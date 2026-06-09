@@ -168,6 +168,10 @@ pub enum Error {
     #[error("Service error: {0}")]
     Service(#[from] offline_protocol_services::ServiceError),
 
+    /// Capability exchange error.
+    #[error("Exchange error: {0}")]
+    Exchange(#[from] offline_protocol_exchange::ExchangeError),
+
     /// Serialization error.
     #[error("Serialization error: {0}")]
     Serialization(String),

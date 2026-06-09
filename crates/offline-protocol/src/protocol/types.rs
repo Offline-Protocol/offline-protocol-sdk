@@ -363,6 +363,10 @@ pub(crate) mod storage_keys {
     pub const SCRUB_SECRET: &str = "scrub_secret";
     /// Key ID for the single scrub-secret entry.
     pub const SCRUB_SECRET_ID: &str = "current";
+    /// Key type for persisted capability-exchange state (ledger, receipts).
+    pub const EXCHANGE_STATE: &str = "exchange_state";
+    /// Key ID for the single exchange-state entry.
+    pub const EXCHANGE_STATE_ID: &str = "current";
 }
 
 /// Protocol state.

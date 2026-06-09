@@ -340,6 +340,13 @@ impl OfflineProtocol {
                 .map(|entry| (entry.content_type, entry.media_metadata))
                 .unwrap_or((ContentType::File, None));
 
+            // Adapter artifacts are intercepted by the exchange: verified
+            // against the attested content hash and surfaced as
+            // AdapterPullCompleted/Rejected instead of FileReceived.
+            if self.try_complete_adapter_pull(&sender, &file_data) {
+                return;
+            }
+
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::file_received(
                     file_id,

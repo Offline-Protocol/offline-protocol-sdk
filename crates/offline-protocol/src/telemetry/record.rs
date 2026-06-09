@@ -151,6 +151,14 @@ mod tests {
         "protocol.service.discovered",
         "protocol.service.request_received",
         "protocol.service.response_received",
+        "protocol.exchange.listing_discovered",
+        "protocol.exchange.receipt_issued",
+        "protocol.exchange.receipt_received",
+        "protocol.exchange.receipt_acknowledged",
+        "protocol.exchange.balance_changed",
+        "protocol.exchange.invocation_failed",
+        "protocol.exchange.adapter_pull_completed",
+        "protocol.exchange.adapter_pull_rejected",
         "protocol.presence.updated",
         "protocol.typing.received",
         "protocol.read_receipt.received",
@@ -316,6 +324,14 @@ mod tests {
             | Event::ServiceDiscovered { .. }
             | Event::ServiceRequestReceived { .. }
             | Event::ServiceResponseReceived { .. }
+            | Event::ListingDiscovered { .. }
+            | Event::ExchangeReceiptIssued { .. }
+            | Event::ExchangeReceiptReceived { .. }
+            | Event::ExchangeReceiptAcknowledged { .. }
+            | Event::ExchangeBalanceChanged { .. }
+            | Event::ExchangeInvocationFailed { .. }
+            | Event::AdapterPullCompleted { .. }
+            | Event::AdapterPullRejected { .. }
             | Event::PresenceUpdated { .. }
             | Event::TypingIndicatorReceived { .. }
             | Event::ReadReceiptReceived { .. }
@@ -341,6 +357,56 @@ mod tests {
             | MlsLifecycleEvent::DecryptionFailed { .. }
             | MlsLifecycleEvent::SessionMissing { .. }
             | MlsLifecycleEvent::SessionReady { .. } => (),
+        }
+    }
+
+    fn exemplar_listing() -> offline_protocol_exchange::Listing {
+        offline_protocol_exchange::Listing {
+            descriptor: offline_protocol_core::ServiceDescriptor {
+                service_id: offline_protocol_core::ServiceId::new("exemplar").unwrap(),
+                version: "1.0".into(),
+                capabilities: std::collections::HashMap::new(),
+            },
+            kind: offline_protocol_exchange::ListingKind::Service,
+            terms: offline_protocol_exchange::Terms::free(),
+            artifact: None,
+            publisher: String::new(),
+            attestation: offline_protocol_exchange::Attestation {
+                public_key: String::new(),
+                signature: String::new(),
+                signed_at_ms: 0,
+            },
+        }
+    }
+
+    fn exemplar_reputation() -> offline_protocol_exchange::ReputationRead {
+        offline_protocol_exchange::ReputationRead {
+            level: offline_protocol_exchange::ReputationLevel::Unknown,
+            settled_receipts: 0,
+            verified_listings: 0,
+            invalid_attestations: 0,
+            first_seen_ms: 0,
+        }
+    }
+
+    fn exemplar_receipt() -> offline_protocol_exchange::UsageReceipt {
+        offline_protocol_exchange::UsageReceipt {
+            receipt_id: String::new(),
+            request_id: String::new(),
+            service_id: String::new(),
+            listing_version: String::new(),
+            unit: offline_protocol_exchange::BillingUnit::PerCall,
+            unit_count: 1,
+            unit_price_minor: 0,
+            total_minor: 0,
+            currency: String::new(),
+            consumer_id: String::new(),
+            provider_id: String::new(),
+            issued_at_ms: 0,
+            consumer_public_key: String::new(),
+            consumer_signature: String::new(),
+            provider_public_key: String::new(),
+            provider_signature: String::new(),
         }
     }
 
@@ -600,6 +666,45 @@ mod tests {
                 status: String::new(),
                 body: String::new(),
                 provider_peer_id: String::new(),
+            },
+            Event::ListingDiscovered {
+                query_id: String::new(),
+                listing: exemplar_listing(),
+                attestation_status: String::new(),
+                reputation: exemplar_reputation(),
+                hop_count: 0,
+            },
+            Event::ExchangeReceiptIssued {
+                receipt: exemplar_receipt(),
+            },
+            Event::ExchangeReceiptReceived {
+                receipt: exemplar_receipt(),
+            },
+            Event::ExchangeReceiptAcknowledged {
+                receipt_id: String::new(),
+            },
+            Event::ExchangeBalanceChanged {
+                currency: String::new(),
+                available_minor: 0,
+                held_minor: 0,
+            },
+            Event::ExchangeInvocationFailed {
+                request_id: String::new(),
+                reason: String::new(),
+            },
+            Event::AdapterPullCompleted {
+                request_id: String::new(),
+                service_id: String::new(),
+                provider_peer_id: String::new(),
+                size_bytes: 0,
+                content_hash: String::new(),
+                data: String::new(),
+            },
+            Event::AdapterPullRejected {
+                request_id: String::new(),
+                service_id: String::new(),
+                provider_peer_id: String::new(),
+                reason: String::new(),
             },
             Event::PresenceUpdated {
                 peer_id: String::new(),

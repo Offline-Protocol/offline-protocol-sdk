@@ -1213,6 +1213,73 @@ interface MeshServices {
     string respond_to_service_request(string request_id, string requester, string service_id, string status, string body);
 };
 
+// Capability exchange: attested listings, metered invocations, signed usage
+// receipts, prepaid balance, and content-addressed adapter pulls. Complex
+// values cross the FFI as JSON strings, matching the event channel.
+interface MeshExchange {
+    [Throws=ProtocolError]
+    constructor(OfflineProtocol protocol);
+
+    // Publish an attested listing. kind: "service" | "adapter".
+    // terms_json: serialized Terms. Returns the listing as JSON.
+    [Throws=ProtocolError]
+    string publish_listing(string service_id, string version, record<DOMString, string> capabilities, string kind, string terms_json);
+
+    // Publish an attested adapter listing from a local artifact file.
+    [Throws=ProtocolError]
+    string publish_adapter_listing(string service_id, string version, record<DOMString, string> capabilities, string terms_json, string base_model, string base_model_version, string artifact_path);
+
+    [Throws=ProtocolError]
+    boolean unpublish_listing(string service_id);
+
+    // Broadcast a discovery query; results arrive as listing_discovered events.
+    [Throws=ProtocolError]
+    string discover_listings(string? service_id);
+
+    // Cached discovered listings as a JSON array of DiscoveredListing.
+    // filter_json: serialized ListingFilter or null.
+    [Throws=ProtocolError]
+    string discovered_listings(string? filter_json);
+
+    // Invoke a discovered listing. Priced listings require a confirmed MLS
+    // session and prepaid balance covering max_units.
+    [Throws=ProtocolError]
+    string invoke_listing(string provider, string service_id, string method, string body, u64 max_units);
+
+    // Declare units consumed by a metered invocation (before responding).
+    [Throws=ProtocolError]
+    void declare_invocation_usage(string request_id, u64 units);
+
+    // Pull a discovered adapter's artifact; results arrive as
+    // adapter_pull_completed / adapter_pull_rejected events.
+    [Throws=ProtocolError]
+    string pull_adapter(string provider, string service_id);
+
+    // Credit the prepaid balance after out-of-band funding. Returns balance JSON.
+    [Throws=ProtocolError]
+    string credit_balance(string currency, u64 amount_minor);
+
+    // Current prepaid balance for a currency, as JSON.
+    [Throws=ProtocolError]
+    string get_balance(string currency);
+
+    // All stored receipts (with settlement status), as JSON.
+    [Throws=ProtocolError]
+    string get_receipts();
+
+    // Receipts awaiting settlement, as JSON.
+    [Throws=ProtocolError]
+    string pending_receipts();
+
+    // Mark receipts settled after the clearing backend confirms them.
+    [Throws=ProtocolError]
+    void mark_receipts_settled(sequence<string> receipt_ids);
+
+    // Local reputation read for a publisher, as JSON.
+    [Throws=ProtocolError]
+    string publisher_reputation(string publisher);
+};
+
 // BLE fragment for outgoing data
 dictionary BleFragment {
     string recipient_id;

@@ -32,6 +32,14 @@ pub use events::{
 };
 pub use offline_protocol_services::MeshServices;
 pub use protocol::OfflineProtocol;
+
+// Re-export capability exchange types for listings, receipts, and settlement.
+pub use offline_protocol_exchange::{
+    AdapterRuntime, ArtifactRef, Attestation, AttestationStatus, Balance, BillingUnit, ChunkPlan,
+    DiscoveredListing, ExchangeError, ExchangeEvent, Listing, ListingFilter, ListingKind,
+    MockClearing, Price, ReceiptStatus, ReputationLevel, ReputationRead, SettlementBackend,
+    SettlementReport, StoredReceipt, StubAdapterRuntime, Terms, UsageReceipt, ADAPTER_PULL_METHOD,
+};
 pub use transport_manager::TransportManager;
 pub use visualization::{
     MessageStats, NetworkLink, NetworkNode, NetworkTopology, NetworkVisualizer, NodeRole,

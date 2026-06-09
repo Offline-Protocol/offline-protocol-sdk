@@ -131,6 +131,7 @@ impl OfflineProtocol {
         self.retry_queue.cleanup_expired();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
+        self.tick_exchange();
         self.cleanup_group_message_dedup();
         self.check_epoch_forks();
         self.check_leave_election_timeouts();
@@ -168,10 +169,10 @@ impl OfflineProtocol {
     /// Broadcasts a service discovery query to all known peers.
     /// Returns a query_id. Responses arrive asynchronously as `ServiceDiscovered` events.
     ///
-    /// **Note:** Discovery responses currently travel only one hop back (to the
-    /// immediate sender of the query). Multi-hop response relay is not yet
-    /// implemented, so services more than one hop away will generate responses
-    /// that reach intermediate forwarders but not the original querier.
+    /// Responses travel back along the query path: each node responds to the
+    /// peer it received the query from, and intermediate nodes forward
+    /// responses toward the originator, so multi-hop providers are
+    /// discoverable by the original querier.
     pub fn discover_services(&mut self, service_id: Option<&str>) -> Result<String> {
         // Service discovery messages are internal control messages (not user
         // content), so they are exempt from require_encryption.
@@ -239,6 +240,12 @@ impl OfflineProtocol {
             .map_err(Error::Service)?;
         let msg = result.message;
         let message_id = self.send_internal_message(&msg.recipient, msg.content, msg.priority)?;
+
+        // Exchange billing: for metered listings this produces the usage
+        // declaration that ships right after the response.
+        if let Some(usage) = self.exchange.note_responded(request_id) {
+            self.dispatch_exchange_actions(vec![usage], Vec::new());
+        }
         Ok(message_id)
     }
 }

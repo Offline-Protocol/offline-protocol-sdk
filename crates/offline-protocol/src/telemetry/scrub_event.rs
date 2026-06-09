@@ -444,6 +444,41 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         } => {
             hash_string(provider_peer_id, scrubber);
         }
+        Event::ListingDiscovered {
+            listing,
+            query_id: _,
+            attestation_status: _,
+            reputation: _,
+            hop_count: _,
+        } => {
+            hash_string(&mut listing.publisher, scrubber);
+        }
+        Event::ExchangeReceiptIssued { receipt } | Event::ExchangeReceiptReceived { receipt } => {
+            hash_string(&mut receipt.consumer_id, scrubber);
+            hash_string(&mut receipt.provider_id, scrubber);
+        }
+        Event::AdapterPullCompleted {
+            provider_peer_id,
+            request_id: _,
+            service_id: _,
+            size_bytes: _,
+            content_hash: _,
+            data: _,
+        } => {
+            hash_string(provider_peer_id, scrubber);
+        }
+        Event::AdapterPullRejected {
+            provider_peer_id,
+            request_id: _,
+            service_id: _,
+            reason: _,
+        } => {
+            hash_string(provider_peer_id, scrubber);
+        }
+        // No identifier fields: receipt ids, currencies, and amounts stay raw.
+        Event::ExchangeReceiptAcknowledged { .. }
+        | Event::ExchangeBalanceChanged { .. }
+        | Event::ExchangeInvocationFailed { .. } => (),
         Event::PresenceUpdated {
             peer_id,
             status: _,
@@ -571,6 +606,14 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::ServiceDiscovered { .. }
         | Event::ServiceRequestReceived { .. }
         | Event::ServiceResponseReceived { .. }
+        | Event::ListingDiscovered { .. }
+        | Event::ExchangeReceiptIssued { .. }
+        | Event::ExchangeReceiptReceived { .. }
+        | Event::ExchangeReceiptAcknowledged { .. }
+        | Event::ExchangeBalanceChanged { .. }
+        | Event::ExchangeInvocationFailed { .. }
+        | Event::AdapterPullCompleted { .. }
+        | Event::AdapterPullRejected { .. }
         | Event::PresenceUpdated { .. }
         | Event::TypingIndicatorReceived { .. }
         | Event::ReadReceiptReceived { .. }

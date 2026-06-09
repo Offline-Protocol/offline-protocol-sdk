@@ -59,7 +59,11 @@ fn bench_send_message(c: &mut Criterion) {
                 protocol
             },
             |mut protocol| {
-                black_box(protocol.send_message("bob", "Hello", None).ok());
+                black_box(
+                    protocol
+                        .send_message("bob", "Hello", None, None::<String>)
+                        .ok(),
+                );
             },
             criterion::BatchSize::LargeInput,
         );

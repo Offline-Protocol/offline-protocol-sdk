@@ -1,6 +1,7 @@
 //! Event types and callbacks.
 
 use offline_protocol_core::{ContentType, MediaMetadata, Message, MessageId};
+use offline_protocol_exchange::{ExchangeEvent, Listing, ReputationRead, UsageReceipt};
 use offline_protocol_services::ServiceEvent;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
@@ -719,6 +720,96 @@ pub enum Event {
         body: String,
         /// Peer user ID of the provider.
         provider_peer_id: String,
+    },
+
+    // --- Capability exchange ---
+    /// An attested capability listing was discovered on the mesh.
+    ///
+    /// Emitted alongside `ServiceDiscovered` when the discovered descriptor
+    /// carries an exchange listing envelope. Consumers should check
+    /// `attestation_status` and `reputation` before invoking a paid listing
+    /// or pulling an adapter.
+    ListingDiscovered {
+        /// Query ID that triggered this discovery.
+        query_id: String,
+        /// The discovered listing (descriptor, kind, terms, attestation).
+        listing: Listing,
+        /// Attestation verification outcome: "verified", "invalid", "unsigned".
+        attestation_status: String,
+        /// Local reputation read for the publisher.
+        reputation: ReputationRead,
+        /// Number of hops from the provider.
+        hop_count: u8,
+    },
+
+    /// This node (as consumer) issued and signed a usage receipt for a
+    /// completed priced invocation. The prepaid balance was debited.
+    ExchangeReceiptIssued {
+        /// The signed receipt (the durable settlement claim).
+        receipt: UsageReceipt,
+    },
+
+    /// This node (as provider) received, verified, and counter-signed a
+    /// usage receipt for an invocation it served.
+    ExchangeReceiptReceived {
+        /// The dual-signed receipt.
+        receipt: UsageReceipt,
+    },
+
+    /// The provider counter-signed a receipt this node issued; the local
+    /// copy is now dual-signed.
+    ExchangeReceiptAcknowledged {
+        /// The acknowledged receipt id.
+        receipt_id: String,
+    },
+
+    /// The prepaid exchange balance changed (funding, hold, debit, release).
+    ExchangeBalanceChanged {
+        /// Currency identifier.
+        currency: String,
+        /// Spendable minor units.
+        available_minor: u64,
+        /// Minor units held against in-flight invocations.
+        held_minor: u64,
+    },
+
+    /// A tracked exchange invocation failed (error status or timeout). Any
+    /// hold was released back to the available balance.
+    ExchangeInvocationFailed {
+        /// The invocation correlation id.
+        request_id: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// An adapter artifact arrived and passed signature + content-hash
+    /// verification. The artifact is safe to hand to the adapter runtime.
+    AdapterPullCompleted {
+        /// The pull's request id.
+        request_id: String,
+        /// The adapter listing's service id.
+        service_id: String,
+        /// Provider peer id the artifact came from.
+        provider_peer_id: String,
+        /// Artifact size in bytes.
+        size_bytes: u64,
+        /// Verified SHA-256 content hash (lowercase hex).
+        content_hash: String,
+        /// Base64-encoded artifact bytes.
+        data: String,
+    },
+
+    /// An adapter artifact arrived but failed verification and was rejected.
+    /// The bytes are discarded and must not be loaded.
+    AdapterPullRejected {
+        /// The pull's request id.
+        request_id: String,
+        /// The adapter listing's service id.
+        service_id: String,
+        /// Provider peer id the artifact came from.
+        provider_peer_id: String,
+        /// Why the artifact was rejected.
+        reason: String,
     },
 
     // --- Presence, typing, and read receipts ---
@@ -1600,6 +1691,14 @@ impl Event {
             Self::ServiceDiscovered { .. } => "protocol.service.discovered",
             Self::ServiceRequestReceived { .. } => "protocol.service.request_received",
             Self::ServiceResponseReceived { .. } => "protocol.service.response_received",
+            Self::ListingDiscovered { .. } => "protocol.exchange.listing_discovered",
+            Self::ExchangeReceiptIssued { .. } => "protocol.exchange.receipt_issued",
+            Self::ExchangeReceiptReceived { .. } => "protocol.exchange.receipt_received",
+            Self::ExchangeReceiptAcknowledged { .. } => "protocol.exchange.receipt_acknowledged",
+            Self::ExchangeBalanceChanged { .. } => "protocol.exchange.balance_changed",
+            Self::ExchangeInvocationFailed { .. } => "protocol.exchange.invocation_failed",
+            Self::AdapterPullCompleted { .. } => "protocol.exchange.adapter_pull_completed",
+            Self::AdapterPullRejected { .. } => "protocol.exchange.adapter_pull_rejected",
             Self::PresenceUpdated { .. } => "protocol.presence.updated",
             Self::TypingIndicatorReceived { .. } => "protocol.typing.received",
             Self::ReadReceiptReceived { .. } => "protocol.read_receipt.received",
@@ -1660,6 +1759,43 @@ impl From<ServiceEvent> for Event {
                 body,
                 provider_peer_id,
             },
+        }
+    }
+}
+
+impl From<ExchangeEvent> for Event {
+    fn from(event: ExchangeEvent) -> Self {
+        match event {
+            ExchangeEvent::ListingDiscovered {
+                query_id,
+                listing,
+                attestation_status,
+                reputation,
+                hop_count,
+            } => Self::ListingDiscovered {
+                query_id,
+                listing,
+                attestation_status: attestation_status.as_str().to_string(),
+                reputation,
+                hop_count,
+            },
+            ExchangeEvent::ReceiptIssued { receipt } => Self::ExchangeReceiptIssued { receipt },
+            ExchangeEvent::ReceiptReceived { receipt } => Self::ExchangeReceiptReceived { receipt },
+            ExchangeEvent::ReceiptAcknowledged { receipt_id } => {
+                Self::ExchangeReceiptAcknowledged { receipt_id }
+            }
+            ExchangeEvent::BalanceChanged {
+                currency,
+                available_minor,
+                held_minor,
+            } => Self::ExchangeBalanceChanged {
+                currency,
+                available_minor,
+                held_minor,
+            },
+            ExchangeEvent::InvocationFailed { request_id, reason } => {
+                Self::ExchangeInvocationFailed { request_id, reason }
+            }
         }
     }
 }
@@ -2023,6 +2159,87 @@ impl fmt::Debug for Event {
                 .field("status", status)
                 .field("body", &format!("[REDACTED {} bytes]", body.len()))
                 .field("provider_peer_id", &"[REDACTED]")
+                .finish(),
+            Self::ListingDiscovered {
+                query_id,
+                listing,
+                attestation_status,
+                reputation,
+                hop_count,
+            } => f
+                .debug_struct("ListingDiscovered")
+                .field("query_id", query_id)
+                .field("service_id", &listing.service_id())
+                .field("kind", &listing.kind.as_str())
+                .field("priced", &listing.terms.is_priced())
+                .field("attestation_status", attestation_status)
+                .field("reputation", &reputation.level.as_str())
+                .field("hop_count", hop_count)
+                .finish(),
+            Self::ExchangeReceiptIssued { receipt } => f
+                .debug_struct("ExchangeReceiptIssued")
+                .field("receipt_id", &receipt.receipt_id)
+                .field("request_id", &receipt.request_id)
+                .field("service_id", &receipt.service_id)
+                .field("unit_count", &receipt.unit_count)
+                .field("total_minor", &receipt.total_minor)
+                .field("currency", &receipt.currency)
+                .finish(),
+            Self::ExchangeReceiptReceived { receipt } => f
+                .debug_struct("ExchangeReceiptReceived")
+                .field("receipt_id", &receipt.receipt_id)
+                .field("request_id", &receipt.request_id)
+                .field("service_id", &receipt.service_id)
+                .field("unit_count", &receipt.unit_count)
+                .field("total_minor", &receipt.total_minor)
+                .field("currency", &receipt.currency)
+                .finish(),
+            Self::ExchangeReceiptAcknowledged { receipt_id } => f
+                .debug_struct("ExchangeReceiptAcknowledged")
+                .field("receipt_id", receipt_id)
+                .finish(),
+            Self::ExchangeBalanceChanged {
+                currency,
+                available_minor,
+                held_minor,
+            } => f
+                .debug_struct("ExchangeBalanceChanged")
+                .field("currency", currency)
+                .field("available_minor", available_minor)
+                .field("held_minor", held_minor)
+                .finish(),
+            Self::ExchangeInvocationFailed { request_id, reason } => f
+                .debug_struct("ExchangeInvocationFailed")
+                .field("request_id", request_id)
+                .field("reason", reason)
+                .finish(),
+            Self::AdapterPullCompleted {
+                request_id,
+                service_id,
+                provider_peer_id: _,
+                size_bytes,
+                content_hash,
+                data,
+            } => f
+                .debug_struct("AdapterPullCompleted")
+                .field("request_id", request_id)
+                .field("service_id", service_id)
+                .field("provider_peer_id", &"[REDACTED]")
+                .field("size_bytes", size_bytes)
+                .field("content_hash", content_hash)
+                .field("data", &format!("[REDACTED {} base64 bytes]", data.len()))
+                .finish(),
+            Self::AdapterPullRejected {
+                request_id,
+                service_id,
+                provider_peer_id: _,
+                reason,
+            } => f
+                .debug_struct("AdapterPullRejected")
+                .field("request_id", request_id)
+                .field("service_id", service_id)
+                .field("provider_peer_id", &"[REDACTED]")
+                .field("reason", reason)
                 .finish(),
             Self::GroupCreated { group_id, name } => f
                 .debug_struct("GroupCreated")

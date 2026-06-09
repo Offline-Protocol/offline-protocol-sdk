@@ -48,6 +48,10 @@ macro_rules! define_internal_prefixes {
             offline_protocol_services::SVC_DISCOVER_RESPONSE,
             offline_protocol_services::SVC_REQUEST,
             offline_protocol_services::SVC_RESPONSE,
+            // Capability exchange settlement prefixes (signed control plane).
+            offline_protocol_exchange::XCHG_USAGE,
+            offline_protocol_exchange::XCHG_RECEIPT,
+            offline_protocol_exchange::XCHG_RECEIPT_ACK,
         ];
     };
 }

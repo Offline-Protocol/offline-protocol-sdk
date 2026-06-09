@@ -3,6 +3,7 @@
 mod blocking;
 mod config_accessors;
 mod decryption_queue;
+mod exchange;
 mod message_dispatch;
 mod observability;
 mod pending_queue;
@@ -183,6 +184,16 @@ pub struct OfflineProtocol {
     /// Mesh service registry and handler (extracted crate).
     mesh_services: MeshServices,
 
+    /// Capability exchange state machine: attested listings, prepaid ledger,
+    /// signed usage receipts, reputation (extracted crate). Like
+    /// `mesh_services`, it performs no I/O — this struct wires its actions
+    /// to transport, identity keys, events, and persistence.
+    pub(crate) exchange: offline_protocol_exchange::ExchangeCore,
+
+    /// Runtime gate for loading verified adapter artifacts. `None` until the
+    /// host app installs one; loading is refused without it.
+    pub(crate) adapter_runtime: Option<Arc<dyn offline_protocol_exchange::AdapterRuntime>>,
+
     /// Bundled state for mesh group messaging (member cache, dedup, pending commits).
     pub(crate) group_mesh: crate::group_mesh::GroupMeshState,
 
@@ -309,6 +320,11 @@ impl OfflineProtocol {
             outbound_media_chunks: HashMap::new(),
             outbound_media_windows: HashMap::new(),
             mesh_services: MeshServices::new(),
+            exchange: offline_protocol_exchange::ExchangeCore::new(
+                config.user_id.clone(),
+                offline_protocol_exchange::ExchangeConfig::default(),
+            ),
+            adapter_runtime: None,
             group_mesh: crate::group_mesh::GroupMeshState::default(),
             known_peer_public_keys: HashMap::new(),
             blocked_users: HashSet::new(),
@@ -374,6 +390,7 @@ impl OfflineProtocol {
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
             self.restore_welcome_lifecycles()?;
+            self.restore_exchange_state();
             Ok(())
         })();
 
@@ -410,6 +427,7 @@ impl OfflineProtocol {
         self.restore_lamport_clock();
         self.restore_tofu_keys();
         self.restore_blocked_users();
+        self.restore_exchange_state();
         info!("Message persistence enabled");
         Ok(())
     }
@@ -1315,6 +1333,22 @@ impl OfflineProtocol {
         // --- Service discovery & request/response ---
         if content.starts_with(offline_protocol_services::SVC_MESSAGE_PREFIX) {
             self.handle_service_message(sender, content, message);
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        // --- Capability exchange settlement messages ---
+        if let Some(data) = content.strip_prefix(offline_protocol_exchange::XCHG_USAGE) {
+            self.handle_exchange_usage_message(sender, data);
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if let Some(data) = content.strip_prefix(offline_protocol_exchange::XCHG_RECEIPT) {
+            self.handle_exchange_receipt_message(sender, data);
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if let Some(data) = content.strip_prefix(offline_protocol_exchange::XCHG_RECEIPT_ACK) {
+            self.handle_exchange_receipt_ack(sender, data);
             return Some(InternalMessageResult::Consumed);
         }
 

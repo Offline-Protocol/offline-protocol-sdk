@@ -1,3 +1,5 @@
+mod exchange_tests;
+
 use super::*;
 use crate::constants::ACK_FOR_KEY;
 use crate::events::{DecryptionFailureCode, PresenceStatus};

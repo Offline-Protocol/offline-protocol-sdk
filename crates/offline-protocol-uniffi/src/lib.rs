@@ -2614,6 +2614,209 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // CAPABILITY EXCHANGE (delegated via MeshExchange wrapper)
+    // ========================================================================
+
+    /// Publishes an attested listing. `kind` is "service" or "adapter";
+    /// `terms_json` is a serialized `Terms`. Returns the listing as JSON.
+    pub(crate) fn xchg_publish_listing(
+        &self,
+        service_id: String,
+        version: String,
+        capabilities: HashMap<String, String>,
+        kind: String,
+        terms_json: String,
+    ) -> Result<String, ProtocolError> {
+        use offline_protocol_core::{ServiceDescriptor, ServiceId};
+        let sid = ServiceId::new(&service_id)
+            .map_err(|e| ProtocolError::InvalidConfiguration(e.to_string()))?;
+        let descriptor = ServiceDescriptor {
+            service_id: sid,
+            version,
+            capabilities,
+        };
+        let kind = parse_listing_kind(&kind)?;
+        let terms: offline_protocol::Terms = serde_json::from_str(&terms_json)
+            .map_err(|e| ProtocolError::InvalidConfiguration(format!("invalid terms: {e}")))?;
+        let mut protocol = self.lock_inner()?;
+        let listing = protocol
+            .publish_listing(descriptor, kind, terms, None)
+            .map_err(ProtocolError::from)?;
+        serde_json::to_string(&listing).map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Publishes an attested adapter listing from a local artifact file.
+    /// Returns the listing as JSON.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn xchg_publish_adapter_listing(
+        &self,
+        service_id: String,
+        version: String,
+        capabilities: HashMap<String, String>,
+        terms_json: String,
+        base_model: String,
+        base_model_version: String,
+        artifact_path: String,
+    ) -> Result<String, ProtocolError> {
+        use offline_protocol_core::{ServiceDescriptor, ServiceId};
+        let sid = ServiceId::new(&service_id)
+            .map_err(|e| ProtocolError::InvalidConfiguration(e.to_string()))?;
+        let descriptor = ServiceDescriptor {
+            service_id: sid,
+            version,
+            capabilities,
+        };
+        let terms: offline_protocol::Terms = serde_json::from_str(&terms_json)
+            .map_err(|e| ProtocolError::InvalidConfiguration(format!("invalid terms: {e}")))?;
+        let mut protocol = self.lock_inner()?;
+        let listing = protocol
+            .publish_adapter_listing(
+                descriptor,
+                terms,
+                &base_model,
+                &base_model_version,
+                &artifact_path,
+            )
+            .map_err(ProtocolError::from)?;
+        serde_json::to_string(&listing).map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Removes a published listing and unregisters its service.
+    pub(crate) fn xchg_unpublish_listing(&self, service_id: String) -> Result<bool, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .unpublish_listing(&service_id)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Broadcasts a listing discovery query. Returns a query_id; results
+    /// arrive as `listing_discovered` events.
+    pub(crate) fn xchg_discover_listings(
+        &self,
+        service_id: Option<String>,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .discover_listings(service_id.as_deref())
+            .map_err(ProtocolError::from)
+    }
+
+    /// Returns cached discovered listings passing the filter, as a JSON
+    /// array of `DiscoveredListing`. `filter_json` is a serialized
+    /// `ListingFilter` (or null for no filter).
+    pub(crate) fn xchg_discovered_listings(
+        &self,
+        filter_json: Option<String>,
+    ) -> Result<String, ProtocolError> {
+        let filter: offline_protocol::ListingFilter = match filter_json {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| ProtocolError::InvalidConfiguration(format!("invalid filter: {e}")))?,
+            None => Default::default(),
+        };
+        let protocol = self.lock_inner()?;
+        let listings = protocol.discovered_listings(&filter);
+        serde_json::to_string(&listings).map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Invokes a discovered listing. Priced listings require a confirmed MLS
+    /// session and a sufficient prepaid balance for `max_units`.
+    pub(crate) fn xchg_invoke_listing(
+        &self,
+        provider: String,
+        service_id: String,
+        method: String,
+        body: String,
+        max_units: u64,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .invoke_listing(&provider, &service_id, &method, &body, max_units)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Declares the unit count for a metered invocation being served (call
+    /// before responding).
+    pub(crate) fn xchg_declare_usage(
+        &self,
+        request_id: String,
+        units: u64,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .declare_invocation_usage(&request_id, units)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Pulls a discovered adapter's artifact. Results arrive as
+    /// `adapter_pull_completed` / `adapter_pull_rejected` events.
+    pub(crate) fn xchg_pull_adapter(
+        &self,
+        provider: String,
+        service_id: String,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .pull_adapter(&provider, &service_id)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Credits the prepaid balance after out-of-band funding. Returns the
+    /// new balance as JSON.
+    pub(crate) fn xchg_credit_balance(
+        &self,
+        currency: String,
+        amount_minor: u64,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        let balance = protocol
+            .credit_exchange_balance(&currency, amount_minor)
+            .map_err(ProtocolError::from)?;
+        serde_json::to_string(&balance).map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Returns the prepaid balance for a currency as JSON.
+    pub(crate) fn xchg_get_balance(&self, currency: String) -> Result<String, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        let balance = protocol.exchange_balance(&currency);
+        serde_json::to_string(&balance).map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Returns all stored receipts (with settlement status) as JSON.
+    pub(crate) fn xchg_get_receipts(&self) -> Result<String, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        let receipts = protocol.exchange_receipts();
+        serde_json::to_string(&receipts).map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Returns receipts awaiting settlement as JSON (export these to the
+    /// clearing backend).
+    pub(crate) fn xchg_pending_receipts(&self) -> Result<String, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        let receipts = protocol.pending_exchange_receipts();
+        serde_json::to_string(&receipts).map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Marks receipts settled after the clearing backend confirms them.
+    pub(crate) fn xchg_mark_receipts_settled(
+        &self,
+        receipt_ids: Vec<String>,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol.mark_exchange_receipts_settled(&receipt_ids);
+        Ok(())
+    }
+
+    /// Returns the local reputation read for a publisher as JSON.
+    pub(crate) fn xchg_publisher_reputation(
+        &self,
+        publisher: String,
+    ) -> Result<String, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        let reputation = protocol.publisher_reputation(&publisher);
+        serde_json::to_string(&reputation).map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    // ========================================================================
     // BLE TRANSPORT OPERATIONS
     // ========================================================================
 
@@ -5107,6 +5310,154 @@ impl MeshServices {
     ) -> Result<String, ProtocolError> {
         self.protocol
             .svc_respond_to_service_request(request_id, requester, service_id, status, body)
+    }
+}
+
+/// Capability exchange wrapper sharing the given protocol's state.
+///
+/// Publishes attested listings, discovers them with verification and
+/// reputation, invokes priced listings against a prepaid balance, pulls
+/// content-addressed adapter artifacts, and exports signed usage receipts
+/// for settlement. Complex values cross the FFI as JSON strings, matching
+/// the event channel.
+pub struct MeshExchange {
+    protocol: Arc<OfflineProtocol>,
+}
+
+impl MeshExchange {
+    /// Creates a MeshExchange instance sharing the given protocol's state.
+    pub fn new(protocol: Arc<OfflineProtocol>) -> Result<Self, ProtocolError> {
+        Ok(Self { protocol })
+    }
+
+    /// Publishes an attested service listing. Returns the listing as JSON.
+    pub fn publish_listing(
+        &self,
+        service_id: String,
+        version: String,
+        capabilities: HashMap<String, String>,
+        kind: String,
+        terms_json: String,
+    ) -> Result<String, ProtocolError> {
+        self.protocol
+            .xchg_publish_listing(service_id, version, capabilities, kind, terms_json)
+    }
+
+    /// Publishes an attested adapter listing from a local artifact file.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_adapter_listing(
+        &self,
+        service_id: String,
+        version: String,
+        capabilities: HashMap<String, String>,
+        terms_json: String,
+        base_model: String,
+        base_model_version: String,
+        artifact_path: String,
+    ) -> Result<String, ProtocolError> {
+        self.protocol.xchg_publish_adapter_listing(
+            service_id,
+            version,
+            capabilities,
+            terms_json,
+            base_model,
+            base_model_version,
+            artifact_path,
+        )
+    }
+
+    /// Removes a published listing. Returns true if it existed.
+    pub fn unpublish_listing(&self, service_id: String) -> Result<bool, ProtocolError> {
+        self.protocol.xchg_unpublish_listing(service_id)
+    }
+
+    /// Broadcasts a listing discovery query. Returns a query_id.
+    pub fn discover_listings(&self, service_id: Option<String>) -> Result<String, ProtocolError> {
+        self.protocol.xchg_discover_listings(service_id)
+    }
+
+    /// Returns cached discovered listings (JSON array of DiscoveredListing).
+    pub fn discovered_listings(
+        &self,
+        filter_json: Option<String>,
+    ) -> Result<String, ProtocolError> {
+        self.protocol.xchg_discovered_listings(filter_json)
+    }
+
+    /// Invokes a discovered listing. Returns the request_id.
+    pub fn invoke_listing(
+        &self,
+        provider: String,
+        service_id: String,
+        method: String,
+        body: String,
+        max_units: u64,
+    ) -> Result<String, ProtocolError> {
+        self.protocol
+            .xchg_invoke_listing(provider, service_id, method, body, max_units)
+    }
+
+    /// Declares the unit count for a metered invocation being served.
+    pub fn declare_invocation_usage(
+        &self,
+        request_id: String,
+        units: u64,
+    ) -> Result<(), ProtocolError> {
+        self.protocol.xchg_declare_usage(request_id, units)
+    }
+
+    /// Pulls a discovered adapter's artifact. Returns the request_id.
+    pub fn pull_adapter(
+        &self,
+        provider: String,
+        service_id: String,
+    ) -> Result<String, ProtocolError> {
+        self.protocol.xchg_pull_adapter(provider, service_id)
+    }
+
+    /// Credits the prepaid balance. Returns the new balance as JSON.
+    pub fn credit_balance(
+        &self,
+        currency: String,
+        amount_minor: u64,
+    ) -> Result<String, ProtocolError> {
+        self.protocol.xchg_credit_balance(currency, amount_minor)
+    }
+
+    /// Returns the prepaid balance for a currency as JSON.
+    pub fn get_balance(&self, currency: String) -> Result<String, ProtocolError> {
+        self.protocol.xchg_get_balance(currency)
+    }
+
+    /// Returns all stored receipts as JSON.
+    pub fn get_receipts(&self) -> Result<String, ProtocolError> {
+        self.protocol.xchg_get_receipts()
+    }
+
+    /// Returns receipts awaiting settlement as JSON.
+    pub fn pending_receipts(&self) -> Result<String, ProtocolError> {
+        self.protocol.xchg_pending_receipts()
+    }
+
+    /// Marks receipts settled after the clearing backend confirms them.
+    pub fn mark_receipts_settled(&self, receipt_ids: Vec<String>) -> Result<(), ProtocolError> {
+        self.protocol.xchg_mark_receipts_settled(receipt_ids)
+    }
+
+    /// Returns the local reputation read for a publisher as JSON.
+    pub fn publisher_reputation(&self, publisher: String) -> Result<String, ProtocolError> {
+        self.protocol.xchg_publisher_reputation(publisher)
+    }
+}
+
+/// Parses a listing kind string for the FFI boundary.
+fn parse_listing_kind(kind: &str) -> Result<offline_protocol::ListingKind, ProtocolError> {
+    match kind {
+        "service" => Ok(offline_protocol::ListingKind::Service),
+        "adapter" => Ok(offline_protocol::ListingKind::Adapter),
+        other => Err(ProtocolError::InvalidConfiguration(format!(
+            "invalid listing kind '{other}' (expected 'service' or 'adapter')"
+        ))),
     }
 }
 

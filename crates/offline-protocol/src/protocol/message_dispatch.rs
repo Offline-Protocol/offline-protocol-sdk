@@ -874,10 +874,12 @@ impl OfflineProtocol {
                 for msg in messages_to_send {
                     let _ = self.send_internal_message(&msg.recipient, msg.content, msg.priority);
                 }
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    for svc_event in events_to_emit {
-                        state.emit_event(Event::from(svc_event));
-                    }
+                // Route through the capability exchange first: listing
+                // envelopes are extracted/verified on discovery, adapter
+                // pulls are auto-served, and tracked invocations settle.
+                // Plain service events pass through to the app unchanged.
+                for svc_event in events_to_emit {
+                    self.dispatch_service_event(svc_event);
                 }
             }
         }
