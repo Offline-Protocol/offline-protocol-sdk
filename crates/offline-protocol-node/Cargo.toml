@@ -1,0 +1,30 @@
+[package]
+name = "offline-protocol-node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Headless Offline Protocol mesh node with a localhost HTTP control API for the capability exchange"
+
+[[bin]]
+name = "offline-protocol-node"
+path = "src/main.rs"
+
+[dependencies]
+offline-protocol = { workspace = true }
+offline-protocol-core = { workspace = true }
+offline-protocol-exchange = { workspace = true }
+offline-protocol-mls = { workspace = true }
+offline-protocol-transport = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+base64 = { workspace = true }
+tiny_http = "0.12"
+
+[dev-dependencies]
+ureq = { version = "2", features = ["json"] }

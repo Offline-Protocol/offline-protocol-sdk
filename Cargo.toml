@@ -10,6 +10,7 @@ members = [
     "crates/offline-protocol-exchange",
     "crates/offline-protocol",
     "crates/offline-protocol-uniffi",
+    "crates/offline-protocol-node",
     "crates/offline-protocol-bench",
 ]
 
