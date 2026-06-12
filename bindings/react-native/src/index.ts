@@ -1338,6 +1338,11 @@ export class OfflineProtocol {
    *
    * Stable across app restarts and `installTelemetrySink(...)` calls;
    * unaffected by an app-supplied `scrubIds` / scrub-secret config.
+   *
+   * Note: while the id reveals nothing about the user or device, it is
+   * still a persistent per-install identifier — using it may need to be
+   * declared under your app's privacy disclosures (e.g. Apple privacy
+   * manifest / Google Play data safety, "device or other IDs").
    */
   async telemetryInstallId(): Promise<string | null> {
     return await OfflineProtocolNativeModule.telemetryInstallId();

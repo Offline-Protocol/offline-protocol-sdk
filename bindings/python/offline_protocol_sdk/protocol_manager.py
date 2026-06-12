@@ -494,6 +494,24 @@ class ProtocolManager:
         """
         return self._protocol.poll_telemetry_frame()
 
+    def telemetry_install_id(self) -> str | None:
+        """Stable, opaque per-install telemetry identifier (32 hex chars),
+        derived from the SDK-managed persistent scrub secret. The secret
+        itself never crosses the FFI and cannot be recovered from the id,
+        so the id is safe to attach to telemetry as a device-grain key.
+
+        Returns ``None`` until the persistent secret is available — i.e.
+        before :meth:`start` wires secure storage via MLS initialization,
+        or when persisting the secret failed this session (the id would
+        not be stable across launches, so none is exposed). Unaffected by
+        installing a telemetry sink or an app-supplied scrub secret.
+
+        Note: while the id reveals nothing about the user or device, it
+        is still a persistent per-install identifier — using it may need
+        to be declared under your app's privacy disclosures.
+        """
+        return self._protocol.telemetry_install_id()
+
     # -- processing loop ------------------------------------------------------
 
     async def _process_loop(self) -> None:
