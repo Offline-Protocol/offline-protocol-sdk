@@ -576,6 +576,43 @@ impl OfflineProtocol {
         );
     }
 
+    /// Returns a stable, opaque per-install telemetry identifier, or `None`
+    /// until the persistent scrub secret is available.
+    ///
+    /// The id is `SHA-256(secret || domain)` truncated to a 32-character hex
+    /// string, where `secret` is the per-install scrub secret managed by
+    /// [`Self::restore_or_init_scrub_secret`]. The secret cannot be recovered
+    /// from the id, and the fixed domain string keeps the id un-correlatable
+    /// with opaque identifiers the scrubber produces for telemetry records:
+    /// the domain contains `:`, which id validation
+    /// (`offline_protocol_core::types::validate_id_chars`) rejects in every
+    /// `UserId`/`AppId`, so no validated identifier reaching the scrubber can
+    /// ever equal the domain and collide with the install id.
+    ///
+    /// Returns `None` while the SDK is still on the random per-instance
+    /// fallback secret — i.e. before storage is provided via
+    /// [`super::OfflineProtocol::initialize_mls`] /
+    /// [`super::OfflineProtocol::enable_message_persistence`], or when
+    /// persistence failed this session. In that state the id would not be
+    /// stable across launches, so none is exposed.
+    ///
+    /// Deliberately derived from the persistent fallback secret, not from an
+    /// installed [`crate::telemetry::TelemetryConfig::with_scrub_secret`]
+    /// override: the install id must not rotate when a sink is (re)installed,
+    /// and must not be computable from an app-chosen secret.
+    ///
+    /// The domain string is part of the public contract: changing it would
+    /// silently rotate every device's install id. Frozen — do not edit.
+    pub fn telemetry_install_id(&self) -> Option<String> {
+        const TELEMETRY_INSTALL_ID_DOMAIN: &str = "telemetry:install-id";
+        self.telemetry_secret_persisted.then(|| {
+            crate::telemetry::scrubber::opaque_id(
+                TELEMETRY_INSTALL_ID_DOMAIN,
+                &self.telemetry_fallback_secret,
+            )
+        })
+    }
+
     // ========================================================================
     // LAMPORT CLOCK PERSISTENCE
     // ========================================================================

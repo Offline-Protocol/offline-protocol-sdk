@@ -1,6 +1,14 @@
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    # Unmaintained-crate notice (not a vulnerability) for a compile-time
+    # proc-macro pulled in by libcrux's formal-verification tooling
+    # (libcrux-sha3 -> libcrux-intrinsics -> core-models -> hax-lib ->
+    # hax-lib-macros -> proc-macro-error2). It never links into shipped
+    # artifacts, and RUSTSEC-2026-0173 itself states no safe upgrade
+    # exists. Re-evaluate when libcrux/hax drop the dependency.
+    { id = "RUSTSEC-2026-0173", reason = "unmaintained build-time proc-macro via libcrux hax-lib; no fixed release exists; compile-time only" },
+]
 
 [licenses]
 version = 2

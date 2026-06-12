@@ -524,6 +524,25 @@ class TestProtocolManagerTelemetry:
             await pm.stop()
 
     @pytest.mark.asyncio
+    async def test_telemetry_install_id(self):
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(_make_config())
+        # Secure storage is only wired during start(); before that the
+        # scrub secret is session-local, so no stable id is exposed.
+        assert pm.telemetry_install_id() is None
+        await pm.start()
+        try:
+            install_id = pm.telemetry_install_id()
+            assert install_id is not None
+            assert len(install_id) == 32
+            assert all(c in "0123456789abcdef" for c in install_id)
+            # Stable across repeated calls within a session.
+            assert pm.telemetry_install_id() == install_id
+        finally:
+            await pm.stop()
+
+    @pytest.mark.asyncio
     async def test_reinstall_releases_prior_sink_pin(self):
         # Re-installing must not leave the previous sink pinned in
         # _prevent_gc. Rust drops its old handle inside install_telemetry_sink,

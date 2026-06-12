@@ -789,6 +789,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 20607:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 19313:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 14209:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink() != 3716:
@@ -2112,6 +2114,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop.argtype
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2629,6 +2636,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start.
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user.restype = ctypes.c_uint16
@@ -8143,6 +8153,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def stop(self, ) -> None:
         raise NotImplementedError
+    def telemetry_install_id(self, ) -> typing.Optional[str]:
+        raise NotImplementedError
     def unblock_user(self, user_id: str) -> None:
         raise NotImplementedError
     def uninstall_telemetry_sink(self, ) -> None:
@@ -10225,6 +10237,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def telemetry_install_id(self, ) -> typing.Optional[str]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalString.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
