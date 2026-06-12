@@ -1118,6 +1118,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_star
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink(
@@ -1497,6 +1499,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(`ptr
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -2072,6 +2076,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 37179.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 11199.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 7771.toShort()) {
@@ -3289,6 +3296,8 @@ public interface OfflineProtocolInterface {
     fun `start`()
     
     fun `stop`()
+    
+    fun `telemetryInstallId`(): kotlin.String?
     
     fun `unblockUser`(`userId`: kotlin.String)
     
@@ -5171,6 +5180,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    override fun `telemetryInstallId`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     

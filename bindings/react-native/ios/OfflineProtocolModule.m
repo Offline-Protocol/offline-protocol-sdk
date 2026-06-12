@@ -34,6 +34,9 @@ RCT_EXTERN_METHOD(pollTelemetryFrame:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(uninstallTelemetrySink:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(telemetryInstallId:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(stop:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

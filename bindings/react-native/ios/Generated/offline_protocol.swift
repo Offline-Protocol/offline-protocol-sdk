@@ -1042,6 +1042,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func stop() throws 
     
+    func telemetryInstallId()  -> String?
+    
     func unblockUser(userId: String) throws 
     
     func uninstallTelemetrySink() throws 
@@ -2276,6 +2278,14 @@ open func stop()throws   {try rustCallWithError(FfiConverterTypeProtocolError_li
             self.uniffiCloneHandle(),$0
     )
 }
+}
+    
+open func telemetryInstallId() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id(
+            self.uniffiCloneHandle(),$0
+    )
+})
 }
     
 open func unblockUser(userId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
@@ -8970,6 +8980,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 37179) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 11199) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 7771) {

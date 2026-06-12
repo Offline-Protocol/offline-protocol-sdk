@@ -11244,3 +11244,77 @@ fn scrub_secret_without_storage_keeps_random_per_instance_fallback() {
     assert!(!a.telemetry_secret_persisted);
     assert_ne!(a.telemetry_fallback_secret, b.telemetry_fallback_secret);
 }
+
+#[test]
+fn telemetry_install_id_is_none_without_storage() {
+    // The per-instance fallback secret is random, so an id derived from it
+    // would rotate every launch — the accessor must expose nothing instead.
+    let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    assert_eq!(protocol.telemetry_install_id(), None);
+}
+
+#[test]
+fn telemetry_install_id_is_stable_across_instances_sharing_storage() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.enable_message_persistence(storage.clone()).unwrap();
+    let first_id = first
+        .telemetry_install_id()
+        .expect("id should be available once the secret is persisted");
+    assert_eq!(first_id.len(), 32);
+    assert!(first_id.chars().all(|c| c.is_ascii_hexdigit()));
+
+    // Same storage = same install: the id must match across sessions so
+    // backend distinct-device aggregation counts one device, not many.
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.enable_message_persistence(storage).unwrap();
+    assert_eq!(second.telemetry_install_id(), Some(first_id));
+}
+
+#[test]
+fn telemetry_install_id_differs_across_installs() {
+    let mut a = OfflineProtocol::new(create_test_config()).unwrap();
+    a.enable_message_persistence(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+    let mut b = OfflineProtocol::new(create_test_config()).unwrap();
+    b.enable_message_persistence(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+    assert_ne!(a.telemetry_install_id(), b.telemetry_install_id());
+}
+
+#[test]
+fn telemetry_install_id_survives_explicit_config_secret() {
+    // An app-supplied scrub_secret overrides opaque-id hashing for telemetry
+    // records, but must not rotate (or make computable) the install id —
+    // it stays pinned to the SDK-managed persistent secret.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.enable_message_persistence(storage).unwrap();
+    let before = protocol.telemetry_install_id();
+    assert!(before.is_some());
+
+    let cfg = TelemetryConfig::default().with_scrub_secret(Some([0xAB; 16]));
+    protocol
+        .install_telemetry_sink(Arc::new(NoopTelemetrySink), cfg)
+        .unwrap();
+    assert_eq!(protocol.telemetry_install_id(), before);
+}
+
+#[test]
+fn telemetry_install_id_is_domain_separated_from_scrubbed_ids() {
+    // Ordinary scrubbed leaf identifiers must not correlate with the install
+    // id: both derive from the same secret, but the fixed domain string keeps
+    // the outputs disjoint for any raw id that isn't the domain itself.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.enable_message_persistence(storage).unwrap();
+    let id = protocol.telemetry_install_id().unwrap();
+    assert_ne!(
+        id,
+        protocol
+            .telemetry_scrubber
+            .hash_id("peer:alice")
+            .into_owned()
+    );
+}

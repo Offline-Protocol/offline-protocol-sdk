@@ -615,6 +615,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun telemetryInstallId(promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.reject("NOT_STARTED", "Protocol not created", null)
+            return
+        }
+        try {
+            promise.resolve(proto.telemetryInstallId())
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_INSTALL_ID", "Failed to read telemetry install id: ${e.message}", e)
+        }
+    }
+
     // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
     // only emits camelCase keys — these parsers match that contract.
     //

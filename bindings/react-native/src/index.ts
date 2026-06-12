@@ -1324,6 +1324,26 @@ export class OfflineProtocol {
   }
 
   /**
+   * Returns a stable, opaque per-install telemetry identifier (32 hex
+   * characters), derived from the SDK-managed persistent scrub secret. The
+   * secret itself never crosses the bridge and cannot be recovered from
+   * the id, so the id is safe to attach to telemetry as a device-grain
+   * key (e.g. distinct-device counting in analytics backends).
+   *
+   * Resolves `null` until the persistent secret is available — i.e.
+   * before secure storage is wired on the native side (MLS initialization
+   * or message persistence), or when persisting the secret failed this
+   * session. In that state the id would not be stable across launches,
+   * so none is exposed.
+   *
+   * Stable across app restarts and `installTelemetrySink(...)` calls;
+   * unaffected by an app-supplied `scrubIds` / scrub-secret config.
+   */
+  async telemetryInstallId(): Promise<string | null> {
+    return await OfflineProtocolNativeModule.telemetryInstallId();
+  }
+
+  /**
    * Registers a listener that receives every TelemetryRecord emitted by the
    * SDK. Requires a prior `installTelemetrySink(...)` — without an installed
    * sink the Rust side emits nothing on either the push channel or the poll

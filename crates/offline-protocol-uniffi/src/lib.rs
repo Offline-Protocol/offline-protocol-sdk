@@ -2316,6 +2316,19 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    /// Stable, opaque per-install telemetry identifier (32 hex chars),
+    /// derived from the SDK-managed persistent scrub secret. The secret
+    /// itself never crosses the FFI and cannot be recovered from the id.
+    ///
+    /// Returns `None` until the persistent secret is available — i.e.
+    /// before secure storage is wired via `initialize_mls` /
+    /// `enable_message_persistence`, or when persisting the secret failed
+    /// this session. Unaffected by installing a telemetry sink or by an
+    /// app-supplied scrub secret.
+    pub fn telemetry_install_id(&self) -> Option<String> {
+        recover_mutex(&self.inner, "inner").telemetry_install_id()
+    }
+
     // ========================================================================
     // TRANSPORT CALLBACKS (EVENT-DRIVEN SENDING)
     // ========================================================================
