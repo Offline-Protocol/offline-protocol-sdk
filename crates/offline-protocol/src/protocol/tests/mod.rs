@@ -180,6 +180,50 @@ impl MlsStorage for FailingPendingListStorage {
     }
 }
 
+#[derive(Default)]
+struct FailingScrubSecretStorage {
+    inner: crate::mls::InMemoryStorage,
+}
+
+impl MlsStorage for FailingScrubSecretStorage {
+    fn store(
+        &self,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        if key_type == storage_keys::SCRUB_SECRET {
+            return Err(offline_protocol_mls::StorageError::StoreFailed(
+                "forced scrub-secret persist failure".to_string(),
+            ));
+        }
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.inner.delete(key_type, key_id)
+    }
+
+    fn list_keys(
+        &self,
+        key_type: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        self.inner.list_keys(key_type)
+    }
+}
+
 #[test]
 fn test_protocol_creation() {
     let protocol = OfflineProtocol::new(create_test_config());
@@ -11304,8 +11348,20 @@ fn telemetry_install_id_survives_explicit_config_secret() {
 #[test]
 fn telemetry_install_id_is_domain_separated_from_scrubbed_ids() {
     // Ordinary scrubbed leaf identifiers must not correlate with the install
-    // id: both derive from the same secret, but the fixed domain string keeps
-    // the outputs disjoint for any raw id that isn't the domain itself.
+    // id: both derive from the same secret, so separation requires that no
+    // raw identifier reaching the scrubber can ever equal the domain string.
+    // The domain contains ':', which id validation rejects in every
+    // UserId/AppId — assert that structural invariant directly so a future
+    // relaxation of the charset (or a domain edit) fails loudly here.
+    assert!(
+        UserId::new("telemetry:install-id").is_err(),
+        "domain must never be a constructible UserId"
+    );
+    assert!(
+        AppId::new("telemetry:install-id").is_err(),
+        "domain must never be a constructible AppId"
+    );
+
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol.enable_message_persistence(storage).unwrap();
@@ -11314,7 +11370,43 @@ fn telemetry_install_id_is_domain_separated_from_scrubbed_ids() {
         id,
         protocol
             .telemetry_scrubber
-            .hash_id("peer:alice")
+            .hash_id("some-user-id")
             .into_owned()
     );
+}
+
+#[test]
+fn telemetry_install_id_derivation_is_frozen() {
+    // Contract test: the install id is SHA-256(secret || "telemetry:install-id")
+    // truncated to 32 hex chars. Backends key device aggregation on this value,
+    // so changing the domain string, hash, or truncation silently rotates every
+    // install id in the field. If this test fails, the change is a breaking one
+    // — do not update the expected value without a migration story.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    storage
+        .store(
+            storage_keys::SCRUB_SECRET,
+            storage_keys::SCRUB_SECRET_ID,
+            &[0x42; 16],
+        )
+        .unwrap();
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.enable_message_persistence(storage).unwrap();
+    assert_eq!(
+        protocol.telemetry_install_id().as_deref(),
+        Some("888112d3efecdb64bbc60cb9b55359c6")
+    );
+}
+
+#[test]
+fn telemetry_install_id_is_none_when_secret_persist_fails() {
+    // When the freshly generated secret cannot be persisted, the SDK keeps a
+    // session-local secret — the id would rotate next launch, so the accessor
+    // must expose nothing (the documented "persisting failed this session"
+    // contract in the UDL/TS docs).
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(Arc::new(FailingScrubSecretStorage::default()))
+        .unwrap();
+    assert_eq!(protocol.telemetry_install_id(), None);
 }

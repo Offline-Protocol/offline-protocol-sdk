@@ -583,7 +583,11 @@ impl OfflineProtocol {
     /// string, where `secret` is the per-install scrub secret managed by
     /// [`Self::restore_or_init_scrub_secret`]. The secret cannot be recovered
     /// from the id, and the fixed domain string keeps the id un-correlatable
-    /// with opaque identifiers the scrubber produces for telemetry records.
+    /// with opaque identifiers the scrubber produces for telemetry records:
+    /// the domain contains `:`, which id validation
+    /// (`offline_protocol_core::types::validate_id_chars`) rejects in every
+    /// `UserId`/`AppId`, so no validated identifier reaching the scrubber can
+    /// ever equal the domain and collide with the install id.
     ///
     /// Returns `None` while the SDK is still on the random per-instance
     /// fallback secret — i.e. before storage is provided via
@@ -600,7 +604,7 @@ impl OfflineProtocol {
     /// The domain string is part of the public contract: changing it would
     /// silently rotate every device's install id. Frozen — do not edit.
     pub fn telemetry_install_id(&self) -> Option<String> {
-        const TELEMETRY_INSTALL_ID_DOMAIN: &str = "telemetry-install-id";
+        const TELEMETRY_INSTALL_ID_DOMAIN: &str = "telemetry:install-id";
         self.telemetry_secret_persisted.then(|| {
             crate::telemetry::scrubber::opaque_id(
                 TELEMETRY_INSTALL_ID_DOMAIN,
