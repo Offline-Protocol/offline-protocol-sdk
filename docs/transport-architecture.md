@@ -182,7 +182,7 @@ Device ←→ Platform Bridge ←→ Reticulum Stack ←→ LoRa/TCP/UDP/I2P ←
 **Key characteristics**:
 - Disabled by default (`reticulumEnabled: false`) — requires external infrastructure
 - Low bandwidth (~0.7 KB/s typical, ~2.7 KB/s peak on LoRa), so excluded from media transfer
-- DORS gives it lowest tie-break priority (resilience fallback)
+- DORS gives it a low tie-break priority (3) — second only to Nostr (resilience fallback)
 - Connection timeout: 60 seconds (vs 30s for Internet)
 
 See the [Reticulum Transport Guide](reticulum.md) for full setup and integration details.

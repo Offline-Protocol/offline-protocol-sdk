@@ -44,10 +44,16 @@ pub struct Message {
     pub priority: MessagePriority,  // Message priority
     pub ttl: TTL,                   // Time-to-live (hops remaining)
     pub hop_count: HopCount,        // Hops traversed
-    pub timestamp: Timestamp,       // When message was created
+    pub timestamp: Timestamp,       // When message was created (wall-clock, display only)
+    pub lamport_clock: LamportClock, // Logical clock for causal ordering across devices
+    pub content_type: ContentType,  // Type of content carried (text, file chunk, etc.)
     pub content: String,            // Message content
+    pub binary_content: Option<Vec<u8>>,    // Raw payload for file-chunk data
+    pub media_metadata: Option<MediaMetadata>, // Media details for non-text content
     pub metadata: HashMap<String, String>,  // App-specific data
     pub requires_ack: bool,         // Whether ACK is required
+    pub reply_to_msg: Option<MessageId>,    // Message this is replying to (threading)
+    pub forwarded_from: Option<ForwardInfo>, // Forwarding attribution, if forwarded
 }
 ```
 
@@ -62,12 +68,14 @@ pub struct ProtocolConfig {
     pub app_id: String,             // Application ID (required)
     pub user_id: String,            // User ID (required)
     pub transport: TransportConfig, // Transport settings
-    pub encryption: EncryptionConfig, // Encryption settings (NEW!)
     pub dors: DorsConfig,          // DORS settings
     pub relay: RelayConfig,        // Relay settings
     pub path: PathConfig,          // Path selection settings
     pub reliability: ReliabilityConfig, // Reliability settings
+    pub encryption: EncryptionConfig, // Auto-encryption (MLS) settings
     pub initial_ttl: u8,           // Initial TTL (default: 8)
+    pub group: GroupConfig,        // Mesh group messaging settings
+    pub security: SecurityConfig,  // Transport & control-message hardening
 }
 ```
 

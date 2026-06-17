@@ -288,7 +288,7 @@ DORS evaluates Reticulum alongside all other transports using the same multi-fac
 | Bandwidth default | 20 | Conservative default score when no measurement available |
 | Energy baseline | 75 | Between BLE (90) and Internet (60) |
 | High-power | No | Not penalized during low battery |
-| Tie-break priority | 3 (lowest) | Internet (0) > WiFi Direct (1) > BLE (2) > Reticulum (3) |
+| Tie-break priority | 3 (second-lowest) | Internet (0) > WiFi Direct (1) > BLE (2) > Reticulum (3) > Nostr (4) |
 
 ### LoRa Throughput Reference
 
@@ -313,7 +313,7 @@ Reticulum will be selected when:
 Reticulum will **not** be selected when:
 - Higher-bandwidth transports are available with comparable reliability
 - The message requests Internet preference (media/file transfers)
-- Scores are tied (tie-break favors Internet > WiFi > BLE > Reticulum)
+- Scores are tied (tie-break favors Internet > WiFi > BLE > Reticulum > Nostr)
 
 ## File Transfer Behavior
 
@@ -478,7 +478,7 @@ On disconnection:
 
 1. Verify `reticulumEnabled: true` in config
 2. Verify `reticulumStatusChanged(true)` was called after the Reticulum stack is ready
-3. Check DORS scores — Reticulum has lowest tie-break priority, so it needs to outscore alternatives
+3. Check DORS scores — Reticulum has a low tie-break priority (only Nostr is lower), so it needs to outscore alternatives
 4. Reticulum is excluded from media transfers by design
 
 ## Further Reading
