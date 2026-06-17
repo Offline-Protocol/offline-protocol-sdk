@@ -46,3 +46,4 @@ build/
 target
 .cursor/
 .claude/
+.claude/todos/
