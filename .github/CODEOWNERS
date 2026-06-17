@@ -1,0 +1,21 @@
+# CODEOWNERS — auto-requests review from the listed owners when matching
+# paths change. See https://docs.github.com/articles/about-code-owners
+#
+# Ownership is assigned to the @Offline-Protocol/maintainers team. The team
+# must exist in the org AND have write access to this repo, otherwise these
+# entries are silently ignored. Manage who is a maintainer here:
+#   https://github.com/orgs/Offline-Protocol/teams/maintainers
+
+# Default owner for everything in the repo
+*                                   @Offline-Protocol/maintainers
+
+# Security-sensitive areas — encryption core and the FFI boundary.
+# Pinned explicitly so they stay with the maintainers team even if the
+# default owner above is ever delegated to a wider group.
+/crates/offline-protocol-mls/       @Offline-Protocol/maintainers
+/crates/offline-protocol-uniffi/    @Offline-Protocol/maintainers
+/SECURITY.md                        @Offline-Protocol/maintainers
+/CLA.md                             @Offline-Protocol/maintainers
+
+# Repo/CI configuration
+/.github/                           @Offline-Protocol/maintainers

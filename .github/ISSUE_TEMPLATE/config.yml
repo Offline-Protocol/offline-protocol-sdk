@@ -1,0 +1,10 @@
+# Disable the "open a blank issue" escape hatch so reports go through a template
+# (and so security reports get redirected privately rather than filed publicly).
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/SECURITY.md
+    about: Do NOT open a public issue for vulnerabilities. Follow our Security Policy to report privately.
+  - name: 💬 Questions & discussion
+    url: https://github.com/Offline-Protocol/offline-protocol-sdk/discussions
+    about: Ask usage questions or propose ideas in GitHub Discussions.

@@ -1,0 +1,72 @@
+name: ✨ Feature Request
+description: Suggest a new feature or enhancement for the SDK
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the Offline Protocol SDK! Please describe the
+        problem you're trying to solve before jumping to a proposed solution.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checklist
+      options:
+        - label: I searched existing issues and discussions and this has not already been proposed.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve? What's the use case? ("I'm trying to ... but ...")
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe what you'd like to happen.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected crate / area
+      description: Which part of the SDK would this touch? (maps to our Conventional Commit scopes)
+      options:
+        - core (offline-protocol-core)
+        - transport (offline-protocol-transport)
+        - router / DORS (offline-protocol-router)
+        - reliability (offline-protocol-reliability)
+        - mls / encryption (offline-protocol-mls)
+        - services (offline-protocol-services)
+        - protocol / main API (offline-protocol)
+        - uniffi (offline-protocol-uniffi)
+        - bindings (React Native / Python / other)
+        - docs
+        - examples
+        - CI / build / tooling
+        - "Not sure / other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternative solutions or workarounds you've thought about.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I would be willing to submit a PR for this feature.
+          required: false
