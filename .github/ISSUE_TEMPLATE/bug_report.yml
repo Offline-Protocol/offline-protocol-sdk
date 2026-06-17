@@ -1,0 +1,115 @@
+name: 🐛 Bug Report
+description: Report a defect in the Offline Protocol SDK
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report!
+
+        ⚠️ **Do not report security vulnerabilities here.** Please follow our
+        [Security Policy](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/SECURITY.md)
+        to report them privately.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checklist
+      options:
+        - label: I searched existing issues and this has not already been reported.
+          required: true
+        - label: This is not a security vulnerability (those go through the Security Policy).
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: SDK version
+      description: Which version of the SDK are you using? (e.g. crate version, npm package version, or git commit)
+      placeholder: "0.2.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected crate / area
+      description: Which part of the SDK does this affect? (maps to our Conventional Commit scopes)
+      options:
+        - core (offline-protocol-core)
+        - transport (offline-protocol-transport)
+        - router / DORS (offline-protocol-router)
+        - reliability (offline-protocol-reliability)
+        - mls / encryption (offline-protocol-mls)
+        - services (offline-protocol-services)
+        - protocol / main API (offline-protocol)
+        - uniffi (offline-protocol-uniffi)
+        - bindings (React Native / Python / other)
+        - docs
+        - examples
+        - CI / build / tooling
+        - "Not sure / other"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Where does the bug occur?
+      options:
+        - Rust (desktop / server)
+        - iOS (Swift)
+        - Android (Kotlin)
+        - React Native
+        - Python
+        - Embedded (C FFI / ESP32)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps (ideally a code snippet or repo) that reproduce the problem.
+      placeholder: |
+        1. Configure the protocol with '...'
+        2. Call '...'
+        3. Observe '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / backtrace
+      description: |
+        Relevant logs or panic output. Run with `RUST_BACKTRACE=1` for backtraces.
+        This will be automatically formatted into code, so no need for backticks.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might help — environment, transport in use, related issues, etc.
+    validations:
+      required: false
