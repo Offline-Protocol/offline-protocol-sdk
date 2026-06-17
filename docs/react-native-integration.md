@@ -144,62 +144,59 @@ See `docs/dors-configuration.md` and `docs/configuration.md` for full parameters
 
 ---
 
-## 7. Group SDK (Relay-Based Groups)
+## 7. Group Messaging (MLS-Encrypted Mesh Groups)
 
-Group features (create groups, send messages, manage members) are provided by **SDK group methods**. Each method returns a JSON string that must be sent to your relay server; the SDK does not open or manage the connection. Your app is responsible for relay connection, authentication, and sending the SDK payloads—or for using a provider that does this (e.g. the example app’s **ProtocolProvider**).
+Group features (create groups, send messages, manage members) are provided directly by the SDK's **mesh group methods**. The SDK handles MLS end-to-end encryption and mesh fan-out automatically — there is **no relay server** to run or connect to. Each method runs against your `OfflineProtocol` instance and delivers over whatever transports DORS has selected.
 
 ### 7.1 Prerequisites
 
-- A relay server that implements the group WebSocket API.
-- User identity (e.g. token) for authenticating with the relay.
+- MLS must be initialised first (see §11.12), e.g. `await protocol.initializeMlsWithSecureStorage(...)`.
+- The creator becomes the group admin; admins manage membership.
 
-### 7.2 Using Group Methods (SDK Only)
-
-Call the group methods on your `OfflineProtocol` instance. Each returns a **Promise&lt;string&gt;** (a JSON string). Your app (or your provider) must send that string to the relay; the SDK does not perform the send.
+### 7.2 Creating and Using Groups
 
 ```ts
-// After your app has established an authenticated relay connection,
-// call SDK group methods and send the returned JSON to the relay.
+// Create a group — the creator is the admin. Returns MlsGroupInfo.
+const group = await protocol.meshCreateGroup('My Group');
 
-const createPayload = await protocol.groupCreate('My Group');
-// Send createPayload to relay (e.g. via your provider’s send() or equivalent).
+// Invite a member by user ID (admin only). Sends MLS Welcome + Commit.
+await protocol.meshInviteToGroup(group.groupId, 'user456');
 
-const listPayload = await protocol.groupGetUserGroups();
-// Send listPayload to relay.
+// Send an encrypted message to all members.
+// Signature: meshSendGroupMessage(groupId, content, priority?, replyToMsg?)
+await protocol.meshSendGroupMessage(group.groupId, 'Hello group!');
 
-const msgPayload = await protocol.groupSendMessage(groupId, content, replyToMsgId ?? null);
-// Send msgPayload to relay.
+// List groups and fetch info.
+const groupIds = await protocol.meshListGroups();
+const info = await protocol.meshGetGroupInfo(group.groupId);
 ```
 
-In the **example React Native app**, **ProtocolProvider** owns the relay connection and exposes group actions (`createGroup`, `sendGroupMessage`, `addGroupMember`, etc.) that call these SDK methods and send the resulting JSON over the relay. Screens use `useProtocol()` and call those context methods only—no direct WebSocket creation. See `examples/react-native-app` and `ProtocolProvider.tsx` for the full pattern.
+In the **example React Native app**, **ProtocolProvider** wraps these in context actions (`createGroup` → `meshCreateGroup`, `sendGroupMessage` → `meshSendGroupMessage`, `addGroupMember` → `meshInviteToGroup`, etc.). Screens use `useProtocol()` and call those context methods only. See `examples/react-native-app` and `ProtocolProvider.tsx` for the full pattern.
 
 ### 7.3 Group Methods Summary
 
 | Method | Description |
 |--------|-------------|
-| `groupCreate(name)` | Create group; creator is admin. |
-| `groupSendMessage(groupId, content, replyToMsg?)` | Send message; optional reply-to message ID. |
-| `groupAddMember(groupId, username)` | Add member (admin). |
-| `groupRemoveMember(groupId, username)` | Remove member (admin or self). |
-| `groupSetAdmin(groupId, username)` | Grant admin (admin). |
-| `groupRemoveAdmin(groupId, username)` | Revoke admin (admin). |
-| `groupLeave(groupId)` | Current user leaves. |
-| `groupDelete(groupId)` | Delete group (admin). |
-| `groupGetInfo(groupId)` | Get group metadata. |
-| `groupGetUserGroups()` | Get all groups for current user. |
+| `meshCreateGroup(name)` | Create group; creator is admin. Returns `MlsGroupInfo`. |
+| `meshSendGroupMessage(groupId, content, priority?, replyToMsg?)` | Send encrypted message to all members. |
+| `meshInviteToGroup(groupId, inviteeUserId)` | Invite member (admin); sends Welcome + Commit. |
+| `meshRemoveFromGroup(groupId, memberId)` | Remove member (admin). |
+| `meshLeaveGroup(groupId)` | Current user leaves the group. |
+| `meshListGroups()` | List all group IDs. |
+| `meshGetGroupInfo(groupId)` | Get group metadata (members, epoch). |
+| `meshRenameGroup(groupId, newName)` | Rename group (admin); broadcasts to members. |
 
-Relay responses (e.g. `UserGroups`, `GroupCreated`, `GroupMessage`, `GroupInfo`, `Error`) are received asynchronously from your relay; see your relay API docs for exact shapes. In the example app, ProtocolProvider tracks these and updates `groups`, `groupDetails`, and `groupMessages` in context.
+Member roles (admin/member) are managed with `meshSetMemberRole` / `meshGetMemberRole` / `meshGetGroupRoles`. See §11.13–§11.14 for the complete reference.
 
 ### 7.4 Reply-to (Threaded Messages)
 
-Store the message ID when the user taps “reply”, then pass it as the third argument:
+Store the message ID when the user taps "reply", then pass it as the `replyToMsg` argument:
 
 ```ts
-const payload = await protocol.groupSendMessage(groupId, content, replyToMessageId);
-// Send payload to relay (or use your provider's sendGroupMessage(groupId, content, replyToMessageId)).
+await protocol.meshSendGroupMessage(groupId, content, null, replyToMessageId);
 ```
 
-Render replies in the UI by resolving `reply_to` / `replyToMsg` to the original message.
+Render replies in the UI by resolving `replyToMsg` to the original message.
 
 ---
 
@@ -219,7 +216,7 @@ Subscribe to `transport_switched`, `relay_promoted`, `network_metrics` for DORS 
 1. BLE/Wi‑Fi Direct permissions granted before start.
 2. `cargo test -p offline-protocol-router` and `cargo test -p offline-protocol` for core logic.
 3. Example app (`examples/react-native-app`) for device scenarios and Control Center.
-4. For groups: relay connection and auth (e.g. via ProtocolProvider), then `groupGetUserGroups` / create / send / reply-to work; add/remove member, leave, delete (admin).
+4. For groups: MLS initialised, then `meshCreateGroup` / `meshSendGroupMessage` / reply-to work; invite, remove member, leave, rename (admin).
 
 ---
 
@@ -468,25 +465,6 @@ High-level group methods that handle MLS encryption and mesh fan-out automatical
 | **forwardMessage** | `forwardMessage(params: ForwardMessageParams): Promise<string>` | Forwards a message to a 1:1 recipient with attribution. |
 
 For group forwarding, see `meshForwardMessageToGroup` in [§11.13](#1113-mesh-group-messaging-mls-encrypted).
-
----
-
-### 11.18 Group Management (Relay Server API)
-
-Each method returns a **JSON string** that your app (or provider) sends to the relay. The SDK does not open or manage the connection. In the example app, ProtocolProvider owns the relay and exposes group actions that call these methods and send the JSON for you.
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| **groupCreate** | `groupCreate(name: string): Promise<string>` | Create group; creator is admin. |
-| **groupSendMessage** | `groupSendMessage(groupId, content, replyToMsg?: string \| null): Promise<string>` | Send message to group; optional reply-to message ID. |
-| **groupAddMember** | `groupAddMember(groupId, username): Promise<string>` | Add member (admin). |
-| **groupRemoveMember** | `groupRemoveMember(groupId, username): Promise<string>` | Remove member (admin or self). |
-| **groupSetAdmin** | `groupSetAdmin(groupId, username): Promise<string>` | Set member as admin (admin). |
-| **groupRemoveAdmin** | `groupRemoveAdmin(groupId, username): Promise<string>` | Remove admin role (admin). |
-| **groupLeave** | `groupLeave(groupId): Promise<string>` | Leave group. |
-| **groupDelete** | `groupDelete(groupId): Promise<string>` | Delete group (admin). |
-| **groupGetInfo** | `groupGetInfo(groupId): Promise<string>` | Get group info. |
-| **groupGetUserGroups** | `groupGetUserGroups(): Promise<string>` | Get all groups for current user. |
 
 ---
 

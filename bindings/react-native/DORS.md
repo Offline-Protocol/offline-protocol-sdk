@@ -2,7 +2,7 @@
 
 ## Overview
 
-DORS is the intelligent transport selection engine at the heart of the Offline Protocol SDK. It automatically evaluates, selects, and switches between available transport layers — Internet, BLE Mesh, Wi-Fi Direct, and Reticulum — based on real-time network conditions. The goal is to ensure optimal message delivery while balancing performance, reliability, and energy consumption.
+DORS is the intelligent transport selection engine at the heart of the Offline Protocol SDK. It automatically evaluates, selects, and switches between available transport layers — Internet, BLE Mesh, Wi-Fi Direct, Reticulum, and Nostr relays — based on real-time network conditions. The goal is to ensure optimal message delivery while balancing performance, reliability, and energy consumption.
 
 ## How DORS Works
 
@@ -138,7 +138,7 @@ Optimized for resilience and long-range delivery via LoRa and other Reticulum me
 | Signal | 5% |
 | Bandwidth | 5% |
 
-Reticulum has no base score bonus and the lowest tie-break priority (Internet > WiFi Direct > BLE > Reticulum). It acts as a resilience fallback when other transports are unavailable or degraded.
+Reticulum has no base score bonus and a low tie-break priority. The full order is Internet > WiFi Direct > BLE > Reticulum > Nostr, so Nostr (not Reticulum) is the lowest-priority transport. Reticulum acts as a resilience fallback when other transports are unavailable or degraded.
 
 ## Switching Safeguards
 

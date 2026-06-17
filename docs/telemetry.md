@@ -162,6 +162,7 @@ Implementations must be thread-safe and non-blocking. See `bindings/react-native
 | `routingDiagnostic` | boolean | `false` | When `true`, `RoutingDecision.scores` carries per-factor breakdowns (signal, proximity, bandwidth, congestion, energy, reliability, load). Off by default to avoid per-emit allocation on the DORS hot path. |
 | `scrubIds` | boolean | `true` | Hash long-lived identifiers (`peer_id`, `user_id`, `group_id`, actor fields) with SHA-256 before emission. |
 | `enablePollQueue` | boolean | `true` | When `false`, the Rust adapter skips the per-emit JSON envelope used by `pollTelemetry()`. Push listeners still fire. Leave `true` if any consumer calls `pollTelemetry()`. |
+| `mlsSamplingBypass` | boolean | `false` | When `true`, a telemetry-grade sink opts out of MLS event sampling so every MLS lifecycle record is emitted (not rate-limited). Leave `false` for normal dashboards. |
 
 Rust also exposes `with_scrub_secret([u8; 16])` for a deterministic hashing key — without it, the SDK generates a random per-instance fallback so scrubbed IDs are stable for the lifetime of one protocol instance but not across restarts.
 

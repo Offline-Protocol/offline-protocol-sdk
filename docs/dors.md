@@ -130,7 +130,7 @@ Optimized for resilience and long-range delivery via LoRa and other Reticulum me
 | Signal | 5% |
 | Bandwidth | 5% |
 
-Reticulum has no base score bonus and receives the third-lowest tie-break priority (Internet > WiFi Direct > BLE > Reticulum > Nostr). It is selected only when it genuinely outscores other transports or when they are unavailable. The low bandwidth weight reflects that Reticulum's LoRa medium is inherently low-throughput (~0.7 KB/s typical, ~2.7 KB/s peak at SF7/BW500kHz).
+Reticulum has no base score bonus and receives the second-lowest tie-break priority (Internet > WiFi Direct > BLE > Reticulum > Nostr). It is selected only when it genuinely outscores other transports or when they are unavailable. The low bandwidth weight reflects that Reticulum's LoRa medium is inherently low-throughput (~0.7 KB/s typical, ~2.7 KB/s peak at SF7/BW500kHz).
 
 ### Nostr Relay Transport
 Optimized for censorship resistance and last-resort routing through public WebSocket relays. Acts as a fallback when other transports are unreachable or actively blocked.

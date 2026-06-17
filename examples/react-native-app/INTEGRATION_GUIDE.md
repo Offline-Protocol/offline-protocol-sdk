@@ -301,9 +301,9 @@ export default function App() {
   const { isStarted, start, stop, sendMessage } = useOfflineProtocol({
     appId: 'my-app',
     userId: 'user123',
-    transport: {
-      bleEnabled: true,
-      internetEnabled: true,
+    transports: {
+      ble: { enabled: true },
+      internet: { enabled: true },
     },
   });
 
@@ -376,10 +376,10 @@ const config: ProtocolConfig = {
   userId: 'current-user-id',
 
   // Transport configuration
-  transport: {
-    bleEnabled: true,          // Enable Bluetooth Low Energy
-    wifiDirectEnabled: true,   // Enable Wi-Fi Direct (Android)
-    internetEnabled: true,     // Enable Internet connectivity
+  transports: {
+    ble: { enabled: true },          // Enable Bluetooth Low Energy
+    wifiDirect: { enabled: true },   // Enable Wi-Fi Direct (Android)
+    internet: { enabled: true },     // Enable Internet connectivity
   },
 
   // DORS (Dynamic Offline Routing Strategy) configuration
