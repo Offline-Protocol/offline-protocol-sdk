@@ -63,6 +63,12 @@ define_internal_prefixes! {
     SESSION_CONFIRM_PROBE = "__MLS_CONFIRM_PROBE__",
     /// Prefix for session confirmation acknowledgement messages.
     SESSION_CONFIRM_ACK = "__MLS_CONFIRM_ACK__",
+    /// Prefix for the MLS-encrypted session-confirm an adopter sends on adopting
+    /// the peer's Welcome. Only ever travels INSIDE an `ENCRYPTED` envelope, never
+    /// as a raw control message on the wire; its sole purpose is to be a
+    /// group-aware decrypt so the both-create "owner" (which confirms only on
+    /// `decrypt_success`) converges. Consumed on receipt — never surfaced to the app.
+    SESSION_CONFIRM_ENCRYPTED = "__MLS_ENC_CONFIRM__",
     /// Prefix for connection request messages.
     CONN_REQUEST = "__CONN_REQ__",
     /// Prefix for connection accepted messages.

@@ -196,6 +196,10 @@ impl OfflineProtocol {
             // Owner side of a both-create race kept its own group; it must await a
             // group-aware decrypt before confirming (see below).
             let mut owner_keep = false;
+            // Adopter side: on a Welcome RETRANSMIT for a group we already adopted,
+            // re-send the encrypted confirm so a lost first confirm is retried in
+            // lockstep with the owner's retransmission until it converges.
+            let mut resend_confirm_on_retransmit = false;
             let sender_owned = sender.to_string();
             let group_id = welcome.group_id.as_str().to_string();
             let is_session = group_id.starts_with("session:");
@@ -235,6 +239,9 @@ impl OfflineProtocol {
                                             sender = %sender,
                                             "Duplicate Welcome after adopt; already converged, ignoring"
                                         );
+                                        // Owner is still retransmitting → it hasn't
+                                        // decrypted our adoption proof yet. Re-send it.
+                                        resend_confirm_on_retransmit = true;
                                     } else {
                                         warn!(error = %e, sender = %sender, "Failed to replace session");
                                         error_reason = Some(e.to_string());
@@ -301,10 +308,22 @@ impl OfflineProtocol {
                             let _ = self.send_key_package_to(&sender_owned, false);
                         }
 
+                        // Proactively prove to the peer that we adopted ITS group.
+                        // The peer may be the both-create "owner", which confirms ONLY
+                        // on a group-aware decrypt from us (a plaintext probe/ack is
+                        // rejected by `can_confirm_from_source`); our session is
+                        // confirmed locally just above, so we can encrypt now. Without
+                        // this, a passive owner with no traffic to send never decrypts
+                        // anything from us, stays Pending, and the 1:1 connection never
+                        // completes. The marker is consumed on receipt (never shown).
+                        if is_session && self.config.encryption.enabled {
+                            self.send_session_confirm_encrypted(&sender_owned);
+                        }
+
                         // Emit secure session established event
                         if let Ok(state) = lock_shared_state(&self.shared_state) {
                             state.emit_event(Event::secure_session_established(
-                                sender_owned,
+                                sender_owned.clone(),
                                 group_id,
                                 is_session,
                                 false, // initiated_by_local is false - we received the Welcome
@@ -314,7 +333,7 @@ impl OfflineProtocol {
                     Err(e) => {
                         if let Ok(state) = lock_shared_state(&self.shared_state) {
                             state.emit_event(Event::secure_session_failed(
-                                sender_owned,
+                                sender_owned.clone(),
                                 format!("Failed to persist confirmation: {}", e),
                             ));
                         }
@@ -323,8 +342,18 @@ impl OfflineProtocol {
             } else if let Some(reason) = error_reason {
                 // Emit secure session failed event
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::secure_session_failed(sender_owned, reason));
+                    state.emit_event(Event::secure_session_failed(sender_owned.clone(), reason));
                 }
+            }
+
+            // Retransmit case: we already adopted the owner's group (session
+            // confirmed earlier), but it is still retransmitting its Welcome
+            // because it has not decrypted our adoption proof. Re-send the
+            // encrypted confirm in lockstep so a lost confirm self-heals. (The
+            // owner stops retransmitting — and we stop re-sending — once it
+            // confirms via decrypt.)
+            if resend_confirm_on_retransmit && is_session && self.config.encryption.enabled {
+                self.send_session_confirm_encrypted(&sender_owned);
             }
         }
     }
@@ -434,12 +463,22 @@ impl OfflineProtocol {
                     sender: sender_owned,
                     group_id,
                 } => {
+                    // A proactive adopter confirm carries no user payload — its only
+                    // job is to BE a group-aware decrypt so we (the owner) can confirm.
+                    // Confirm as normal below, then consume it so it never surfaces as
+                    // a chat message.
+                    let is_session_confirm = text == internal_prefixes::SESSION_CONFIRM_ENCRYPTED;
+                    let surfaced = if is_session_confirm {
+                        Some(InternalMessageResult::Consumed)
+                    } else {
+                        Some(InternalMessageResult::Decrypted(text))
+                    };
                     if !self.can_confirm_from_source(&sender_owned, "decrypt_success") {
                         debug!(
                             sender = %sender_owned,
                             "Skipping decrypt-based confirmation until welcome send is at least attempted"
                         );
-                        Some(InternalMessageResult::Decrypted(text))
+                        surfaced
                     } else {
                         match self.confirm_session_state(&sender_owned, "decrypt_success") {
                             Ok(true) => {
@@ -460,7 +499,7 @@ impl OfflineProtocol {
                                 );
                             }
                         }
-                        Some(InternalMessageResult::Decrypted(text))
+                        surfaced
                     }
                 }
                 DecryptResult::Empty => {
