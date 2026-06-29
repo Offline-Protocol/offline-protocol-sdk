@@ -234,6 +234,45 @@ impl GroupManager {
         Ok(group)
     }
 
+    /// Joins a group from a Welcome, replacing any existing group at the same
+    /// `group_id` **non-destructively**.
+    ///
+    /// Unlike a naive delete-then-join, this stages the incoming Welcome FIRST.
+    /// Staging (`StagedWelcome::new_from_welcome`) is the step that consumes the
+    /// one-time key package, so it is the natural failure point: if the key
+    /// package is unavailable — e.g. a retransmitted Welcome we already adopted,
+    /// or a first-contact key-package race — staging returns `Err` and the
+    /// existing group is left **completely intact** instead of being bricked.
+    /// Only once staging succeeds do we remove the prior group (1:1 session
+    /// groups share the deterministic MLS group id derived from the session
+    /// string, so `into_group` must write into a cleared slot) and install the
+    /// adopted one. This makes both-create adoption idempotent: a duplicate
+    /// Welcome is a safe no-op rather than a re-brick.
+    pub fn join_group_replacing(&self, welcome: Welcome, group_id: &GroupId) -> Result<MlsGroup> {
+        let group_config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
+
+        // Stage first — non-destructive failure point (consumes the key package).
+        let staged = StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)
+            .map_err(|e| MlsError::WelcomeProcessing(format!("Failed to stage welcome: {}", e)))?;
+
+        // Staging succeeded: it is now safe to drop any prior group at this id so
+        // `into_group` writes a clean slot at the shared MLS group id.
+        if self.load_group(group_id)?.is_some() {
+            self.delete_group(group_id)?;
+        }
+
+        let group = staged
+            .into_group(&self.provider)
+            .map_err(|e| MlsError::WelcomeProcessing(format!("Failed to join group: {}", e)))?;
+
+        self.save_group(group_id, &group)?;
+
+        debug!(group_id = %group_id, "Joined/adopted group via Welcome (non-destructive)");
+        Ok(group)
+    }
+
     /// Gets information about a group.
     pub fn get_group_info(&self, group: &MlsGroup, group_id: &GroupId) -> GroupInfo {
         let members: Vec<String> = group

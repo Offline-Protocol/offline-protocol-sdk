@@ -137,11 +137,23 @@ internal class InboundFragmentBuffer(
     }
 
     /**
-     * Walk every peer's buffer, evicting entries older than [timeoutMs] and
-     * pruning buffers that become empty. Returns the total number of
-     * fragments evicted for diagnostics. Called by the transport's routing
-     * cleanup ticker so stale inbound bytes do not pin memory forever when
-     * a peer that was mid-handshake goes silent.
+     * Walk every peer's buffer and evict whole buffers that have gone idle
+     * for [timeoutMs] (no fragment received within the window). Returns the
+     * total number of fragments evicted for diagnostics. Called by the
+     * transport's routing cleanup ticker so stale inbound bytes do not pin
+     * memory forever when a peer that was mid-handshake goes silent.
+     *
+     * Eviction is at WHOLE-BUFFER granularity keyed on the NEWEST entry —
+     * not per-fragment. The previous per-fragment sweep tore a still-arriving
+     * multi-fragment message: while device-id resolution was pending (a
+     * reverse connect throttled to once / [timeoutMs]), the sender keeps
+     * streaming fragments, but the sweep dropped fragment 0 the moment it
+     * aged past the window while fragments 1..n were still in flight, handing
+     * the reassembler a permanent hole and dropping the message. Keying on the
+     * newest fragment means a buffer survives as long as bytes are still
+     * arriving, and is dropped wholesale only once the peer truly goes silent —
+     * matching the whole-message invariant [enqueue]'s overflow policy already
+     * documents.
      */
     fun evictExpired(): Int {
         mainThreadCheck()
@@ -151,21 +163,17 @@ internal class InboundFragmentBuffer(
         while (iter.hasNext()) {
             val entry = iter.next()
             val queue = entry.value
-            var expired = 0
-            val qIter = queue.iterator()
-            while (qIter.hasNext()) {
-                val frag = qIter.next()
-                if (now - frag.timestamp >= timeoutMs) {
-                    qIter.remove()
-                    expired++
-                }
+            // Newest entry = last appended (timestamps are append-monotonic).
+            val newestTs = queue.lastOrNull()?.timestamp
+            if (newestTs == null) {
+                iter.remove()
+                continue
             }
-            if (expired > 0) {
-                total.addAndGet(-expired)
-                onDropped(entry.key, DropReason.EXPIRED, expired)
-                totalEvicted += expired
-            }
-            if (queue.isEmpty()) {
+            if (now - newestTs >= timeoutMs) {
+                val dropped = queue.size
+                total.addAndGet(-dropped)
+                onDropped(entry.key, DropReason.EXPIRED, dropped)
+                totalEvicted += dropped
                 iter.remove()
             }
         }

@@ -9,7 +9,9 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -105,6 +107,11 @@ class PeripheralGattServer(
         fun onCentralConnected(device: BluetoothDevice)
         fun onCentralDisconnected(device: BluetoothDevice, status: Int)
         fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray)
+        /** A notification we pushed to [device] (via [notifyFragment]) has been
+         *  flushed by the stack — the next notification to that central may now
+         *  go. Lets the transport release its per-peer send gate on real
+         *  completion instead of relying solely on the watchdog timeout. */
+        fun onNotificationSent(device: BluetoothDevice, status: Int)
         /** Return the current device-ID bytes, or null to fail the read. */
         fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray?
         /** Return the current signed-identity bytes, or null to fail the read. */
@@ -248,6 +255,48 @@ class PeripheralGattServer(
 
     /** Count of centrals currently subscribed via CCCD. Observability only. */
     fun subscribedCentralCount(): Int = subscribedCentralAddresses.size
+
+    /** True if [address] is a central currently subscribed to the message
+     *  characteristic via CCCD — i.e. we can push notifications to it over the
+     *  connection it opened to our GATT server. [subscribedCentralAddresses] is
+     *  a concurrent set so this is safe to read from the main thread. */
+    fun isSubscribed(address: String): Boolean =
+        subscribedCentralAddresses.contains(address)
+
+    /**
+     * Reply to a central by notifying the message characteristic over the
+     * connection IT opened to our GATT server. This is the egress for
+     * asymmetric mesh links where we are only the peripheral for [device] (see
+     * the class note above): the central's reverse link back to us may be
+     * absent or half-open, so a central-role `writeCharacteristic(NO_RESPONSE)`
+     * returns SUCCESS into a dead link and the bytes are silently dropped on air
+     * (no status 201, no error) — the peer never gets the reply and retransmits
+     * forever. Notifying over the live, subscribed connection is reliable.
+     *
+     * Returns true if the stack accepted the notification. No-op (false) if the
+     * server/characteristic is gone or [device] is not subscribed. Notifications
+     * are serialised one-outstanding-per-connection by the stack, just like
+     * NO_RESPONSE writes, so the caller paces them via the shared write gate.
+     */
+    fun notifyFragment(device: BluetoothDevice, bytes: ByteArray): Boolean {
+        val server = gattServer ?: return false
+        val characteristic = messageCharacteristic ?: return false
+        if (!subscribedCentralAddresses.contains(device.address)) return false
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                server.notifyCharacteristicChanged(device, characteristic, false, bytes) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                characteristic.value = bytes
+                @Suppress("DEPRECATION")
+                server.notifyCharacteristicChanged(device, characteristic, false)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "notifyFragment failed for ${device.address}", e)
+            false
+        }
+    }
 
     /** Cancel an in-flight connection to a central. */
     fun cancelConnection(device: BluetoothDevice) {
@@ -566,6 +615,10 @@ class PeripheralGattServer(
                     iterator.remove()
                 }
             }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            listener.onNotificationSent(device, status)
         }
 
         override fun onCharacteristicWriteRequest(

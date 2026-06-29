@@ -99,6 +99,16 @@ internal class CentralGattClient(
         fun learnRouteFromMessage(messageJson: String, neighborId: String, neighborAddress: String?)
         fun drainAndSendFragments()
 
+        /** Release the per-peer write gate after a GATT characteristic write
+         *  to [address] completes (the stack flushed the op and will accept
+         *  the next write). On API 33+ the value-overload of
+         *  writeCharacteristic rejects a concurrent write with
+         *  ERROR_GATT_WRITE_REQUEST_BUSY (201) while one is still outstanding,
+         *  even for WRITE_TYPE_NO_RESPONSE, so the facade serialises one
+         *  outstanding write per peer and uses this signal to drain the next
+         *  fragment. Called on the main thread. */
+        fun onWriteCompleted(address: String)
+
         /** Hand a received fragment to the facade (either via client
          *  notify or via central-side write). Called on the main thread. */
         fun handleInboundFragment(address: String, data: ByteArray)
@@ -594,12 +604,13 @@ internal class CentralGattClient(
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (host.isShuttingDown()) return
             if (characteristic.uuid != messageCharUuid) return
-            if (status != BluetoothGatt.GATT_SUCCESS) return
+            // Release the per-peer write gate and drive the next fragment. Done
+            // even on a non-success status so a failed write cannot leave the
+            // gate stuck and wedge the peer; the facade re-drives from the queue.
+            val address = gatt.device.address
             mainHandler.post {
                 if (host.isShuttingDown()) return@post
-                if (host.isRunning()) {
-                    host.drainAndSendFragments()
-                }
+                host.onWriteCompleted(address)
             }
         }
 

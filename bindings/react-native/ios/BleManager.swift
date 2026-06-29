@@ -1480,8 +1480,12 @@ public class BleManager: NSObject, TransportManager {
                 if self.pendingFragments[centralId] == nil {
                     self.pendingFragments[centralId] = []
                 }
+                // Whole-buffer overflow drop (matches Android InboundFragmentBuffer):
+                // fragments are slices of one message, so dropping just the oldest
+                // leaves orphan slices that the reassembler stitches into garbage.
+                // Drop the whole peer buffer at message-boundary granularity instead.
                 if (self.pendingFragments[centralId]?.count ?? 0) >= self.MAX_PENDING_FRAGMENTS_PER_PEER {
-                    self.pendingFragments[centralId]?.removeFirst()
+                    self.pendingFragments[centralId]?.removeAll()
                 }
                 self.pendingFragments[centralId]?.append((data, Date()))
                 
@@ -1510,8 +1514,12 @@ public class BleManager: NSObject, TransportManager {
             // processPendingFragments() will handle them all in FIFO order.
             if let centralId = centralId,
                self.pendingFragments[centralId]?.isEmpty == false {
+                // Whole-buffer overflow drop (matches Android InboundFragmentBuffer):
+                // fragments are slices of one message, so dropping just the oldest
+                // leaves orphan slices that the reassembler stitches into garbage.
+                // Drop the whole peer buffer at message-boundary granularity instead.
                 if (self.pendingFragments[centralId]?.count ?? 0) >= self.MAX_PENDING_FRAGMENTS_PER_PEER {
-                    self.pendingFragments[centralId]?.removeFirst()
+                    self.pendingFragments[centralId]?.removeAll()
                 }
                 self.pendingFragments[centralId, default: []].append((data, Date()))
                 return
@@ -1642,12 +1650,25 @@ public class BleManager: NSObject, TransportManager {
     
     private func cleanupPendingFragments() {
         let now = Date()
-        for (centralId, fragments) in pendingFragments {
-            let validFragments = fragments.filter { now.timeIntervalSince($0.1) < PENDING_FRAGMENT_TIMEOUT }
-            if validFragments.isEmpty {
+        // Idle-window eviction at WHOLE-BUFFER granularity. A buffer is stale
+        // only if NOTHING has arrived for it within PENDING_FRAGMENT_TIMEOUT —
+        // i.e. its newest fragment is older than the window. The previous
+        // per-fragment filter tore a still-arriving multi-fragment message:
+        // while device-id resolution was pending the sender keeps streaming
+        // fragments, but the filter dropped fragment 0 once it aged past the
+        // window while later fragments were still in flight, handing the
+        // reassembler a permanent hole. Key on the newest fragment so a buffer
+        // survives as long as bytes keep arriving, and drop it wholesale only
+        // once the peer goes silent (matching the whole-buffer overflow policy).
+        // Snapshot the keys so we never mutate the dictionary mid-iteration.
+        for centralId in Array(pendingFragments.keys) {
+            guard let fragments = pendingFragments[centralId] else { continue }
+            guard let newest = fragments.map({ $0.1 }).max() else {
                 pendingFragments.removeValue(forKey: centralId)
-            } else {
-                pendingFragments[centralId] = validFragments
+                continue
+            }
+            if now.timeIntervalSince(newest) >= PENDING_FRAGMENT_TIMEOUT {
+                pendingFragments.removeValue(forKey: centralId)
             }
         }
     }
@@ -2643,6 +2664,16 @@ extension BleManager: CBPeripheralDelegate {
                         processPendingFragments(for: centralId, deviceId: deviceId)
                     }
                 }
+
+                // The recipient -> peripheral mapping and MESSAGE characteristic
+                // now exist, so flush any OUTBOUND fragments parked while this
+                // connection was still forming. drainAndSendFragments previously
+                // ran only on connect / onFragmentsAvailable, so the FIRST message
+                // a user sent into a still-connecting peer (already popped out of
+                // the Rust queue and parked in pendingOutboundFragments) had
+                // nothing to re-trigger it and stalled until a later fragment
+                // event or the 30s expiry — the iOS->Android first-message stall.
+                self.drainAndSendFragments()
             }
         } else if characteristic.uuid == MESSAGE_CHAR_UUID {
             // Handle received message fragment

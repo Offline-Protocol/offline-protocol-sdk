@@ -4,7 +4,7 @@ use super::{
     internal_prefixes, lock_shared_state, OfflineProtocol, SessionState, WelcomeDeliveryState,
     WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS,
     RECONCILIATION_THROTTLE_MS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
-    WELCOME_RETRY_BATCH_SIZE, WELCOME_RETRY_JITTER_RATIO,
+    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_RETRY_BATCH_SIZE, WELCOME_RETRY_JITTER_RATIO,
 };
 use crate::mls_observability::MlsOperationContext;
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
@@ -138,6 +138,7 @@ impl OfflineProtocol {
         if matches!(previous, SessionState::Confirmed) {
             self.confirmed_sessions.insert(peer_id.to_string());
             self.clear_confirmation_recovery_tracking(peer_id);
+            self.both_create_awaiting_decrypt.remove(peer_id);
             info!(
                 event = "session_state_transition",
                 session_or_group_id = %peer_id,
@@ -158,6 +159,15 @@ impl OfflineProtocol {
 
         self.confirmed_sessions.insert(peer_id.to_string());
         self.clear_confirmation_recovery_tracking(peer_id);
+        // Group-aware proof has arrived (decrypt), so we no longer need to gate
+        // confirmation on decrypt for this both-create peer.
+        self.both_create_awaiting_decrypt.remove(peer_id);
+        // The peer has proved the session, so the outbound Welcome — kept
+        // non-terminal so a lost fragment keeps being retried — is delivered.
+        // Mark it Sent so process_welcome_retry_queue stops re-sending it. Mesh
+        // has no transport-level delivery ack, so this session proof is the mesh
+        // equivalent of on_transport_send_confirmed.
+        self.mark_welcome_confirmed(peer_id, source_event);
         if source_event != "welcome_received" && source_event != "decrypt_success" {
             self.maybe_emit_local_session_established(
                 peer_id,
@@ -173,6 +183,43 @@ impl OfflineProtocol {
             "session_state_transition"
         );
         Ok(true)
+    }
+
+    /// Marks a non-terminal outbound welcome lifecycle as `Sent` once the peer
+    /// has proved the session (probe / ack / welcome / decrypt). The mesh
+    /// equivalent of [`Self::on_transport_send_confirmed`], which only fires for
+    /// Internet. No-op when there is no welcome lifecycle for `peer_id` (e.g. a
+    /// confirmation keyed by a group id rather than a 1:1 peer) or it is already
+    /// terminal, so it is safe to call from every confirmation path.
+    fn mark_welcome_confirmed(&mut self, peer_id: &str, source_event: &str) {
+        if !matches!(
+            self.welcome_lifecycles.get(peer_id).map(|r| r.state),
+            Some(WelcomeDeliveryState::SendAttempted) | Some(WelcomeDeliveryState::Failed)
+        ) {
+            return;
+        }
+        if let Some(record) = self.welcome_lifecycles.get_mut(peer_id) {
+            record.next_retry_at = None;
+            record.last_reason_code = None;
+            record.last_transport_error = None;
+        }
+        // transition_welcome_state persists the record and logs the transition.
+        if self
+            .transition_welcome_state(peer_id, WelcomeDeliveryState::Sent, source_event)
+            .is_err()
+        {
+            return;
+        }
+        if let Some(snapshot) = self.welcome_lifecycles.get(peer_id).cloned() {
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::welcome_send_succeeded(
+                    peer_id.to_string(),
+                    snapshot.welcome_message.id.as_str().to_string(),
+                    snapshot.group_id,
+                    snapshot.attempt,
+                ));
+            }
+        }
     }
 
     /// Ensures a session has an explicit persisted state entry.
@@ -456,6 +503,15 @@ impl OfflineProtocol {
     }
 
     pub(super) fn can_confirm_from_source(&self, peer_id: &str, source_event: &str) -> bool {
+        // Both-create owner: we kept our own group and are waiting for the peer to
+        // prove it adopted *our* group. Only a successful decrypt is group-aware
+        // proof of that; a plaintext probe/ack proves only that the peer holds
+        // some session (possibly its own, pre-adoption group), so it must not
+        // confirm us or we would stop retransmitting and strand the peer.
+        if self.both_create_awaiting_decrypt.contains(peer_id) && source_event != "decrypt_success" {
+            return false;
+        }
+
         if !matches!(
             source_event,
             "decrypt_success"
@@ -597,36 +653,34 @@ impl OfflineProtocol {
                             Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
                         })?;
 
-                if matches!(transport_used, Some(TransportType::Internet)) {
-                    // Internet send() only enqueues for platform polling. Keep lifecycle
-                    // non-terminal until explicit platform confirmation arrives.
-                    updated.next_retry_at = Some(
-                        Utc::now() + ChronoDuration::seconds(WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS),
-                    );
-                    updated.last_reason_code = None;
-                    updated.last_transport_error = None;
-                    self.welcome_lifecycles
-                        .insert(peer_id.to_string(), updated.clone());
-                    self.persist_welcome_lifecycle_entry(&updated)?;
-                    return Ok(false);
-                }
-
-                updated.next_retry_at = None;
+                // No transport's send() proves the peer reassembled and joined
+                // the group, so keep the lifecycle NON-TERMINAL until an explicit
+                // confirmation arrives and let the retry queue re-send on timeout.
+                //
+                //   - Internet send() only enqueues for platform polling; the
+                //     confirmation is on_transport_send_confirmed.
+                //   - A BLE / WiFi-Direct GATT WRITE_TYPE_NO_RESPONSE returning Ok
+                //     only means the local stack accepted the bytes. A single lost
+                //     fragment of the multi-fragment Welcome would otherwise leave
+                //     the sender believing the session exists while the peer holds
+                //     undecryptable ciphertext, with NO retry — permanently
+                //     bricking the pair. The mesh confirmation is the peer proving
+                //     the session (its probe / ack / welcome / decrypt), which marks
+                //     the welcome Sent via confirm_session_state.
+                let confirm_timeout_secs =
+                    if matches!(transport_used, Some(TransportType::Internet)) {
+                        WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS
+                    } else {
+                        WELCOME_MESH_CONFIRM_TIMEOUT_SECS
+                    };
+                updated.next_retry_at =
+                    Some(Utc::now() + ChronoDuration::seconds(confirm_timeout_secs));
                 updated.last_reason_code = None;
                 updated.last_transport_error = None;
                 self.welcome_lifecycles
                     .insert(peer_id.to_string(), updated.clone());
                 self.persist_welcome_lifecycle_entry(&updated)?;
-                self.transition_welcome_state(peer_id, WelcomeDeliveryState::Sent, source_event)?;
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::welcome_send_succeeded(
-                        peer_id.to_string(),
-                        updated.welcome_message.id.as_str().to_string(),
-                        updated.group_id,
-                        updated.attempt,
-                    ));
-                }
-                Ok(true)
+                Ok(false)
             }
             Err(err) => {
                 let reason = Self::map_welcome_reason_code(&err);
@@ -927,6 +981,13 @@ impl OfflineProtocol {
             .welcome_lifecycles
             .iter()
             .filter_map(|(peer_id, record)| {
+                // Skip peers whose session is already confirmed: the welcome is
+                // delivered, mark_welcome_confirmed should have marked it Sent,
+                // and re-sending would be wasted bandwidth (defensive against any
+                // keying mismatch that left the lifecycle non-terminal).
+                if self.confirmed_sessions.contains(peer_id) {
+                    return None;
+                }
                 if matches!(record.state, WelcomeDeliveryState::SendAttempted)
                     && record.next_retry_at.is_some_and(|retry_at| retry_at <= now)
                 {
@@ -950,6 +1011,9 @@ impl OfflineProtocol {
             .welcome_lifecycles
             .iter()
             .filter_map(|(peer_id, record)| {
+                if self.confirmed_sessions.contains(peer_id) {
+                    return None;
+                }
                 if matches!(record.state, WelcomeDeliveryState::Failed)
                     && record.next_retry_at.is_some_and(|retry_at| retry_at <= now)
                 {

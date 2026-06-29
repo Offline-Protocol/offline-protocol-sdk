@@ -25,6 +25,15 @@ pub(crate) const WELCOME_LIFECYCLE_TTL_SECS: i64 = 300;
 pub(crate) const WELCOME_RETRY_JITTER_RATIO: f64 = 0.2;
 /// Timeout waiting for explicit internet send confirmation for welcome.
 pub(crate) const WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS: i64 = 10;
+/// Timeout waiting for a mesh (BLE / WiFi-Direct) welcome to be confirmed by
+/// the peer proving the session (probe / ack / welcome / decrypt). A mesh
+/// `send()` returning Ok only means the local stack accepted the bytes, not
+/// that the multi-fragment Welcome reassembled on the peer — so the lifecycle
+/// stays non-terminal and the retry queue re-sends the whole Welcome after this
+/// window, recovering from a lost fragment. Slightly longer than the internet
+/// timeout to allow a slow multi-fragment Welcome to assemble plus the probe
+/// round-trip before paying to re-fragment and re-send it.
+pub(crate) const WELCOME_MESH_CONFIRM_TIMEOUT_SECS: i64 = 15;
 /// Minimum interval between session reconciliation scans (list_sessions I/O).
 /// Keeps the expensive Keychain/Keystore I/O out of the hot path so that
 /// sendMessage() is not blocked by Mutex contention on every process tick.

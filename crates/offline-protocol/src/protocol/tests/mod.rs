@@ -3499,6 +3499,19 @@ fn test_welcome_partial_success_after_retry_reaches_sent() {
     thread::sleep(Duration::from_millis(10));
     protocol.process().unwrap();
 
+    // A mesh welcome is now NON-TERMINAL until the peer proves the session: a
+    // successful (retried) transport send leaves the lifecycle SendAttempted
+    // with a confirm timeout, so a lost fragment keeps being re-sent instead of
+    // being falsely marked delivered.
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::SendAttempted);
+    assert!(lifecycle.next_retry_at.is_some());
+
+    // The peer's session proof (here an ack) confirms the session and marks the
+    // welcome Sent, ending the retries.
+    protocol
+        .confirm_session_state("bob", "confirmation_ack_received")
+        .unwrap();
     assert_eq!(
         protocol.welcome_lifecycles.get("bob").unwrap().state,
         WelcomeDeliveryState::Sent
@@ -3734,6 +3747,15 @@ fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
             None::<MessagePriority>,
             None::<String>,
         )
+        .unwrap();
+    // A mesh welcome is non-terminal until the peer proves the session; the
+    // peer's confirmation drives it to the terminal Sent state under test here.
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::SendAttempted
+    );
+    protocol
+        .confirm_session_state("bob", "confirmation_ack_received")
         .unwrap();
     assert_eq!(
         protocol.welcome_lifecycles.get("bob").unwrap().state,

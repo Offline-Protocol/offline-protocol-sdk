@@ -133,6 +133,20 @@ class BleTransportFacade(
          */
         private const val MAX_DRAIN_ITERATIONS_PER_CALL = 32
         private const val BACKPRESSURE_RETRY_MS = 50L
+        /** Max time the per-peer write gate ([writeInFlight]) stays closed
+         *  before the next send is allowed regardless of completion callback.
+         *
+         *  The fast path is onCharacteristicWrite releasing the gate the
+         *  instant the stack accepts the next write. But for
+         *  WRITE_TYPE_NO_RESPONSE that callback is stack-dependent and on many
+         *  devices never fires — observed on-device as the gate clearing only
+         *  via this timeout. So this is NOT a rare-glitch watchdog; it is the
+         *  steady-state inter-write pace whenever the callback is absent. Keep
+         *  it small so a missing callback doesn't throttle throughput, but
+         *  above the few ms a write actually occupies the stack so the next
+         *  write doesn't out-run it into ERROR_GATT_WRITE_REQUEST_BUSY (201).
+         *  An occasional 201 here still self-heals via the backpressure retry. */
+        private const val WRITE_GATE_WATCHDOG_MS = 30L
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
@@ -278,6 +292,8 @@ class BleTransportFacade(
                 ) = this@BleTransportFacade.learnRouteFromMessage(messageJson, neighborId, neighborAddress)
                 override fun drainAndSendFragments() =
                     this@BleTransportFacade.drainAndSendFragments()
+                override fun onWriteCompleted(address: String) =
+                    this@BleTransportFacade.onWriteCompleted(address)
                 override fun handleInboundFragment(address: String, data: ByteArray) =
                     this@BleTransportFacade.handleReceivedData(data, address)
                 override fun connectToDevice(device: BluetoothDevice) =
@@ -683,7 +699,19 @@ class BleTransportFacade(
     private var bytesReceived: Long = 0
     private var fragmentsSent: Long = 0
     private var fragmentsReceived: Long = 0
-    
+
+    // Per-peer BLE write gate. Android 13+ (API 33) rejects a second
+    // writeCharacteristic on the same connection with
+    // ERROR_GATT_WRITE_REQUEST_BUSY (201) while one write is still
+    // outstanding — even for WRITE_TYPE_NO_RESPONSE — so the drain loop's
+    // back-to-back writes used to self-collide and silently drop a
+    // multi-fragment message. We allow at most one outstanding write per BLE
+    // address and release it from [onWriteCompleted] (the onCharacteristicWrite
+    // callback). The value is the elapsedRealtime() the write was issued, used
+    // as a watchdog so a lost completion callback cannot wedge a peer forever.
+    // Main-thread only (every accessor runs under assertMainThread).
+    private val writeInFlight = HashMap<String, Long>()
+
     // MARK: - TransportManager Implementation
     
     private fun emitDiagnostic(level: String, message: String, context: Map<String, Any?> = emptyMap()) {
@@ -2193,6 +2221,22 @@ class BleTransportFacade(
                 // Maintain FIFO ordering: if this recipient already has
                 // fragments waiting, enqueue instead of sending directly.
                 if (outboundQueue.enqueueIfBlocked(recipientId, data)) {
+                    // Backpressure against the write gate: once this peer's
+                    // queue is backed up, stop pulling more fragments out of
+                    // the Rust core (bleGetNextFragment is a destructive pop)
+                    // into the bounded per-peer queue. The write gate paces
+                    // sends to ~1 fragment / WRITE_GATE_WATCHDOG_MS when the
+                    // completion callback is absent, which is far slower than
+                    // this loop can pull; without this stop the loop spins the
+                    // whole backlog into the queue, overflows maxPerPeer, and
+                    // OutboundFragmentQueue.enqueue discards the in-flight
+                    // message. Leaving the backlog in Rust keeps delivery
+                    // lossless — the scheduled re-drain below resumes once
+                    // flush() has drained the queue back down.
+                    if (outboundQueue.isBackedUp(recipientId)) {
+                        hitBackpressure = true
+                        break
+                    }
                     continue
                 }
 
@@ -2214,6 +2258,24 @@ class BleTransportFacade(
             mainHandler.post { drainAndSendFragments() }
         } else if (hitBackpressure && outboundQueue.totalCount() > 0) {
             mainHandler.postDelayed({ drainAndSendFragments() }, BACKPRESSURE_RETRY_MS)
+        }
+    }
+
+    /**
+     * Fast-path release of the per-peer BLE write gate when the stack actually
+     * fires onCharacteristicWrite for the outstanding write, draining the next
+     * fragment immediately. This callback is unreliable for
+     * WRITE_TYPE_NO_RESPONSE (often never fires), so it is only the fast path —
+     * the gate is also released by the self-paced fallback scheduled in
+     * sendFragmentData. Without the gate the drain loop issues writeCharacteristic
+     * calls back-to-back and Android 13+ rejects the concurrent ones with
+     * ERROR_GATT_WRITE_REQUEST_BUSY (201), silently dropping fragments.
+     */
+    fun onWriteCompleted(address: String) {
+        assertMainThread("onWriteCompleted")
+        writeInFlight.remove(address)
+        if (state == TransportState.RUNNING) {
+            drainAndSendFragments()
         }
     }
 
@@ -2298,6 +2360,74 @@ class BleTransportFacade(
         return null
     }
 
+    /**
+     * Reply to a peer that connected to OUR GATT server (we are its peripheral)
+     * by notifying the message characteristic over the connection it opened and
+     * subscribed to — the reliable egress for asymmetric mesh links, used in
+     * preference to a reverse central writeCharacteristic that may vanish on a
+     * half-open link. Shares the per-peer [writeInFlight] gate + self-paced
+     * watchdog with the central write path so notifications stay serialised (one
+     * outstanding per peer) and multi-fragment replies self-pace identically.
+     * Main-thread only.
+     */
+    private fun sendViaNotify(recipientId: String, address: String, data: ByteArray): Boolean {
+        assertMainThread("sendViaNotify")
+        val server = peripheralGattServer ?: return false
+
+        // Serialise to one outstanding notify per peer (same gate as the central
+        // write path) so we don't out-run the stack's one-op-at-a-time limit.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val inFlightSince = writeInFlight[address]
+            if (inFlightSince != null) {
+                if (android.os.SystemClock.elapsedRealtime() - inFlightSince < WRITE_GATE_WATCHDOG_MS) {
+                    if (logThrottler.shouldLog("notify_gated_$recipientId", intervalMs = 5000)) {
+                        Log.d(TAG, "Deferring notify to $recipientId: prior notify still in flight")
+                    }
+                    return false
+                }
+                writeInFlight.remove(address)
+            }
+        }
+
+        val device = try {
+            bluetoothAdapter?.getRemoteDevice(address)
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Cannot resolve device for notify to $recipientId ($address)", e)
+            null
+        } ?: return false
+
+        if (!server.notifyFragment(device, data)) {
+            if (logThrottler.shouldLog("notify_failed_$recipientId", intervalMs = 2000)) {
+                Log.w(TAG, "Failed to notify BLE fragment for $recipientId")
+                emitDiagnostic("warning", "Failed to notify BLE fragment", mapOf("recipientId" to recipientId))
+            }
+            return false
+        }
+
+        bytesSent += data.size
+        fragmentsSent++
+        meshController.markPeerActive(recipientId)
+        meshController.markPeerActive(deviceId)
+
+        // Hold + self-pace the gate exactly like the central write path. The
+        // peripheral onNotificationSent callback is not wired through, so the
+        // 30ms watchdog re-drives the next fragment, making multi-fragment
+        // replies complete without depending on a completion callback.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val stamp = android.os.SystemClock.elapsedRealtime()
+            writeInFlight[address] = stamp
+            mainHandler.postDelayed({
+                if (writeInFlight[address] == stamp) {
+                    writeInFlight.remove(address)
+                    if (state == TransportState.RUNNING) {
+                        drainAndSendFragments()
+                    }
+                }
+            }, WRITE_GATE_WATCHDOG_MS)
+        }
+        return true
+    }
+
     private fun sendFragmentData(recipientId: String, data: ByteArray): Boolean {
         // Every call site (drainAndSendFragments, pollAndSendFragments, the
         // OutboundFragmentQueue.flush callback) runs on main already, but
@@ -2312,7 +2442,23 @@ class BleTransportFacade(
         // Find GATT client for recipient
         val address = resolveTargetAddress(recipientId)
         val gatt = address?.let { connections.getGatt(it) }
-        
+
+        // Asymmetric-link reply: if this peer reached US as a central on our GATT
+        // server and subscribed to the message characteristic, reply over THAT
+        // connection (the one it opened and is actively waiting on) via a
+        // peripheral notify, instead of a reverse central writeCharacteristic.
+        // A central NO_RESPONSE write returns SUCCESS into a reverse link that may
+        // be absent or half-open, and the bytes are silently dropped on air (no
+        // status 201, no error) — so the central path "succeeds" forever while the
+        // peer, never getting our reply, retransmits and eventually gives up. This
+        // is the dominant offline failure for a peer that connected to us.
+        if (address != null && peripheralGattServer?.isSubscribed(address) == true) {
+            if (logThrottler.shouldLog("reply_via_notify_$recipientId", intervalMs = 5000)) {
+                Log.i(TAG, "Replying to $recipientId via peripheral notify (asymmetric link)")
+            }
+            return sendViaNotify(recipientId, address, data)
+        }
+
         // Until the remote has ack'd our CCCD write, the return path is not
         // verified and the BLE stack may still be executing the setup ops
         // (deviceId read → identity read → writeDescriptor). Issuing a write
@@ -2352,7 +2498,28 @@ class BleTransportFacade(
             }
             return false
         }
-        
+
+        // Serialise to a single outstanding write per peer (see [writeInFlight]).
+        // On API 33+ a concurrent writeCharacteristic returns
+        // ERROR_GATT_WRITE_REQUEST_BUSY (201) and the fragment is lost, so
+        // defer (return false → drainAndSendFragments re-enqueues) until the
+        // prior write's onCharacteristicWrite releases the gate. A gate older
+        // than the watchdog is cleared so a lost callback cannot wedge us.
+        // `address` is non-null here: `gatt` is `address?.let { ... }` and we
+        // returned above when `gatt == null`, so Kotlin smart-casts it.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val inFlightSince = writeInFlight[address]
+            if (inFlightSince != null) {
+                if (android.os.SystemClock.elapsedRealtime() - inFlightSince < WRITE_GATE_WATCHDOG_MS) {
+                    if (logThrottler.shouldLog("write_gated_$recipientId", intervalMs = 5000)) {
+                        Log.d(TAG, "Deferring write to $recipientId: prior write still in flight")
+                    }
+                    return false
+                }
+                writeInFlight.remove(address)
+            }
+        }
+
         //  Validate connection state before attempting to send
         if (gatt.device.bondState == BluetoothDevice.BOND_NONE) {
             // Device is not bonded - this might be okay for BLE, but log it
@@ -2430,6 +2597,35 @@ class BleTransportFacade(
         fragmentsSent++
         meshController.markPeerActive(recipientId)
         meshController.markPeerActive(deviceId)
+
+        // Hold the per-peer write gate. onCharacteristicWrite releases it when
+        // it fires — but for WRITE_TYPE_NO_RESPONSE that completion callback is
+        // stack-dependent and on many devices never fires at all. Without a
+        // fallback that strands every fragment after the first: the gate set
+        // here would only ever clear on the next *attempted* send, and nothing
+        // reliably re-attempts, so a multi-fragment message delivers fragment 1
+        // and then stalls. So self-pace — schedule a re-drain after the
+        // watchdog window that releases the gate and pumps the next fragment,
+        // making delivery independent of the callback. Gated on API 33+ to
+        // match the serialise check above; older stacks queue writes fine.
+        // `address` is non-null here: `gatt` is `address?.let { ... }` and we
+        // returned above when `gatt == null`, so Kotlin smart-casts it.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val stamp = android.os.SystemClock.elapsedRealtime()
+            writeInFlight[address] = stamp
+            mainHandler.postDelayed({
+                // Only act if THIS write is still the outstanding one.
+                // onCharacteristicWrite or a newer write may have already moved
+                // the gate on; clearing it then would let the next write race an
+                // in-flight one into status 201.
+                if (writeInFlight[address] == stamp) {
+                    writeInFlight.remove(address)
+                    if (state == TransportState.RUNNING) {
+                        drainAndSendFragments()
+                    }
+                }
+            }, WRITE_GATE_WATCHDOG_MS)
+        }
         return true
     }
     
@@ -2863,6 +3059,24 @@ class BleTransportFacade(
             mainHandler.post {
                 if (shuttingDown) return@post
                 handleReceivedData(bytes, address)
+            }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            if (shuttingDown) return
+            // Our peripheral notify to this central completed — release the
+            // per-peer write gate and pump the next fragment, exactly like
+            // onCharacteristicWrite does for the central write path. Makes
+            // multi-fragment notify replies event-paced (fast) instead of
+            // waiting on the 30ms watchdog for every fragment.
+            val address = device.address
+            // Diagnostic: proves the stack actually transmitted the notification
+            // (status 0 = GATT_SUCCESS). If "Replying via notify" appears but this
+            // never does, the notify is stuck in the stack queue / not going OTA.
+            Log.i(TAG, "Notification flushed to $address status=$status")
+            mainHandler.post {
+                if (shuttingDown) return@post
+                onWriteCompleted(address)
             }
         }
 

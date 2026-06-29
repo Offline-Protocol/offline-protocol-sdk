@@ -120,6 +120,17 @@ pub struct OfflineProtocol {
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
+    /// Peers for which we are the both-create "owner" (kept our own session
+    /// group on the lexicographic tiebreak) and are still awaiting a
+    /// *group-aware* proof that the peer adopted our group. While a peer is in
+    /// this set, only `decrypt_success` may confirm the session — a plaintext
+    /// confirmation probe/ack is NOT group-aware (it only proves the peer holds
+    /// *some* session, possibly its own pre-adoption group) and must not be
+    /// allowed to stop our Welcome retransmission, or the peer could be left
+    /// stranded on a divergent group. In-memory only: rebuilt on the next
+    /// received Welcome after a restart.
+    both_create_awaiting_decrypt: std::collections::HashSet<String>,
+
     /// Sink for MLS lifecycle telemetry.
     mls_event_emitter: Arc<dyn MlsEventEmitter>,
 
@@ -286,6 +297,7 @@ impl OfflineProtocol {
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
+            both_create_awaiting_decrypt: std::collections::HashSet::new(),
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),
             mls_event_rate_limiter: MlsEventRateLimiter::default(),
             // The pre-install scrubber uses `TelemetryConfig::default()` —

@@ -63,8 +63,16 @@ struct FragmentAssembly {
     total_fragments: u16,
     /// Received fragments (index -> data)
     fragments: HashMap<u16, Vec<u8>>,
-    /// First fragment received time
+    /// First fragment received time. Anchors the assembly-latency metric and
+    /// the eviction-priority age penalty — NOT the idle timeout.
     started_at: SystemTime,
+    /// Time the most recent fragment was inserted. The idle timeout in
+    /// [`Self::cleanup_fragment_buffers`] is measured from this, not
+    /// [`started_at`], so a large/slow multi-fragment message that is still
+    /// arriving is not evicted mid-flight just because its first fragment is
+    /// old (e.g. a backgrounded receiver, a 100-200ms connection interval, or
+    /// an iOS->Android sender with no per-write pacing).
+    last_seen: SystemTime,
 }
 
 impl FragmentAssembly {
@@ -490,8 +498,11 @@ impl BleTransport {
         let mut expired = Vec::new();
 
         for (message_id, assembly) in buffers.iter() {
+            // Idle timeout: evict only buffers with no fragment received within
+            // the window (measured from last_seen, not started_at), so a slow
+            // but still-arriving message is never torn mid-assembly.
             if now
-                .duration_since(assembly.started_at)
+                .duration_since(assembly.last_seen)
                 .unwrap_or_else(|_| StdDuration::from_secs(0))
                 > StdDuration::from_secs(BLE_FRAGMENT_TIMEOUT_SECS)
             {
@@ -769,6 +780,7 @@ impl BleTransport {
                     total_fragments: fragment.total_fragments,
                     fragments: HashMap::new(),
                     started_at: now,
+                    last_seen: now,
                 });
 
             // Validate fragment
@@ -782,6 +794,10 @@ impl BleTransport {
             assembly
                 .fragments
                 .insert(fragment.fragment_index, fragment.data);
+            // Idle-timeout anchor: refresh on every fragment so an actively
+            // arriving multi-fragment message keeps its buffer alive past the
+            // BLE_FRAGMENT_TIMEOUT_SECS window measured from the first fragment.
+            assembly.last_seen = now;
 
             // Check if complete
             if assembly.fragments.len() == assembly.total_fragments as usize {
@@ -1243,6 +1259,7 @@ mod tests {
                 total_fragments: 2,
                 fragments: HashMap::new(),
                 started_at: SystemTime::now(),
+                last_seen: SystemTime::now(),
             },
         );
 

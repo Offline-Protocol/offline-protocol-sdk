@@ -193,6 +193,9 @@ impl OfflineProtocol {
 
             // Track if we need to flush pending messages and process pending decryption
             let mut should_flush = false;
+            // Owner side of a both-create race kept its own group; it must await a
+            // group-aware decrypt before confirming (see below).
+            let mut owner_keep = false;
             let sender_owned = sender.to_string();
             let group_id = welcome.group_id.as_str().to_string();
             let is_session = group_id.starts_with("session:");
@@ -222,17 +225,36 @@ impl OfflineProtocol {
                                     should_flush = true;
                                 }
                                 Err(e) => {
-                                    warn!(error = %e, sender = %sender, "Failed to replace session");
-                                    error_reason = Some(e.to_string());
+                                    // Non-destructive adopt: if our session survived, the
+                                    // staging failure is a retransmitted Welcome we already
+                                    // adopted (the one-time key package is consumed). It is a
+                                    // harmless duplicate — drop it instead of erroring/bricking.
+                                    if manager.has_session(sender).unwrap_or(false) {
+                                        debug!(
+                                            error = %e,
+                                            sender = %sender,
+                                            "Duplicate Welcome after adopt; already converged, ignoring"
+                                        );
+                                    } else {
+                                        warn!(error = %e, sender = %sender, "Failed to replace session");
+                                        error_reason = Some(e.to_string());
+                                    }
                                 }
                             }
                         } else {
                             info!(
                                 sender = %sender,
                                 local_id = %local_id,
-                                "Welcome-wins tiebreaker: keeping local session (local < remote)"
+                                "Welcome-wins tiebreaker: keeping local session (local < remote); \
+                                 awaiting group-aware decrypt before confirming our Welcome"
                             );
-                            should_flush = true;
+                            // Owner side of a both-create race: keep our own group, but do NOT
+                            // confirm our outbound Welcome merely because we received the peer's.
+                            // Receiving their Welcome is no proof they received ours, so confirming
+                            // here would mark our Welcome Sent and stop retransmission — the
+                            // convergence bug. Keep retransmitting until a decrypt proves they
+                            // adopted our group.
+                            owner_keep = true;
                         }
                     } else {
                         match manager.join_session(&welcome) {
@@ -247,6 +269,13 @@ impl OfflineProtocol {
                         }
                     }
                 }
+            }
+
+            // Owner side of a both-create race: record that this peer must prove
+            // it adopted our group via a group-aware decrypt before we confirm
+            // (and stop retransmitting). A plaintext probe/ack is not sufficient.
+            if owner_keep {
+                self.both_create_awaiting_decrypt.insert(sender_owned.clone());
             }
 
             // Confirm session and process queued items after releasing the MLS lock
