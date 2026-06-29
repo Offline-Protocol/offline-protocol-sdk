@@ -13,6 +13,11 @@ android {
         targetSdkVersion 34
         versionCode 1
         versionName "1.0"
+
+        // Ship FFI keep rules to consumers so R8/ProGuard in their release
+        // builds does not obfuscate the JNA/uniffi bindings and kill the
+        // mesh transport. See consumer-rules.pro for the rationale.
+        consumerProguardFiles 'consumer-rules.pro'
         
         ndk {
             abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
