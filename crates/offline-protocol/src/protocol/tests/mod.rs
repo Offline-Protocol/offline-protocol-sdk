@@ -3723,6 +3723,91 @@ fn test_mesh_welcome_sender_probes_for_confirmation() {
 }
 
 #[test]
+fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
+    // Regression (Bug B): a simple adopter with a lexicographically SMALLER
+    // user_id that already joined the owner's group must, on a Welcome
+    // RETRANSMIT, re-send its encrypted confirm so a lost first confirm
+    // self-heals — and must NOT misclassify the retransmit as a both-create race
+    // (owner_keep). The buggy path entered owner_keep (because has_existing is
+    // true and local < remote), which poisoned both_create_awaiting_decrypt and
+    // suppressed the confirm, stranding the owner in Pending forever.
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_transport_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    // Owner "zoe" (lexicographically greater than "bob") creates the group and
+    // the Welcome. bob never creates its own group — it only joins zoe's, so bob
+    // has no outbound welcome lifecycle for zoe.
+    let zoe_manager = MlsManager::new("zoe", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    zoe_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = zoe_manager.create_session("bob").unwrap();
+    let welcome_content = format!(
+        "{}{}",
+        internal_prefixes::WELCOME,
+        serde_json::to_string(&welcome).unwrap()
+    );
+    let make_welcome_msg = || {
+        Message::new(
+            UserId::new("zoe").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &welcome_content,
+        )
+    };
+
+    // First Welcome: bob joins and proactively confirms its own side.
+    bob.process_internal_message(&make_welcome_msg());
+    assert!(
+        bob.confirmed_sessions.contains("zoe"),
+        "adopter should confirm its session on first Welcome receipt"
+    );
+
+    let encrypted_before = bob_transport_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .count();
+
+    // Welcome RETRANSMIT — the owner is still re-sending because it has not yet
+    // observed our confirm.
+    bob.process_internal_message(&make_welcome_msg());
+
+    // Must NOT be misclassified as a both-create owner.
+    assert!(
+        !bob.both_create_awaiting_decrypt.contains("zoe"),
+        "adopter retransmit must not enter owner_keep / poison both_create_awaiting_decrypt"
+    );
+
+    // Must re-send an encrypted confirm so a lost first confirm self-heals.
+    let encrypted_after = bob_transport_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .count();
+    assert!(
+        encrypted_after > encrypted_before,
+        "adopter should re-send an encrypted confirm on Welcome retransmit"
+    );
+}
+
+#[test]
 fn test_welcome_terminal_lifecycle_can_be_overwritten() {
     let mut config = create_test_config();
     config.encryption.enabled = true;

@@ -248,20 +248,37 @@ impl OfflineProtocol {
                                     }
                                 }
                             }
-                        } else {
+                        } else if self.welcome_lifecycles.contains_key(sender) {
                             info!(
                                 sender = %sender,
                                 local_id = %local_id,
                                 "Welcome-wins tiebreaker: keeping local session (local < remote); \
                                  awaiting group-aware decrypt before confirming our Welcome"
                             );
-                            // Owner side of a both-create race: keep our own group, but do NOT
-                            // confirm our outbound Welcome merely because we received the peer's.
-                            // Receiving their Welcome is no proof they received ours, so confirming
-                            // here would mark our Welcome Sent and stop retransmission — the
-                            // convergence bug. Keep retransmitting until a decrypt proves they
-                            // adopted our group.
+                            // Genuine both-create owner: we created our OWN group for this
+                            // peer AND sent a Welcome (hence an outbound welcome lifecycle
+                            // exists). Keep our group, but do NOT confirm our outbound
+                            // Welcome merely because we received the peer's — that is no
+                            // proof they adopted ours. Keep retransmitting until a decrypt
+                            // proves they adopted our group.
                             owner_keep = true;
+                        } else {
+                            // NOT a both-create owner: we have no outbound welcome
+                            // lifecycle for this peer, so we never created our own group —
+                            // we joined THEIR group via an earlier Welcome. This is the
+                            // owner re-sending its Welcome because it has not yet observed
+                            // our confirm. Re-send the encrypted confirm so a lost first
+                            // confirm self-heals in lockstep with the owner's
+                            // retransmission. Critically, do NOT enter owner_keep: we are
+                            // the adopter, and gating on decrypt here (plus poisoning
+                            // both_create_awaiting_decrypt) would suppress our confirm and
+                            // strand the owner in Pending forever — the convergence bug.
+                            debug!(
+                                sender = %sender,
+                                local_id = %local_id,
+                                "Welcome retransmit for an already-adopted session; re-sending encrypted confirm"
+                            );
+                            resend_confirm_on_retransmit = true;
                         }
                     } else {
                         match manager.join_session(&welcome) {
