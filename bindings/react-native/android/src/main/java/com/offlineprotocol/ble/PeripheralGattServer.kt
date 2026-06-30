@@ -119,6 +119,25 @@ class PeripheralGattServer(
          *  sized for OUR central link to the peer is not over-sized for this
          *  notify link — the cause of the offline 1:1 Welcome-delivery stall. */
         fun onPeripheralMtuNegotiated(device: BluetoothDevice, maxPayload: Int)
+        /**
+         * A remote central enabled notifications (CCCD subscribe) on the link it
+         * opened to our GATT server. The transport re-flushes the per-peer MTU so
+         * the notify-link floor is applied even when this link's MTU has not been
+         * (and may never be) observed via the server-role onMtuChanged that backs
+         * [onPeripheralMtuNegotiated]. The subscribe typically lands after the
+         * central-link MTU flush, so it is the transport's signal to apply the
+         * floor for this peer.
+         */
+        fun onCentralSubscribed(device: BluetoothDevice)
+        /**
+         * A remote central disabled notifications (CCCD unsubscribe) on the link it
+         * opened to our GATT server. The transport re-flushes the per-peer MTU so
+         * the notify floor applied on [onCentralSubscribed] is dropped now that the
+         * peer is no longer notify-reachable, relaxing the per-peer size back to the
+         * observed link MTU(s) — or clearing it when neither direction is known.
+         * Symmetric with [onCentralSubscribed].
+         */
+        fun onCentralUnsubscribed(device: BluetoothDevice)
         /** Return the current device-ID bytes, or null to fail the read. */
         fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray?
         /** Return the current signed-identity bytes, or null to fail the read. */
@@ -193,14 +212,17 @@ class PeripheralGattServer(
 
     /**
      * Addresses of centrals that have written ENABLE_NOTIFICATION_VALUE to
-     * the CCCD. Kept purely for observability — the facade currently routes
-     * outbound fragments through client-side writes, never server-side
-     * notifications, so nothing reads this set beyond the diagnostic
-     * emissions in [onDescriptorWriteRequest]. Keyed by address (not
-     * [BluetoothDevice]) so the contract matches [MeshConnectionRegistry]'s
-     * stated "stable for the lifetime of a single LL connection" guarantee
-     * instead of relying on [BluetoothDevice.equals] delegating to the
-     * address string.
+     * the CCCD. Load-bearing, not merely observability: the facade reads this set
+     * (via [subscribedAddresses] / [isSubscribed]) to (a) resolve the asymmetric-
+     * link notify egress — replying over the connection the peer opened to us
+     * rather than a reverse central write — and (b) apply the per-peer MTU floor
+     * for a notify-subscribed peer whose notify-link MTU was never observed. A
+     * [ConcurrentHashMap]-backed set: mutated here on the GATT-server binder thread
+     * (CCCD writes) and read on the main thread, so the cross-thread access is safe.
+     * Keyed by address (not [BluetoothDevice]) so the contract matches
+     * [MeshConnectionRegistry]'s stated "stable for the lifetime of a single LL
+     * connection" guarantee instead of relying on [BluetoothDevice.equals]
+     * delegating to the address string.
      */
     private val subscribedCentralAddresses: MutableSet<String> =
         ConcurrentHashMap.newKeySet()
@@ -758,6 +780,16 @@ class PeripheralGattServer(
                                     "subscribedCount" to subscribedCentralAddresses.size,
                                 ),
                             )
+                            // This central is now notify-subscribed. Its notify-link
+                            // MTU may never be reported (server-role onMtuChanged is
+                            // unreliable) and the subscribe typically lands after the
+                            // central-link MTU flush, so signal the transport to
+                            // re-flush and apply the notify floor for this peer. Fired
+                            // synchronously on the binder thread (the listener reposts
+                            // to main), mirroring onPeripheralMtuNegotiated; it runs
+                            // before sendResponse below but only enqueues work, so it
+                            // does not delay the CCCD ack.
+                            listener.onCentralSubscribed(device)
                         }
                         CccdAction.DISABLE -> {
                             subscribedCentralAddresses.remove(device.address)
@@ -769,6 +801,14 @@ class PeripheralGattServer(
                                     "subscribedCount" to subscribedCentralAddresses.size,
                                 ),
                             )
+                            // This central is no longer notify-subscribed. Signal the
+                            // transport to re-flush so the per-peer MTU floor applied
+                            // on subscribe is dropped (the peer is no longer notify-
+                            // reachable); without it the stale 185 floor would persist
+                            // and throttle central egress until some later unrelated
+                            // flush. Mirrors the ENABLE path; only enqueues work, so it
+                            // does not delay the CCCD ack sent below.
+                            listener.onCentralUnsubscribed(device)
                         }
                     }
                     if (responseNeeded) {
