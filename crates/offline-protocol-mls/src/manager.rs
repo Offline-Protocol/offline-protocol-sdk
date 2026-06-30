@@ -355,7 +355,9 @@ impl MlsManager {
         let key_type = StorageKeyType::ContactKeyPackage.as_str();
         let _ = self.storage.delete(key_type, other_user_id);
 
-        // Join using their Welcome (session.join_session handles deleting our existing session)
+        // Join using their Welcome. `join_session` adopts non-destructively
+        // (stage-then-swap), so a retransmitted Welcome that re-stages is a safe
+        // no-op rather than deleting and re-creating our existing session.
         self.session_manager.join_session(welcome)
     }
 
@@ -1204,6 +1206,9 @@ mod tests {
             .encrypt_for_user("bob", b"still converged after retransmit")
             .unwrap();
         let pt2 = bob.decrypt_from_user(&ct2).unwrap();
-        assert_eq!(pt2.as_deref(), Some(&b"still converged after retransmit"[..]));
+        assert_eq!(
+            pt2.as_deref(),
+            Some(&b"still converged after retransmit"[..])
+        );
     }
 }
