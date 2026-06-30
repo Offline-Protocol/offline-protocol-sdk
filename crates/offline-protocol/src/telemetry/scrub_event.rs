@@ -250,6 +250,13 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         Event::SecureSessionFailed { peer_id, reason: _ } => {
             hash_string(peer_id, scrubber);
         }
+        Event::ConvergenceDiag {
+            peer_id,
+            stage: _,
+            detail: _,
+        } => {
+            hash_string(peer_id, scrubber);
+        }
         Event::WelcomeSendAttempted {
             peer_id,
             group_id,
@@ -547,6 +554,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::RelayDemotedBattery { .. }
         | Event::SecureSessionEstablished { .. }
         | Event::SecureSessionFailed { .. }
+        | Event::ConvergenceDiag { .. }
         | Event::WelcomeSendAttempted { .. }
         | Event::WelcomeSendSucceeded { .. }
         | Event::WelcomeSendFailed { .. }

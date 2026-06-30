@@ -292,6 +292,7 @@ mod tests {
             | Event::RelayDemotedBattery { .. }
             | Event::SecureSessionEstablished { .. }
             | Event::SecureSessionFailed { .. }
+            | Event::ConvergenceDiag { .. }
             | Event::WelcomeSendAttempted { .. }
             | Event::WelcomeSendSucceeded { .. }
             | Event::WelcomeSendFailed { .. }
@@ -466,6 +467,11 @@ mod tests {
             Event::SecureSessionFailed {
                 peer_id: String::new(),
                 reason: String::new(),
+            },
+            Event::ConvergenceDiag {
+                stage: String::new(),
+                peer_id: String::new(),
+                detail: String::new(),
             },
             Event::WelcomeSendAttempted {
                 peer_id: String::new(),

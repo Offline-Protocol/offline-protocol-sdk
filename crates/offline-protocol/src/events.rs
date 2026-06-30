@@ -430,6 +430,19 @@ pub enum Event {
         reason: String,
     },
 
+    /// Diagnostic breadcrumb for the 1:1 MLS convergence (Welcome receive /
+    /// adopt / confirm) path. Emitted so the receiver side — which otherwise
+    /// produces no event until it fully establishes or loudly fails — is
+    /// observable in Metro. Pure instrumentation; carries no protocol effect.
+    ConvergenceDiag {
+        /// Fixed stage label, e.g. "welcome_received" or "welcome_branch".
+        stage: String,
+        /// Peer ID this breadcrumb concerns.
+        peer_id: String,
+        /// Free-form `key=value` context (counts, branch taken, errors).
+        detail: String,
+    },
+
     /// Welcome send lifecycle entered attempted state.
     WelcomeSendAttempted {
         /// Peer identifier for this welcome lifecycle.
@@ -1100,6 +1113,15 @@ impl Event {
         Self::SecureSessionFailed { peer_id, reason }
     }
 
+    /// Creates a ConvergenceDiag event (1:1 MLS convergence instrumentation).
+    pub fn convergence_diag(stage: String, peer_id: String, detail: String) -> Self {
+        Self::ConvergenceDiag {
+            stage,
+            peer_id,
+            detail,
+        }
+    }
+
     /// Creates a WelcomeSendAttempted event.
     pub fn welcome_send_attempted(
         peer_id: String,
@@ -1576,6 +1598,7 @@ impl Event {
             Self::RelayDemotedBattery { .. } => "protocol.relay.demoted_battery",
             Self::SecureSessionEstablished { .. } => "protocol.secure_session.established",
             Self::SecureSessionFailed { .. } => "protocol.secure_session.failed",
+            Self::ConvergenceDiag { .. } => "protocol.convergence.diag",
             Self::WelcomeSendAttempted { .. } => "protocol.welcome.send_attempted",
             Self::WelcomeSendSucceeded { .. } => "protocol.welcome.send_succeeded",
             Self::WelcomeSendFailed { .. } => "protocol.welcome.send_failed",
@@ -1891,6 +1914,16 @@ impl fmt::Debug for Event {
                 .debug_struct("SecureSessionFailed")
                 .field("peer_id", &"[REDACTED]")
                 .field("reason", reason)
+                .finish(),
+            Self::ConvergenceDiag {
+                stage,
+                peer_id: _,
+                detail,
+            } => f
+                .debug_struct("ConvergenceDiag")
+                .field("stage", stage)
+                .field("peer_id", &"[REDACTED]")
+                .field("detail", detail)
                 .finish(),
             Self::WelcomeSendAttempted {
                 peer_id: _,

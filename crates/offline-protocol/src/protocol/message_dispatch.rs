@@ -204,10 +204,22 @@ impl OfflineProtocol {
             let group_id = welcome.group_id.as_str().to_string();
             let is_session = group_id.starts_with("session:");
             let mut error_reason: Option<String> = None;
+            // Receiver-side convergence instrumentation: prove the Welcome
+            // actually reassembled and reached MLS handling on THIS device.
+            // (Absent in logs => the Welcome never fully arrived — a transport
+            // problem; present => the problem is in adoption/confirm, not
+            // transport.) Emitted before taking the MLS lock.
+            let mut had_existing = false;
+            self.emit_event(Event::convergence_diag(
+                "welcome_received".to_string(),
+                sender_owned.clone(),
+                format!("group_id={} is_session={}", group_id, is_session),
+            ));
 
             if let Some(mls) = self.mls_manager.clone() {
                 if let Ok(manager) = mls.read() {
                     let has_existing = manager.has_session(sender).unwrap_or(false);
+                    had_existing = has_existing;
 
                     if has_existing {
                         // Both sides created a session and exchanged Welcomes.
@@ -300,6 +312,32 @@ impl OfflineProtocol {
             // (and stop retransmitting). A plaintext probe/ack is not sufficient.
             if owner_keep {
                 self.mark_both_create_awaiting_decrypt(&sender_owned);
+            }
+
+            // Receiver-side convergence instrumentation: which branch did this
+            // device take, and did adoption succeed? Decisive for the owner
+            // (iOS) side, which otherwise emits NOTHING on the owner_keep /
+            // resend_confirm / no-mls paths. Emitted after the MLS lock release.
+            {
+                let branch = if should_flush {
+                    "adopted"
+                } else if owner_keep {
+                    "owner_keep"
+                } else if resend_confirm_on_retransmit {
+                    "resend_confirm"
+                } else if error_reason.is_some() {
+                    "join_failed"
+                } else {
+                    "no_mls"
+                };
+                self.emit_event(Event::convergence_diag(
+                    "welcome_branch".to_string(),
+                    sender_owned.clone(),
+                    format!(
+                        "had_existing={} branch={} err={:?}",
+                        had_existing, branch, error_reason
+                    ),
+                ));
             }
 
             // Confirm session and process queued items after releasing the MLS lock
@@ -485,6 +523,15 @@ impl OfflineProtocol {
                     // Confirm as normal below, then consume it so it never surfaces as
                     // a chat message.
                     let is_session_confirm = text == internal_prefixes::SESSION_CONFIRM_ENCRYPTED;
+                    // Convergence instrumentation: a group-aware decrypt landed.
+                    // This is exactly what the both-create owner waits on to
+                    // confirm its own Welcome — seeing it (with is_confirm=true)
+                    // means the adopter's proof arrived and decrypted.
+                    self.emit_event(Event::convergence_diag(
+                        "decrypt_success".to_string(),
+                        sender_owned.clone(),
+                        format!("is_confirm={} group_id={}", is_session_confirm, group_id),
+                    ));
                     let surfaced = if is_session_confirm {
                         Some(InternalMessageResult::Consumed)
                     } else {
