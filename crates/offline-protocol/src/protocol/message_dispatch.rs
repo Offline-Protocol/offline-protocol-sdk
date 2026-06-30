@@ -577,6 +577,36 @@ impl OfflineProtocol {
                                     &group_id,
                                     MlsOperationContext::Receive,
                                 );
+
+                                // Surface the app-facing established event for the
+                                // both-create owner. `can_confirm_from_source` restricts a
+                                // `both_create_awaiting_decrypt` owner to confirm ONLY via a
+                                // group-aware decrypt (a plaintext probe/ack is rejected), so
+                                // this is its sole convergence path — and the one place it can
+                                // tell the app the session exists. `confirm_session_state`
+                                // deliberately skips emission for `decrypt_success` (it does
+                                // not know the group id), deferring to this call site exactly
+                                // as the Welcome-receive path above does for the adopter.
+                                // Without this the owner has a fully working 1:1 session (it
+                                // sends and receives) but the app never receives
+                                // `secure_session_established`, so UI gated on a known secure
+                                // session — e.g. the demo's group-creation contact list —
+                                // silently excludes the peer. Gate on `session:` so multi-party
+                                // group decrypts (which also reach this arm) are not reported as
+                                // 1:1 sessions. Reaching `Ok(true)` here implies we own the 1:1
+                                // group (an adopter would already be Confirmed via
+                                // `welcome_received` and return `Ok(false)`), so
+                                // `initiated_by_local` is true.
+                                if group_id.starts_with("session:") {
+                                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                        state.emit_event(Event::secure_session_established(
+                                            sender_owned.clone(),
+                                            group_id.clone(),
+                                            true,
+                                            true,
+                                        ));
+                                    }
+                                }
                             }
                             Ok(false) => {}
                             Err(e) => {
