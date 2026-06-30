@@ -20,8 +20,10 @@ import org.junit.Test
  *     This is the exact regression from the previous head-eviction policy.
  *   - Peer cap evicts the peer with the stalest head entry, excluding the
  *     address currently being queued for.
- *   - Expiry during [evictExpired] evicts stale entries and prunes empty
- *     buckets while keeping the aggregate counter consistent.
+ *   - [evictExpired] evicts a peer's buffer wholesale once it has gone idle
+ *     (its NEWEST fragment aged past the window) and prunes empty buckets, but
+ *     never tears a buffer whose fragments are still arriving — all while
+ *     keeping the aggregate counter consistent.
  *   - `removeAll` / `clear` bring the total counter back to zero.
  *   - `totalCount` is readable without tripping the main-thread guard, so
  *     callback-thread diagnostic paths stay safe.
@@ -186,29 +188,59 @@ class InboundFragmentBufferTest {
     }
 
     @Test
-    fun `evictExpired drops old entries and prunes empty buckets`() {
+    fun `evictExpired evicts a whole idle buffer but never a still-arriving one`() {
+        // Regression for the per-fragment sweep that tore an in-flight message:
+        // while device-id resolution was pending the sender keeps streaming
+        // fragments, and the old sweep dropped fragment 0 the moment it aged past
+        // the window while fragments 1..n were still in flight — handing the
+        // reassembler a permanent hole. Eviction now keys on the NEWEST fragment,
+        // so a buffer survives as long as bytes keep arriving and is dropped only
+        // once the peer truly goes silent.
+        val h = Harness(timeoutMs = 1_000L)
+        h.buffer.enqueue("aa:00", byteArrayOf(1)) // ts = 0
+        h.buffer.enqueue("aa:00", byteArrayOf(2)) // ts = 0
+        h.buffer.enqueue("bb:11", byteArrayOf(10)) // ts = 0, then goes silent
+        h.clock.advance(1_500L)
+        h.buffer.enqueue("aa:00", byteArrayOf(3)) // ts = 1500 -> aa:00 still arriving
+
+        val expired = h.buffer.evictExpired()
+        // aa:00's newest fragment is fresh, so the WHOLE buffer is kept (its old
+        // head is NOT torn out). bb:11 has been idle since ts=0 (age >= timeout),
+        // so it is evicted wholesale.
+        assertEquals(1, expired)
+        assertEquals(3, h.buffer.totalCount())
+        assertTrue(h.buffer.hasPending("aa:00"))
+        assertFalse(h.buffer.hasPending("bb:11"))
+
+        // The aa:00 buffer survived intact and in order, including its old head.
+        val aaDrain = h.buffer.drain("aa:00")
+        assertEquals(3, aaDrain.size)
+        assertArrayEquals(byteArrayOf(1), aaDrain[0])
+        assertArrayEquals(byteArrayOf(2), aaDrain[1])
+        assertArrayEquals(byteArrayOf(3), aaDrain[2])
+
+        val expiryDrops = h.drops.filter { it.reason == InboundFragmentBuffer.DropReason.EXPIRED }
+        assertEquals(
+            setOf("bb:11" to 1),
+            expiryDrops.map { it.address to it.count }.toSet(),
+        )
+    }
+
+    @Test
+    fun `evictExpired drops a fully idle buffer wholesale and prunes it`() {
         val h = Harness(timeoutMs = 1_000L)
         h.buffer.enqueue("aa:00", byteArrayOf(1))
         h.buffer.enqueue("aa:00", byteArrayOf(2))
-        h.buffer.enqueue("bb:11", byteArrayOf(10))
-        h.clock.advance(1_500L)
-        h.buffer.enqueue("aa:00", byteArrayOf(3))
+        h.clock.advance(1_500L) // nothing new arrives -> the whole buffer is idle
 
         val expired = h.buffer.evictExpired()
-        // aa:00: two entries expired, one survived (the post-advance one).
-        // bb:11: one entry expired, bucket now empty and pruned.
-        assertEquals(3, expired)
-        assertEquals(1, h.buffer.totalCount())
-        assertTrue(h.buffer.hasPending("aa:00"))
-        assertFalse(h.buffer.hasPending("bb:11"))
-        val aaDrain = h.buffer.drain("aa:00")
-        assertEquals(1, aaDrain.size)
-        assertArrayEquals(byteArrayOf(3), aaDrain[0])
+        assertEquals(2, expired)
+        assertEquals(0, h.buffer.totalCount())
+        assertFalse(h.buffer.hasPending("aa:00"))
 
         val expiryDrops = h.drops.filter { it.reason == InboundFragmentBuffer.DropReason.EXPIRED }
-        assertEquals(2, expiryDrops.size)
         assertEquals(
-            setOf("aa:00" to 2, "bb:11" to 1),
+            setOf("aa:00" to 2),
             expiryDrops.map { it.address to it.count }.toSet(),
         )
     }

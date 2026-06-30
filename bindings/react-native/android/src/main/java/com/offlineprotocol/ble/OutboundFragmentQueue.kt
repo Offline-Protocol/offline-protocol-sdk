@@ -64,6 +64,24 @@ internal class OutboundFragmentQueue(
     }
 
     /**
+     * True once [recipientId]'s queue has filled past a high-water mark
+     * (3/4 of [maxPerPeer]). The drain loop uses this as a backpressure
+     * signal to STOP pulling more fragments out of the Rust core — which is
+     * a destructive pop — into this bounded queue. Without it, when the BLE
+     * write gate paces sends slower than the loop can pull, the loop spins
+     * the whole Rust backlog into the queue, overflows [maxPerPeer], and
+     * [enqueue] discards the entire per-peer queue mid-message. Holding the
+     * backlog in Rust (the proper unbounded, ordered buffer) instead keeps
+     * delivery lossless; the scheduled re-drain resumes pulling once
+     * [flush] has drained the queue back below the mark.
+     */
+    fun isBackedUp(recipientId: String): Boolean {
+        mainThreadCheck()
+        val size = queues[recipientId]?.size ?: 0
+        return size >= maxPerPeer * 3 / 4
+    }
+
+    /**
      * Append a fragment to [recipientId]'s queue. If doing so would exceed
      * [maxPerPeer] the entire per-recipient queue is discarded first (see
      * the class-level overflow policy note). [onDropped] is invoked once
@@ -135,6 +153,15 @@ internal class OutboundFragmentQueue(
         for (recipientId in queues.keys.toList()) {
             val queue = queues[recipientId] ?: continue
 
+            // Expiry is per-fragment, not per-message. These entries are opaque
+            // fragment bytes from the Rust fragmenter with no message grouping at
+            // this layer, so on a stall longer than timeoutMs the early fragments
+            // of a multi-fragment message can be dropped while later ones survive,
+            // tearing it. Bounded, not silent: the receiver's idle reassembly times
+            // out the partial and the sender's higher layer (Welcome retransmit /
+            // ack-driven retry) re-sends the whole message. True whole-message
+            // expiry would need message ids threaded down from Rust — tracked
+            // separately.
             var expired = 0
             val expiryIter = queue.iterator()
             while (expiryIter.hasNext()) {

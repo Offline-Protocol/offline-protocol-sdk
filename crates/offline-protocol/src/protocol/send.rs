@@ -326,6 +326,70 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
+    /// Sends one MLS-encrypted session-confirm marker to `peer_id`.
+    ///
+    /// Used by the Welcome-adopt path: after we adopt the peer's `session:` group
+    /// (and confirm our own side), the peer may be the both-create "owner" that
+    /// kept its own group and confirms ONLY on a group-aware decrypt from us. A
+    /// plaintext probe/ack does not count, and we may have no user traffic to
+    /// send — so without this the owner stays Pending forever and the 1:1
+    /// connection never completes. The marker is `SESSION_CONFIRM_ENCRYPTED`
+    /// wrapped in the normal `ENCRYPTED` envelope; the peer consumes it on decrypt
+    /// (never surfaced). Mirrors [`Self::send_internal_message`] but encrypts
+    /// (data-plane, so NOT signed) and never propagates errors — it is re-sent on
+    /// every received Welcome while still adopting, so a lost confirm is retried
+    /// in lockstep with the owner's Welcome retransmission.
+    pub(super) fn send_session_confirm_encrypted(&mut self, peer_id: &str) {
+        let encrypted = match self.encrypt_content_for_recipient(
+            peer_id,
+            internal_prefixes::SESSION_CONFIRM_ENCRYPTED,
+            MessagePriority::High,
+        ) {
+            Ok(content) => content,
+            Err(err) => {
+                debug!(
+                    peer = %peer_id,
+                    error = %err,
+                    "Skipped proactive session-confirm (encryption not ready); welcome retry remains"
+                );
+                return;
+            }
+        };
+
+        let message =
+            match self.create_message(peer_id, encrypted, Some(MessagePriority::High), None) {
+                Ok(message) => message,
+                Err(err) => {
+                    warn!(peer = %peer_id, error = %err, "Failed to build session-confirm message");
+                    return;
+                }
+            };
+
+        if self.deduplicator.is_duplicate(&message.id) {
+            return;
+        }
+        self.deduplicator.mark_seen(message.id.clone());
+
+        let previous_transport = self.transport_manager.current_transport();
+        match self.transport_manager.send(&message) {
+            Ok(()) => {
+                let current_transport = self.transport_manager.current_transport();
+                let _ = self.handle_send_success(&message, current_transport);
+                info!(peer = %peer_id, "Sent proactive encrypted session-confirm to owner");
+            }
+            Err(err) => {
+                let current_transport = self.transport_manager.current_transport();
+                let _ =
+                    self.handle_send_failure(&message, current_transport.or(previous_transport));
+                debug!(
+                    peer = %peer_id,
+                    error = %err,
+                    "Proactive session-confirm deferred (will retry with welcome)"
+                );
+            }
+        }
+    }
+
     /// Sends a message via a specific transport type.
     pub fn send_message_via_transport(
         &mut self,
@@ -1510,8 +1574,17 @@ impl OfflineProtocol {
             return Ok(());
         };
         let reason = crate::events::WelcomeReasonCode::TransportUnavailable;
-        let _ =
-            self.apply_welcome_send_failure(&peer_id, reason, transport_error, "transport_failed")?;
+        // No raw error is available on this async path, so infer no-carrier from
+        // live connectivity: with no transport currently available the peer is
+        // simply unreachable and the Welcome must be kept alive, not aged.
+        let no_carrier = self.transport_manager.get_available_transports().is_empty();
+        let _ = self.apply_welcome_send_failure(
+            &peer_id,
+            reason,
+            transport_error,
+            no_carrier,
+            "transport_failed",
+        )?;
         Ok(())
     }
 

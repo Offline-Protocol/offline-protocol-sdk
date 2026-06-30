@@ -355,7 +355,9 @@ impl MlsManager {
         let key_type = StorageKeyType::ContactKeyPackage.as_str();
         let _ = self.storage.delete(key_type, other_user_id);
 
-        // Join using their Welcome (session.join_session handles deleting our existing session)
+        // Join using their Welcome. `join_session` adopts non-destructively
+        // (stage-then-swap), so a retransmitted Welcome that re-stages is a safe
+        // no-op rather than deleting and re-creating our existing session.
         self.session_manager.join_session(welcome)
     }
 
@@ -1140,5 +1142,73 @@ mod tests {
 
         let groups = manager.list_groups().unwrap();
         assert_eq!(groups.len(), 1);
+    }
+
+    /// Regression test for the both-create split-brain re-brick.
+    ///
+    /// With auto key exchange, both peers create a `session:a:b` group and the
+    /// higher-id peer adopts the lower-id "owner"'s Welcome. The owner keeps
+    /// retransmitting its Welcome until it sees a group-aware proof, so the
+    /// adopter receives the SAME Welcome again *after* it already adopted. MLS
+    /// key packages are one-time, so re-staging that Welcome must fail — but it
+    /// must fail NON-DESTRUCTIVELY, leaving the converged group intact. The old
+    /// delete-then-stage path deleted the good group first and then could not
+    /// re-stage, permanently bricking a working session.
+    #[test]
+    fn test_both_create_adopt_is_non_destructive_on_welcome_retransmit() {
+        // alice = lexicographically-lower "owner"; bob = higher "adopter".
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+
+        // Exchange key packages both ways (both sides will auto-create).
+        let alice_kp = alice.generate_key_package().unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        bob.import_key_package("alice", &alice_kp.key_package_data)
+            .unwrap();
+
+        // Both-create race: each peer creates its own session group + Welcome.
+        let alice_welcome = alice.create_session("bob").unwrap(); // owner's Welcome
+        let _bob_welcome = bob.create_session("alice").unwrap(); // adopter's own group
+        assert!(bob.has_session("alice").unwrap());
+
+        // Adopter adopts the owner's Welcome (first delivery): replaces its own
+        // group with alice's, consuming bob's one-time key package.
+        bob.join_session(&alice_welcome).unwrap();
+        assert!(bob.has_session("alice").unwrap());
+
+        // Convergence: alice encrypts and bob decrypts on the shared group.
+        let ct = alice
+            .encrypt_for_user("bob", b"hello over the converged group")
+            .unwrap();
+        let pt = bob.decrypt_from_user(&ct).unwrap();
+        assert_eq!(pt.as_deref(), Some(&b"hello over the converged group"[..]));
+
+        // Owner retransmits the SAME Welcome (its periodic retry). Re-staging
+        // MUST fail (bob's key package is consumed) but MUST be non-destructive.
+        let retransmit = bob.join_session(&alice_welcome);
+        assert!(
+            retransmit.is_err(),
+            "re-staging a consumed key package should fail"
+        );
+
+        // The converged group MUST survive the failed retransmit. This is the
+        // regression: the old delete-then-stage path left bob with no session.
+        assert!(
+            bob.has_session("alice").unwrap(),
+            "duplicate Welcome must not brick the converged session"
+        );
+
+        // ...and it must still be functional after the failed retransmit.
+        let ct2 = alice
+            .encrypt_for_user("bob", b"still converged after retransmit")
+            .unwrap();
+        let pt2 = bob.decrypt_from_user(&ct2).unwrap();
+        assert_eq!(
+            pt2.as_deref(),
+            Some(&b"still converged after retransmit"[..])
+        );
     }
 }

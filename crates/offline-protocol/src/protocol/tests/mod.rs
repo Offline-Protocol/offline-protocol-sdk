@@ -3499,6 +3499,19 @@ fn test_welcome_partial_success_after_retry_reaches_sent() {
     thread::sleep(Duration::from_millis(10));
     protocol.process().unwrap();
 
+    // A mesh welcome is now NON-TERMINAL until the peer proves the session: a
+    // successful (retried) transport send leaves the lifecycle SendAttempted
+    // with a confirm timeout, so a lost fragment keeps being re-sent instead of
+    // being falsely marked delivered.
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::SendAttempted);
+    assert!(lifecycle.next_retry_at.is_some());
+
+    // The peer's session proof (here an ack) confirms the session and marks the
+    // welcome Sent, ending the retries.
+    protocol
+        .confirm_session_state("bob", "confirmation_ack_received")
+        .unwrap();
     assert_eq!(
         protocol.welcome_lifecycles.get("bob").unwrap().state,
         WelcomeDeliveryState::Sent
@@ -3641,6 +3654,160 @@ fn test_on_transport_send_confirmed_sends_immediate_probe() {
 }
 
 #[test]
+fn test_mesh_welcome_sender_probes_for_confirmation() {
+    // Regression: the Welcome SENDER on a mesh transport (BLE / WiFi-Direct) must
+    // actively probe the peer for confirmation, not wait passively for the peer's
+    // single proactive confirm. Mesh has no `on_transport_send_confirmed`, so if
+    // the Welcome send does not seed the probe scheduler, the sender's
+    // `run_throttled_reconciliation` `has_pending_work` gate stays false (it has
+    // no pending encrypted messages) and it never emits a SESSION_CONFIRM_PROBE.
+    // The Welcome then retransmits every confirm-timeout window until TTL — the
+    // observed "Welcome send confirmation timed out, attempt 1,2,3,4..." loop.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    // Mesh transport only — no Internet path to confirm the send for us.
+    let mut ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    let transport_handle = ble.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol.start().unwrap();
+
+    // Peer key package available, as after accepting a connection request.
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    // Accepter path: create the 1:1 group and send the Welcome. This does NOT
+    // queue an app message, so it does not borrow the initiator's
+    // queue_message_for_session_establishment -> kick-reconciliation path; the
+    // probe must be seeded by the Welcome send itself.
+    protocol.establish_secure_session("bob").unwrap();
+
+    assert!(
+        protocol.confirmation_probe_due_at.contains_key("bob"),
+        "Welcome send should seed the confirmation-probe scheduler for the pending peer"
+    );
+
+    let messages_before = transport_handle.sent_messages().len();
+
+    // A process tick now has pending work, so reconciliation is not
+    // short-circuited and the sender emits a confirmation probe.
+    protocol.process().unwrap();
+
+    let messages_after = transport_handle.sent_messages();
+    assert!(
+        messages_after.len() > messages_before,
+        "Expected the sender to emit a confirmation probe on the next process tick"
+    );
+    assert!(
+        messages_after.iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        "Expected a SESSION_CONFIRM_PROBE to be emitted by the mesh Welcome sender"
+    );
+}
+
+#[test]
+fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
+    // Regression (Bug B): a simple adopter with a lexicographically SMALLER
+    // user_id that already joined the owner's group must, on a Welcome
+    // RETRANSMIT, re-send its encrypted confirm so a lost first confirm
+    // self-heals — and must NOT misclassify the retransmit as a both-create race
+    // (owner_keep). The buggy path entered owner_keep (because has_existing is
+    // true and local < remote), which poisoned both_create_awaiting_decrypt and
+    // suppressed the confirm, stranding the owner in Pending forever.
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_transport_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    // Owner "zoe" (lexicographically greater than "bob") creates the group and
+    // the Welcome. bob never creates its own group — it only joins zoe's, so bob
+    // has no outbound welcome lifecycle for zoe.
+    let zoe_manager = MlsManager::new("zoe", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    zoe_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = zoe_manager.create_session("bob").unwrap();
+    let welcome_content = format!(
+        "{}{}",
+        internal_prefixes::WELCOME,
+        serde_json::to_string(&welcome).unwrap()
+    );
+    let make_welcome_msg = || {
+        Message::new(
+            UserId::new("zoe").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &welcome_content,
+        )
+    };
+
+    // First Welcome: bob joins and proactively confirms its own side.
+    bob.process_internal_message(&make_welcome_msg());
+    assert!(
+        bob.confirmed_sessions.contains("zoe"),
+        "adopter should confirm its session on first Welcome receipt"
+    );
+
+    let encrypted_before = bob_transport_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .count();
+
+    // Welcome RETRANSMIT — the owner is still re-sending because it has not yet
+    // observed our confirm.
+    bob.process_internal_message(&make_welcome_msg());
+
+    // Must NOT be misclassified as a both-create owner.
+    assert!(
+        !bob.both_create_awaiting_decrypt.contains("zoe"),
+        "adopter retransmit must not enter owner_keep / poison both_create_awaiting_decrypt"
+    );
+
+    // Must re-send an encrypted confirm so a lost first confirm self-heals.
+    let encrypted_after = bob_transport_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .count();
+    assert!(
+        encrypted_after > encrypted_before,
+        "adopter should re-send an encrypted confirm on Welcome retransmit"
+    );
+}
+
+#[test]
 fn test_welcome_terminal_lifecycle_can_be_overwritten() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
@@ -3734,6 +3901,15 @@ fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
             None::<MessagePriority>,
             None::<String>,
         )
+        .unwrap();
+    // A mesh welcome is non-terminal until the peer proves the session; the
+    // peer's confirmation drives it to the terminal Sent state under test here.
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::SendAttempted
+    );
+    protocol
+        .confirm_session_state("bob", "confirmation_ack_received")
         .unwrap();
     assert_eq!(
         protocol.welcome_lifecycles.get("bob").unwrap().state,
@@ -3883,6 +4059,418 @@ fn test_welcome_restore_promotes_retry_exhausted_failed_to_expired() {
     let restored = restarted.welcome_lifecycles.get("bob").unwrap();
     assert_eq!(restored.state, WelcomeDeliveryState::Expired);
     assert!(restored.next_retry_at.is_none());
+}
+
+#[test]
+fn test_welcome_no_carrier_ticks_keep_lifecycle_alive() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    config.reliability.retry.max_retries = 2;
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 5;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    // No transport is added, so every send fails with TransportNotAvailable.
+    let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let observed_events_clone = observed_events.clone();
+    protocol.on_event(move |event| {
+        observed_events_clone.lock().unwrap().push(event);
+    });
+    protocol.start().unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    let _ = protocol.send_message(
+        "bob",
+        "queued-offline",
+        None::<MessagePriority>,
+        None::<String>,
+    );
+
+    // Far more no-carrier attempts than max_retries — none may expire the
+    // Welcome, and the retry budget must not accumulate.
+    for _ in 0..10 {
+        let _ = protocol.try_send_welcome("bob", "test_no_carrier_tick");
+    }
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_ne!(
+        lifecycle.state,
+        WelcomeDeliveryState::Expired,
+        "a no-carrier Welcome must never expire"
+    );
+    assert!(
+        lifecycle.attempt <= 1,
+        "no-carrier failures must not consume the retry budget, got attempt={}",
+        lifecycle.attempt
+    );
+
+    let events = observed_events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::WelcomeSendExpired { .. })),
+        "no-carrier ticks must not emit WelcomeSendExpired"
+    );
+}
+
+#[test]
+fn test_no_carrier_welcome_parks_without_churn() {
+    // Regression: a Welcome with no transport carrier must be PARKED (cheap,
+    // slow re-check), not re-attempted at the data-plane retry rate. Each wasted
+    // attempt previously incremented-then-rolled-back the attempt counter, ran
+    // two state transitions (two persists + two info logs), and emitted a
+    // WelcomeSendAttempted event — ~1 Hz of storage/event churn while a device
+    // is simply offline. A parked Welcome emits no attempt/failed events and
+    // schedules its next re-check on the slow no-carrier interval.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    // Tiny data-plane backoff: if the no-carrier path WERE (incorrectly) using
+    // it, next_retry_at would land ~milliseconds out, not the slow interval.
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 5;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let observed_events_clone = observed_events.clone();
+    protocol.on_event(move |event| {
+        observed_events_clone.lock().unwrap().push(event);
+    });
+    protocol.start().unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    let _ = protocol.send_message(
+        "bob",
+        "queued-offline",
+        None::<MessagePriority>,
+        None::<String>,
+    );
+    for _ in 0..10 {
+        let _ = protocol.try_send_welcome("bob", "test_no_carrier_tick");
+    }
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    // Parked, not aged: still non-terminal and no attempt consumed.
+    assert_ne!(lifecycle.state, WelcomeDeliveryState::Expired);
+    assert_eq!(
+        lifecycle.attempt, 0,
+        "a parked no-carrier Welcome must not consume an attempt, got {}",
+        lifecycle.attempt
+    );
+    // Re-check is scheduled on the SLOW no-carrier interval, proving we did not
+    // fall through to the ~1ms data-plane backoff.
+    let next_retry = lifecycle
+        .next_retry_at
+        .expect("a parked Welcome must schedule a re-check");
+    let secs_out = (next_retry - Utc::now()).num_seconds();
+    assert!(
+        secs_out >= WELCOME_NO_CARRIER_RETRY_SECS - 2,
+        "parked Welcome must re-check on the slow no-carrier interval, got {secs_out}s"
+    );
+
+    // The churn we eliminated: no per-tick attempt/failed/expired events.
+    let events = observed_events.lock().unwrap();
+    let churn = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::WelcomeSendAttempted { .. }
+                    | Event::WelcomeSendFailed { .. }
+                    | Event::WelcomeSendExpired { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        churn, 0,
+        "no-carrier ticks must not emit attempt/failed/expired churn, got {churn}"
+    );
+}
+
+#[test]
+fn test_both_create_gate_survives_owner_restart() {
+    // Regression: the both-create owner gate must persist. If an owner restarts
+    // mid-convergence and loses the gate, a stale plaintext probe/ack could
+    // confirm it, stop its Welcome retransmission, and strand the peer on a
+    // divergent group. With the gate restored, only a group-aware decrypt may
+    // confirm.
+    let config = create_test_config_for_user("alice");
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let mut owner = OfflineProtocol::new(config.clone()).unwrap();
+    owner.initialize_mls(storage.clone()).unwrap();
+    owner.mark_both_create_awaiting_decrypt("bob");
+    assert!(owner.both_create_awaiting_decrypt.contains("bob"));
+    // The gate blocks a plaintext-ack confirmation (only a decrypt is accepted).
+    assert!(!owner.can_confirm_from_source("bob", "confirmation_ack_received"));
+
+    // Restart with the same storage: the gate must be restored.
+    let mut restarted = OfflineProtocol::new(config.clone()).unwrap();
+    restarted.initialize_mls(storage.clone()).unwrap();
+    assert!(
+        restarted.both_create_awaiting_decrypt.contains("bob"),
+        "both-create owner gate must survive a restart"
+    );
+    assert!(
+        !restarted.can_confirm_from_source("bob", "confirmation_ack_received"),
+        "restored gate must still block a plaintext-ack confirmation"
+    );
+
+    // Convergence clears it from storage too, so a later restart does not revive
+    // it (which would wrongly keep blocking confirmation of a converged peer).
+    restarted.clear_both_create_awaiting_decrypt("bob");
+    let mut after_converge = OfflineProtocol::new(config).unwrap();
+    after_converge.initialize_mls(storage).unwrap();
+    assert!(
+        !after_converge.both_create_awaiting_decrypt.contains("bob"),
+        "a cleared gate must not be restored after convergence"
+    );
+}
+
+#[test]
+fn test_both_create_gate_cleared_on_session_delete() {
+    // Regression: deleting a 1:1 session (or repairing stale state) must clear
+    // the persisted both-create owner gate. A leaked gate entry would make
+    // `can_confirm_from_source` reject every non-decrypt source — including
+    // `welcome_received` — on the NEXT session with this peer, re-stranding it
+    // in Pending, and it would survive restart via the storage restore.
+    let config = create_test_config_for_user("alice");
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let mut owner = OfflineProtocol::new(config.clone()).unwrap();
+    owner.initialize_mls(storage.clone()).unwrap();
+    owner.mark_both_create_awaiting_decrypt("bob");
+    assert!(owner.both_create_awaiting_decrypt.contains("bob"));
+    assert!(!owner.can_confirm_from_source("bob", "welcome_received"));
+
+    // Tearing the session down clears the gate from memory AND storage.
+    owner.manual_mls_delete_session("bob").unwrap();
+    assert!(
+        !owner.both_create_awaiting_decrypt.contains("bob"),
+        "session delete must clear the both-create owner gate in memory"
+    );
+    // The peer is now confirmable via a fresh Welcome again.
+    assert!(
+        owner.can_confirm_from_source("bob", "welcome_received"),
+        "a re-paired peer must not be blocked by a stale gate"
+    );
+
+    // A restart must not revive the cleared gate from storage.
+    let mut restarted = OfflineProtocol::new(config).unwrap();
+    restarted.initialize_mls(storage).unwrap();
+    assert!(
+        !restarted.both_create_awaiting_decrypt.contains("bob"),
+        "a deleted gate must not be restored after restart"
+    );
+}
+
+#[test]
+fn test_welcome_sends_when_carrier_appears() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    config.reliability.retry.max_retries = 2;
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 5;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+    protocol.start().unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    // Phase 1: no carrier — the Welcome stalls (non-terminal) without expiring.
+    let _ = protocol.send_message(
+        "bob",
+        "queued-offline",
+        None::<MessagePriority>,
+        None::<String>,
+    );
+    assert_ne!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::Expired
+    );
+
+    // Phase 2: a transport appears; the stalled Welcome is delivered.
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.set_status(TransportStatus::Available);
+    let mock_handle = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    protocol
+        .try_send_welcome("bob", "test_carrier_appeared")
+        .unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.state,
+        WelcomeDeliveryState::SendAttempted,
+        "the Welcome should be transmitted once a carrier exists"
+    );
+    assert!(
+        lifecycle.last_reason_code.is_none(),
+        "a successful send clears the failure reason"
+    );
+    assert!(
+        !mock_handle.sent_messages().is_empty(),
+        "the carrier should have received the Welcome"
+    );
+}
+
+#[test]
+fn test_welcome_restart_keeps_no_carrier_lifecycle_alive() {
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
+    protocol.initialize_mls(storage.clone()).unwrap();
+
+    // A Welcome that stalled with no carrier and then aged past its TTL while
+    // the device was offline, with no retry scheduled.
+    let message = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "__MLS_WELCOME__dummy".to_string(),
+    );
+    protocol
+        .upsert_welcome_lifecycle("bob", "session:bob:1", message, "test_created")
+        .unwrap();
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+        .unwrap();
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_failed")
+        .unwrap();
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.last_reason_code = Some(crate::events::WelcomeReasonCode::TransportUnavailable);
+        record.next_retry_at = None;
+        record.expires_at = Utc::now() - ChronoDuration::seconds(1_000);
+    }
+    let persisted = protocol.welcome_lifecycles.get("bob").cloned().unwrap();
+    protocol
+        .persist_welcome_lifecycle_entry(&persisted)
+        .unwrap();
+
+    // Restart: the no-carrier Welcome must survive, not be promoted to Expired.
+    let mut restarted = OfflineProtocol::new(config).unwrap();
+    restarted.initialize_mls(storage).unwrap();
+
+    let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        restored.state,
+        WelcomeDeliveryState::Failed,
+        "a stale-TTL no-carrier Welcome must NOT be expired on restart"
+    );
+    assert!(restored.next_retry_at.is_some());
+    assert!(
+        restored.expires_at > Utc::now(),
+        "the TTL window should be restarted (carrier-relative) on restore"
+    );
+}
+
+#[test]
+fn test_welcome_expired_rearms_on_peer_rediscovery() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    config.reliability.retry.max_retries = 1;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    // A present-but-failing carrier: the first send fails (SendFailed), which
+    // with max_retries=1 exhausts the Welcome to Expired.
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.set_status(TransportStatus::Available);
+    mock.set_fail_next_sends(1);
+    let mock_handle = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    let _ = protocol.send_message(
+        "bob",
+        "should-expire-then-recover",
+        None::<MessagePriority>,
+        None::<String>,
+    );
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::Expired,
+        "carrier-present exhaustion should expire the Welcome"
+    );
+
+    // Sends now succeed (the single forced failure is spent). Rediscovering the
+    // peer must re-arm and re-send the expired Welcome.
+    protocol.on_neighbor_discovered("bob");
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_ne!(
+        lifecycle.state,
+        WelcomeDeliveryState::Expired,
+        "rediscovery must revive an expired Welcome"
+    );
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::SendAttempted);
+    assert!(
+        !mock_handle.sent_messages().is_empty(),
+        "the re-armed Welcome should have been transmitted"
+    );
 }
 
 #[test]

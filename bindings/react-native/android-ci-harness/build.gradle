@@ -1,0 +1,21 @@
+// Root project of the CI harness. Its ONLY job is to put the Android Gradle
+// Plugin and the Kotlin Gradle plugin on the buildscript classpath so the
+// included `:offlineprotocol` module's legacy
+// `apply plugin: 'com.android.library'` / `'kotlin-android'` resolve. Subproject
+// `apply plugin` calls inherit this buildscript classpath, which is exactly the
+// classpath a host RN app would otherwise provide.
+//
+// Kotlin is pinned to 1.9.x to match the module's current (pre-Kotlin-2)
+// source. Bumping to 2.x first requires the `optString`/nullability fixes
+// tracked in todo.md, or the module will not compile under the strict 2.x
+// platform-type rules.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.5.2"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24"
+    }
+}

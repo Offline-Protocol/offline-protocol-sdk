@@ -9,7 +9,9 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -105,6 +107,18 @@ class PeripheralGattServer(
         fun onCentralConnected(device: BluetoothDevice)
         fun onCentralDisconnected(device: BluetoothDevice, status: Int)
         fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray)
+        /** A notification we pushed to [device] (via [notifyFragment]) has been
+         *  flushed by the stack — the next notification to that central may now
+         *  go. Lets the transport release its per-peer send gate on real
+         *  completion instead of relying solely on the watchdog timeout. */
+        fun onNotificationSent(device: BluetoothDevice, status: Int)
+        /** The ATT MTU for [device]'s connection to OUR GATT server has been
+         *  (re)negotiated by that central. [maxPayload] is the header-adjusted
+         *  max NOTIFY payload (MTU − 3) we can push to it via [notifyFragment].
+         *  The transport bounds the per-peer fragment size by this so a message
+         *  sized for OUR central link to the peer is not over-sized for this
+         *  notify link — the cause of the offline 1:1 Welcome-delivery stall. */
+        fun onPeripheralMtuNegotiated(device: BluetoothDevice, maxPayload: Int)
         /** Return the current device-ID bytes, or null to fail the read. */
         fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray?
         /** Return the current signed-identity bytes, or null to fail the read. */
@@ -123,6 +137,11 @@ class PeripheralGattServer(
          *  facade's MAX_FRAGMENT_SIZE (185 bytes) to tolerate MTU-negotiation
          *  headroom, but bounded so a hostile central cannot balloon memory. */
         const val MAX_INBOUND_WRITE_BYTES = 4096
+        /** ATT protocol header subtracted from a negotiated ATT MTU to get the
+         *  usable NOTIFY payload (MTU − 3). Matches CentralGattClient's
+         *  ATT_HEADER_BYTES so both link directions report payloads on the
+         *  same basis. */
+        private const val ATT_HEADER_BYTES = 3
         /** Maximum age of a per-central identity long-read snapshot. A
          *  coherent long-read session finishes in well under a second on
          *  real hardware; anything older is either the result of a central
@@ -248,6 +267,72 @@ class PeripheralGattServer(
 
     /** Count of centrals currently subscribed via CCCD. Observability only. */
     fun subscribedCentralCount(): Int = subscribedCentralAddresses.size
+
+    /** True if [address] is a central currently subscribed to the message
+     *  characteristic via CCCD — i.e. we can push notifications to it over the
+     *  connection it opened to our GATT server. [subscribedCentralAddresses] is
+     *  a concurrent set so this is safe to read from the main thread. */
+    fun isSubscribed(address: String): Boolean =
+        subscribedCentralAddresses.contains(address)
+
+    /** Snapshot of the addresses of centrals currently subscribed via CCCD.
+     *  Used to resolve the notify egress by PEER IDENTITY when the address we
+     *  hold for a peer (the central link we opened to it) differs from the
+     *  address it subscribed under (the link it opened to our server). */
+    fun subscribedAddresses(): Set<String> = subscribedCentralAddresses.toSet()
+
+    /**
+     * Reply to a central by notifying the message characteristic over the
+     * connection IT opened to our GATT server. This is the egress for
+     * asymmetric mesh links where we are only the peripheral for [device] (see
+     * the class note above): the central's reverse link back to us may be
+     * absent or half-open, so a central-role `writeCharacteristic(NO_RESPONSE)`
+     * returns SUCCESS into a dead link and the bytes are silently dropped on air
+     * (no status 201, no error) — the peer never gets the reply and retransmits
+     * forever. Notifying over the live, subscribed connection is reliable.
+     *
+     * Returns true if the stack accepted the notification. No-op (false) if the
+     * server/characteristic is gone or [device] is not subscribed. Notifications
+     * are serialised one-outstanding-per-connection by the stack, just like
+     * NO_RESPONSE writes, so the caller paces them via the shared write gate.
+     */
+    fun notifyFragment(device: BluetoothDevice, bytes: ByteArray): Boolean {
+        val server = gattServer ?: return false
+        val characteristic = messageCharacteristic ?: return false
+        if (!subscribedCentralAddresses.contains(device.address)) return false
+        return try {
+            // confirm = true → ATT Handle Value INDICATION (acknowledged) rather
+            // than a fire-and-forget NOTIFICATION. The central must confirm each
+            // one before the stack accepts the next, giving the per-fragment flow
+            // control that keeps a large Welcome from overrunning the receiver.
+            // onNotificationSent then fires on the CONFIRMATION (real delivery),
+            // which releases the per-peer write gate only once the peer has it.
+            val accepted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                server.notifyCharacteristicChanged(device, characteristic, true, bytes) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                characteristic.value = bytes
+                @Suppress("DEPRECATION")
+                server.notifyCharacteristicChanged(device, characteristic, true)
+            }
+            if (!accepted) {
+                // The stack refused the notification. The dominant cause for a
+                // multi-fragment payload is a fragment larger than this notify
+                // link's ATT_MTU − 3. Surface the size so a stalled Welcome is
+                // attributable to an MTU mismatch rather than silent loss.
+                diagnosticEmitter(
+                    "warning",
+                    "notify rejected by stack",
+                    mapOf("address" to device.address, "fragmentSize" to bytes.size),
+                )
+            }
+            accepted
+        } catch (e: Exception) {
+            Log.e(TAG, "notifyFragment failed for ${device.address}", e)
+            false
+        }
+    }
 
     /** Cancel an in-flight connection to a central. */
     fun cancelConnection(device: BluetoothDevice) {
@@ -389,8 +474,17 @@ class PeripheralGattServer(
     private fun registerNotifyCharacteristic(uuid: UUID): BluetoothGattCharacteristic {
         val char = BluetoothGattCharacteristic(
             uuid,
+            // INDICATE, not NOTIFY: indications are ATT-confirmed, so the stack
+            // will not send the next fragment until the central confirms the
+            // previous one. That per-fragment flow control is what an
+            // unacknowledged NOTIFY lacks — a large multi-fragment message (an
+            // MLS Welcome) out-runs a slower central's receive buffer and loses
+            // a fragment every pass, so it never reassembles. With only
+            // INDICATE advertised, iOS subscribes for indications (it prefers
+            // NOTIFY when both are offered), and the CCCD classifier already
+            // accepts the 0x0002 enable value.
             BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
-                BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                BluetoothGattCharacteristic.PROPERTY_INDICATE,
             BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
         val cccd = BluetoothGattDescriptor(
@@ -444,6 +538,24 @@ class PeripheralGattServer(
                     listener.onCentralDisconnected(device, status)
                 }
             }
+        }
+
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            // A remote central (re)negotiated the ATT MTU on the connection IT
+            // opened to OUR GATT server. This callback is the ONLY place the
+            // peripheral/NOTIFY link's capacity is observable on the server
+            // side — without it the transport keeps sizing notifications for
+            // our central link to the peer and overflows this one, silently
+            // truncating/dropping the multi-fragment MLS Welcome on air.
+            // Surface the raw value as a diagnostic and the header-adjusted
+            // payload to the transport, which folds it into the per-peer MTU.
+            val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
+            diagnosticEmitter(
+                "info",
+                "peripheral_link_mtu",
+                mapOf("address" to device.address, "mtu" to mtu, "maxPayload" to maxPayload),
+            )
+            listener.onPeripheralMtuNegotiated(device, maxPayload)
         }
 
         override fun onCharacteristicReadRequest(
@@ -566,6 +678,10 @@ class PeripheralGattServer(
                     iterator.remove()
                 }
             }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            listener.onNotificationSent(device, status)
         }
 
         override fun onCharacteristicWriteRequest(

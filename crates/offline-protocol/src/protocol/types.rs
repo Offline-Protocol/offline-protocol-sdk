@@ -25,6 +25,24 @@ pub(crate) const WELCOME_LIFECYCLE_TTL_SECS: i64 = 300;
 pub(crate) const WELCOME_RETRY_JITTER_RATIO: f64 = 0.2;
 /// Timeout waiting for explicit internet send confirmation for welcome.
 pub(crate) const WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS: i64 = 10;
+/// Timeout waiting for a mesh (BLE / WiFi-Direct) welcome to be confirmed by
+/// the peer proving the session (probe / ack / welcome / decrypt). A mesh
+/// `send()` returning Ok only means the local stack accepted the bytes, not
+/// that the multi-fragment Welcome reassembled on the peer — so the lifecycle
+/// stays non-terminal and the retry queue re-sends the whole Welcome after this
+/// window, recovering from a lost fragment. Slightly longer than the internet
+/// timeout to allow a slow multi-fragment Welcome to assemble plus the probe
+/// round-trip before paying to re-fragment and re-send it.
+pub(crate) const WELCOME_MESH_CONFIRM_TIMEOUT_SECS: i64 = 15;
+/// Retry cadence for a Welcome that has no transport carrier at all (the peer is
+/// simply unreachable right now). A send is guaranteed to fail with no carrier,
+/// so we do NOT burn the speculative send/transition/event churn on it every
+/// retry tick — we park it and re-check on this slow interval instead. The
+/// primary recovery is event-driven (`on_neighbor_discovered` → re-arm fires the
+/// instant a carrier surfaces the peer); this poll is only a safety net for a
+/// carrier returning without a fresh discovery event, so it is deliberately far
+/// slower than the data-plane retry interval to keep an offline device quiet.
+pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
 /// Minimum interval between session reconciliation scans (list_sessions I/O).
 /// Keeps the expensive Keychain/Keystore I/O out of the hot path so that
 /// sendMessage() is not blocked by Mutex contention on every process tick.
@@ -363,6 +381,12 @@ pub(crate) mod storage_keys {
     pub const SCRUB_SECRET: &str = "scrub_secret";
     /// Key ID for the single scrub-secret entry.
     pub const SCRUB_SECRET_ID: &str = "current";
+    /// Key type for peers we are the both-create "owner" of and are awaiting a
+    /// group-aware decrypt from before confirming (see
+    /// [`crate::protocol::OfflineProtocol`]'s `both_create_awaiting_decrypt`).
+    /// Persisted so an owner restart mid-convergence cannot let a stale plaintext
+    /// probe/ack prematurely confirm and strand the peer on a divergent group.
+    pub const BOTH_CREATE_AWAITING_DECRYPT: &str = "both_create_awaiting_decrypt";
 }
 
 /// Protocol state.

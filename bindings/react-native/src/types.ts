@@ -705,6 +705,22 @@ export interface SecureSessionFailedEvent extends BaseEvent {
 }
 
 /**
+ * Convergence diagnostic event (1:1 MLS convergence instrumentation).
+ * Pure receiver-side breadcrumb for the Welcome receive / adopt / confirm
+ * path — carries no protocol effect. Surfaces stages the receiver otherwise
+ * emits nothing for (welcome reassembled, branch taken, decrypt landed).
+ */
+export interface ConvergenceDiagEvent extends BaseEvent {
+  type: 'convergence_diag';
+  /** Fixed stage label, e.g. 'welcome_received' | 'welcome_branch' | 'decrypt_success' */
+  stage: string;
+  /** Peer ID this breadcrumb concerns */
+  peer_id: string;
+  /** Free-form key=value context */
+  detail: string;
+}
+
+/**
  * Machine-readable reason codes for welcome delivery failures.
  */
 export type WelcomeReasonCode =
@@ -1141,6 +1157,7 @@ export type ProtocolEvent =
   | DiagnosticEvent
   | SecureSessionEstablishedEvent
   | SecureSessionFailedEvent
+  | ConvergenceDiagEvent
   | WelcomeSendAttemptedEvent
   | WelcomeSendSucceededEvent
   | WelcomeSendFailedEvent

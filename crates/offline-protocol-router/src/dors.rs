@@ -102,6 +102,37 @@ const TIE_EPSILON: f32 = 0.01;
 /// "we don't know the signal yet").
 const SIGNAL_SCORE_NO_DATA: f32 = 50.0;
 
+/// Demotion subtracted from the Internet transport's score to make it a strict
+/// *fallback* (only chosen when no mesh transport can reach the peer). Applied
+/// only when `prefer_online == false` and the message is not internet-preferred.
+/// Large enough to push Internet below every possible mesh score (max ≈ 125),
+/// so it ranks last while remaining the sole candidate for genuinely remote
+/// peers where no mesh transport is available. See `calculate_transport_score`.
+const INTERNET_FALLBACK_DEMOTION: f32 = 10_000.0;
+
+/// Recovers the real 0–125 quality score from a (possibly demoted) routing
+/// `total` for telemetry / display.
+///
+/// [`INTERNET_FALLBACK_DEMOTION`] is a pure *ranking* device: it pushes the
+/// Internet transport below every mesh score so selection only escalates to it
+/// as a last resort. That sentinel must never leak to app-facing telemetry
+/// (events, routing decisions, the UniFFI boundary) — a dashboard reading a
+/// "score" of ≈ -9900 for a remote peer is nonsense. Selection keeps the raw
+/// (negative) total internally; consumers that *display* a score call this.
+///
+/// The demotion is detectable by sign: a non-demoted total is always `>= 0`
+/// (it is `.max(0.0)`'d in `calculate_transport_score`), and a demoted Internet
+/// total is `real - INTERNET_FALLBACK_DEMOTION` with `real ∈ [0, ~125]`, so
+/// adding the demotion back recovers the real score exactly. Idempotent — safe
+/// to apply to an already-sanitized (non-negative) value.
+pub fn display_routing_score(raw_total: f32) -> f32 {
+    if raw_total < 0.0 {
+        (raw_total + INTERNET_FALLBACK_DEMOTION).max(0.0)
+    } else {
+        raw_total
+    }
+}
+
 /// Tie-break priority for transport selection when scores are equal or within TIE_EPSILON.
 /// Lower value = preferred. Order: Internet, WiFiDirect, BLE, Reticulum.
 ///
@@ -573,6 +604,15 @@ impl TransportSelector {
             }
 
             let score = self.calculate_transport_score(message, *transport_type, metrics);
+            // INVARIANT: `score.total` recorded here may be the *negative*
+            // fallback-demotion sentinel for a demoted Internet transport
+            // (prefer_online=false), not a real 0–125 quality score. The
+            // stability-window consumers (`is_stable_better` / `get_scores_in_window`)
+            // tolerate this by sign today (it makes "leave Internet for mesh"
+            // trivially allowed, which matches intent). Any FUTURE consumer that
+            // *aggregates* this history across transports (e.g. a global average)
+            // must first map entries through `display_routing_score`, or the
+            // sentinel will skew the result.
             self.record_score(*transport_type, score.total);
             scored_transports.push((*transport_type, score));
         }
@@ -617,6 +657,11 @@ impl TransportSelector {
         // Log all scored transports for observability.
         // Guard allocation behind level check to avoid Vec<String> on every call.
         if tracing::enabled!(tracing::Level::DEBUG) {
+            // These are the RAW totals, intentionally NOT passed through
+            // `display_routing_score`: a negative Internet total here is the
+            // fallback-demotion rank (prefer_online=false), and showing it raw is
+            // exactly what explains why a lower-quality mesh transport outranks it.
+            // Sanitizing here would hide the demotion and make selection look wrong.
             let scores_summary: Vec<_> = scored_transports
                 .iter()
                 .map(|(t, s)| format!("{:?}={:.1}", t, s.total))
@@ -813,7 +858,7 @@ impl TransportSelector {
         };
 
         let w = &profile.weights;
-        let total = (profile.base_score
+        let mut total = (profile.base_score
             + media_adjust
             + (signal_score * w.signal)
             + (proximity_score * w.proximity)
@@ -823,6 +868,25 @@ impl TransportSelector {
             + (reliability_score * w.reliability)
             + (load_score * w.load))
             .max(0.0);
+
+        // Internet-as-fallback. When the caller is not preferring online and the
+        // message is not internet-preferred (media/file chunks), demote Internet
+        // far below every mesh transport so DORS only escalates to it when a mesh
+        // send reports the peer unreachable (the fallback loop in
+        // TransportManager::send). This keeps a nearby peer on BLE/Wi-Fi-Direct —
+        // which an app-level relay bridge cannot reach when that peer is off the
+        // relay — while still leaving Internet as the sole candidate for a
+        // genuinely remote peer (no mesh transport available at all). The score
+        // goes negative here on purpose; selection only cares about relative
+        // order, and Internet must rank below mesh's 0–100 band. With
+        // `prefer_online == true` the historical internet-first behaviour is
+        // unchanged.
+        if transport_type == TransportType::Internet
+            && !self.config.prefer_online
+            && !prefers_internet
+        {
+            total -= INTERNET_FALLBACK_DEMOTION;
+        }
 
         TransportScore {
             signal: signal_score,
@@ -848,7 +912,24 @@ impl TransportSelector {
             return false;
         }
 
-        // Emergency bypass: if current transport has critical degradation, switch immediately
+        // Emergency bypass: if current transport has critical degradation, switch
+        // immediately to any reasonably scored candidate. `candidate_score` is the
+        // argmax score, so whenever Internet is fallback-demoted it is a
+        // non-negative mesh score (the negative sentinel can only be the argmax
+        // when Internet is the sole transport, and then `should_switch` is not
+        // reached), so the `> 10.0` floor never sees the sentinel.
+        //
+        // IMPORTANT behavioral note for prefer_online=false: when the ONLY
+        // alternative to a critically degraded mesh link is the demoted Internet,
+        // `best_transport` is still that mesh link (demoted Internet ranks below
+        // it), so `select_transport` returns early on `current == best_transport`
+        // BEFORE reaching this emergency check. Proactive mesh→Internet escalation
+        // is therefore intentionally delegated to the `send()` fallback loop (which
+        // escalates only when a mesh send returns a hard error), NOT driven from
+        // here. Consequence: a mesh link that is degraded yet still returns Ok from
+        // send() is not proactively abandoned for Internet — by design, to keep the
+        // offline-first preference. Do not read this bypass as a general mesh→
+        // Internet safety net under the default config.
         if self.is_emergency_switch_needed(current_transport) {
             return candidate_score > 10.0; // Any reasonably scored candidate is acceptable
         }
@@ -1702,6 +1783,98 @@ mod tests {
         assert_eq!(selected, TransportType::Internet);
     }
 
+    /// Internet is a *fallback* transport when prefer_online is false: a mesh
+    /// transport wins when available, Internet is only chosen when no mesh
+    /// transport is available (a genuinely remote peer), and an internet-
+    /// preferred (media) message keeps Internet on top.
+    #[test]
+    fn test_internet_is_fallback_when_not_prefer_online() {
+        // Default config => prefer_online = false.
+        let message = create_test_message();
+
+        let mut both = HashMap::new();
+        both.insert(TransportType::Internet, create_test_metrics(None, 0.0, 0));
+        both.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.1, 5));
+
+        // score_and_rank (drives the fallback order): BLE first, Internet last
+        // but still present as a fallback candidate.
+        let mut selector = TransportSelector::new();
+        let ranked = selector.score_and_rank(&message, &both);
+        assert_eq!(
+            ranked[0].0,
+            TransportType::BLE,
+            "mesh must outrank Internet when prefer_online = false (ranked: {ranked:?})",
+        );
+        assert!(
+            ranked.iter().any(|(t, _)| *t == TransportType::Internet),
+            "Internet must remain a candidate for fallback, just ranked last",
+        );
+        assert_eq!(
+            selector.select_transport(&message, &both),
+            Some(TransportType::BLE),
+            "primary selection must be mesh, not Internet",
+        );
+
+        // Only Internet available (remote peer): Internet must still be selected.
+        let mut internet_only = HashMap::new();
+        internet_only.insert(TransportType::Internet, create_test_metrics(None, 0.0, 0));
+        let mut remote_selector = TransportSelector::new();
+        assert_eq!(
+            remote_selector.select_transport(&message, &internet_only),
+            Some(TransportType::Internet),
+            "Internet must be selected when it is the only available transport",
+        );
+
+        // Media message (transport_preference = internet): Internet not demoted.
+        let mut media = create_test_message();
+        media
+            .metadata
+            .insert("transport_preference".to_string(), "internet".to_string());
+        let mut media_selector = TransportSelector::new();
+        assert_eq!(
+            media_selector.select_transport(&media, &both),
+            Some(TransportType::Internet),
+            "an internet-preferred (media) message must keep Internet on top",
+        );
+    }
+
+    /// `display_routing_score` must recover the real 0–125 quality score from the
+    /// negative fallback-demotion sentinel (so telemetry never leaks ≈ -9900),
+    /// be the identity for normal mesh scores, and be idempotent.
+    #[test]
+    fn test_display_routing_score_reverses_fallback_demotion() {
+        // A demoted Internet total (real score 42 minus the demotion) recovers to 42.
+        let demoted = 42.0 - INTERNET_FALLBACK_DEMOTION;
+        assert!(
+            demoted < 0.0,
+            "precondition: demotion makes the total negative"
+        );
+        assert!((display_routing_score(demoted) - 42.0).abs() < 1e-3);
+
+        // Normal mesh scores pass through untouched.
+        assert_eq!(display_routing_score(0.0), 0.0);
+        assert_eq!(display_routing_score(73.5), 73.5);
+        assert_eq!(display_routing_score(125.0), 125.0);
+
+        // Idempotent: applying it to an already-sanitized value is a no-op.
+        let once = display_routing_score(demoted);
+        assert_eq!(display_routing_score(once), once);
+
+        // And the live demotion path: an Internet-only selection still scores
+        // negative INTERNALLY, but display_routing_score sanitizes it to >= 0.
+        let selector = TransportSelector::new();
+        let message = create_test_message();
+        let metrics = create_test_metrics(None, 0.0, 0);
+        let raw = selector
+            .calculate_transport_score(&message, TransportType::Internet, &metrics)
+            .total;
+        assert!(
+            raw < 0.0,
+            "Internet is demoted negative under default config"
+        );
+        assert!(display_routing_score(raw) >= 0.0);
+    }
+
     #[test]
     fn test_hysteresis_prevents_switching() {
         let mut selector = TransportSelector::new();
@@ -2107,7 +2280,11 @@ mod tests {
         );
         for (tt, score) in &ranked {
             assert!(score.is_finite(), "Score for {:?} must be finite", tt);
-            assert!(*score >= 0.0, "Score for {:?} must be non-negative", tt);
+            // Internet is demoted to a negative fallback sentinel under the
+            // default (prefer_online = false) config; mesh transports stay >= 0.
+            if *tt != TransportType::Internet {
+                assert!(*score >= 0.0, "Score for {:?} must be non-negative", tt);
+            }
         }
         let scores: Vec<f32> = ranked.iter().map(|(_, s)| *s).collect();
         let sorted: Vec<f32> = {
@@ -2179,11 +2356,15 @@ mod tests {
                 "Missing metrics must not produce NaN for {:?}",
                 tt
             );
-            assert!(
-                !score.is_nan() && *score >= 0.0,
-                "Missing metrics must yield safe default score for {:?}",
-                tt
-            );
+            // Internet is demoted to a negative fallback sentinel under the
+            // default config; mesh transports stay >= 0.
+            if *tt != TransportType::Internet {
+                assert!(
+                    !score.is_nan() && *score >= 0.0,
+                    "Missing metrics must yield safe default score for {:?}",
+                    tt
+                );
+            }
         }
     }
 
@@ -2416,7 +2597,10 @@ mod tests {
         let mut metrics = create_test_metrics(None, 0.0, 0);
         metrics.bandwidth_bps = Some(5_000_000); // 5 Mbps
         let score = selector.calculate_transport_score(&message, TransportType::Internet, &metrics);
-        assert!(score.total.is_finite() && score.total >= 0.0);
+        // total is finite; under the default (prefer_online = false) config the
+        // Internet total is demoted negative (fallback), so we assert finiteness
+        // only. The sub-scores below are unaffected by the demotion.
+        assert!(score.total.is_finite());
         assert!(score.bandwidth >= 0.0 && score.bandwidth <= 100.0);
         assert!(score.reliability >= 0.0 && score.reliability <= 100.0);
     }
@@ -2511,11 +2695,15 @@ mod tests {
                 "total must be finite for {:?}",
                 transport_type
             );
-            assert!(
-                score.total >= 0.0,
-                "total must be non-negative for {:?}",
-                transport_type
-            );
+            // Internet is demoted to a negative fallback sentinel under the
+            // default config; mesh transports stay >= 0.
+            if transport_type != TransportType::Internet {
+                assert!(
+                    score.total >= 0.0,
+                    "total must be non-negative for {:?}",
+                    transport_type
+                );
+            }
             assert!(score.bandwidth >= 0.0 && score.bandwidth <= 100.0);
             assert!(score.congestion >= 0.0 && score.congestion <= 100.0);
         }
@@ -2867,10 +3055,19 @@ mod tests {
         // Verify all scores are finite and non-negative.
         for (label, score) in [("BLE", &ble), ("WiFiDirect", &wifi), ("Internet", &inet)] {
             assert!(
-                score.total.is_finite() && score.total >= 0.0,
-                "{label} score must be finite and non-negative, got {}",
+                score.total.is_finite(),
+                "{label} score must be finite, got {}",
                 score.total,
             );
+            // Internet is demoted to a negative fallback sentinel under the
+            // default config; mesh transports stay >= 0.
+            if label != "Internet" {
+                assert!(
+                    score.total >= 0.0,
+                    "{label} score must be non-negative, got {}",
+                    score.total,
+                );
+            }
         }
 
         // With good RSSI (-60) and 75% battery, BLE's energy-efficiency weighting

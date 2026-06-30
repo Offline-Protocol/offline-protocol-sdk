@@ -11,7 +11,7 @@ use crate::{Error, Result};
 use chrono::Utc;
 use offline_protocol_core::Message;
 use offline_protocol_router::{
-    DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector,
+    display_routing_score, DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector,
 };
 use offline_protocol_transport::{
     Error as TransportError, Transport, TransportMetrics, TransportStatus, TransportType,
@@ -264,8 +264,21 @@ impl TransportManager {
         reason_code: Option<RoutingReasonCode>,
         detailed_scores: Option<&[(TransportType, TransportScore)]>,
     ) -> RoutingDecision {
+        // Sanitize the internal fallback-demotion sentinel out of every score
+        // that leaves the engine. DORS keeps Internet's `total` negative to rank
+        // it last; telemetry/UniFFI consumers must see the real 0–125 quality
+        // score instead. This is the single chokepoint for all RoutingDecision
+        // emitters, so `winning_score` is also sanitized here defensively
+        // (idempotent for an already-positive value).
         let scores = match (self.routing_diagnostic, detailed_scores) {
-            (true, Some(detailed)) => detailed.to_vec(),
+            (true, Some(detailed)) => detailed
+                .iter()
+                .map(|(t, s)| {
+                    let mut s = s.clone();
+                    s.total = display_routing_score(s.total);
+                    (*t, s)
+                })
+                .collect(),
             _ => Vec::new(),
         };
         RoutingDecision {
@@ -273,7 +286,7 @@ impl TransportManager {
             phase,
             from,
             to,
-            winning_score,
+            winning_score: winning_score.map(display_routing_score),
             reason_code,
             scores,
         }
@@ -392,7 +405,13 @@ impl TransportManager {
             Some(d) => d.iter().map(|(t, s)| (*t, s.total)).collect(),
             None => self.selector.score_and_rank(message, &available),
         };
-        let scores: Vec<(String, f32)> = scored.iter().map(|(t, s)| (t.to_string(), *s)).collect();
+        // Sanitize the fallback-demotion sentinel out of the emitted scores (the
+        // `scored` vec itself keeps the raw totals — the fallback loop below
+        // relies on Internet ranking last).
+        let scores: Vec<(String, f32)> = scored
+            .iter()
+            .map(|(t, s)| (t.to_string(), display_routing_score(*s)))
+            .collect();
         self.emit_dors_event(Event::dors_score_updated(scores));
 
         self.emit_routing_decision(|| {
@@ -406,10 +425,12 @@ impl TransportManager {
                 detailed_slice,
             )
         });
+        // Telemetry-only; sanitize the fallback-demotion sentinel so the emitted
+        // selection score is the real 0–125 quality value, not the negative rank.
         let primary_score = scored
             .iter()
             .find(|(t, _)| *t == primary)
-            .map(|(_, s)| *s)
+            .map(|(_, s)| display_routing_score(*s))
             .unwrap_or(0.0);
         let selection_reason = if previous.is_none() {
             DorsReasonCode::InitialSelection

@@ -18,7 +18,7 @@ android {
         // builds does not obfuscate the JNA/uniffi bindings and kill the
         // mesh transport. See consumer-rules.pro for the rationale.
         consumerProguardFiles 'consumer-rules.pro'
-        
+
         ndk {
             abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
         }

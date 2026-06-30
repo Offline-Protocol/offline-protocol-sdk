@@ -193,14 +193,38 @@ impl OfflineProtocol {
 
             // Track if we need to flush pending messages and process pending decryption
             let mut should_flush = false;
+            // Owner side of a both-create race kept its own group; it must await a
+            // group-aware decrypt before confirming (see below).
+            let mut owner_keep = false;
+            // Adopter side: on a Welcome RETRANSMIT for a group we already adopted,
+            // re-send the encrypted confirm so a lost first confirm is retried in
+            // lockstep with the owner's retransmission until it converges.
+            let mut resend_confirm_on_retransmit = false;
             let sender_owned = sender.to_string();
             let group_id = welcome.group_id.as_str().to_string();
             let is_session = group_id.starts_with("session:");
             let mut error_reason: Option<String> = None;
+            // Receiver-side convergence instrumentation: prove the Welcome
+            // actually reassembled and reached MLS handling on THIS device.
+            // (Absent in logs => the Welcome never fully arrived — a transport
+            // problem; present => the problem is in adoption/confirm, not
+            // transport.) Emitted before taking the MLS lock.
+            let mut had_existing = false;
+            // NB: keep `detail` free of raw identifiers — the telemetry scrubber
+            // only hashes the named `peer_id` field, so anything embedded here
+            // ships in cleartext. `group_id` is `session:<localId>:<peerId>`, so
+            // it is deliberately omitted; the (hashed) peer_id already identifies
+            // the pair and `is_session` is the only non-identifying bit of value.
+            self.emit_event(Event::convergence_diag(
+                "welcome_received".to_string(),
+                sender_owned.clone(),
+                format!("is_session={}", is_session),
+            ));
 
             if let Some(mls) = self.mls_manager.clone() {
                 if let Ok(manager) = mls.read() {
                     let has_existing = manager.has_session(sender).unwrap_or(false);
+                    had_existing = has_existing;
 
                     if has_existing {
                         // Both sides created a session and exchanged Welcomes.
@@ -222,17 +246,56 @@ impl OfflineProtocol {
                                     should_flush = true;
                                 }
                                 Err(e) => {
-                                    warn!(error = %e, sender = %sender, "Failed to replace session");
-                                    error_reason = Some(e.to_string());
+                                    // Non-destructive adopt: if our session survived, the
+                                    // staging failure is a retransmitted Welcome we already
+                                    // adopted (the one-time key package is consumed). It is a
+                                    // harmless duplicate — drop it instead of erroring/bricking.
+                                    if manager.has_session(sender).unwrap_or(false) {
+                                        debug!(
+                                            error = %e,
+                                            sender = %sender,
+                                            "Duplicate Welcome after adopt; already converged, ignoring"
+                                        );
+                                        // Owner is still retransmitting → it hasn't
+                                        // decrypted our adoption proof yet. Re-send it.
+                                        resend_confirm_on_retransmit = true;
+                                    } else {
+                                        warn!(error = %e, sender = %sender, "Failed to replace session");
+                                        error_reason = Some(e.to_string());
+                                    }
                                 }
                             }
-                        } else {
+                        } else if self.welcome_lifecycles.contains_key(sender) {
                             info!(
                                 sender = %sender,
                                 local_id = %local_id,
-                                "Welcome-wins tiebreaker: keeping local session (local < remote)"
+                                "Welcome-wins tiebreaker: keeping local session (local < remote); \
+                                 awaiting group-aware decrypt before confirming our Welcome"
                             );
-                            should_flush = true;
+                            // Genuine both-create owner: we created our OWN group for this
+                            // peer AND sent a Welcome (hence an outbound welcome lifecycle
+                            // exists). Keep our group, but do NOT confirm our outbound
+                            // Welcome merely because we received the peer's — that is no
+                            // proof they adopted ours. Keep retransmitting until a decrypt
+                            // proves they adopted our group.
+                            owner_keep = true;
+                        } else {
+                            // NOT a both-create owner: we have no outbound welcome
+                            // lifecycle for this peer, so we never created our own group —
+                            // we joined THEIR group via an earlier Welcome. This is the
+                            // owner re-sending its Welcome because it has not yet observed
+                            // our confirm. Re-send the encrypted confirm so a lost first
+                            // confirm self-heals in lockstep with the owner's
+                            // retransmission. Critically, do NOT enter owner_keep: we are
+                            // the adopter, and gating on decrypt here (plus poisoning
+                            // both_create_awaiting_decrypt) would suppress our confirm and
+                            // strand the owner in Pending forever — the convergence bug.
+                            debug!(
+                                sender = %sender,
+                                local_id = %local_id,
+                                "Welcome retransmit for an already-adopted session; re-sending encrypted confirm"
+                            );
+                            resend_confirm_on_retransmit = true;
                         }
                     } else {
                         match manager.join_session(&welcome) {
@@ -247,6 +310,45 @@ impl OfflineProtocol {
                         }
                     }
                 }
+            }
+
+            // Owner side of a both-create race: record that this peer must prove
+            // it adopted our group via a group-aware decrypt before we confirm
+            // (and stop retransmitting). A plaintext probe/ack is not sufficient.
+            if owner_keep {
+                self.mark_both_create_awaiting_decrypt(&sender_owned);
+            }
+
+            // Receiver-side convergence instrumentation: which branch did this
+            // device take, and did adoption succeed? Decisive for the owner
+            // (iOS) side, which otherwise emits NOTHING on the owner_keep /
+            // resend_confirm / no-mls paths. Emitted after the MLS lock release.
+            {
+                let branch = if should_flush {
+                    "adopted"
+                } else if owner_keep {
+                    "owner_keep"
+                } else if resend_confirm_on_retransmit {
+                    "resend_confirm"
+                } else if error_reason.is_some() {
+                    "join_failed"
+                } else {
+                    "no_mls"
+                };
+                // `err_present` is a bool, not the raw error string: MLS error
+                // text can carry group/peer identifiers and `detail` is not
+                // scrubbed. The `join_failed` branch already flags the failure,
+                // and the scrubbed `SecureSessionFailed` event carries the reason.
+                self.emit_event(Event::convergence_diag(
+                    "welcome_branch".to_string(),
+                    sender_owned.clone(),
+                    format!(
+                        "had_existing={} branch={} err_present={}",
+                        had_existing,
+                        branch,
+                        error_reason.is_some()
+                    ),
+                ));
             }
 
             // Confirm session and process queued items after releasing the MLS lock
@@ -272,10 +374,22 @@ impl OfflineProtocol {
                             let _ = self.send_key_package_to(&sender_owned, false);
                         }
 
+                        // Proactively prove to the peer that we adopted ITS group.
+                        // The peer may be the both-create "owner", which confirms ONLY
+                        // on a group-aware decrypt from us (a plaintext probe/ack is
+                        // rejected by `can_confirm_from_source`); our session is
+                        // confirmed locally just above, so we can encrypt now. Without
+                        // this, a passive owner with no traffic to send never decrypts
+                        // anything from us, stays Pending, and the 1:1 connection never
+                        // completes. The marker is consumed on receipt (never shown).
+                        if is_session && self.config.encryption.enabled {
+                            self.send_session_confirm_encrypted(&sender_owned);
+                        }
+
                         // Emit secure session established event
                         if let Ok(state) = lock_shared_state(&self.shared_state) {
                             state.emit_event(Event::secure_session_established(
-                                sender_owned,
+                                sender_owned.clone(),
                                 group_id,
                                 is_session,
                                 false, // initiated_by_local is false - we received the Welcome
@@ -285,7 +399,7 @@ impl OfflineProtocol {
                     Err(e) => {
                         if let Ok(state) = lock_shared_state(&self.shared_state) {
                             state.emit_event(Event::secure_session_failed(
-                                sender_owned,
+                                sender_owned.clone(),
                                 format!("Failed to persist confirmation: {}", e),
                             ));
                         }
@@ -294,8 +408,18 @@ impl OfflineProtocol {
             } else if let Some(reason) = error_reason {
                 // Emit secure session failed event
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::secure_session_failed(sender_owned, reason));
+                    state.emit_event(Event::secure_session_failed(sender_owned.clone(), reason));
                 }
+            }
+
+            // Retransmit case: we already adopted the owner's group (session
+            // confirmed earlier), but it is still retransmitting its Welcome
+            // because it has not decrypted our adoption proof. Re-send the
+            // encrypted confirm in lockstep so a lost confirm self-heals. (The
+            // owner stops retransmitting — and we stop re-sending — once it
+            // confirms via decrypt.)
+            if resend_confirm_on_retransmit && is_session && self.config.encryption.enabled {
+                self.send_session_confirm_encrypted(&sender_owned);
             }
         }
     }
@@ -405,12 +529,34 @@ impl OfflineProtocol {
                     sender: sender_owned,
                     group_id,
                 } => {
+                    // A proactive adopter confirm carries no user payload — its only
+                    // job is to BE a group-aware decrypt so we (the owner) can confirm.
+                    // Confirm as normal below, then consume it so it never surfaces as
+                    // a chat message.
+                    let is_session_confirm = text == internal_prefixes::SESSION_CONFIRM_ENCRYPTED;
+                    // Convergence instrumentation: a group-aware decrypt landed.
+                    // This is exactly what the both-create owner waits on to
+                    // confirm its own Welcome — seeing it (with is_confirm=true)
+                    // means the adopter's proof arrived and decrypted.
+                    // `group_id` (= `session:<localId>:<peerId>`) is omitted: it
+                    // would leak both ids in cleartext through the unscrubbed
+                    // `detail`. The hashed `peer_id` already identifies the pair.
+                    self.emit_event(Event::convergence_diag(
+                        "decrypt_success".to_string(),
+                        sender_owned.clone(),
+                        format!("is_confirm={}", is_session_confirm),
+                    ));
+                    let surfaced = if is_session_confirm {
+                        Some(InternalMessageResult::Consumed)
+                    } else {
+                        Some(InternalMessageResult::Decrypted(text))
+                    };
                     if !self.can_confirm_from_source(&sender_owned, "decrypt_success") {
                         debug!(
                             sender = %sender_owned,
                             "Skipping decrypt-based confirmation until welcome send is at least attempted"
                         );
-                        Some(InternalMessageResult::Decrypted(text))
+                        surfaced
                     } else {
                         match self.confirm_session_state(&sender_owned, "decrypt_success") {
                             Ok(true) => {
@@ -431,7 +577,7 @@ impl OfflineProtocol {
                                 );
                             }
                         }
-                        Some(InternalMessageResult::Decrypted(text))
+                        surfaced
                     }
                 }
                 DecryptResult::Empty => {

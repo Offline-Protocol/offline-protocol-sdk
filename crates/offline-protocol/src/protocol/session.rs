@@ -4,7 +4,8 @@ use super::{
     internal_prefixes, lock_shared_state, OfflineProtocol, SessionState, WelcomeDeliveryState,
     WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS,
     RECONCILIATION_THROTTLE_MS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
-    WELCOME_RETRY_BATCH_SIZE, WELCOME_RETRY_JITTER_RATIO,
+    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_RETRY_BATCH_SIZE,
+    WELCOME_RETRY_JITTER_RATIO,
 };
 use crate::mls_observability::MlsOperationContext;
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
@@ -51,6 +52,10 @@ impl OfflineProtocol {
                 self.confirmed_sessions.remove(peer_id);
                 self.clear_confirmation_recovery_tracking(peer_id);
                 self.welcome_lifecycles.remove(peer_id);
+                // The MLS session is gone, so any both-create owner gate for this
+                // peer is stale; clear it (memory + storage) or it would block
+                // `welcome_received` confirmation on the next re-pairing.
+                self.clear_both_create_awaiting_decrypt(peer_id);
                 if let Err(err) = self.clear_session_state_entry(peer_id) {
                     warn!(
                         peer_id = %peer_id,
@@ -138,6 +143,7 @@ impl OfflineProtocol {
         if matches!(previous, SessionState::Confirmed) {
             self.confirmed_sessions.insert(peer_id.to_string());
             self.clear_confirmation_recovery_tracking(peer_id);
+            self.clear_both_create_awaiting_decrypt(peer_id);
             info!(
                 event = "session_state_transition",
                 session_or_group_id = %peer_id,
@@ -158,6 +164,15 @@ impl OfflineProtocol {
 
         self.confirmed_sessions.insert(peer_id.to_string());
         self.clear_confirmation_recovery_tracking(peer_id);
+        // Group-aware proof has arrived (decrypt), so we no longer need to gate
+        // confirmation on decrypt for this both-create peer.
+        self.clear_both_create_awaiting_decrypt(peer_id);
+        // The peer has proved the session, so the outbound Welcome — kept
+        // non-terminal so a lost fragment keeps being retried — is delivered.
+        // Mark it Sent so process_welcome_retry_queue stops re-sending it. Mesh
+        // has no transport-level delivery ack, so this session proof is the mesh
+        // equivalent of on_transport_send_confirmed.
+        self.mark_welcome_confirmed(peer_id, source_event);
         if source_event != "welcome_received" && source_event != "decrypt_success" {
             self.maybe_emit_local_session_established(
                 peer_id,
@@ -173,6 +188,59 @@ impl OfflineProtocol {
             "session_state_transition"
         );
         Ok(true)
+    }
+
+    /// Marks a non-terminal outbound welcome lifecycle as `Sent` once the peer
+    /// has proved the session (probe / ack / welcome / decrypt). The mesh
+    /// equivalent of [`Self::on_transport_send_confirmed`], which only fires for
+    /// Internet. No-op when there is no welcome lifecycle for `peer_id` (e.g. a
+    /// confirmation keyed by a group id rather than a 1:1 peer) or it is already
+    /// terminal, so it is safe to call from every confirmation path.
+    fn mark_welcome_confirmed(&mut self, peer_id: &str, source_event: &str) {
+        match self.welcome_lifecycles.get(peer_id).map(|r| r.state) {
+            // In flight / retried — fall through and mark Sent below.
+            Some(WelcomeDeliveryState::SendAttempted) | Some(WelcomeDeliveryState::Failed) => {}
+            // Parked, never actually sent (no carrier at send time) for a peer
+            // that converged over some other path. `Created -> Sent` is not a
+            // legal transition and there is nothing in flight to confirm, so drop
+            // the now-moot lifecycle (memory + storage) rather than leaving it to
+            // linger until the session is deleted.
+            Some(WelcomeDeliveryState::Created) => {
+                self.welcome_lifecycles.remove(peer_id);
+                if let Err(err) = self.clear_welcome_lifecycle_entry(peer_id) {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to clear parked welcome lifecycle on confirmation"
+                    );
+                }
+                return;
+            }
+            // Already terminal (Sent / Expired) or no lifecycle — nothing to do.
+            _ => return,
+        }
+        if let Some(record) = self.welcome_lifecycles.get_mut(peer_id) {
+            record.next_retry_at = None;
+            record.last_reason_code = None;
+            record.last_transport_error = None;
+        }
+        // transition_welcome_state persists the record and logs the transition.
+        if self
+            .transition_welcome_state(peer_id, WelcomeDeliveryState::Sent, source_event)
+            .is_err()
+        {
+            return;
+        }
+        if let Some(snapshot) = self.welcome_lifecycles.get(peer_id).cloned() {
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::welcome_send_succeeded(
+                    peer_id.to_string(),
+                    snapshot.welcome_message.id.as_str().to_string(),
+                    snapshot.group_id,
+                    snapshot.attempt,
+                ));
+            }
+        }
     }
 
     /// Ensures a session has an explicit persisted state entry.
@@ -455,7 +523,38 @@ impl OfflineProtocol {
         }
     }
 
+    /// Marks `peer_id` as a both-create owner gate — we kept our own group and
+    /// must observe a group-aware decrypt before confirming — and persists it so
+    /// an owner restart mid-convergence cannot let a stale plaintext probe/ack
+    /// confirm prematurely. Only writes storage on a genuine insert.
+    pub(super) fn mark_both_create_awaiting_decrypt(&mut self, peer_id: &str) {
+        if self
+            .both_create_awaiting_decrypt
+            .insert(peer_id.to_string())
+        {
+            self.persist_both_create_awaiting_decrypt(peer_id);
+        }
+    }
+
+    /// Clears the both-create owner gate for `peer_id` (it has converged) from
+    /// both memory and storage. Only writes storage on a genuine removal.
+    pub(super) fn clear_both_create_awaiting_decrypt(&mut self, peer_id: &str) {
+        if self.both_create_awaiting_decrypt.remove(peer_id) {
+            self.delete_both_create_awaiting_decrypt(peer_id);
+        }
+    }
+
     pub(super) fn can_confirm_from_source(&self, peer_id: &str, source_event: &str) -> bool {
+        // Both-create owner: we kept our own group and are waiting for the peer to
+        // prove it adopted *our* group. Only a successful decrypt is group-aware
+        // proof of that; a plaintext probe/ack proves only that the peer holds
+        // some session (possibly its own, pre-adoption group), so it must not
+        // confirm us or we would stop retransmitting and strand the peer.
+        if self.both_create_awaiting_decrypt.contains(peer_id) && source_event != "decrypt_success"
+        {
+            return false;
+        }
+
         if !matches!(
             source_event,
             "decrypt_success"
@@ -539,6 +638,39 @@ impl OfflineProtocol {
         self.try_send_welcome(recipient, "welcome_initial_send")
     }
 
+    /// Parks a Welcome that currently has no transport carrier: refresh the
+    /// carrier-relative TTL and schedule a slow re-check, WITHOUT consuming a
+    /// retry attempt, transitioning state, or emitting a `WelcomeSendAttempted`
+    /// event. A no-carrier send is a guaranteed failure, so re-attempting it at
+    /// the data-plane retry rate only churns storage I/O and app events while a
+    /// device is offline. The lifecycle stays in its current non-terminal state
+    /// (Created on the first send, Failed on a later retry) so the retry queue
+    /// re-polls it on [`WELCOME_NO_CARRIER_RETRY_SECS`]; `on_neighbor_discovered`
+    /// re-arms it immediately when a carrier surfaces the peer. Returns
+    /// `Ok(false)` (not sent).
+    fn park_welcome_no_carrier(&mut self, peer_id: &str) -> Result<bool> {
+        let snapshot = {
+            let Some(record) = self.welcome_lifecycles.get_mut(peer_id) else {
+                return Ok(false);
+            };
+            let now = Utc::now();
+            record.next_retry_at =
+                Some(now + ChronoDuration::seconds(WELCOME_NO_CARRIER_RETRY_SECS));
+            record.expires_at = now + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
+            record.last_reason_code = Some(crate::events::WelcomeReasonCode::TransportUnavailable);
+            record.last_transport_error = None;
+            record.clone()
+        };
+        self.persist_welcome_lifecycle_entry(&snapshot)?;
+        debug!(
+            peer_id = %peer_id,
+            state = snapshot.state.as_str(),
+            retry_in_secs = WELCOME_NO_CARRIER_RETRY_SECS,
+            "Welcome parked: no transport carrier, re-checking on slow interval"
+        );
+        Ok(false)
+    }
+
     pub(super) fn try_send_welcome(&mut self, peer_id: &str, source_event: &str) -> Result<bool> {
         let now = Utc::now();
         let mut record = self
@@ -554,7 +686,10 @@ impl OfflineProtocol {
             return Ok(false);
         }
 
-        if record.expires_at <= now {
+        // Only honor the TTL when a carrier actually exists: a Welcome that has
+        // never had a deliverable transport must not age out.
+        let carrier_available = !self.transport_manager.get_available_transports().is_empty();
+        if carrier_available && record.expires_at <= now {
             self.transition_welcome_state(peer_id, WelcomeDeliveryState::Expired, source_event)?;
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::welcome_send_expired(
@@ -569,6 +704,18 @@ impl OfflineProtocol {
                 crate::events::WelcomeReasonCode::RetryExhausted,
             );
             return Ok(false);
+        }
+
+        // No carrier at all: a send is guaranteed to fail, so do NOT burn the
+        // speculative attempt increment, the SendAttempted/Failed transitions
+        // (two persisted state changes + two info logs), and a
+        // `WelcomeSendAttempted` event on it every retry tick. Park the
+        // lifecycle on a slow carrier-relative interval instead and re-check
+        // later; `on_neighbor_discovered` re-arms it immediately when a carrier
+        // surfaces the peer. This keeps an offline device quiet rather than
+        // spinning storage I/O + app events at the data-plane retry rate.
+        if !carrier_available {
+            return self.park_welcome_no_carrier(peer_id);
         }
 
         record.attempt = record.attempt.saturating_add(1);
@@ -597,54 +744,148 @@ impl OfflineProtocol {
                             Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
                         })?;
 
-                if matches!(transport_used, Some(TransportType::Internet)) {
-                    // Internet send() only enqueues for platform polling. Keep lifecycle
-                    // non-terminal until explicit platform confirmation arrives.
-                    updated.next_retry_at = Some(
-                        Utc::now() + ChronoDuration::seconds(WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS),
-                    );
-                    updated.last_reason_code = None;
-                    updated.last_transport_error = None;
-                    self.welcome_lifecycles
-                        .insert(peer_id.to_string(), updated.clone());
-                    self.persist_welcome_lifecycle_entry(&updated)?;
-                    return Ok(false);
-                }
-
-                updated.next_retry_at = None;
+                // No transport's send() proves the peer reassembled and joined
+                // the group, so keep the lifecycle NON-TERMINAL until an explicit
+                // confirmation arrives and let the retry queue re-send on timeout.
+                //
+                //   - Internet send() only enqueues for platform polling; the
+                //     confirmation is on_transport_send_confirmed.
+                //   - A BLE / WiFi-Direct GATT WRITE_TYPE_NO_RESPONSE returning Ok
+                //     only means the local stack accepted the bytes. A single lost
+                //     fragment of the multi-fragment Welcome would otherwise leave
+                //     the sender believing the session exists while the peer holds
+                //     undecryptable ciphertext, with NO retry — permanently
+                //     bricking the pair. The mesh confirmation is the peer proving
+                //     the session (its probe / ack / welcome / decrypt), which marks
+                //     the welcome Sent via confirm_session_state.
+                let confirm_timeout_secs =
+                    if matches!(transport_used, Some(TransportType::Internet)) {
+                        WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS
+                    } else {
+                        WELCOME_MESH_CONFIRM_TIMEOUT_SECS
+                    };
+                updated.next_retry_at =
+                    Some(Utc::now() + ChronoDuration::seconds(confirm_timeout_secs));
                 updated.last_reason_code = None;
                 updated.last_transport_error = None;
                 self.welcome_lifecycles
                     .insert(peer_id.to_string(), updated.clone());
                 self.persist_welcome_lifecycle_entry(&updated)?;
-                self.transition_welcome_state(peer_id, WelcomeDeliveryState::Sent, source_event)?;
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::welcome_send_succeeded(
-                        peer_id.to_string(),
-                        updated.welcome_message.id.as_str().to_string(),
-                        updated.group_id,
-                        updated.attempt,
-                    ));
-                }
-                Ok(true)
+
+                // Seed the confirmation-probe scheduler for this pending peer so
+                // the SENDER actively reconciles instead of waiting passively.
+                //
+                // The Welcome is now in flight but unconfirmed. The sender's only
+                // built-in convergence path would otherwise be the receiver's
+                // single proactive encrypted confirm on first Welcome receipt — a
+                // single point of failure with no retry (a lost fragment, a
+                // not-yet-ready encryptor, or the retransmit/owner_keep path on
+                // the receiver all strand it). By marking a probe due now,
+                // `run_throttled_reconciliation` (whose `has_pending_work` gate is
+                // otherwise false on the sender, since it has no pending encrypted
+                // messages) starts emitting `SESSION_CONFIRM_PROBE`s. The peer —
+                // which holds the session — replies with `SESSION_CONFIRM_ACK`,
+                // confirming us and marking this Welcome `Sent`. The entry is
+                // dropped once confirmed (`clear_confirmation_recovery_tracking`)
+                // or once the peer is no longer pending (`kick`'s retain), so this
+                // adds no steady-state work after convergence.
+                self.confirmation_probe_due_at
+                    .insert(peer_id.to_string(), Utc::now());
+
+                Ok(false)
             }
             Err(err) => {
+                let no_carrier = Self::is_no_carrier_error(&err);
                 let reason = Self::map_welcome_reason_code(&err);
                 self.apply_welcome_send_failure(
                     peer_id,
                     reason,
                     Some(err.to_string()),
+                    no_carrier,
                     source_event,
                 )
             }
         }
     }
 
+    /// Re-arms a stalled or expired outbound Welcome when a peer becomes
+    /// reachable again, so a session that never converged while the peer was
+    /// offline gets a fresh delivery attempt over the now-available carrier.
+    ///
+    /// No-op when the peer's session is already confirmed, when there is no
+    /// Welcome lifecycle, or when the Welcome is already `Sent` or still
+    /// in-flight (`SendAttempted`). An `Expired` lifecycle is rebuilt from its
+    /// retained Welcome message — the MLS group is not torn down on expiry, so
+    /// the stored Welcome is still valid to re-send — while a `Created`/`Failed`
+    /// lifecycle has its budget and TTL reset and is retried immediately.
+    pub(super) fn rearm_welcome_for_peer(&mut self, peer_id: &str, source_event: &str) {
+        if self.confirmed_sessions.contains(peer_id) {
+            return;
+        }
+        let Some(record) = self.welcome_lifecycles.get(peer_id).cloned() else {
+            return;
+        };
+        match record.state {
+            WelcomeDeliveryState::Sent | WelcomeDeliveryState::SendAttempted => {}
+            WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed => {
+                if let Some(entry) = self.welcome_lifecycles.get_mut(peer_id) {
+                    entry.attempt = 0;
+                    entry.next_retry_at = Some(Utc::now());
+                    entry.last_reason_code = None;
+                    entry.last_transport_error = None;
+                    entry.expires_at =
+                        Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
+                }
+                if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to re-arm welcome on peer reachability"
+                    );
+                }
+            }
+            WelcomeDeliveryState::Expired => {
+                // Expired is terminal in the lifecycle state machine, so rebuild
+                // from the retained Welcome message (upsert permits overwrite
+                // from Expired) before re-sending.
+                let welcome_message = record.welcome_message.clone();
+                let group_id = record.group_id.clone();
+                if let Err(err) =
+                    self.upsert_welcome_lifecycle(peer_id, &group_id, welcome_message, source_event)
+                {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to rebuild expired welcome on peer reachability"
+                    );
+                    return;
+                }
+                if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to re-arm expired welcome on peer reachability"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Records a Welcome send failure and decides whether to retry or expire.
+    ///
+    /// `no_carrier` is `true` when the failure was simply that no transport
+    /// carrier exists yet (vs. a present carrier that failed mid-send). A
+    /// no-carrier failure must NOT age the Welcome: it neither counts toward
+    /// the retry budget nor lets the TTL expire it, because the peer is merely
+    /// unreachable for now and will be retried once a carrier appears. The
+    /// speculative attempt increment from [`Self::try_send_welcome`] is rolled
+    /// back so a long offline period leaves the real-delivery budget intact.
     pub(super) fn apply_welcome_send_failure(
         &mut self,
         peer_id: &str,
         reason: crate::events::WelcomeReasonCode,
         transport_error: Option<String>,
+        no_carrier: bool,
         source_event: &str,
     ) -> Result<bool> {
         let mut updated = self
@@ -661,7 +902,11 @@ impl OfflineProtocol {
         }
 
         let max_attempts = self.config.reliability.retry.max_retries.max(1);
-        let should_expire = updated.attempt >= max_attempts || updated.expires_at <= Utc::now();
+        // A no-carrier failure never expires the Welcome: neither the retry
+        // budget nor the TTL applies while the peer is simply unreachable. Only
+        // a carrier-backed failure (SendFailed / Timeout) ages it toward expiry.
+        let should_expire =
+            !no_carrier && (updated.attempt >= max_attempts || updated.expires_at <= Utc::now());
         if should_expire {
             let terminal_reason = crate::events::WelcomeReasonCode::RetryExhausted;
             {
@@ -711,13 +956,32 @@ impl OfflineProtocol {
             return Ok(false);
         }
 
-        let delay_ms = self.compute_welcome_retry_delay_ms(peer_id, updated.attempt);
-        let retry_at = Utc::now() + ChronoDuration::milliseconds(delay_ms as i64);
+        // A no-carrier failure (the carrier raced away after the pre-send check,
+        // or an async transport-failed callback with no carrier) re-checks on the
+        // slow no-carrier interval rather than the data-plane backoff: there is
+        // nothing to deliver over until a carrier returns, and `try_send_welcome`
+        // parks subsequent no-carrier ticks cheaply anyway.
+        let retry_at = if no_carrier {
+            Utc::now() + ChronoDuration::seconds(WELCOME_NO_CARRIER_RETRY_SECS)
+        } else {
+            let delay_ms = self.compute_welcome_retry_delay_ms(peer_id, updated.attempt);
+            Utc::now() + ChronoDuration::milliseconds(delay_ms as i64)
+        };
 
         {
             let record = self.welcome_lifecycles.get_mut(peer_id).ok_or_else(|| {
                 Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
             })?;
+            // Roll back the speculative attempt increment from try_send_welcome
+            // for a no-carrier failure so the retry budget stays reserved for
+            // real delivery attempts over an available carrier, and push the TTL
+            // forward so a never-deliverable Welcome does not age out — the TTL
+            // clock is carrier-relative, not creation-relative.
+            if no_carrier {
+                record.attempt = record.attempt.saturating_sub(1);
+                record.expires_at =
+                    Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
+            }
             record.last_reason_code = Some(reason);
             record.last_transport_error = transport_error;
             record.next_retry_at = Some(retry_at);
@@ -900,6 +1164,19 @@ impl OfflineProtocol {
         SessionStateError::classify(error).to_welcome_reason_code()
     }
 
+    /// True when a send failed because no transport carrier exists yet, as
+    /// opposed to a present-but-unhealthy carrier (`SendFailed`) or a
+    /// sent-but-unconfirmed timeout. A no-carrier failure means the peer is
+    /// simply unreachable right now, so the Welcome must be kept alive and
+    /// retried rather than counted against its budget — see
+    /// [`Self::apply_welcome_send_failure`].
+    pub(super) fn is_no_carrier_error(error: &Error) -> bool {
+        matches!(
+            error,
+            Error::Transport(offline_protocol_transport::Error::TransportNotAvailable(_))
+        )
+    }
+
     pub(super) fn session_ready_context_for_source(source_event: &str) -> MlsOperationContext {
         match source_event {
             "confirmation_ack_received" | "confirmation_probe_received" | "decrypt_success" => {
@@ -927,6 +1204,13 @@ impl OfflineProtocol {
             .welcome_lifecycles
             .iter()
             .filter_map(|(peer_id, record)| {
+                // Skip peers whose session is already confirmed: the welcome is
+                // delivered, mark_welcome_confirmed should have marked it Sent,
+                // and re-sending would be wasted bandwidth (defensive against any
+                // keying mismatch that left the lifecycle non-terminal).
+                if self.confirmed_sessions.contains(peer_id) {
+                    return None;
+                }
                 if matches!(record.state, WelcomeDeliveryState::SendAttempted)
                     && record.next_retry_at.is_some_and(|retry_at| retry_at <= now)
                 {
@@ -942,6 +1226,9 @@ impl OfflineProtocol {
                 &peer_id,
                 crate::events::WelcomeReasonCode::Timeout,
                 Some("Welcome send confirmation timed out".to_string()),
+                // A confirm timeout means the Welcome was sent over a carrier;
+                // this is not a no-carrier failure, so it ages normally.
+                false,
                 "welcome_confirm_timeout",
             )?;
         }
@@ -950,8 +1237,17 @@ impl OfflineProtocol {
             .welcome_lifecycles
             .iter()
             .filter_map(|(peer_id, record)| {
-                if matches!(record.state, WelcomeDeliveryState::Failed)
-                    && record.next_retry_at.is_some_and(|retry_at| retry_at <= now)
+                if self.confirmed_sessions.contains(peer_id) {
+                    return None;
+                }
+                // Failed = a normal retry-due Welcome. Created with a due
+                // next_retry_at = a no-carrier-parked Welcome (see
+                // `park_welcome_no_carrier`): a fresh Created entry has
+                // next_retry_at == None, so only parked ones match here.
+                if matches!(
+                    record.state,
+                    WelcomeDeliveryState::Failed | WelcomeDeliveryState::Created
+                ) && record.next_retry_at.is_some_and(|retry_at| retry_at <= now)
                 {
                     return Some(peer_id.clone());
                 }

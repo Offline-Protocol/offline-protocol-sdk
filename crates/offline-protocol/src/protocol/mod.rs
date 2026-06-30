@@ -120,6 +120,20 @@ pub struct OfflineProtocol {
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
+    /// Peers for which we are the both-create "owner" (kept our own session
+    /// group on the lexicographic tiebreak) and are still awaiting a
+    /// *group-aware* proof that the peer adopted our group. While a peer is in
+    /// this set, only `decrypt_success` may confirm the session — a plaintext
+    /// confirmation probe/ack is NOT group-aware (it only proves the peer holds
+    /// *some* session, possibly its own pre-adoption group) and must not be
+    /// allowed to stop our Welcome retransmission, or the peer could be left
+    /// stranded on a divergent group. Persisted (see
+    /// `restore_both_create_awaiting_decrypt`) so an owner restart mid-convergence
+    /// keeps the gate, rather than letting a stale plaintext probe/ack confirm
+    /// prematurely. Mutate only via `mark_both_create_awaiting_decrypt` /
+    /// `clear_both_create_awaiting_decrypt` to keep memory and storage in sync.
+    both_create_awaiting_decrypt: std::collections::HashSet<String>,
+
     /// Sink for MLS lifecycle telemetry.
     mls_event_emitter: Arc<dyn MlsEventEmitter>,
 
@@ -286,6 +300,7 @@ impl OfflineProtocol {
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
+            both_create_awaiting_decrypt: std::collections::HashSet::new(),
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),
             mls_event_rate_limiter: MlsEventRateLimiter::default(),
             // The pre-install scrubber uses `TelemetryConfig::default()` —
@@ -374,6 +389,7 @@ impl OfflineProtocol {
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
             self.restore_welcome_lifecycles()?;
+            self.restore_both_create_awaiting_decrypt();
             Ok(())
         })();
 
@@ -715,6 +731,11 @@ impl OfflineProtocol {
         // Flush any pending outbox messages destined for this peer
         self.flush_outbox_for_peer(peer_id);
 
+        // A Welcome that stalled or expired while this peer was unreachable now
+        // has a fresh delivery opportunity over the carrier that surfaced this
+        // peer — re-arm it. No-op when there is no pending Welcome for the peer.
+        self.rearm_welcome_for_peer(peer_id, "peer_rediscovered");
+
         // Only send key package if encryption is enabled and auto key exchange is on
         if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
             return;
@@ -1052,6 +1073,12 @@ impl OfflineProtocol {
         self.confirmed_sessions.remove(peer_id);
         self.clear_confirmation_recovery_tracking(peer_id);
         self.welcome_lifecycles.remove(peer_id);
+        // Drop the both-create owner gate too (memory + storage). A leaked gate
+        // entry would make `can_confirm_from_source` reject every non-decrypt
+        // confirmation source — including `welcome_received` — on the NEXT
+        // session with this peer, re-stranding it in Pending (and surviving
+        // restart via `restore_both_create_awaiting_decrypt`).
+        self.clear_both_create_awaiting_decrypt(peer_id);
         self.clear_session_state_entry(peer_id)?;
         self.clear_welcome_lifecycle_entry(peer_id)?;
         Ok(())

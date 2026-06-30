@@ -106,6 +106,33 @@ jobs:
       - name: Run pytest
         run: pytest bindings/python/tests/ -v
 
+  android-unit-tests:
+    name: Android Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ubuntu-latest ships an Android SDK, but provision it explicitly so the
+      # toolchain (and license acceptance) doesn't drift out from under us.
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # Runs the RN Android module's JVM unit tests (InboundFragmentBuffer,
+      # OutboundFragmentQueue, the GATT CCCD/long-read helpers, MeshController,
+      # ...) via a standalone harness, since the module can't build on its own.
+      # See bindings/react-native/android-ci-harness/README.md.
+      - name: Android unit tests
+        working-directory: bindings/react-native/android-ci-harness
+        run: gradle :offlineprotocol:testDebugUnitTest --no-daemon --stacktrace
+
   coverage:
     name: Code Coverage
     if: github.event_name == 'push'

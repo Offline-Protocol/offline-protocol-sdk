@@ -2,10 +2,10 @@
 
 use super::{
     storage_keys, OfflineProtocol, PendingMessage, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::{Error, Result};
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::LamportClock;
 use offline_protocol_mls::MlsManager;
 use std::sync::{Arc, RwLock};
@@ -380,8 +380,11 @@ impl OfflineProtocol {
                     if matches!(
                         record.last_reason_code,
                         Some(crate::events::WelcomeReasonCode::RetryExhausted)
-                    ) || record.expires_at <= Utc::now()
-                    {
+                    ) {
+                        // Only genuine retry exhaustion (a present carrier that
+                        // kept failing) is terminal here. A stale TTL alone must
+                        // NOT expire a no-carrier Welcome on restart — the TTL
+                        // clock is carrier-relative and is refreshed below.
                         record.state = WelcomeDeliveryState::Expired;
                         warn!(
                             event = "welcome_lifecycle_repaired",
@@ -405,6 +408,25 @@ impl OfflineProtocol {
                         );
                     }
                     self.persist_welcome_lifecycle_entry(&record)?;
+                }
+                // The TTL clock is carrier-relative: a Welcome must not be
+                // restored already-expired after an offline period. Restart the
+                // window for any non-terminal lifecycle whose TTL has lapsed so
+                // it gets a fresh chance once a carrier (or the peer) reappears.
+                if matches!(record.state, WelcomeDeliveryState::Failed)
+                    && record.expires_at <= Utc::now()
+                {
+                    record.expires_at =
+                        Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
+                    self.persist_welcome_lifecycle_entry(&record)?;
+                    warn!(
+                        event = "welcome_lifecycle_repaired",
+                        session_or_group_id = %peer_id,
+                        repair_action = "ttl_refreshed_carrier_relative",
+                        state = record.state.as_str(),
+                        attempt = record.attempt,
+                        "welcome_lifecycle_repaired"
+                    );
                 }
                 if matches!(
                     record.state,
@@ -483,6 +505,57 @@ impl OfflineProtocol {
             info!(
                 count = self.blocked_users.len(),
                 "Restored blocked users from storage"
+            );
+        }
+    }
+
+    // ========================================================================
+    // BOTH-CREATE OWNER GATE PERSISTENCE
+    // ========================================================================
+
+    /// Persists a both-create owner-gate entry (value-less; the key is the peer).
+    pub(crate) fn persist_both_create_awaiting_decrypt(&self, peer_id: &str) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.store(storage_keys::BOTH_CREATE_AWAITING_DECRYPT, peer_id, &[]) {
+            warn!(peer_id = %peer_id, error = %e, "Failed to persist both-create owner gate");
+        }
+    }
+
+    /// Deletes a both-create owner-gate entry once the peer has converged.
+    pub(crate) fn delete_both_create_awaiting_decrypt(&self, peer_id: &str) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::BOTH_CREATE_AWAITING_DECRYPT, peer_id) {
+            warn!(peer_id = %peer_id, error = %e, "Failed to delete both-create owner gate");
+        }
+    }
+
+    /// Restores the both-create owner gate from storage on startup, so an owner
+    /// that restarted mid-convergence keeps requiring a group-aware decrypt
+    /// before confirming a still-pending peer. Stale entries for already-confirmed
+    /// peers are harmless (confirmation short-circuits) and are cleared on the
+    /// next confirm.
+    pub(crate) fn restore_both_create_awaiting_decrypt(&mut self) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        let peer_ids = match storage.list_keys(storage_keys::BOTH_CREATE_AWAITING_DECRYPT) {
+            Ok(keys) => keys,
+            Err(e) => {
+                warn!(error = %e, "Failed to list both-create owner gate from storage");
+                return;
+            }
+        };
+        for peer_id in &peer_ids {
+            self.both_create_awaiting_decrypt.insert(peer_id.clone());
+        }
+        if !self.both_create_awaiting_decrypt.is_empty() {
+            info!(
+                count = self.both_create_awaiting_decrypt.len(),
+                "Restored both-create owner gate from storage"
             );
         }
     }

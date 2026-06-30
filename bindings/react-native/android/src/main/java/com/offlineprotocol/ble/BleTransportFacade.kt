@@ -133,6 +133,56 @@ class BleTransportFacade(
          */
         private const val MAX_DRAIN_ITERATIONS_PER_CALL = 32
         private const val BACKPRESSURE_RETRY_MS = 50L
+        /** Max time the per-peer write gate ([writeInFlight]) stays closed
+         *  before the next send is allowed regardless of completion callback.
+         *
+         *  The fast path is onCharacteristicWrite releasing the gate the
+         *  instant the stack accepts the next write. But for
+         *  WRITE_TYPE_NO_RESPONSE that callback is stack-dependent and on many
+         *  devices never fires — observed on-device as the gate clearing only
+         *  via this timeout. So this is NOT a rare-glitch watchdog; it is the
+         *  steady-state inter-write pace whenever the callback is absent. Keep
+         *  it small so a missing callback doesn't throttle throughput, but
+         *  above the few ms a write actually occupies the stack so the next
+         *  write doesn't out-run it into ERROR_GATT_WRITE_REQUEST_BUSY (201).
+         *  An occasional 201 here still self-heals via the backpressure retry. */
+        private const val WRITE_GATE_WATCHDOG_MS = 30L
+        /** Per-peer gate hold for the peripheral INDICATE (notify) egress: the
+         *  safety-net timeout before the next indication is allowed absent a
+         *  completion callback.
+         *
+         *  Unlike the central WRITE_TYPE_NO_RESPONSE path, the notify path has a
+         *  RELIABLE completion signal — the message characteristic is an
+         *  INDICATION (ATT-confirmed), so onNotificationSent fires on the
+         *  central's confirmation (real delivery) and that is the fast path that
+         *  releases the gate. This watchdog is therefore a true fallback, not the
+         *  steady-state pace, so it is deliberately LONGER than
+         *  [WRITE_GATE_WATCHDOG_MS]: an indication confirmation needs at least one
+         *  connection interval plus the central's processing (commonly 30–50ms+),
+         *  and a 30ms watchdog would routinely pre-empt the confirmation, re-drive
+         *  into a stack that rejects a second outstanding indication, and churn
+         *  re-enqueues — partly defeating the per-fragment flow control INDICATE
+         *  exists to provide. A genuinely lost confirmation costs at most this
+         *  long per fragment (≈15 fragments stays well under the reassembly TTL
+         *  and the mesh welcome-confirm timeout). */
+        private const val NOTIFY_GATE_WATCHDOG_MS = 250L
+        /** Minimum spacing between two completion-driven fragment sends to the
+         *  same link.
+         *
+         *  The write gate's fast path ([onWriteCompleted]) drains the next
+         *  fragment the instant the local stack signals completion
+         *  (onCharacteristicWrite / onNotificationSent). But for a peripheral
+         *  NOTIFY that completion fires when the notification leaves OUR
+         *  controller, NOT when the central (e.g. an iOS device) has drained it
+         *  from its receive buffer — so back-to-back notifies out-run a slower
+         *  central and it silently drops fragments mid-burst. A small multi-
+         *  fragment message (a few fragments) survives; a large one (an MLS
+         *  Welcome, ~15 fragments) deterministically loses a fragment every
+         *  pass and never reassembles. Spacing completion-driven sends by ~one
+         *  BLE connection interval lets the peer drain between notifications.
+         *  Tiny relative to a message's lifetime (15 fragments ≈ 0.3s) and
+         *  well under the reassembly TTL. */
+        private const val INTER_FRAGMENT_PACING_MS = 20L
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
@@ -278,6 +328,8 @@ class BleTransportFacade(
                 ) = this@BleTransportFacade.learnRouteFromMessage(messageJson, neighborId, neighborAddress)
                 override fun drainAndSendFragments() =
                     this@BleTransportFacade.drainAndSendFragments()
+                override fun onWriteCompleted(address: String) =
+                    this@BleTransportFacade.onWriteCompleted(address)
                 override fun handleInboundFragment(address: String, data: ByteArray) =
                     this@BleTransportFacade.handleReceivedData(data, address)
                 override fun connectToDevice(device: BluetoothDevice) =
@@ -333,9 +385,17 @@ class BleTransportFacade(
                     // `on_peer_lost`. All that remains is the facade-side
                     // staged entry keyed by BLE address (non-empty in the
                     // edge case where `onPeerMtuNegotiated` landed but
-                    // the device-id read never completed).
+                    // the device-id read never completed) plus the
+                    // per-device MTU slots, both cleared below.
+                    //
+                    // Asymmetry (by design): this drops the peer's MTU state
+                    // wholesale even if a peripheral/notify link to the same
+                    // peer is still alive — whether a central give-up should
+                    // imply peer loss is a protocol-level question left out of
+                    // scope here. A surviving link self-heals: its next inbound
+                    // fragment re-stages the MTU via onPeripheralMtuNegotiated.
                     if (shuttingDown) return
-                    dropStagedPeerMtu(address)
+                    dropStagedPeerMtu(address, peerId)
                 }
             },
             diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
@@ -372,20 +432,39 @@ class BleTransportFacade(
     private val connections = MeshConnectionRegistry()
     private val lastSeenRssi = ConcurrentHashMap<String, Short>()
 
-    // Per-address staging map for negotiated ATT payload sizes. Populated
-    // from [CentralGattClient.Host.onPeerMtuNegotiated] (which reposts to
-    // main before touching this map) and drained in
-    // [CentralGattClient.Host.onDeviceIdResolved] once the reverse GATT
-    // read has mapped the address to a stable device id — at that point
-    // we flush into Rust via `protocol.bleSetPeerMtu` so the fragmenter
-    // can size outbound chunks per peer instead of using the 185-byte
-    // fallback. Entries are removed on successful flush (so a reconnect
-    // cannot observe a stale value) and on disconnect alongside the
-    // matching `bleClearPeerMtu` call. Main-thread only — every access
-    // is guarded by [assertMainThread], and the type is a plain `HashMap`
-    // to make the discipline visible rather than silently tolerate cross-
-    // thread writes.
+    // Per-address negotiated ATT payload for the CENTRAL link — the
+    // connection WE opened to the peer's GATT server. Populated from
+    // [CentralGattClient.Host.onPeerMtuNegotiated] and flushed once
+    // [CentralGattClient.Host.onDeviceIdResolved] maps the address to a stable
+    // device id. The Rust core stores ONE MTU per peer, so the value flushed
+    // is min(this, the peripheral-link payload below) — see [flushPeerMtu].
+    // Entries persist until link teardown (they are inputs to the min, not
+    // one-shot), and are cleared in [dropStagedPeerMtu] / on stop. Main-thread
+    // only — every access is guarded by [assertMainThread], and the type is a
+    // plain `HashMap` to make the discipline visible.
     private val peerMaxPayloads = HashMap<String, Int>()
+    // Per-address negotiated ATT payload for the PERIPHERAL/NOTIFY link — the
+    // connection the peer opened to OUR GATT server, reported by
+    // [PeripheralGattServer.Listener.onPeripheralMtuNegotiated]. A multi-
+    // fragment message (e.g. an MLS Welcome) sized for the central link but
+    // egressed as a peripheral notify would overflow this link and be
+    // truncated/dropped on air; folding this into the per-peer MTU via min()
+    // is the offline-convergence fix. Cleared when the peripheral link drops
+    // (in [handleCentralDisconnectedOnMain]) so the central MTU is restored.
+    // Main-thread only.
+    private val peripheralMaxPayloads = HashMap<String, Int>()
+    // Per-DEVICE-ID negotiated ATT payloads, one slot per direction. A peer can
+    // be reachable over two links with DIFFERENT BLE addresses (iOS uses distinct
+    // connection handles per direction), so the central and peripheral payloads
+    // must be combined by device identity, not by a single address — otherwise a
+    // late renegotiation on one link would flush an MTU unbounded by the other and
+    // the notify egress overflows it (the offline 1:1 Welcome stall this fix
+    // targets). The per-address maps above are the deferral buffer for a payload
+    // negotiated before the device id resolves; [flushPeerMtu] promotes them into
+    // these per-device slots and mins across THESE. Cleared per-direction on that
+    // link's teardown. Main-thread only.
+    private val centralPayloadByDevice = HashMap<String, Int>()
+    private val peripheralPayloadByDevice = HashMap<String, Int>()
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
@@ -683,7 +762,19 @@ class BleTransportFacade(
     private var bytesReceived: Long = 0
     private var fragmentsSent: Long = 0
     private var fragmentsReceived: Long = 0
-    
+
+    // Per-peer BLE write gate. Android 13+ (API 33) rejects a second
+    // writeCharacteristic on the same connection with
+    // ERROR_GATT_WRITE_REQUEST_BUSY (201) while one write is still
+    // outstanding — even for WRITE_TYPE_NO_RESPONSE — so the drain loop's
+    // back-to-back writes used to self-collide and silently drop a
+    // multi-fragment message. We allow at most one outstanding write per BLE
+    // address and release it from [onWriteCompleted] (the onCharacteristicWrite
+    // callback). The value is the elapsedRealtime() the write was issued, used
+    // as a watchdog so a lost completion callback cannot wedge a peer forever.
+    // Main-thread only (every accessor runs under assertMainThread).
+    private val writeInFlight = HashMap<String, Long>()
+
     // MARK: - TransportManager Implementation
     
     private fun emitDiagnostic(level: String, message: String, context: Map<String, Any?> = emptyMap()) {
@@ -892,6 +983,15 @@ class BleTransportFacade(
         // a stale value from the prior session before the new
         // handshake stages its own MTU.
         peerMaxPayloads.clear()
+        peripheralMaxPayloads.clear()
+        centralPayloadByDevice.clear()
+        peripheralPayloadByDevice.clear()
+        // The per-peer write gate is otherwise self-healing across a restart
+        // (watchdogs fire within the gate window and the stale-check covers a
+        // fast restart since elapsedRealtime is monotonic), but clear it here to
+        // match the documented "drop prior-session state" intent and remove the
+        // cross-session reasoning burden.
+        writeInFlight.clear()
         centralClient.clearAll()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
@@ -1927,36 +2027,96 @@ class BleTransportFacade(
     private fun currentConnectionCount(): Int = connections.connectionCount()
 
     /**
-     * Flushes a staged negotiated-MTU value into the Rust transport keyed by
-     * [deviceId]. Called from both the MTU-first-then-deviceId path (the
-     * normal handshake order, triggered via
-     * [CentralGattClient.Host.onDeviceIdResolved]) and the
-     * deviceId-first-then-MTU path (triggered from
-     * [CentralGattClient.Host.onPeerMtuNegotiated] when the address already
-     * has a resolved identifier). Idempotent: if no staged value exists the
-     * call is a no-op and the Rust fragmenter falls back to the 185-byte
-     * floor for that peer.
+     * Recomputes and flushes the effective per-peer ATT payload into the Rust
+     * transport keyed by [deviceId]. The core stores ONE MTU per peer but a
+     * peer can be reachable over two links with different MTUs — the central
+     * link WE opened ([peerMaxPayloads]) and the peripheral/NOTIFY link the
+     * peer opened to our GATT server ([peripheralMaxPayloads]). A single
+     * fragment stream must fit BOTH, so we flush the **minimum** of whatever
+     * is currently known. Without this, a message sized for the (larger)
+     * central link but egressed as a notify overflows the peripheral link and
+     * is truncated/dropped on air — the offline 1:1 Welcome-delivery stall.
      *
-     * On successful flush the staged entry is removed so that a reconnect
-     * on the same BLE address cannot observe a stale value before the new
-     * handshake stages its own MTU. If the controller later renegotiates
-     * mid-link (rare), [CentralGattClient.Host.onPeerMtuNegotiated] re-
-     * stages and re-flushes from scratch. Main-thread only.
+     * The two links can use DIFFERENT BLE addresses for the same peer (iOS uses
+     * distinct connection handles per direction) and Rust is keyed by device id,
+     * so the min MUST be taken per DEVICE, not per address: a single call sees
+     * only one link's [address], so it promotes that address's staged value into
+     * the matching per-device direction slot ([centralPayloadByDevice] /
+     * [peripheralPayloadByDevice]) and mins across those. This accumulates both
+     * directions across the two links' separate flushes, so a late renegotiation
+     * on one link can no longer drop the bound the other imposed.
+     *
+     * Called whenever either link's MTU is (re)negotiated, when the device id
+     * resolves ([CentralGattClient.Host.onDeviceIdResolved]), and when a link
+     * tears down (to restore the surviving link's MTU). If neither direction has
+     * a value the Rust entry is cleared so the fragmenter reverts to its
+     * 185-byte floor rather than retaining a dead link's value. Idempotent and
+     * main-thread only. The per-address staged values are NOT removed on flush
+     * (they are inputs to the min); link-teardown paths clear the dropped
+     * direction's per-device slot explicitly.
      */
     private fun flushPeerMtu(address: String, deviceId: String) {
         assertMainThread("flushPeerMtu")
-        val staged = peerMaxPayloads[address] ?: return
+        // Promote this link's staged (per-address) payload into the per-DEVICE
+        // direction slot. On asymmetric-address peers each flush sees only its own
+        // link's address, so both directions accumulate across the two links'
+        // separate flushes; on a symmetric (single-address) peer both promote
+        // together. Promotion only sets — never clears — so a flush via one link
+        // cannot wipe the bound the other imposed.
+        peerMaxPayloads[address]?.let { centralPayloadByDevice[deviceId] = it }
+        peripheralMaxPayloads[address]?.let { peripheralPayloadByDevice[deviceId] = it }
+
+        val central = centralPayloadByDevice[deviceId]
+        val peripheral = peripheralPayloadByDevice[deviceId]
+        val effective = listOfNotNull(central, peripheral).minOrNull()
+        if (effective == null) {
+            // Both directions gone — drop the Rust entry so the fragmenter falls
+            // back to the floor instead of keeping a stale per-peer size, and the
+            // now-empty per-device slots.
+            centralPayloadByDevice.remove(deviceId)
+            peripheralPayloadByDevice.remove(deviceId)
+            try {
+                protocol.bleClearPeerMtu(deviceId)
+            } catch (e: Exception) {
+                Log.w(TAG, "bleClearPeerMtu failed for $deviceId", e)
+            }
+            return
+        }
+        // A link that negotiated BELOW the fragment floor is a real offline-
+        // failure case: Rust rejects a sub-floor MTU and reverts to the 185-byte
+        // floor (see `set_peer_mtu`), which is LARGER than this link can carry, so
+        // a multi-fragment notify can still overflow. Rare on modern stacks (both
+        // platforms request the BLE-5 max) but it is exactly the legacy/quirky-peer
+        // population, so surface it to Metro instead of failing silently. (Honoring
+        // a sub-floor notify fragment size is a deeper fragmenter change tracked
+        // separately.)
+        if (effective < MAX_FRAGMENT_SIZE) {
+            emitDiagnostic(
+                "warning",
+                "BLE link negotiated below fragment floor; notify may overflow",
+                mapOf(
+                    "deviceId" to deviceId,
+                    "effectivePayload" to effective,
+                    "floor" to MAX_FRAGMENT_SIZE,
+                ),
+            )
+        }
         try {
-            protocol.bleSetPeerMtu(deviceId, staged.toUInt())
-            peerMaxPayloads.remove(address)
+            protocol.bleSetPeerMtu(deviceId, effective.toUInt())
             emitDiagnostic(
                 "info",
                 "BLE per-peer MTU flushed to Rust",
-                mapOf("address" to address, "deviceId" to deviceId, "maxPayload" to staged),
+                mapOf(
+                    "address" to address,
+                    "deviceId" to deviceId,
+                    "centralPayload" to (central ?: -1),
+                    "peripheralPayload" to (peripheral ?: -1),
+                    "effectivePayload" to effective,
+                ),
             )
         } catch (e: Exception) {
-            // Leave the staged entry in place on failure so the next
-            // flush opportunity (re-entry via onPeerMtuNegotiated or
+            // Leave the staged entries in place on failure so the next
+            // flush opportunity (re-entry via either link's negotiation or
             // onDeviceIdResolved) can retry without losing the value.
             Log.w(TAG, "bleSetPeerMtu failed for $deviceId", e)
             emitDiagnostic(
@@ -1981,13 +2141,23 @@ class BleTransportFacade(
      * [handleCentralDisconnectedOnMain] for the bug this invariant
      * exists to prevent.
      *
-     * [address] may be null on paths where we only know the device
-     * id, in which case this is a no-op. Main-thread only.
+     * [address] may be null on paths where we only know the device id; the
+     * per-device direction slots keyed by [deviceId] are still cleared.
+     * Main-thread only.
      */
-    private fun dropStagedPeerMtu(address: String?) {
+    private fun dropStagedPeerMtu(address: String?, deviceId: String?) {
         assertMainThread("dropStagedPeerMtu")
         if (address != null) {
             peerMaxPayloads.remove(address)
+            peripheralMaxPayloads.remove(address)
+        }
+        // Also clear the per-device direction slots [flushPeerMtu] promotes into,
+        // or a stale value would survive this address's teardown and skew the min
+        // on the peer's next link. Callers that drop the whole peer (blePeerLost)
+        // pass the device id so both directions are cleared.
+        if (deviceId != null) {
+            centralPayloadByDevice.remove(deviceId)
+            peripheralPayloadByDevice.remove(deviceId)
         }
     }
 
@@ -2081,7 +2251,7 @@ class BleTransportFacade(
             outboundQueue.removeAll(peerId)
             // Facade-only staged drop; the Rust-side MTU entry is cleared
             // by `protocol.blePeerLost` below via `on_peer_lost`.
-            dropStagedPeerMtu(address)
+            dropStagedPeerMtu(address, peerId)
             meshController.registerDisconnection(peerId)
             refreshSelfMetrics()
 
@@ -2193,6 +2363,22 @@ class BleTransportFacade(
                 // Maintain FIFO ordering: if this recipient already has
                 // fragments waiting, enqueue instead of sending directly.
                 if (outboundQueue.enqueueIfBlocked(recipientId, data)) {
+                    // Backpressure against the write gate: once this peer's
+                    // queue is backed up, stop pulling more fragments out of
+                    // the Rust core (bleGetNextFragment is a destructive pop)
+                    // into the bounded per-peer queue. The write gate paces
+                    // sends to ~1 fragment / WRITE_GATE_WATCHDOG_MS when the
+                    // completion callback is absent, which is far slower than
+                    // this loop can pull; without this stop the loop spins the
+                    // whole backlog into the queue, overflows maxPerPeer, and
+                    // OutboundFragmentQueue.enqueue discards the in-flight
+                    // message. Leaving the backlog in Rust keeps delivery
+                    // lossless — the scheduled re-drain below resumes once
+                    // flush() has drained the queue back down.
+                    if (outboundQueue.isBackedUp(recipientId)) {
+                        hitBackpressure = true
+                        break
+                    }
                     continue
                 }
 
@@ -2214,6 +2400,43 @@ class BleTransportFacade(
             mainHandler.post { drainAndSendFragments() }
         } else if (hitBackpressure && outboundQueue.totalCount() > 0) {
             mainHandler.postDelayed({ drainAndSendFragments() }, BACKPRESSURE_RETRY_MS)
+        }
+    }
+
+    /**
+     * Fast-path release of the per-peer BLE write gate when the stack actually
+     * fires onCharacteristicWrite for the outstanding write, draining the next
+     * fragment immediately. This callback is unreliable for
+     * WRITE_TYPE_NO_RESPONSE (often never fires), so it is only the fast path —
+     * the gate is also released by the self-paced fallback scheduled in
+     * sendFragmentData. Without the gate the drain loop issues writeCharacteristic
+     * calls back-to-back and Android 13+ rejects the concurrent ones with
+     * ERROR_GATT_WRITE_REQUEST_BUSY (201), silently dropping fragments.
+     */
+    fun onWriteCompleted(address: String) {
+        assertMainThread("onWriteCompleted")
+        // Address-keyed, not per-write: a stale onCharacteristicWrite for an
+        // earlier write that fires after the watchdog/stale-check already advanced
+        // the gate to a newer write on the same address will clear the NEWER
+        // write's gate. Android's write callback carries no per-op token, so
+        // completion cannot be correlated to a specific write. The worst case is a
+        // single ERROR_GATT_WRITE_REQUEST_BUSY (201) on that newer write, which
+        // self-heals via the caller's re-enqueue + BACKPRESSURE_RETRY — no data loss.
+        writeInFlight.remove(address)
+        if (state == TransportState.RUNNING) {
+            // Pace the next completion-driven send by one BLE connection
+            // interval instead of draining immediately. onNotificationSent /
+            // onCharacteristicWrite signal that OUR controller accepted the
+            // op, not that the peer has drained it — firing the next notify
+            // instantly out-runs a slower central (iOS) and drops fragments
+            // mid-burst, so a large multi-fragment Welcome never reassembles.
+            // The brief spacing lets the peer keep up; small messages are
+            // unaffected in practice.
+            mainHandler.postDelayed({
+                if (state == TransportState.RUNNING) {
+                    drainAndSendFragments()
+                }
+            }, INTER_FRAGMENT_PACING_MS)
         }
     }
 
@@ -2298,6 +2521,80 @@ class BleTransportFacade(
         return null
     }
 
+    /**
+     * Reply to a peer that connected to OUR GATT server (we are its peripheral)
+     * by notifying the message characteristic over the connection it opened and
+     * subscribed to — the reliable egress for asymmetric mesh links, used in
+     * preference to a reverse central writeCharacteristic that may vanish on a
+     * half-open link. Shares the per-peer [writeInFlight] gate with the central
+     * write path so notifications stay serialised (one outstanding per peer), but
+     * paces on the INDICATE-aware [NOTIFY_GATE_WATCHDOG_MS] fallback — the fast
+     * path is onNotificationSent firing on the indication confirmation.
+     * Main-thread only.
+     */
+    private fun sendViaNotify(recipientId: String, address: String, data: ByteArray): Boolean {
+        assertMainThread("sendViaNotify")
+        val server = peripheralGattServer ?: return false
+
+        // Serialise to one outstanding indication per peer (same gate as the
+        // central write path) so we don't out-run the stack's one-op-at-a-time
+        // limit. The stale threshold is the INDICATE-aware watchdog: a deferred
+        // fragment keeps waiting until onNotificationSent releases the gate or
+        // the (longer) fallback elapses, rather than racing the confirmation.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val inFlightSince = writeInFlight[address]
+            if (inFlightSince != null) {
+                if (android.os.SystemClock.elapsedRealtime() - inFlightSince < NOTIFY_GATE_WATCHDOG_MS) {
+                    if (logThrottler.shouldLog("notify_gated_$recipientId", intervalMs = 5000)) {
+                        Log.d(TAG, "Deferring notify to $recipientId: prior notify still in flight")
+                    }
+                    return false
+                }
+                writeInFlight.remove(address)
+            }
+        }
+
+        val device = try {
+            bluetoothAdapter?.getRemoteDevice(address)
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "Cannot resolve device for notify to $recipientId ($address)", e)
+            null
+        } ?: return false
+
+        if (!server.notifyFragment(device, data)) {
+            if (logThrottler.shouldLog("notify_failed_$recipientId", intervalMs = 2000)) {
+                Log.w(TAG, "Failed to notify BLE fragment for $recipientId")
+                emitDiagnostic("warning", "Failed to notify BLE fragment", mapOf("recipientId" to recipientId))
+            }
+            return false
+        }
+
+        bytesSent += data.size
+        fragmentsSent++
+        meshController.markPeerActive(recipientId)
+        meshController.markPeerActive(deviceId)
+
+        // Hold the per-peer gate. The fast path is onNotificationSent firing on
+        // the INDICATE confirmation (real delivery) -> onWriteCompleted, which
+        // releases the gate and paces the next fragment by one connection
+        // interval. This watchdog only re-drives if that callback is lost; it is
+        // longer than the central path's (see [NOTIFY_GATE_WATCHDOG_MS]) so it
+        // does not pre-empt the confirmation round-trip and churn busy-rejects.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val stamp = android.os.SystemClock.elapsedRealtime()
+            writeInFlight[address] = stamp
+            mainHandler.postDelayed({
+                if (writeInFlight[address] == stamp) {
+                    writeInFlight.remove(address)
+                    if (state == TransportState.RUNNING) {
+                        drainAndSendFragments()
+                    }
+                }
+            }, NOTIFY_GATE_WATCHDOG_MS)
+        }
+        return true
+    }
+
     private fun sendFragmentData(recipientId: String, data: ByteArray): Boolean {
         // Every call site (drainAndSendFragments, pollAndSendFragments, the
         // OutboundFragmentQueue.flush callback) runs on main already, but
@@ -2312,7 +2609,47 @@ class BleTransportFacade(
         // Find GATT client for recipient
         val address = resolveTargetAddress(recipientId)
         val gatt = address?.let { connections.getGatt(it) }
-        
+
+        // Asymmetric-link reply: if this peer reached US as a central on our GATT
+        // server and subscribed to the message characteristic, reply over THAT
+        // connection (the one it opened and is actively waiting on) via a
+        // peripheral notify, instead of a reverse central writeCharacteristic.
+        // A central NO_RESPONSE write returns SUCCESS into a reverse link that may
+        // be absent or half-open, and the bytes are silently dropped on air (no
+        // status 201, no error) — so the central path "succeeds" forever while the
+        // peer, never getting our reply, retransmits and eventually gives up. This
+        // is the dominant offline failure for a peer that connected to us.
+        //
+        // Resolve the notify egress by PEER IDENTITY, not just `address`: the
+        // address we hold for the peer (the central link WE opened to it,
+        // addressForDevice) can differ from the address it subscribed under (the
+        // link IT opened to our GATT server) — iOS uses distinct handles per
+        // direction. So if the resolved address isn't the subscribed one, fall back
+        // to any subscribed central that maps back to this recipient. Without this
+        // the notify path silently never engages for the very peers it exists for.
+        val notifyAddress = peripheralGattServer?.let { server ->
+            if (address != null && server.isSubscribed(address)) {
+                address
+            } else {
+                server.subscribedAddresses().firstOrNull { subscribed ->
+                    connections.deviceIdForAddress(subscribed) == recipientId
+                }
+            }
+        }
+        if (notifyAddress != null) {
+            if (logThrottler.shouldLog("reply_via_notify_$recipientId", intervalMs = 5000)) {
+                Log.i(TAG, "Replying to $recipientId via peripheral notify (asymmetric link) addr=$notifyAddress")
+                emitDiagnostic("info", "BLE reply via peripheral notify", mapOf(
+                    "recipientId" to recipientId,
+                    "notifyAddress" to notifyAddress,
+                    "resolvedAddress" to (address ?: "null"),
+                    "matchedByIdentity" to (notifyAddress != address).toString(),
+                    "fragmentSize" to data.size,
+                ))
+            }
+            return sendViaNotify(recipientId, notifyAddress, data)
+        }
+
         // Until the remote has ack'd our CCCD write, the return path is not
         // verified and the BLE stack may still be executing the setup ops
         // (deviceId read → identity read → writeDescriptor). Issuing a write
@@ -2352,7 +2689,28 @@ class BleTransportFacade(
             }
             return false
         }
-        
+
+        // Serialise to a single outstanding write per peer (see [writeInFlight]).
+        // On API 33+ a concurrent writeCharacteristic returns
+        // ERROR_GATT_WRITE_REQUEST_BUSY (201) and the fragment is lost, so
+        // defer (return false → drainAndSendFragments re-enqueues) until the
+        // prior write's onCharacteristicWrite releases the gate. A gate older
+        // than the watchdog is cleared so a lost callback cannot wedge us.
+        // `address` is non-null here: `gatt` is `address?.let { ... }` and we
+        // returned above when `gatt == null`, so Kotlin smart-casts it.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val inFlightSince = writeInFlight[address]
+            if (inFlightSince != null) {
+                if (android.os.SystemClock.elapsedRealtime() - inFlightSince < WRITE_GATE_WATCHDOG_MS) {
+                    if (logThrottler.shouldLog("write_gated_$recipientId", intervalMs = 5000)) {
+                        Log.d(TAG, "Deferring write to $recipientId: prior write still in flight")
+                    }
+                    return false
+                }
+                writeInFlight.remove(address)
+            }
+        }
+
         //  Validate connection state before attempting to send
         if (gatt.device.bondState == BluetoothDevice.BOND_NONE) {
             // Device is not bonded - this might be okay for BLE, but log it
@@ -2430,6 +2788,35 @@ class BleTransportFacade(
         fragmentsSent++
         meshController.markPeerActive(recipientId)
         meshController.markPeerActive(deviceId)
+
+        // Hold the per-peer write gate. onCharacteristicWrite releases it when
+        // it fires — but for WRITE_TYPE_NO_RESPONSE that completion callback is
+        // stack-dependent and on many devices never fires at all. Without a
+        // fallback that strands every fragment after the first: the gate set
+        // here would only ever clear on the next *attempted* send, and nothing
+        // reliably re-attempts, so a multi-fragment message delivers fragment 1
+        // and then stalls. So self-pace — schedule a re-drain after the
+        // watchdog window that releases the gate and pumps the next fragment,
+        // making delivery independent of the callback. Gated on API 33+ to
+        // match the serialise check above; older stacks queue writes fine.
+        // `address` is non-null here: `gatt` is `address?.let { ... }` and we
+        // returned above when `gatt == null`, so Kotlin smart-casts it.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val stamp = android.os.SystemClock.elapsedRealtime()
+            writeInFlight[address] = stamp
+            mainHandler.postDelayed({
+                // Only act if THIS write is still the outstanding one.
+                // onCharacteristicWrite or a newer write may have already moved
+                // the gate on; clearing it then would let the next write race an
+                // in-flight one into status 201.
+                if (writeInFlight[address] == stamp) {
+                    writeInFlight.remove(address)
+                    if (state == TransportState.RUNNING) {
+                        drainAndSendFragments()
+                    }
+                }
+            }, WRITE_GATE_WATCHDOG_MS)
+        }
         return true
     }
     
@@ -2446,11 +2833,13 @@ class BleTransportFacade(
             // single-threaded decision is race-free — no lock is required.
             val resolvedSender = connections.deviceIdForAddress(address)
             val hasPendingForAddress = pendingInbound.hasPending(address)
-            val queued = resolvedSender == null || hasPendingForAddress
-            if (queued) {
+            // Inline the queue-vs-direct condition (rather than a `val queued`)
+            // so Kotlin can smart-cast `resolvedSender` to non-null after this
+            // guard returns: smart-casting tracks the inline `== null` disjunct
+            // here, but NOT a null check stored in a separate Boolean `val`.
+            if (resolvedSender == null || hasPendingForAddress) {
                 pendingInbound.enqueue(address, data)
-                val senderId: String? = resolvedSender
-                if (senderId == null) {
+                if (resolvedSender == null) {
                     if (logThrottler.shouldLog("queue_pending_$address")) {
                         Log.d(TAG, "Queued fragment while awaiting device ID for $address")
                         emitDiagnostic(
@@ -2507,7 +2896,8 @@ class BleTransportFacade(
 
             // Device ID is already resolved and no earlier bytes are waiting
             // — process directly. Kotlin smart-casts `resolvedSender` to
-            // non-null here because the `queued` branch above returns.
+            // non-null here: the `resolvedSender == null` disjunct in the guard
+            // above returns, so reaching this point proves it is non-null.
             val resolvedSenderId: String = resolvedSender
 
             lastSeenRssi[address]?.toInt()?.let { observedRssi ->
@@ -2848,6 +3238,27 @@ class BleTransportFacade(
             }
         }
 
+        override fun onPeripheralMtuNegotiated(device: BluetoothDevice, maxPayload: Int) {
+            // Fired on the GATT-server binder thread when a central renegotiates
+            // the MTU on the link it opened to us. Repost to main to touch the
+            // staging maps and the connection registry without racing the
+            // handshake state machine, mirroring onPeerMtuNegotiated.
+            if (shuttingDown) return
+            mainHandler.post {
+                if (shuttingDown) return@post
+                assertMainThread("onPeripheralMtuNegotiated.stage")
+                val address = device.address
+                peripheralMaxPayloads[address] = maxPayload
+                // Flush now if the peer's device id is already resolved (via our
+                // central link's device-id read); otherwise onDeviceIdResolved →
+                // flushPeerMtu picks up this staged peripheral payload later.
+                val deviceId = connections.deviceIdForAddress(address)
+                if (deviceId != null) {
+                    flushPeerMtu(address, deviceId)
+                }
+            }
+        }
+
         override fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray) {
             if (shuttingDown) return
             Log.i(TAG, "MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
@@ -2863,6 +3274,24 @@ class BleTransportFacade(
             mainHandler.post {
                 if (shuttingDown) return@post
                 handleReceivedData(bytes, address)
+            }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            if (shuttingDown) return
+            // Our peripheral notify to this central completed — release the
+            // per-peer write gate and pump the next fragment, exactly like
+            // onCharacteristicWrite does for the central write path. Makes
+            // multi-fragment notify replies event-paced (fast) instead of
+            // waiting on the 30ms watchdog for every fragment.
+            val address = device.address
+            // Diagnostic: proves the stack actually transmitted the notification
+            // (status 0 = GATT_SUCCESS). If "Replying via notify" appears but this
+            // never does, the notify is stuck in the stack queue / not going OTA.
+            Log.i(TAG, "Notification flushed to $address status=$status")
+            mainHandler.post {
+                if (shuttingDown) return@post
+                onWriteCompleted(address)
             }
         }
 
@@ -2933,9 +3362,13 @@ class BleTransportFacade(
         // RSSI cached to speed up reconnection. Any other status is a real
         // failure and we tear the peer state down.
         //
-        // MTU state invariant: this handler MUST NOT touch the Rust-side
-        // `peer_mtus` entry for the peer, and MUST NOT touch the facade
-        // staging map either. This function runs on a peripheral-role
+        // MTU state invariant: this handler MUST NOT clear or demote the
+        // CENTRAL-owned `peer_mtus` value or its staging slot
+        // (`peerMaxPayloads`). It MAY drop the peripheral/NOTIFY-link slot
+        // (`peripheralMaxPayloads`) — that link IS this connection — and
+        // re-flush the recomputed min, which only ever RAISES the per-peer
+        // MTU back toward the central value (see the clean-disconnect block
+        // below). This function runs on a peripheral-role
         // disconnect (a remote central disconnected from our GATT
         // server). The `peer_mtus[deviceId]` entry is owned by our
         // *central-role* link to the same peer, populated via
@@ -2957,6 +3390,22 @@ class BleTransportFacade(
         // `peer_mtus` via `on_peer_lost`, which is correct for a path
         // that *also* drops the peer from the Rust `peers` map.
         val isCleanDisconnect = status == 0 || status == 19
+        // The peripheral/NOTIFY link to this central is gone. Drop its payload
+        // and, on a clean disconnect (peer likely returns, deviceId mapping
+        // kept), recompute the per-peer MTU from the surviving central link —
+        // restoring it from any min() demotion the notify link imposed. On a
+        // non-clean disconnect the teardown below calls blePeerLost (drops
+        // peer_mtus wholesale) + dropStagedPeerMtu, so we defer to that path.
+        if (isCleanDisconnect && peripheralMaxPayloads.remove(address) != null) {
+            connections.deviceIdForAddress(address)?.let { peerId ->
+                // Drop the per-device peripheral slot too, or the recompute would
+                // re-min against the dead notify link's (smaller) bound. With it
+                // gone, flushPeerMtu restores the per-peer MTU from the surviving
+                // central link's per-device slot.
+                peripheralPayloadByDevice.remove(peerId)
+                flushPeerMtu(address, peerId)
+            }
+        }
         if (!isCleanDisconnect) {
             lastSeenRssi.remove(address)
             connections.deviceIdForAddress(address)?.let { peerId ->
@@ -2970,7 +3419,7 @@ class BleTransportFacade(
                 // `blePeerLost` above already dropped the Rust-side MTU
                 // entry via `on_peer_lost`; only the facade-side staged
                 // slot (keyed by BLE address) still needs clearing here.
-                dropStagedPeerMtu(address)
+                dropStagedPeerMtu(address, peerId)
                 meshController.registerDisconnection(peerId)
                 refreshSelfMetrics()
                 connections.removeIdentifiersForAddress(address)

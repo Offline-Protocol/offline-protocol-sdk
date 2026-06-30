@@ -110,13 +110,29 @@ impl GroupManager {
     pub fn delete_group(&self, group_id: &GroupId) -> Result<()> {
         let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
 
-        if let Ok(Some(mut group)) = MlsGroup::load(self.provider.storage(), &mls_group_id) {
-            group.delete(self.provider.storage()).map_err(|e| {
-                MlsError::Storage(StorageError::DeleteFailed(format!(
-                    "Failed to delete group from provider storage: {:?}",
-                    e
-                )))
-            })?;
+        match MlsGroup::load(self.provider.storage(), &mls_group_id) {
+            Ok(Some(mut group)) => {
+                group.delete(self.provider.storage()).map_err(|e| {
+                    MlsError::Storage(StorageError::DeleteFailed(format!(
+                        "Failed to delete group from provider storage: {:?}",
+                        e
+                    )))
+                })?;
+            }
+            // No group at this id — nothing to clean up.
+            Ok(None) => {}
+            // We could not load the group to delete its provider-side state
+            // (epoch keypairs, secrets); that state may now leak. Warn rather
+            // than abort and still drop the marker below: callers such as
+            // `join_group_replacing` deliberately rely on `delete_group` not
+            // failing here once the one-time key package is already consumed.
+            Err(e) => {
+                warn!(
+                    group_id = %group_id,
+                    error = ?e,
+                    "delete_group: could not load group to clean provider state; dropping marker only"
+                );
+            }
         }
 
         let key_type = StorageKeyType::GroupState.as_str();
@@ -231,6 +247,65 @@ impl GroupManager {
         self.save_group(group_id, &group)?;
 
         debug!(group_id = %group_id, "Joined group via Welcome");
+        Ok(group)
+    }
+
+    /// Joins a group from a Welcome, replacing any existing group at the same
+    /// `group_id`. **Non-destructive on the common failure (a duplicate
+    /// Welcome); best-effort — NOT atomic — on the rare storage failure.**
+    ///
+    /// Staging the incoming Welcome (`StagedWelcome::new_from_welcome`) is the
+    /// step that consumes the one-time key package, so it is the natural failure
+    /// point: if the key package is unavailable — e.g. a retransmitted Welcome we
+    /// already adopted, or a first-contact key-package race — staging returns
+    /// `Err` **before** we touch the existing group, which is therefore left
+    /// completely intact. This makes both-create adoption idempotent: a duplicate
+    /// Welcome is a safe no-op rather than a re-brick, the case this method exists
+    /// to handle.
+    ///
+    /// Caveat — once staging succeeds the swap is **not atomic**. We delete the
+    /// prior group (to avoid orphaning its old-leaf epoch encryption keypairs,
+    /// which are keyed by `(group_id, epoch, leaf_index)`; the adopted group
+    /// installs at a different leaf and so would not overwrite them) and then call
+    /// `into_group`, which performs several sequential, non-transactional storage
+    /// writes. If one of those fails (e.g. a Keychain/Keystore write error), the
+    /// old group is already gone and the new one is absent — a lost session. The
+    /// key package is spent by then, so the same Welcome cannot simply be retried;
+    /// recovery is a fresh key-package exchange. The caller distinguishes this
+    /// "lost group" outcome from a benign duplicate by observing `has_session`
+    /// (false here, true for a duplicate) and surfaces it as a session failure.
+    pub fn join_group_replacing(&self, welcome: Welcome, group_id: &GroupId) -> Result<MlsGroup> {
+        let group_config = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
+
+        // Stage first — non-destructive failure point (consumes the key package).
+        // A failure here leaves the existing group untouched (benign duplicate).
+        let staged = StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)
+            .map_err(|e| MlsError::WelcomeProcessing(format!("Failed to stage welcome: {}", e)))?;
+
+        // Staging consumed the key package; from here a failure is not
+        // recoverable by retrying the same Welcome. Drop the prior group so its
+        // old-leaf epoch keypairs are not orphaned. `delete_group` already
+        // no-ops on absence and tolerates a corrupt prior group, so call it
+        // unconditionally — a redundant `load_group` here would only add another
+        // fallible storage read that could abort the join with the key package
+        // already spent.
+        self.delete_group(group_id)?;
+
+        let group = staged.into_group(&self.provider).map_err(|e| {
+            // Distinct message from the staging failure above: the prior group is
+            // already deleted and the key package is spent, so this is the
+            // non-atomic "lost group" window, not a benign duplicate.
+            MlsError::WelcomeProcessing(format!(
+                "Failed to install adopted group (prior group removed, key package consumed): {}",
+                e
+            ))
+        })?;
+
+        self.save_group(group_id, &group)?;
+
+        debug!(group_id = %group_id, "Joined/adopted group via Welcome (non-destructive stage, best-effort swap)");
         Ok(group)
     }
 

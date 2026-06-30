@@ -99,23 +99,14 @@ impl SessionManager {
 
     /// Joins a session using a Welcome message.
     ///
-    /// Implements "welcome-wins" strategy: if we already created a session for this peer
-    /// (race condition), we delete our session and adopt the incoming Welcome instead.
-    /// This ensures both peers end up with the same cryptographic state.
+    /// Implements a **non-destructive** "welcome-wins" strategy: if we already
+    /// created a session for this peer (both-create race), the incoming Welcome
+    /// is staged first and only replaces our group once staging succeeds (see
+    /// [`crate::group::GroupManager::join_group_replacing`]). A retransmitted
+    /// Welcome we already adopted, or a first-contact key-package race, fails to
+    /// stage and leaves the existing converged group intact — so adoption is
+    /// idempotent and never bricks a working session.
     pub fn join_session(&self, welcome_msg: &WelcomeMessage) -> Result<GroupInfo> {
-        let session_id = GroupId::from(welcome_msg.group_id.as_str());
-
-        // Welcome-wins: If we already created a session for this peer,
-        // delete it and use the incoming Welcome instead
-        if self.group_manager.load_group(&session_id)?.is_some() {
-            info!(
-                session_id = %session_id,
-                inviter = %welcome_msg.inviter_id,
-                "Welcome-wins: replacing existing session with incoming Welcome"
-            );
-            self.group_manager.delete_group(&session_id)?;
-        }
-
         // Deserialize the Welcome from the MlsMessageOut bytes
         let mls_msg = MlsMessageIn::tls_deserialize_exact(&welcome_msg.welcome_data)
             .map_err(|e| MlsError::Deserialization(e.to_string()))?;
@@ -130,9 +121,11 @@ impl SessionManager {
             }
         };
 
+        // Stage-then-swap: replaces any existing group only after the incoming
+        // Welcome stages successfully, so a failed stage is a safe no-op.
         let group = self
             .group_manager
-            .join_group(welcome, &welcome_msg.group_id)?;
+            .join_group_replacing(welcome, &welcome_msg.group_id)?;
         let info = self
             .group_manager
             .get_group_info(&group, &welcome_msg.group_id);
@@ -140,7 +133,7 @@ impl SessionManager {
         info!(
             session_id = %welcome_msg.group_id,
             inviter = %welcome_msg.inviter_id,
-            "Joined 1:1 session"
+            "Joined/adopted 1:1 session (non-destructive)"
         );
 
         Ok(info)
