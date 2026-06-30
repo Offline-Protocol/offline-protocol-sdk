@@ -690,7 +690,32 @@ impl TransportSelector {
                     .find(|(t, _)| *t == current)
                     .map(|(_, s)| s.total)
                 {
-                    if !self.should_switch(current, current_score, best_transport, best_score) {
+                    // A negative current total is the Internet fallback-demotion
+                    // sentinel (prefer_online=false; see `score_transport`). Anti-flap
+                    // (cooldown/hysteresis/stability) must NOT pin the demoted fallback
+                    // over an available, real-scored mesh transport. The fallback only
+                    // became `current` because a *prior* send found the mesh peer
+                    // unreachable and escalated to Internet — which also re-armed the
+                    // switch cooldown (TransportManager::send → set_current_transport).
+                    // The instant the mesh peer is back in the available set (its
+                    // non-negative score outranks the sentinel) we must switch to it, or
+                    // the next send rides the relay through the whole cooldown and an
+                    // off-relay nearby peer is silently bypassed.
+                    let current_is_demoted_fallback = current_score < 0.0 && best_score >= 0.0;
+                    if current_is_demoted_fallback {
+                        debug!(
+                            current = ?current,
+                            current_score = current_score,
+                            candidate = ?best_transport,
+                            candidate_score = best_score,
+                            "DORS: leaving demoted Internet fallback for an available mesh transport (bypassing cooldown)"
+                        );
+                    } else if !self.should_switch(
+                        current,
+                        current_score,
+                        best_transport,
+                        best_score,
+                    ) {
                         debug!(
                             current = ?current,
                             current_score = current_score,
@@ -1967,6 +1992,47 @@ mod tests {
             first, second,
             "cooldown must block immediate re-switch; should stay on {:?}",
             first
+        );
+    }
+
+    /// Regression (Android↔iOS off-relay stall): the demoted Internet fallback
+    /// must never be retained over an available mesh transport, even while the
+    /// switch cooldown is active. The cold-start path pins `current = Internet`
+    /// (BLE had no peers, the send escalated to Internet via the fallback loop,
+    /// which re-armed the cooldown); the instant a BLE peer is discovered the next
+    /// selection must switch to BLE rather than riding the relay through the whole
+    /// cooldown — which silently bypasses a nearby peer that is off the relay.
+    /// Pre-fix this returned Internet for `switch_cooldown_secs`.
+    #[test]
+    fn test_demoted_internet_fallback_yields_to_mesh_despite_cooldown() {
+        // Default config => prefer_online = false (Internet demoted) with a
+        // non-zero switch cooldown, so absent the bypass the cooldown pins Internet.
+        let message = create_test_message();
+        let mut selector = TransportSelector::new();
+        assert!(
+            selector.config.switch_cooldown_secs > 0,
+            "test depends on a non-zero default cooldown to prove the bypass",
+        );
+
+        // Cold start: only Internet is up (BLE has no peers yet). Internet is
+        // selected and becomes `current`, arming the cooldown timer.
+        let mut internet_only = HashMap::new();
+        internet_only.insert(TransportType::Internet, create_test_metrics(None, 0.0, 0));
+        assert_eq!(
+            selector.select_transport(&message, &internet_only),
+            Some(TransportType::Internet),
+            "cold start with only Internet available must select Internet",
+        );
+
+        // A BLE peer is discovered a moment later; the cooldown is still active.
+        let mut both = HashMap::new();
+        both.insert(TransportType::Internet, create_test_metrics(None, 0.0, 0));
+        both.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.1, 5));
+        assert_eq!(
+            selector.select_transport(&message, &both),
+            Some(TransportType::BLE),
+            "a freshly-available mesh transport must win immediately over the \
+             demoted Internet fallback, bypassing the switch cooldown",
         );
     }
 

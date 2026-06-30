@@ -4710,6 +4710,207 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
     );
 }
 
+/// Regression (Android↔iOS "receives but never sends"): a both-create owner
+/// whose own Welcome timed out to the terminal `Expired` state on a lossy /
+/// asymmetric BLE link must STILL confirm the session the moment it decrypts a
+/// real group message from the peer. A successful group decrypt is definitive
+/// proof the peer adopted our group; gating decrypt-confirmation on a still-active
+/// local Welcome left the owner able to receive but never reply (every outbound
+/// send → SessionNotReady). The both-create gate is preserved: a plaintext probe
+/// must NOT confirm such an owner — only a decrypt may.
+#[test]
+fn test_both_create_owner_confirms_via_decrypt_after_welcome_expired() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    // We are the both-create owner: we created our own group for "bob" and sent a
+    // Welcome that never reached `Sent` — retries exhausted it to `Expired`.
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    {
+        let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+    protocol
+        .ensure_session_state_entry("bob", "test_setup")
+        .unwrap();
+
+    let welcome_msg = protocol
+        .create_message("bob", "placeholder", Some(MessagePriority::High), None)
+        .unwrap();
+    protocol
+        .upsert_welcome_lifecycle("bob", "session:bob:user123", welcome_msg, "test_setup")
+        .unwrap();
+    // Drive the welcome through to the terminal Expired state along its legal
+    // lifecycle path (SendAttempted -> Failed -> Expired) — what a Welcome that
+    // times out after retry exhaustion actually does.
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_setup")
+        .unwrap();
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_setup")
+        .unwrap();
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::Expired, "test_setup")
+        .unwrap();
+    // Both-create owner: confirmation is gated on a group-aware decrypt.
+    protocol.mark_both_create_awaiting_decrypt("bob");
+
+    // A plaintext probe is NOT proof of adoption — the gate must still reject it.
+    assert!(
+        !protocol.can_confirm_from_source("bob", "confirmation_probe_received"),
+        "a plaintext probe must not confirm a both-create owner"
+    );
+
+    // A successful group decrypt IS definitive proof — it must confirm even though
+    // our local Welcome is Expired. Pre-fix this returned false, leaving the owner
+    // permanently able to receive but never send.
+    assert!(
+        protocol.can_confirm_from_source("bob", "decrypt_success"),
+        "a group decrypt must confirm the owner regardless of an expired local Welcome"
+    );
+    assert!(
+        matches!(
+            protocol.confirm_session_state("bob", "decrypt_success"),
+            Ok(true)
+        ),
+        "confirm_session_state must transition Pending->Confirmed on decrypt_success"
+    );
+    assert!(
+        protocol.confirmed_sessions.contains("bob"),
+        "session must be confirmed so outbound sends stop failing SessionNotReady"
+    );
+}
+
+/// Regression (Android↔iOS group creation): the 1:1 session OWNER — the side that
+/// created the session group and sent the Welcome — confirms only when it decrypts
+/// the peer's first group-aware message (the `decrypt_success` path). That path must
+/// surface the app-facing `SecureSessionEstablished` event, exactly as the adopter's
+/// Welcome-receive path does. Before the fix the owner confirmed silently: 1:1 send
+/// and receive both worked, but the app never learned the session existed, so any UI
+/// gated on a known secure session — the demo's "contacts with secure sessions"
+/// group-creation list — silently excluded the peer ("no contact available to create
+/// a group"). A both-create owner is the acute case: `can_confirm_from_source` forces
+/// it to converge ONLY through decrypt, so without this emission the peer could never
+/// be added to a group from the owner's device.
+#[test]
+fn test_session_owner_emits_established_on_decrypt_confirmation() {
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.encryption.enabled = true;
+    alice_config.encryption.store_pending = true;
+
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+
+    let alice_storage = Arc::new(InMemoryStorage::new());
+    let bob_storage = Arc::new(InMemoryStorage::new());
+
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+
+    alice.initialize_mls(alice_storage).unwrap();
+    bob.initialize_mls(bob_storage).unwrap();
+
+    let mut alice_transport = MockTransport::new(TransportType::BLE);
+    alice_transport.start().unwrap();
+    let alice_transport_handle = alice_transport.clone();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(alice_transport));
+
+    // Capture the owner's events before any session work begins.
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    alice.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    alice.start().unwrap();
+
+    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_transport_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    // Alice (owner) creates the session group + Welcome from Bob's key package.
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+    alice
+        .send_message("bob", "bootstrap", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Bob adopts Alice's group from the Welcome.
+    let welcome_wire = alice_transport_handle
+        .sent_messages()
+        .into_iter()
+        .find(|msg| msg.content.starts_with(internal_prefixes::WELCOME))
+        .map(|msg| msg.content)
+        .expect("expected welcome message sent by owner");
+    let welcome_msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &welcome_wire,
+    );
+    let _ = bob.process_internal_message(&welcome_msg);
+
+    // The owner has only SENT a Welcome — it must stay Pending (and silent) until a
+    // group-aware decrypt proves the peer adopted the group.
+    assert!(
+        !alice.confirmed_sessions.contains("bob"),
+        "owner must stay Pending until it decrypts a group-aware message from the peer"
+    );
+
+    // Bob sends an encrypted message; Alice (owner) decrypts it and confirms.
+    bob.send_message("alice", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let encrypted_from_bob = bob_transport_handle
+        .sent_messages()
+        .into_iter()
+        .rev()
+        .find(|msg| msg.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("expected encrypted message sent by adopter");
+    let _ = alice.process_internal_message(&encrypted_from_bob);
+
+    assert!(
+        alice.confirmed_sessions.contains("bob"),
+        "owner must confirm the session on decrypt_success"
+    );
+    let captured = events.lock().unwrap();
+    assert!(
+        captured.iter().any(|event| matches!(
+            event,
+            Event::SecureSessionEstablished {
+                peer_id,
+                is_session,
+                initiated_by_local,
+                ..
+            } if peer_id == "bob" && *is_session && *initiated_by_local
+        )),
+        "owner must emit SecureSessionEstablished so the app learns the 1:1 session exists"
+    );
+}
+
 #[test]
 fn test_welcome_delayed_confirmation_after_timeout_converges_to_sent() {
     let mut config = create_test_config();

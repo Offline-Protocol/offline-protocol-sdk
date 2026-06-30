@@ -187,6 +187,21 @@ pub struct BleTransport {
     /// error. Surface via [`Self::fragment_fallback_count`] so
     /// production alerts fire the first time the invariant breaks.
     fragment_fallback_count: Arc<AtomicU64>,
+    /// Count of [`Transport::send`] calls that returned
+    /// [`PeerNotReachable`](crate::Error::PeerNotReachable) for a recipient that
+    /// was **not** among the connected BLE peers, *while other peers WERE
+    /// connected* (the peers map was non-empty).
+    ///
+    /// "No BLE peers at all" is the ordinary offline case and is **not** counted —
+    /// DORS escalating that send to Internet is exactly right. A non-empty map
+    /// missing only this recipient is the suspicious case: the device is meshing
+    /// with someone, just not the addressed id. The dominant cause is a
+    /// `recipient` ↔ `ble_peer_discovered` device-id **keying mismatch** (e.g. an
+    /// app addressing a message by a user id that differs from the advertised mesh
+    /// id), which makes a physically-in-range peer look unreachable and silently
+    /// routes the message to Internet. Surfacing it turns a silent misroute into
+    /// an observable signal. Exposed via [`Self::recipient_not_among_peers_count`].
+    recipient_not_among_peers_count: Arc<AtomicU64>,
     /// Platform callback invoked when new fragments are available to send.
     /// Called from `send()` after enqueueing — the platform layer should
     /// respond by calling `get_next_fragment()` and performing the BLE write.
@@ -213,6 +228,7 @@ impl BleTransport {
             peer_mtus: Arc::new(Mutex::new(HashMap::new())),
             undersized_mtu_reports: Arc::new(AtomicU64::new(0)),
             fragment_fallback_count: Arc::new(AtomicU64::new(0)),
+            recipient_not_among_peers_count: Arc::new(AtomicU64::new(0)),
             on_fragments_available: Arc::new(Mutex::new(None)),
             eviction_callback: Arc::new(Mutex::new(None)),
         }
@@ -349,6 +365,17 @@ impl BleTransport {
     /// regressing to the 185-byte floor. Surface in dashboards.
     pub fn fragment_fallback_count(&self) -> u64 {
         self.fragment_fallback_count.load(Ordering::Relaxed)
+    }
+
+    /// Monotonic count of [`Transport::send`] calls whose recipient was not among
+    /// the connected BLE peers **while other peers were connected**.
+    ///
+    /// Zero in healthy operation. A sustained non-zero value means messages to
+    /// in-range peers are being silently routed off BLE — almost always a
+    /// `recipient` ↔ `ble_peer_discovered` device-id keying mismatch in the host
+    /// app. Surface in dashboards alongside [`Self::fragment_fallback_count`].
+    pub fn recipient_not_among_peers_count(&self) -> u64 {
+        self.recipient_not_among_peers_count.load(Ordering::Relaxed)
     }
 
     /// Sets the platform-specific handle.
@@ -1108,6 +1135,23 @@ impl Transport for BleTransport {
         {
             let peers = self.peers.lock().unwrap();
             if !peers.contains_key(&recipient) {
+                // Distinguish "no BLE peers at all" (ordinary offline; escalate to
+                // the next transport) from "meshing with other peers but not this
+                // recipient" — the latter is the keying-mismatch signal that
+                // silently routes an in-range peer's message to Internet. Count and
+                // warn only the latter so the metric isn't drowned out by the
+                // benign no-peers case. See `recipient_not_among_peers_count`.
+                if !peers.is_empty() {
+                    self.recipient_not_among_peers_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        recipient = %recipient,
+                        connected_peers = peers.len(),
+                        "ble: send recipient is not among the connected BLE peers while \
+                         other peers are connected — likely a recipient↔device-id keying \
+                         mismatch; this send will fall back off BLE"
+                    );
+                }
                 return Err(crate::Error::PeerNotReachable(format!(
                     "BLE: no connected peer for recipient {}",
                     recipient
@@ -1237,6 +1281,35 @@ mod tests {
         assert_eq!(transport.status(), TransportStatus::Available);
         transport.stop().unwrap();
         assert_eq!(transport.status(), TransportStatus::Disconnected);
+    }
+
+    #[test]
+    fn test_ble_recipient_not_among_peers_count_signals_keying_mismatch() {
+        let mut transport = BleTransport::new("test-device");
+        transport.start().unwrap();
+
+        // No BLE peers at all: PeerNotReachable, but this is the ordinary offline
+        // case (escalating to the next transport is correct) and must NOT be counted.
+        assert!(matches!(
+            transport.send(&small_message()).unwrap_err(),
+            crate::Error::PeerNotReachable(_)
+        ));
+        assert_eq!(transport.recipient_not_among_peers_count(), 0);
+
+        // Meshing with another peer ("alice") but not the addressed recipient
+        // ("bob"): the keying-mismatch signal — a physically-present mesh whose
+        // ids don't match the send target. This MUST be counted.
+        transport.on_peer_discovered(peer_device("alice"));
+        assert!(matches!(
+            transport.send(&small_message()).unwrap_err(),
+            crate::Error::PeerNotReachable(_)
+        ));
+        assert_eq!(transport.recipient_not_among_peers_count(), 1);
+
+        // Recipient now connected: send succeeds and the counter does not move.
+        transport.on_peer_discovered(peer_device("bob"));
+        transport.send(&small_message()).unwrap();
+        assert_eq!(transport.recipient_not_among_peers_count(), 1);
     }
 
     #[test]

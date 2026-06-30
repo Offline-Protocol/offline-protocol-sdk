@@ -265,35 +265,45 @@ impl OfflineProtocol {
                                     }
                                 }
                             }
-                        } else if self.welcome_lifecycles.contains_key(sender) {
+                        } else if self.welcome_lifecycles.contains_key(sender)
+                            && !self.confirmed_sessions.contains(sender)
+                        {
                             info!(
                                 sender = %sender,
                                 local_id = %local_id,
                                 "Welcome-wins tiebreaker: keeping local session (local < remote); \
                                  awaiting group-aware decrypt before confirming our Welcome"
                             );
-                            // Genuine both-create owner: we created our OWN group for this
-                            // peer AND sent a Welcome (hence an outbound welcome lifecycle
-                            // exists). Keep our group, but do NOT confirm our outbound
+                            // Genuine both-create owner that is NOT yet converged: we
+                            // created our OWN group for this peer AND sent a Welcome (hence
+                            // an outbound welcome lifecycle exists) and have not yet
+                            // confirmed. Keep our group, but do NOT confirm our outbound
                             // Welcome merely because we received the peer's — that is no
                             // proof they adopted ours. Keep retransmitting until a decrypt
-                            // proves they adopted our group.
+                            // proves they adopted our group. The `!confirmed` guard is
+                            // load-bearing: once converged, a late Welcome retransmit must
+                            // NOT re-arm (and re-persist) `both_create_awaiting_decrypt` on
+                            // an already-confirmed session — that stale, persisted gate
+                            // would later block confirmation on a re-pair where this device
+                            // adopts, stranding it. A converged owner falls through to the
+                            // resend-confirm branch instead.
                             owner_keep = true;
                         } else {
-                            // NOT a both-create owner: we have no outbound welcome
-                            // lifecycle for this peer, so we never created our own group —
-                            // we joined THEIR group via an earlier Welcome. This is the
-                            // owner re-sending its Welcome because it has not yet observed
-                            // our confirm. Re-send the encrypted confirm so a lost first
-                            // confirm self-heals in lockstep with the owner's
-                            // retransmission. Critically, do NOT enter owner_keep: we are
-                            // the adopter, and gating on decrypt here (plus poisoning
+                            // Either (a) the adopter: we have no outbound welcome lifecycle
+                            // for this peer, so we never created our own group — we joined
+                            // THEIR group via an earlier Welcome, and this is the owner
+                            // re-sending its Welcome because it has not yet observed our
+                            // confirm; or (b) an already-converged owner whose `!confirmed`
+                            // guard above sent it here. In both cases re-send the encrypted
+                            // confirm so a lost confirm self-heals in lockstep with the
+                            // owner's retransmission. Critically, do NOT enter owner_keep:
+                            // for the adopter, gating on decrypt here (plus poisoning
                             // both_create_awaiting_decrypt) would suppress our confirm and
                             // strand the owner in Pending forever — the convergence bug.
                             debug!(
                                 sender = %sender,
                                 local_id = %local_id,
-                                "Welcome retransmit for an already-adopted session; re-sending encrypted confirm"
+                                "Welcome retransmit for an already-adopted/converged session; re-sending encrypted confirm"
                             );
                             resend_confirm_on_retransmit = true;
                         }
@@ -567,6 +577,36 @@ impl OfflineProtocol {
                                     &group_id,
                                     MlsOperationContext::Receive,
                                 );
+
+                                // Surface the app-facing established event for the
+                                // both-create owner. `can_confirm_from_source` restricts a
+                                // `both_create_awaiting_decrypt` owner to confirm ONLY via a
+                                // group-aware decrypt (a plaintext probe/ack is rejected), so
+                                // this is its sole convergence path — and the one place it can
+                                // tell the app the session exists. `confirm_session_state`
+                                // deliberately skips emission for `decrypt_success` (it does
+                                // not know the group id), deferring to this call site exactly
+                                // as the Welcome-receive path above does for the adopter.
+                                // Without this the owner has a fully working 1:1 session (it
+                                // sends and receives) but the app never receives
+                                // `secure_session_established`, so UI gated on a known secure
+                                // session — e.g. the demo's group-creation contact list —
+                                // silently excludes the peer. Gate on `session:` so multi-party
+                                // group decrypts (which also reach this arm) are not reported as
+                                // 1:1 sessions. Reaching `Ok(true)` here implies we own the 1:1
+                                // group (an adopter would already be Confirmed via
+                                // `welcome_received` and return `Ok(false)`), so
+                                // `initiated_by_local` is true.
+                                if group_id.starts_with("session:") {
+                                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                        state.emit_event(Event::secure_session_established(
+                                            sender_owned.clone(),
+                                            group_id.clone(),
+                                            true,
+                                            true,
+                                        ));
+                                    }
+                                }
                             }
                             Ok(false) => {}
                             Err(e) => {

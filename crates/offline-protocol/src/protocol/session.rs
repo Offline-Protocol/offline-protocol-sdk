@@ -555,12 +555,26 @@ impl OfflineProtocol {
             return false;
         }
 
+        // A successful group decrypt is definitive, group-aware proof that the
+        // peer adopted our 1:1 group. `decrypt_success` is raised only inside
+        // `DecryptResult::Success` (see message_dispatch.rs): ciphertext on the
+        // single stored `session:<a>:<b>` group actually decrypted, which is
+        // possible only if the peer is a member. It must therefore confirm the
+        // session regardless of our *local* Welcome's delivery state. Gating it on
+        // a still-active local Welcome (the lifecycle match below) strands a
+        // both-create owner whose own Welcome timed out to `Failed`/`Expired` on a
+        // lossy or asymmetric BLE link (the Android↔iOS case): the owner decrypts
+        // the peer's messages but never confirms, so every outbound send fails
+        // `SessionNotReady` — it can receive but never reply. The both-create gate
+        // above is preserved, so a both-create owner is still restricted to *only*
+        // decrypt_success (a plaintext probe/ack can never confirm it).
+        if source_event == "decrypt_success" {
+            return true;
+        }
+
         if !matches!(
             source_event,
-            "decrypt_success"
-                | "confirmation_ack_received"
-                | "confirmation_probe_received"
-                | "confirmation_retry"
+            "confirmation_ack_received" | "confirmation_probe_received" | "confirmation_retry"
         ) {
             return true;
         }
@@ -573,8 +587,9 @@ impl OfflineProtocol {
             None => matches!(
                 source_event,
                 // Compatibility path for sessions created before welcome lifecycle
-                // persistence existed. Decrypt-based confirmation stays blocked
-                // until we have explicit local welcome delivery evidence.
+                // persistence existed. A plaintext probe/ack/retry can confirm here
+                // (it is the only evidence such a legacy session has); a group-aware
+                // decrypt already returned true above and never reaches this arm.
                 "confirmation_ack_received" | "confirmation_probe_received" | "confirmation_retry"
             ),
         }

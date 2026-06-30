@@ -120,7 +120,12 @@ public class BleManager: NSObject, TransportManager {
     // owned by fragmentQueue. ALL reads and writes MUST occur inside fragmentQueue.async.
     // evictPeer() dispatches removals to fragmentQueue to honour this contract.
     private var pendingFragments: [UUID: [(Data, Date)]] = [:]
-    private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 5.0 // For incoming fragments waiting for device ID
+    // Idle window for incoming fragments waiting for the sender's device-id to
+    // resolve (a GATT connect+read, throttled to ~5s and prone to retries). 5s was
+    // too short: a first-contact multi-fragment MLS Welcome arriving in a burst
+    // could be evicted before resolution completed and be lost before reassembly.
+    // 15s exceeds the reverse-resolution worst case; the per-peer cap bounds memory.
+    private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 15.0
     private let PENDING_OUTBOUND_FRAGMENT_TIMEOUT: TimeInterval = 30.0 // For outbound fragments that failed to send
     private let MAX_PENDING_FRAGMENTS_PER_PEER = 100
     // Track outbound fragments with timestamps for timeout handling (owned by fragmentQueue)
@@ -142,7 +147,24 @@ public class BleManager: NSObject, TransportManager {
     private var peripheralReady = false
     private var isGattServiceReady = false
     private var pendingAdvertiseAfterServiceReady = false
-    private var subscribedCentrals: Set<UUID> = []
+    // Peripheral-role NOTIFY egress (the iOS mirror of Android's
+    // PeripheralGattServer.notifyFragment path, PR #120/#121). Lets iOS reply to a
+    // peer that connected to US as central — so we hold no `CBPeripheral` for it —
+    // by pushing a notification over the link IT opened, instead of trying to
+    // reverse-connect as central (which iOS backgrounding routinely blocks). Absent
+    // this, iOS can only send over a link it opened, so iOS→Android stalls whenever
+    // Android is central / iOS is peripheral.
+    //
+    // `subscribedCentralsById` is guarded by `notifyLock` so the fragment drain
+    // (fragmentQueue) can test notify-reachability while CoreBluetooth's peripheral
+    // delegates (main queue) mutate it. The `notifyOutbound` queue and the actual
+    // `peripheralManager.updateValue` call stay main-queue-only — CBPeripheralManager
+    // must be driven from its delegate queue (init'd with `queue: nil` ⇒ main) — so
+    // the drain hands fragments to the main-queue pump via `enqueueNotifyOutbound`.
+    private let notifyLock = NSLock()
+    private var subscribedCentralsById: [UUID: CBCentral] = [:]
+    /// Per-recipient NOTIFY outbound queue, drained by `pumpNotifyOutbound`. Main-queue only.
+    private var notifyOutbound: [String: [(data: Data, timestamp: Date)]] = [:]
     private var lastMeshAdvertisement: MeshAdvertisementData?
     
     // Metrics
@@ -452,8 +474,11 @@ public class BleManager: NSObject, TransportManager {
         lastProactiveScanRefresh = nil
         lastForcedBleRefresh = nil
         aggressiveDiscoveryStarted = nil
-        subscribedCentrals.removeAll()
-        
+        notifyLock.lock()
+        subscribedCentralsById.removeAll()
+        notifyLock.unlock()
+        notifyOutbound.removeAll()
+
         // Clean up managers
         centralManager = nil
         peripheralManager = nil
@@ -1098,6 +1123,18 @@ public class BleManager: NSObject, TransportManager {
 
                 let hasPeripheral = self.findPeripheral(for: recipientId) != nil
                 if !hasPeripheral {
+                    // No central link to this peer. If it subscribed to OUR GATT
+                    // server (the Android-central / iOS-peripheral topology), reply
+                    // over THAT link via NOTIFY instead of trying to reverse-connect
+                    // as central — which iOS backgrounding routinely blocks, the exact
+                    // fragile path Android abandoned in PR #120. Without this, iOS can
+                    // only ever send over a link it opened, so iOS→Android stalls in
+                    // this (common) topology.
+                    if self.notifyTarget(for: recipientId) != nil {
+                        self.enqueueNotifyOutbound(recipientId: recipientId, data: data)
+                        consecutiveSkips = 0
+                        continue
+                    }
                     self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
                     if let identifier = self.connections.peripheralIdentifier(for: recipientId),
                        reconnectAttempted.insert(identifier).inserted {
@@ -1264,7 +1301,134 @@ public class BleManager: NSObject, TransportManager {
     }
 
     private func currentConnectionCount() -> Int {
-        return connections.connectedPeripheralCount() + subscribedCentrals.count
+        return connections.connectedPeripheralCount() + subscribedCentralCount()
+    }
+
+    // MARK: - Peripheral-role NOTIFY egress (iOS mirror of Android #120/#121)
+
+    private func subscribedCentralCount() -> Int {
+        notifyLock.lock()
+        let count = subscribedCentralsById.count
+        notifyLock.unlock()
+        return count
+    }
+
+    /// Resolves a recipient device-id to a subscribed `CBCentral` we can notify, or
+    /// nil if the peer is not notify-subscribed to our GATT server. Cross-references
+    /// the retained centrals (under `notifyLock`) with the thread-safe connection
+    /// registry, so it is safe to call from any queue (the drain runs on
+    /// `fragmentQueue`; the pump runs on main). Mirrors Android's
+    /// `subscribedNotifyAddressFor` device-scoped resolution.
+    private func notifyTarget(for recipientId: String) -> CBCentral? {
+        notifyLock.lock()
+        let centrals = subscribedCentralsById
+        notifyLock.unlock()
+        for (identifier, central) in centrals {
+            if connections.centralDeviceId(for: identifier) == recipientId
+                || connections.peripheralDeviceId(for: identifier) == recipientId {
+                return central
+            }
+        }
+        return nil
+    }
+
+    /// Hands a fragment to the main-queue NOTIFY pump. Safe to call from the
+    /// fragment drain (`fragmentQueue`): the queue mutation and `updateValue` run on
+    /// main, where CBPeripheralManager lives. FIFO is preserved because `main.async`
+    /// is ordered and the drain pulls fragments from Rust in order.
+    private func enqueueNotifyOutbound(recipientId: String, data: Data) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            var queue = self.notifyOutbound[recipientId] ?? []
+            queue.append((data: data, timestamp: Date()))
+            if queue.count > self.MAX_PENDING_FRAGMENTS_PER_PEER {
+                let overflow = queue.count - self.MAX_PENDING_FRAGMENTS_PER_PEER
+                queue.removeFirst(overflow)
+                self.emitDiagnostic("warning", "NOTIFY outbound queue capped, dropping oldest",
+                                    context: ["recipientId": recipientId, "dropped": overflow,
+                                              "max": self.MAX_PENDING_FRAGMENTS_PER_PEER])
+            }
+            self.notifyOutbound[recipientId] = queue
+            self.pumpNotifyOutbound()
+        }
+    }
+
+    /// Drains queued NOTIFY fragments to their subscribed centrals via
+    /// `updateValue`. On a `false` return the controller's transmit queue is full;
+    /// we stop and resume from `peripheralManagerIsReadyToUpdateSubscribers` — the
+    /// peripheral-side analog of the central `canSendWriteWithoutResponse`
+    /// backpressure the write path already honours. Main-queue only.
+    private func pumpNotifyOutbound() {
+        guard let pm = peripheralManager, let characteristic = messageCharacteristic else { return }
+        let now = Date()
+        var sentBytes: UInt64 = 0
+        var sentFragments: UInt64 = 0
+        for recipientId in Array(notifyOutbound.keys) {
+            guard var queue = notifyOutbound[recipientId] else { continue }
+            queue = queue.filter { now.timeIntervalSince($0.timestamp) < PENDING_OUTBOUND_FRAGMENT_TIMEOUT }
+            guard let central = notifyTarget(for: recipientId) else {
+                // No longer notify-reachable. Drop the queued fragments; the
+                // reliability layer (MLS Welcome retransmit / RetryQueue) re-drives
+                // delivery over whatever path is available next.
+                notifyOutbound.removeValue(forKey: recipientId)
+                continue
+            }
+            var transmitQueueFull = false
+            while let head = queue.first {
+                if pm.updateValue(head.data, for: characteristic, onSubscribedCentrals: [central]) {
+                    queue.removeFirst()
+                    sentBytes += UInt64(head.data.count)
+                    sentFragments += 1
+                    meshController.markPeerActive(recipientId)
+                    meshController.markPeerActive(deviceId)
+                } else {
+                    transmitQueueFull = true
+                    break
+                }
+            }
+            if queue.isEmpty {
+                notifyOutbound.removeValue(forKey: recipientId)
+            } else {
+                notifyOutbound[recipientId] = queue
+            }
+            // A `false` return means the shared transmit queue is full for the whole
+            // peripheral, not just this central — stop and wait for the ready callback.
+            if transmitQueueFull { break }
+        }
+        // Fold the byte/fragment counters on `fragmentQueue`, which owns them
+        // (`sendFragmentData` mutates them there), so this main-queue pump does not
+        // race the drain on the non-atomic counters.
+        if sentBytes > 0 || sentFragments > 0 {
+            fragmentQueue.async { [weak self] in
+                self?.bytesSent += sentBytes
+                self?.fragmentsSent += sentFragments
+            }
+        }
+    }
+
+    /// Reports the MIN usable payload over the links we can egress on (central WRITE
+    /// and peripheral NOTIFY) to the Rust fragmenter, which sizes every fragment to
+    /// one per-peer value regardless of carrier. Without the min, a fragment sized
+    /// for the larger central-write link overflows the NOTIFY link and is truncated
+    /// on air — the iOS analog of the bug PR #121 fixed on Android. Values are read
+    /// live from CoreBluetooth (both are already ATT-header-adjusted). A sub-floor
+    /// value is left for Rust's `set_peer_mtu` to reject and clamp to its 185-byte
+    /// floor, so we do not duplicate that constant here. Main-queue only.
+    private func reflectEgressMtu(forDeviceId deviceId: String) {
+        var candidates: [Int] = []
+        if let peripheral = findPeripheral(for: deviceId) {
+            candidates.append(peripheral.maximumWriteValueLength(for: .withoutResponse))
+        }
+        if let central = notifyTarget(for: deviceId) {
+            candidates.append(central.maximumUpdateValueLength)
+        }
+        guard let smallest = candidates.min(), smallest > 0 else { return }
+        do {
+            try protocolInstance.bleSetPeerMtu(peerId: deviceId, maxPayload: UInt32(smallest))
+        } catch {
+            emitDiagnostic("warning", "reflectEgressMtu bleSetPeerMtu failed",
+                           context: ["deviceId": deviceId, "error": error.localizedDescription])
+        }
     }
 
     /// Tears down the protocol-side state for a peer that has been lost —
@@ -1576,6 +1740,15 @@ public class BleManager: NSObject, TransportManager {
     }
     
     private func processPendingFragments(for centralId: UUID, deviceId: String) {
+        // A device-id just resolved for this link. If the peer is notify-reachable,
+        // clamp the Rust fragmenter to the NOTIFY link's payload (min with any
+        // central-write link) and flush any queued NOTIFY fragments. Runs on the
+        // caller's (main) queue — every caller is a CoreBluetooth delegate — which is
+        // required: `pumpNotifyOutbound` drives CBPeripheralManager. This is not
+        // gated on inbound fragments existing, so it also covers a central that
+        // subscribed before we knew its device-id.
+        reflectEgressMtu(forDeviceId: deviceId)
+        pumpNotifyOutbound()
         fragmentQueue.async { [weak self] in
             guard let self = self else { return }
             guard let fragments = self.pendingFragments.removeValue(forKey: centralId) else {
@@ -3018,12 +3191,16 @@ extension BleManager: CBPeripheralManagerDelegate {
             return
         }
         
-        // Track this central as subscribed for connection count
-        subscribedCentrals.insert(central.identifier)
+        // Retain this central so we can NOTIFY it (peripheral-role egress) and so it
+        // counts toward the connection budget. Stored under `notifyLock` because the
+        // fragment drain tests notify-reachability off the main queue.
+        notifyLock.lock()
+        subscribedCentralsById[central.identifier] = central
+        notifyLock.unlock()
         print("[BleManager] Central subscribed: \(central.identifier)")
         emitDiagnostic("info", "Central subscribed to characteristic", context: [
             "central": central.identifier.uuidString,
-            "totalSubscribed": subscribedCentrals.count
+            "totalSubscribed": subscribedCentralCount()
         ])
 
         if connections.centralDeviceId(for: central.identifier) == nil && connections.peripheralDeviceId(for: central.identifier) == nil {
@@ -3038,13 +3215,40 @@ extension BleManager: CBPeripheralManagerDelegate {
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
         print("[BleManager] Central unsubscribed from characteristic: \(characteristic.uuid)")
-        subscribedCentrals.remove(central.identifier)
+        let deviceId = connections.centralDeviceId(for: central.identifier)
+            ?? connections.peripheralDeviceId(for: central.identifier)
+        notifyLock.lock()
+        subscribedCentralsById.removeValue(forKey: central.identifier)
+        notifyLock.unlock()
         emitDiagnostic("info", "Central unsubscribed", context: [
             "central": central.identifier.uuidString,
             "characteristic": characteristic.uuid.uuidString,
-            "remainingSubscribed": subscribedCentrals.count
+            "remainingSubscribed": subscribedCentralCount()
         ])
         connections.removeCentralDeviceId(for: central.identifier)
+        // The NOTIFY link to this peer is gone: drop anything queued for it and
+        // re-report the per-peer MTU (now only a central-write link, if any, binds).
+        if let deviceId = deviceId {
+            notifyOutbound.removeValue(forKey: deviceId)
+            reflectEgressMtu(forDeviceId: deviceId)
+        }
+    }
+
+    /// CoreBluetooth signals the peripheral transmit queue has space again after a
+    /// prior `updateValue` returned false (transmit-queue-full backpressure). Resume
+    /// draining queued NOTIFY fragments. Without this, a multi-fragment NOTIFY (an
+    /// MLS Welcome) that hits backpressure would stall until the next unrelated
+    /// drain. Mirrors the central-side `peripheralIsReady(toSendWriteWithoutResponse:)`.
+    // iOS 26.5 SDK renamed the Swift import of this delegate method to
+    // `peripheralManagerIsReady(toUpdateSubscribers:)` and marked the old
+    // auto-imported name unavailable, so the old spelling is a hard compile error
+    // on new Xcode. The underlying ObjC selector is unchanged, so pin it with an
+    // explicit `@objc(...)`: that keeps CoreBluetooth dispatching to this method on
+    // older SDKs (where the new Swift name is not the protocol requirement) while
+    // satisfying the renamed requirement on 26.5+.
+    @objc(peripheralManagerIsReadyToUpdateSubscribers:)
+    public func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+        pumpNotifyOutbound()
     }
 }
 
