@@ -1073,6 +1073,12 @@ impl OfflineProtocol {
         self.confirmed_sessions.remove(peer_id);
         self.clear_confirmation_recovery_tracking(peer_id);
         self.welcome_lifecycles.remove(peer_id);
+        // Drop the both-create owner gate too (memory + storage). A leaked gate
+        // entry would make `can_confirm_from_source` reject every non-decrypt
+        // confirmation source — including `welcome_received` — on the NEXT
+        // session with this peer, re-stranding it in Pending (and surviving
+        // restart via `restore_both_create_awaiting_decrypt`).
+        self.clear_both_create_awaiting_decrypt(peer_id);
         self.clear_session_state_entry(peer_id)?;
         self.clear_welcome_lifecycle_entry(peer_id)?;
         Ok(())

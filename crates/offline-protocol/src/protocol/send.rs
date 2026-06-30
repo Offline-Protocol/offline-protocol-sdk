@@ -379,8 +379,8 @@ impl OfflineProtocol {
             }
             Err(err) => {
                 let current_transport = self.transport_manager.current_transport();
-                let _ = self
-                    .handle_send_failure(&message, current_transport.or(previous_transport));
+                let _ =
+                    self.handle_send_failure(&message, current_transport.or(previous_transport));
                 debug!(
                     peer = %peer_id,
                     error = %err,

@@ -52,6 +52,10 @@ impl OfflineProtocol {
                 self.confirmed_sessions.remove(peer_id);
                 self.clear_confirmation_recovery_tracking(peer_id);
                 self.welcome_lifecycles.remove(peer_id);
+                // The MLS session is gone, so any both-create owner gate for this
+                // peer is stale; clear it (memory + storage) or it would block
+                // `welcome_received` confirmation on the next re-pairing.
+                self.clear_both_create_awaiting_decrypt(peer_id);
                 if let Err(err) = self.clear_session_state_entry(peer_id) {
                     warn!(
                         peer_id = %peer_id,
@@ -193,11 +197,27 @@ impl OfflineProtocol {
     /// confirmation keyed by a group id rather than a 1:1 peer) or it is already
     /// terminal, so it is safe to call from every confirmation path.
     fn mark_welcome_confirmed(&mut self, peer_id: &str, source_event: &str) {
-        if !matches!(
-            self.welcome_lifecycles.get(peer_id).map(|r| r.state),
-            Some(WelcomeDeliveryState::SendAttempted) | Some(WelcomeDeliveryState::Failed)
-        ) {
-            return;
+        match self.welcome_lifecycles.get(peer_id).map(|r| r.state) {
+            // In flight / retried — fall through and mark Sent below.
+            Some(WelcomeDeliveryState::SendAttempted) | Some(WelcomeDeliveryState::Failed) => {}
+            // Parked, never actually sent (no carrier at send time) for a peer
+            // that converged over some other path. `Created -> Sent` is not a
+            // legal transition and there is nothing in flight to confirm, so drop
+            // the now-moot lifecycle (memory + storage) rather than leaving it to
+            // linger until the session is deleted.
+            Some(WelcomeDeliveryState::Created) => {
+                self.welcome_lifecycles.remove(peer_id);
+                if let Err(err) = self.clear_welcome_lifecycle_entry(peer_id) {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to clear parked welcome lifecycle on confirmation"
+                    );
+                }
+                return;
+            }
+            // Already terminal (Sent / Expired) or no lifecycle — nothing to do.
+            _ => return,
         }
         if let Some(record) = self.welcome_lifecycles.get_mut(peer_id) {
             record.next_retry_at = None;
@@ -508,7 +528,10 @@ impl OfflineProtocol {
     /// an owner restart mid-convergence cannot let a stale plaintext probe/ack
     /// confirm prematurely. Only writes storage on a genuine insert.
     pub(super) fn mark_both_create_awaiting_decrypt(&mut self, peer_id: &str) {
-        if self.both_create_awaiting_decrypt.insert(peer_id.to_string()) {
+        if self
+            .both_create_awaiting_decrypt
+            .insert(peer_id.to_string())
+        {
             self.persist_both_create_awaiting_decrypt(peer_id);
         }
     }
@@ -527,7 +550,8 @@ impl OfflineProtocol {
         // proof of that; a plaintext probe/ack proves only that the peer holds
         // some session (possibly its own, pre-adoption group), so it must not
         // confirm us or we would stop retransmitting and strand the peer.
-        if self.both_create_awaiting_decrypt.contains(peer_id) && source_event != "decrypt_success" {
+        if self.both_create_awaiting_decrypt.contains(peer_id) && source_event != "decrypt_success"
+        {
             return false;
         }
 

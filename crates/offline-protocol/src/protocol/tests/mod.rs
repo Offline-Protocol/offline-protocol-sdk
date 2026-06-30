@@ -3715,9 +3715,9 @@ fn test_mesh_welcome_sender_probes_for_confirmation() {
         "Expected the sender to emit a confirmation probe on the next process tick"
     );
     assert!(
-        messages_after
-            .iter()
-            .any(|m| m.content.starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        messages_after.iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
         "Expected a SESSION_CONFIRM_PROBE to be emitted by the mesh Welcome sender"
     );
 }
@@ -4251,6 +4251,43 @@ fn test_both_create_gate_survives_owner_restart() {
     assert!(
         !after_converge.both_create_awaiting_decrypt.contains("bob"),
         "a cleared gate must not be restored after convergence"
+    );
+}
+
+#[test]
+fn test_both_create_gate_cleared_on_session_delete() {
+    // Regression: deleting a 1:1 session (or repairing stale state) must clear
+    // the persisted both-create owner gate. A leaked gate entry would make
+    // `can_confirm_from_source` reject every non-decrypt source — including
+    // `welcome_received` — on the NEXT session with this peer, re-stranding it
+    // in Pending, and it would survive restart via the storage restore.
+    let config = create_test_config_for_user("alice");
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let mut owner = OfflineProtocol::new(config.clone()).unwrap();
+    owner.initialize_mls(storage.clone()).unwrap();
+    owner.mark_both_create_awaiting_decrypt("bob");
+    assert!(owner.both_create_awaiting_decrypt.contains("bob"));
+    assert!(!owner.can_confirm_from_source("bob", "welcome_received"));
+
+    // Tearing the session down clears the gate from memory AND storage.
+    owner.manual_mls_delete_session("bob").unwrap();
+    assert!(
+        !owner.both_create_awaiting_decrypt.contains("bob"),
+        "session delete must clear the both-create owner gate in memory"
+    );
+    // The peer is now confirmable via a fresh Welcome again.
+    assert!(
+        owner.can_confirm_from_source("bob", "welcome_received"),
+        "a re-paired peer must not be blocked by a stale gate"
+    );
+
+    // A restart must not revive the cleared gate from storage.
+    let mut restarted = OfflineProtocol::new(config).unwrap();
+    restarted.initialize_mls(storage).unwrap();
+    assert!(
+        !restarted.both_create_awaiting_decrypt.contains("bob"),
+        "a deleted gate must not be restored after restart"
     );
 }
 
