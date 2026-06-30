@@ -127,6 +127,7 @@ mod tests {
         "protocol.relay.demoted_battery",
         "protocol.secure_session.established",
         "protocol.secure_session.failed",
+        "protocol.convergence.diag",
         "protocol.welcome.send_attempted",
         "protocol.welcome.send_succeeded",
         "protocol.welcome.send_failed",
