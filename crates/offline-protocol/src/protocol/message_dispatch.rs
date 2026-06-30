@@ -210,10 +210,15 @@ impl OfflineProtocol {
             // problem; present => the problem is in adoption/confirm, not
             // transport.) Emitted before taking the MLS lock.
             let mut had_existing = false;
+            // NB: keep `detail` free of raw identifiers — the telemetry scrubber
+            // only hashes the named `peer_id` field, so anything embedded here
+            // ships in cleartext. `group_id` is `session:<localId>:<peerId>`, so
+            // it is deliberately omitted; the (hashed) peer_id already identifies
+            // the pair and `is_session` is the only non-identifying bit of value.
             self.emit_event(Event::convergence_diag(
                 "welcome_received".to_string(),
                 sender_owned.clone(),
-                format!("group_id={} is_session={}", group_id, is_session),
+                format!("is_session={}", is_session),
             ));
 
             if let Some(mls) = self.mls_manager.clone() {
@@ -330,12 +335,18 @@ impl OfflineProtocol {
                 } else {
                     "no_mls"
                 };
+                // `err_present` is a bool, not the raw error string: MLS error
+                // text can carry group/peer identifiers and `detail` is not
+                // scrubbed. The `join_failed` branch already flags the failure,
+                // and the scrubbed `SecureSessionFailed` event carries the reason.
                 self.emit_event(Event::convergence_diag(
                     "welcome_branch".to_string(),
                     sender_owned.clone(),
                     format!(
-                        "had_existing={} branch={} err={:?}",
-                        had_existing, branch, error_reason
+                        "had_existing={} branch={} err_present={}",
+                        had_existing,
+                        branch,
+                        error_reason.is_some()
                     ),
                 ));
             }
@@ -527,10 +538,13 @@ impl OfflineProtocol {
                     // This is exactly what the both-create owner waits on to
                     // confirm its own Welcome — seeing it (with is_confirm=true)
                     // means the adopter's proof arrived and decrypted.
+                    // `group_id` (= `session:<localId>:<peerId>`) is omitted: it
+                    // would leak both ids in cleartext through the unscrubbed
+                    // `detail`. The hashed `peer_id` already identifies the pair.
                     self.emit_event(Event::convergence_diag(
                         "decrypt_success".to_string(),
                         sender_owned.clone(),
-                        format!("is_confirm={} group_id={}", is_session_confirm, group_id),
+                        format!("is_confirm={}", is_session_confirm),
                     ));
                     let surfaced = if is_session_confirm {
                         Some(InternalMessageResult::Consumed)
