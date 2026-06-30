@@ -203,14 +203,17 @@ class PeripheralGattServer(
 
     /**
      * Addresses of centrals that have written ENABLE_NOTIFICATION_VALUE to
-     * the CCCD. Kept purely for observability — the facade currently routes
-     * outbound fragments through client-side writes, never server-side
-     * notifications, so nothing reads this set beyond the diagnostic
-     * emissions in [onDescriptorWriteRequest]. Keyed by address (not
-     * [BluetoothDevice]) so the contract matches [MeshConnectionRegistry]'s
-     * stated "stable for the lifetime of a single LL connection" guarantee
-     * instead of relying on [BluetoothDevice.equals] delegating to the
-     * address string.
+     * the CCCD. Load-bearing, not merely observability: the facade reads this set
+     * (via [subscribedAddresses] / [isSubscribed]) to (a) resolve the asymmetric-
+     * link notify egress — replying over the connection the peer opened to us
+     * rather than a reverse central write — and (b) apply the per-peer MTU floor
+     * for a notify-subscribed peer whose notify-link MTU was never observed. A
+     * [ConcurrentHashMap]-backed set: mutated here on the GATT-server binder thread
+     * (CCCD writes) and read on the main thread, so the cross-thread access is safe.
+     * Keyed by address (not [BluetoothDevice]) so the contract matches
+     * [MeshConnectionRegistry]'s stated "stable for the lifetime of a single LL
+     * connection" guarantee instead of relying on [BluetoothDevice.equals]
+     * delegating to the address string.
      */
     private val subscribedCentralAddresses: MutableSet<String> =
         ConcurrentHashMap.newKeySet()

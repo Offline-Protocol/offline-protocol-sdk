@@ -80,6 +80,31 @@ internal fun computeEffectivePayload(
 }
 
 /**
+ * Resolves, by PEER IDENTITY, the subscribed peripheral-link address that
+ * belongs to [deviceId] — or null if no notify-subscribed central maps to this
+ * peer.
+ *
+ * This is the SINGLE device-scoped resolution shared by the per-peer MTU floor
+ * ([BleTransportFacade.flushPeerMtu]) and the notify egress
+ * ([BleTransportFacade.sendFragmentData]). Keeping one predicate is load-bearing:
+ * the floor must be applied for exactly the peers the notify path can reach, or a
+ * multi-fragment notify (an MLS Welcome) sized for the larger central link
+ * overflows the unobserved notify link and is silently truncated on air. The two
+ * links can use DIFFERENT BLE addresses for the same peer (iOS uses distinct
+ * handles per direction), so we match by device id, not address.
+ *
+ * [resolveDeviceId] maps a subscribed address to the device id it registered
+ * under ([MeshConnectionRegistry.deviceIdForAddress]); a subscribed address that
+ * has not resolved to any device id (null) never matches. Pure and side-effect
+ * free so the resolution is unit-testable without the Android BLE stack.
+ */
+internal fun resolveSubscribedAddress(
+    deviceId: String,
+    subscribedAddresses: Collection<String>,
+    resolveDeviceId: (String) -> String?,
+): String? = subscribedAddresses.firstOrNull { resolveDeviceId(it) == deviceId }
+
+/**
  * BLE transport facade implementing [TransportManager] for Bluetooth Low
  * Energy communication. Ensures iOS ↔ Android cross-platform compatibility.
  *
@@ -2062,6 +2087,21 @@ class BleTransportFacade(
     private fun currentConnectionCount(): Int = connections.connectionCount()
 
     /**
+     * The subscribed peripheral-link address that maps to [deviceId] by identity,
+     * or null if the peer is not notify-subscribed. Wraps [resolveSubscribedAddress]
+     * over the live GATT-server subscription set and the connection registry so the
+     * MTU floor and the notify egress resolve notify-reachability identically — see
+     * [resolveSubscribedAddress] for why that shared predicate is load-bearing.
+     * Main-thread only (reads [connections] and the GATT-server snapshot).
+     */
+    private fun subscribedNotifyAddressFor(deviceId: String): String? {
+        val server = peripheralGattServer ?: return null
+        return resolveSubscribedAddress(deviceId, server.subscribedAddresses()) {
+            connections.deviceIdForAddress(it)
+        }
+    }
+
+    /**
      * Recomputes and flushes the effective per-peer ATT payload into the Rust
      * transport keyed by [deviceId]. The core stores ONE MTU per peer but a
      * peer can be reachable over two links with different MTUs — the central
@@ -2111,17 +2151,15 @@ class BleTransportFacade(
         // fires (an iOS central negotiates a smaller MTU on the link it opens to
         // us, or none). Without a peripheral value the min() would collapse to the
         // central payload and a multi-fragment notify — an MLS Welcome — would
-        // overflow the notify link and be silently truncated on air. So when any
-        // notify-subscribed address maps to this peer but no peripheral payload is
-        // on file, [computeEffectivePayload] floors the peripheral term to the
-        // 185-byte fragment cap until a real value arrives. The subscription check
-        // is device-scoped, not address-scoped: the two links can use different BLE
-        // addresses for the same peer (iOS uses distinct handles per direction), so
-        // we match by device id exactly as the notify-egress resolution does.
+        // overflow the notify link and be silently truncated on air. So when the
+        // peer is notify-subscribed but no peripheral payload is on file,
+        // [computeEffectivePayload] floors the peripheral term to the 185-byte
+        // fragment cap until a real value arrives. Notify-reachability is resolved
+        // by [subscribedNotifyAddressFor] — the SAME device-scoped resolution the
+        // notify egress uses — so the floor is applied for exactly the peers the
+        // notify path can reach.
         val peripheralStaged = peripheralPayloadByDevice[deviceId]
-        val notifySubscribed = peripheralGattServer?.subscribedAddresses()?.any {
-            connections.deviceIdForAddress(it) == deviceId
-        } == true
+        val notifySubscribed = subscribedNotifyAddressFor(deviceId) != null
         val effective = computeEffectivePayload(
             central = central,
             peripheralStaged = peripheralStaged,
@@ -2140,6 +2178,26 @@ class BleTransportFacade(
                 Log.w(TAG, "bleClearPeerMtu failed for $deviceId", e)
             }
             return
+        }
+        // The notify floor took effect AND it caps a central link that could carry
+        // more: the per-peer MTU is ONE value used for BOTH directions, so flooring
+        // for the unobserved notify link also throttles central-write egress to the
+        // 185-byte cap until a real peripheral MTU is observed (then
+        // min(central, peripheral) relaxes it). The trade is correct — silent notify
+        // truncation is the alternative — and self-healing, but surface it so a
+        // convergence/throughput investigation can see WHY a higher-MTU central link
+        // is fragmenting at 185. (Honoring per-direction fragment sizes, which would
+        // remove the trade, is a deeper fragmenter change tracked separately.)
+        if (peripheralStaged == null && notifySubscribed && central != null && central > MAX_FRAGMENT_SIZE) {
+            emitDiagnostic(
+                "info",
+                "BLE per-peer MTU floored to notify cap; central egress throttled until peripheral MTU observed",
+                mapOf(
+                    "deviceId" to deviceId,
+                    "centralPayload" to central,
+                    "floor" to MAX_FRAGMENT_SIZE,
+                ),
+            )
         }
         // A link that negotiated BELOW the fragment floor is a real offline-
         // failure case: Rust rejects a sub-floor MTU and reverts to the 185-byte
@@ -2690,9 +2748,9 @@ class BleTransportFacade(
             if (address != null && server.isSubscribed(address)) {
                 address
             } else {
-                server.subscribedAddresses().firstOrNull { subscribed ->
-                    connections.deviceIdForAddress(subscribed) == recipientId
-                }
+                // Resolve by identity through the shared device-scoped predicate —
+                // the same one the MTU floor uses, so floor and egress never desync.
+                subscribedNotifyAddressFor(recipientId)
             }
         }
         if (notifyAddress != null) {
