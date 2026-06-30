@@ -147,6 +147,25 @@ class BleTransportFacade(
          *  write doesn't out-run it into ERROR_GATT_WRITE_REQUEST_BUSY (201).
          *  An occasional 201 here still self-heals via the backpressure retry. */
         private const val WRITE_GATE_WATCHDOG_MS = 30L
+        /** Per-peer gate hold for the peripheral INDICATE (notify) egress: the
+         *  safety-net timeout before the next indication is allowed absent a
+         *  completion callback.
+         *
+         *  Unlike the central WRITE_TYPE_NO_RESPONSE path, the notify path has a
+         *  RELIABLE completion signal — the message characteristic is an
+         *  INDICATION (ATT-confirmed), so onNotificationSent fires on the
+         *  central's confirmation (real delivery) and that is the fast path that
+         *  releases the gate. This watchdog is therefore a true fallback, not the
+         *  steady-state pace, so it is deliberately LONGER than
+         *  [WRITE_GATE_WATCHDOG_MS]: an indication confirmation needs at least one
+         *  connection interval plus the central's processing (commonly 30–50ms+),
+         *  and a 30ms watchdog would routinely pre-empt the confirmation, re-drive
+         *  into a stack that rejects a second outstanding indication, and churn
+         *  re-enqueues — partly defeating the per-fragment flow control INDICATE
+         *  exists to provide. A genuinely lost confirmation costs at most this
+         *  long per fragment (≈15 fragments stays well under the reassembly TTL
+         *  and the mesh welcome-confirm timeout). */
+        private const val NOTIFY_GATE_WATCHDOG_MS = 250L
         /** Minimum spacing between two completion-driven fragment sends to the
          *  same link.
          *
@@ -2507,21 +2526,25 @@ class BleTransportFacade(
      * by notifying the message characteristic over the connection it opened and
      * subscribed to — the reliable egress for asymmetric mesh links, used in
      * preference to a reverse central writeCharacteristic that may vanish on a
-     * half-open link. Shares the per-peer [writeInFlight] gate + self-paced
-     * watchdog with the central write path so notifications stay serialised (one
-     * outstanding per peer) and multi-fragment replies self-pace identically.
+     * half-open link. Shares the per-peer [writeInFlight] gate with the central
+     * write path so notifications stay serialised (one outstanding per peer), but
+     * paces on the INDICATE-aware [NOTIFY_GATE_WATCHDOG_MS] fallback — the fast
+     * path is onNotificationSent firing on the indication confirmation.
      * Main-thread only.
      */
     private fun sendViaNotify(recipientId: String, address: String, data: ByteArray): Boolean {
         assertMainThread("sendViaNotify")
         val server = peripheralGattServer ?: return false
 
-        // Serialise to one outstanding notify per peer (same gate as the central
-        // write path) so we don't out-run the stack's one-op-at-a-time limit.
+        // Serialise to one outstanding indication per peer (same gate as the
+        // central write path) so we don't out-run the stack's one-op-at-a-time
+        // limit. The stale threshold is the INDICATE-aware watchdog: a deferred
+        // fragment keeps waiting until onNotificationSent releases the gate or
+        // the (longer) fallback elapses, rather than racing the confirmation.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val inFlightSince = writeInFlight[address]
             if (inFlightSince != null) {
-                if (android.os.SystemClock.elapsedRealtime() - inFlightSince < WRITE_GATE_WATCHDOG_MS) {
+                if (android.os.SystemClock.elapsedRealtime() - inFlightSince < NOTIFY_GATE_WATCHDOG_MS) {
                     if (logThrottler.shouldLog("notify_gated_$recipientId", intervalMs = 5000)) {
                         Log.d(TAG, "Deferring notify to $recipientId: prior notify still in flight")
                     }
@@ -2551,10 +2574,12 @@ class BleTransportFacade(
         meshController.markPeerActive(recipientId)
         meshController.markPeerActive(deviceId)
 
-        // Hold + self-pace the gate exactly like the central write path. The
-        // peripheral onNotificationSent callback is not wired through, so the
-        // 30ms watchdog re-drives the next fragment, making multi-fragment
-        // replies complete without depending on a completion callback.
+        // Hold the per-peer gate. The fast path is onNotificationSent firing on
+        // the INDICATE confirmation (real delivery) -> onWriteCompleted, which
+        // releases the gate and paces the next fragment by one connection
+        // interval. This watchdog only re-drives if that callback is lost; it is
+        // longer than the central path's (see [NOTIFY_GATE_WATCHDOG_MS]) so it
+        // does not pre-empt the confirmation round-trip and churn busy-rejects.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val stamp = android.os.SystemClock.elapsedRealtime()
             writeInFlight[address] = stamp
@@ -2565,7 +2590,7 @@ class BleTransportFacade(
                         drainAndSendFragments()
                     }
                 }
-            }, WRITE_GATE_WATCHDOG_MS)
+            }, NOTIFY_GATE_WATCHDOG_MS)
         }
         return true
     }
