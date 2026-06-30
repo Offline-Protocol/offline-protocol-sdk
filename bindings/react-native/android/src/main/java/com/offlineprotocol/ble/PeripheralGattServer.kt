@@ -301,14 +301,20 @@ class PeripheralGattServer(
         val characteristic = messageCharacteristic ?: return false
         if (!subscribedCentralAddresses.contains(device.address)) return false
         return try {
+            // confirm = true → ATT Handle Value INDICATION (acknowledged) rather
+            // than a fire-and-forget NOTIFICATION. The central must confirm each
+            // one before the stack accepts the next, giving the per-fragment flow
+            // control that keeps a large Welcome from overrunning the receiver.
+            // onNotificationSent then fires on the CONFIRMATION (real delivery),
+            // which releases the per-peer write gate only once the peer has it.
             val accepted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                server.notifyCharacteristicChanged(device, characteristic, false, bytes) ==
+                server.notifyCharacteristicChanged(device, characteristic, true, bytes) ==
                     BluetoothStatusCodes.SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 characteristic.value = bytes
                 @Suppress("DEPRECATION")
-                server.notifyCharacteristicChanged(device, characteristic, false)
+                server.notifyCharacteristicChanged(device, characteristic, true)
             }
             if (!accepted) {
                 // The stack refused the notification. The dominant cause for a
@@ -468,8 +474,17 @@ class PeripheralGattServer(
     private fun registerNotifyCharacteristic(uuid: UUID): BluetoothGattCharacteristic {
         val char = BluetoothGattCharacteristic(
             uuid,
+            // INDICATE, not NOTIFY: indications are ATT-confirmed, so the stack
+            // will not send the next fragment until the central confirms the
+            // previous one. That per-fragment flow control is what an
+            // unacknowledged NOTIFY lacks — a large multi-fragment message (an
+            // MLS Welcome) out-runs a slower central's receive buffer and loses
+            // a fragment every pass, so it never reassembles. With only
+            // INDICATE advertised, iOS subscribes for indications (it prefers
+            // NOTIFY when both are offered), and the CCCD classifier already
+            // accepts the 0x0002 enable value.
             BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
-                BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                BluetoothGattCharacteristic.PROPERTY_INDICATE,
             BluetoothGattCharacteristic.PERMISSION_WRITE,
         )
         val cccd = BluetoothGattDescriptor(
