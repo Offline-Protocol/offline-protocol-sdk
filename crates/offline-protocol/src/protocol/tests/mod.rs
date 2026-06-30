@@ -3654,6 +3654,75 @@ fn test_on_transport_send_confirmed_sends_immediate_probe() {
 }
 
 #[test]
+fn test_mesh_welcome_sender_probes_for_confirmation() {
+    // Regression: the Welcome SENDER on a mesh transport (BLE / WiFi-Direct) must
+    // actively probe the peer for confirmation, not wait passively for the peer's
+    // single proactive confirm. Mesh has no `on_transport_send_confirmed`, so if
+    // the Welcome send does not seed the probe scheduler, the sender's
+    // `run_throttled_reconciliation` `has_pending_work` gate stays false (it has
+    // no pending encrypted messages) and it never emits a SESSION_CONFIRM_PROBE.
+    // The Welcome then retransmits every confirm-timeout window until TTL — the
+    // observed "Welcome send confirmation timed out, attempt 1,2,3,4..." loop.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    // Mesh transport only — no Internet path to confirm the send for us.
+    let mut ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    let transport_handle = ble.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol.start().unwrap();
+
+    // Peer key package available, as after accepting a connection request.
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    // Accepter path: create the 1:1 group and send the Welcome. This does NOT
+    // queue an app message, so it does not borrow the initiator's
+    // queue_message_for_session_establishment -> kick-reconciliation path; the
+    // probe must be seeded by the Welcome send itself.
+    protocol.establish_secure_session("bob").unwrap();
+
+    assert!(
+        protocol.confirmation_probe_due_at.contains_key("bob"),
+        "Welcome send should seed the confirmation-probe scheduler for the pending peer"
+    );
+
+    let messages_before = transport_handle.sent_messages().len();
+
+    // A process tick now has pending work, so reconciliation is not
+    // short-circuited and the sender emits a confirmation probe.
+    protocol.process().unwrap();
+
+    let messages_after = transport_handle.sent_messages();
+    assert!(
+        messages_after.len() > messages_before,
+        "Expected the sender to emit a confirmation probe on the next process tick"
+    );
+    assert!(
+        messages_after
+            .iter()
+            .any(|m| m.content.starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        "Expected a SESSION_CONFIRM_PROBE to be emitted by the mesh Welcome sender"
+    );
+}
+
+#[test]
 fn test_welcome_terminal_lifecycle_can_be_overwritten() {
     let mut config = create_test_config();
     config.encryption.enabled = true;

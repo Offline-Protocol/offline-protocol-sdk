@@ -685,6 +685,27 @@ impl OfflineProtocol {
                 self.welcome_lifecycles
                     .insert(peer_id.to_string(), updated.clone());
                 self.persist_welcome_lifecycle_entry(&updated)?;
+
+                // Seed the confirmation-probe scheduler for this pending peer so
+                // the SENDER actively reconciles instead of waiting passively.
+                //
+                // The Welcome is now in flight but unconfirmed. The sender's only
+                // built-in convergence path would otherwise be the receiver's
+                // single proactive encrypted confirm on first Welcome receipt — a
+                // single point of failure with no retry (a lost fragment, a
+                // not-yet-ready encryptor, or the retransmit/owner_keep path on
+                // the receiver all strand it). By marking a probe due now,
+                // `run_throttled_reconciliation` (whose `has_pending_work` gate is
+                // otherwise false on the sender, since it has no pending encrypted
+                // messages) starts emitting `SESSION_CONFIRM_PROBE`s. The peer —
+                // which holds the session — replies with `SESSION_CONFIRM_ACK`,
+                // confirming us and marking this Welcome `Sent`. The entry is
+                // dropped once confirmed (`clear_confirmation_recovery_tracking`)
+                // or once the peer is no longer pending (`kick`'s retain), so this
+                // adds no steady-state work after convergence.
+                self.confirmation_probe_due_at
+                    .insert(peer_id.to_string(), Utc::now());
+
                 Ok(false)
             }
             Err(err) => {
