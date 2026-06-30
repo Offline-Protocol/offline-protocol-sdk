@@ -1,0 +1,31 @@
+// Standalone Gradle harness for running the Android library module's JVM unit
+// tests (../android/src/test) in CI.
+//
+// The module itself (../android) is a React Native library: it uses the legacy
+// `apply plugin: 'com.android.library'` style and relies on a *host app's*
+// buildscript classpath to supply the Android Gradle Plugin + Kotlin plugin, so
+// it cannot be configured on its own. This harness supplies that classpath (see
+// build.gradle) and includes the module as a subproject WITHOUT modifying its
+// build.gradle, so the way real RN apps consume `../android` is untouched.
+//
+// In CI no `node_modules` is installed, so the module's `reactNativeExists`
+// check is false and it takes its built-in "standalone build or testing" path
+// (compileOnly react-android) — exactly what this harness exercises.
+
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+// NB: deliberately NO `dependencyResolutionManagement { repositoriesMode = ... }`
+// here — the included module declares its own `repositories {}` block, and the
+// default PREFER_PROJECT mode lets that stand. A FAIL_ON_PROJECT_REPOS policy
+// would break the module's build.gradle.
+
+rootProject.name = "offline-protocol-android-ci"
+
+include(":offlineprotocol")
+project(":offlineprotocol").projectDir = file("../android")
