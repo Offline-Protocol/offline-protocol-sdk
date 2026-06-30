@@ -510,6 +510,57 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // BOTH-CREATE OWNER GATE PERSISTENCE
+    // ========================================================================
+
+    /// Persists a both-create owner-gate entry (value-less; the key is the peer).
+    pub(crate) fn persist_both_create_awaiting_decrypt(&self, peer_id: &str) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.store(storage_keys::BOTH_CREATE_AWAITING_DECRYPT, peer_id, &[]) {
+            warn!(peer_id = %peer_id, error = %e, "Failed to persist both-create owner gate");
+        }
+    }
+
+    /// Deletes a both-create owner-gate entry once the peer has converged.
+    pub(crate) fn delete_both_create_awaiting_decrypt(&self, peer_id: &str) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::BOTH_CREATE_AWAITING_DECRYPT, peer_id) {
+            warn!(peer_id = %peer_id, error = %e, "Failed to delete both-create owner gate");
+        }
+    }
+
+    /// Restores the both-create owner gate from storage on startup, so an owner
+    /// that restarted mid-convergence keeps requiring a group-aware decrypt
+    /// before confirming a still-pending peer. Stale entries for already-confirmed
+    /// peers are harmless (confirmation short-circuits) and are cleared on the
+    /// next confirm.
+    pub(crate) fn restore_both_create_awaiting_decrypt(&mut self) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        let peer_ids = match storage.list_keys(storage_keys::BOTH_CREATE_AWAITING_DECRYPT) {
+            Ok(keys) => keys,
+            Err(e) => {
+                warn!(error = %e, "Failed to list both-create owner gate from storage");
+                return;
+            }
+        };
+        for peer_id in &peer_ids {
+            self.both_create_awaiting_decrypt.insert(peer_id.clone());
+        }
+        if !self.both_create_awaiting_decrypt.is_empty() {
+            info!(
+                count = self.both_create_awaiting_decrypt.len(),
+                "Restored both-create owner gate from storage"
+            );
+        }
+    }
+
+    // ========================================================================
     // TELEMETRY SCRUB-SECRET PERSISTENCE
     // ========================================================================
 

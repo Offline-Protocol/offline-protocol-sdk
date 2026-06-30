@@ -127,8 +127,11 @@ pub struct OfflineProtocol {
     /// confirmation probe/ack is NOT group-aware (it only proves the peer holds
     /// *some* session, possibly its own pre-adoption group) and must not be
     /// allowed to stop our Welcome retransmission, or the peer could be left
-    /// stranded on a divergent group. In-memory only: rebuilt on the next
-    /// received Welcome after a restart.
+    /// stranded on a divergent group. Persisted (see
+    /// `restore_both_create_awaiting_decrypt`) so an owner restart mid-convergence
+    /// keeps the gate, rather than letting a stale plaintext probe/ack confirm
+    /// prematurely. Mutate only via `mark_both_create_awaiting_decrypt` /
+    /// `clear_both_create_awaiting_decrypt` to keep memory and storage in sync.
     both_create_awaiting_decrypt: std::collections::HashSet<String>,
 
     /// Sink for MLS lifecycle telemetry.
@@ -386,6 +389,7 @@ impl OfflineProtocol {
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
             self.restore_welcome_lifecycles()?;
+            self.restore_both_create_awaiting_decrypt();
             Ok(())
         })();
 

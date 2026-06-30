@@ -4128,6 +4128,133 @@ fn test_welcome_no_carrier_ticks_keep_lifecycle_alive() {
 }
 
 #[test]
+fn test_no_carrier_welcome_parks_without_churn() {
+    // Regression: a Welcome with no transport carrier must be PARKED (cheap,
+    // slow re-check), not re-attempted at the data-plane retry rate. Each wasted
+    // attempt previously incremented-then-rolled-back the attempt counter, ran
+    // two state transitions (two persists + two info logs), and emitted a
+    // WelcomeSendAttempted event — ~1 Hz of storage/event churn while a device
+    // is simply offline. A parked Welcome emits no attempt/failed events and
+    // schedules its next re-check on the slow no-carrier interval.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    // Tiny data-plane backoff: if the no-carrier path WERE (incorrectly) using
+    // it, next_retry_at would land ~milliseconds out, not the slow interval.
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 5;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let observed_events_clone = observed_events.clone();
+    protocol.on_event(move |event| {
+        observed_events_clone.lock().unwrap().push(event);
+    });
+    protocol.start().unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    let _ = protocol.send_message(
+        "bob",
+        "queued-offline",
+        None::<MessagePriority>,
+        None::<String>,
+    );
+    for _ in 0..10 {
+        let _ = protocol.try_send_welcome("bob", "test_no_carrier_tick");
+    }
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    // Parked, not aged: still non-terminal and no attempt consumed.
+    assert_ne!(lifecycle.state, WelcomeDeliveryState::Expired);
+    assert_eq!(
+        lifecycle.attempt, 0,
+        "a parked no-carrier Welcome must not consume an attempt, got {}",
+        lifecycle.attempt
+    );
+    // Re-check is scheduled on the SLOW no-carrier interval, proving we did not
+    // fall through to the ~1ms data-plane backoff.
+    let next_retry = lifecycle
+        .next_retry_at
+        .expect("a parked Welcome must schedule a re-check");
+    let secs_out = (next_retry - Utc::now()).num_seconds();
+    assert!(
+        secs_out >= WELCOME_NO_CARRIER_RETRY_SECS - 2,
+        "parked Welcome must re-check on the slow no-carrier interval, got {secs_out}s"
+    );
+
+    // The churn we eliminated: no per-tick attempt/failed/expired events.
+    let events = observed_events.lock().unwrap();
+    let churn = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::WelcomeSendAttempted { .. }
+                    | Event::WelcomeSendFailed { .. }
+                    | Event::WelcomeSendExpired { .. }
+            )
+        })
+        .count();
+    assert_eq!(
+        churn, 0,
+        "no-carrier ticks must not emit attempt/failed/expired churn, got {churn}"
+    );
+}
+
+#[test]
+fn test_both_create_gate_survives_owner_restart() {
+    // Regression: the both-create owner gate must persist. If an owner restarts
+    // mid-convergence and loses the gate, a stale plaintext probe/ack could
+    // confirm it, stop its Welcome retransmission, and strand the peer on a
+    // divergent group. With the gate restored, only a group-aware decrypt may
+    // confirm.
+    let config = create_test_config_for_user("alice");
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let mut owner = OfflineProtocol::new(config.clone()).unwrap();
+    owner.initialize_mls(storage.clone()).unwrap();
+    owner.mark_both_create_awaiting_decrypt("bob");
+    assert!(owner.both_create_awaiting_decrypt.contains("bob"));
+    // The gate blocks a plaintext-ack confirmation (only a decrypt is accepted).
+    assert!(!owner.can_confirm_from_source("bob", "confirmation_ack_received"));
+
+    // Restart with the same storage: the gate must be restored.
+    let mut restarted = OfflineProtocol::new(config.clone()).unwrap();
+    restarted.initialize_mls(storage.clone()).unwrap();
+    assert!(
+        restarted.both_create_awaiting_decrypt.contains("bob"),
+        "both-create owner gate must survive a restart"
+    );
+    assert!(
+        !restarted.can_confirm_from_source("bob", "confirmation_ack_received"),
+        "restored gate must still block a plaintext-ack confirmation"
+    );
+
+    // Convergence clears it from storage too, so a later restart does not revive
+    // it (which would wrongly keep blocking confirmation of a converged peer).
+    restarted.clear_both_create_awaiting_decrypt("bob");
+    let mut after_converge = OfflineProtocol::new(config).unwrap();
+    after_converge.initialize_mls(storage).unwrap();
+    assert!(
+        !after_converge.both_create_awaiting_decrypt.contains("bob"),
+        "a cleared gate must not be restored after convergence"
+    );
+}
+
+#[test]
 fn test_welcome_sends_when_carrier_appears() {
     let mut config = create_test_config();
     config.encryption.enabled = true;

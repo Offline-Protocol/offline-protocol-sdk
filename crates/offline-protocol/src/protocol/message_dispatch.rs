@@ -299,7 +299,7 @@ impl OfflineProtocol {
             // it adopted our group via a group-aware decrypt before we confirm
             // (and stop retransmitting). A plaintext probe/ack is not sufficient.
             if owner_keep {
-                self.both_create_awaiting_decrypt.insert(sender_owned.clone());
+                self.mark_both_create_awaiting_decrypt(&sender_owned);
             }
 
             // Confirm session and process queued items after releasing the MLS lock

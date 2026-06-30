@@ -110,6 +110,29 @@ const SIGNAL_SCORE_NO_DATA: f32 = 50.0;
 /// peers where no mesh transport is available. See `calculate_transport_score`.
 const INTERNET_FALLBACK_DEMOTION: f32 = 10_000.0;
 
+/// Recovers the real 0–125 quality score from a (possibly demoted) routing
+/// `total` for telemetry / display.
+///
+/// [`INTERNET_FALLBACK_DEMOTION`] is a pure *ranking* device: it pushes the
+/// Internet transport below every mesh score so selection only escalates to it
+/// as a last resort. That sentinel must never leak to app-facing telemetry
+/// (events, routing decisions, the UniFFI boundary) — a dashboard reading a
+/// "score" of ≈ -9900 for a remote peer is nonsense. Selection keeps the raw
+/// (negative) total internally; consumers that *display* a score call this.
+///
+/// The demotion is detectable by sign: a non-demoted total is always `>= 0`
+/// (it is `.max(0.0)`'d in `calculate_transport_score`), and a demoted Internet
+/// total is `real - INTERNET_FALLBACK_DEMOTION` with `real ∈ [0, ~125]`, so
+/// adding the demotion back recovers the real score exactly. Idempotent — safe
+/// to apply to an already-sanitized (non-negative) value.
+pub fn display_routing_score(raw_total: f32) -> f32 {
+    if raw_total < 0.0 {
+        (raw_total + INTERNET_FALLBACK_DEMOTION).max(0.0)
+    } else {
+        raw_total
+    }
+}
+
 /// Tie-break priority for transport selection when scores are equal or within TIE_EPSILON.
 /// Lower value = preferred. Order: Internet, WiFiDirect, BLE, Reticulum.
 ///
@@ -875,7 +898,11 @@ impl TransportSelector {
             return false;
         }
 
-        // Emergency bypass: if current transport has critical degradation, switch immediately
+        // Emergency bypass: if current transport has critical degradation, switch immediately.
+        // `candidate_score` is the best (argmax) score, so it is always a non-negative mesh
+        // score whenever Internet is fallback-demoted (the negative sentinel can only be the
+        // *best* when Internet is the sole transport, and then `should_switch` is not reached).
+        // So the `> 10.0` "reasonable candidate" floor never sees the demotion sentinel.
         if self.is_emergency_switch_needed(current_transport) {
             return candidate_score > 10.0; // Any reasonably scored candidate is acceptable
         }
@@ -1782,6 +1809,37 @@ mod tests {
             Some(TransportType::Internet),
             "an internet-preferred (media) message must keep Internet on top",
         );
+    }
+
+    /// `display_routing_score` must recover the real 0–125 quality score from the
+    /// negative fallback-demotion sentinel (so telemetry never leaks ≈ -9900),
+    /// be the identity for normal mesh scores, and be idempotent.
+    #[test]
+    fn test_display_routing_score_reverses_fallback_demotion() {
+        // A demoted Internet total (real score 42 minus the demotion) recovers to 42.
+        let demoted = 42.0 - INTERNET_FALLBACK_DEMOTION;
+        assert!(demoted < 0.0, "precondition: demotion makes the total negative");
+        assert!((display_routing_score(demoted) - 42.0).abs() < 1e-3);
+
+        // Normal mesh scores pass through untouched.
+        assert_eq!(display_routing_score(0.0), 0.0);
+        assert_eq!(display_routing_score(73.5), 73.5);
+        assert_eq!(display_routing_score(125.0), 125.0);
+
+        // Idempotent: applying it to an already-sanitized value is a no-op.
+        let once = display_routing_score(demoted);
+        assert_eq!(display_routing_score(once), once);
+
+        // And the live demotion path: an Internet-only selection still scores
+        // negative INTERNALLY, but display_routing_score sanitizes it to >= 0.
+        let selector = TransportSelector::new();
+        let message = create_test_message();
+        let metrics = create_test_metrics(None, 0.0, 0);
+        let raw = selector
+            .calculate_transport_score(&message, TransportType::Internet, &metrics)
+            .total;
+        assert!(raw < 0.0, "Internet is demoted negative under default config");
+        assert!(display_routing_score(raw) >= 0.0);
     }
 
     #[test]
