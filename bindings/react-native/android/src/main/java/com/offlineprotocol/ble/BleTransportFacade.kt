@@ -366,9 +366,17 @@ class BleTransportFacade(
                     // `on_peer_lost`. All that remains is the facade-side
                     // staged entry keyed by BLE address (non-empty in the
                     // edge case where `onPeerMtuNegotiated` landed but
-                    // the device-id read never completed).
+                    // the device-id read never completed) plus the
+                    // per-device MTU slots, both cleared below.
+                    //
+                    // Asymmetry (by design): this drops the peer's MTU state
+                    // wholesale even if a peripheral/notify link to the same
+                    // peer is still alive — whether a central give-up should
+                    // imply peer loss is a protocol-level question left out of
+                    // scope here. A surviving link self-heals: its next inbound
+                    // fragment re-stages the MTU via onPeripheralMtuNegotiated.
                     if (shuttingDown) return
-                    dropStagedPeerMtu(address)
+                    dropStagedPeerMtu(address, peerId)
                 }
             },
             diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
@@ -426,6 +434,18 @@ class BleTransportFacade(
     // (in [handleCentralDisconnectedOnMain]) so the central MTU is restored.
     // Main-thread only.
     private val peripheralMaxPayloads = HashMap<String, Int>()
+    // Per-DEVICE-ID negotiated ATT payloads, one slot per direction. A peer can
+    // be reachable over two links with DIFFERENT BLE addresses (iOS uses distinct
+    // connection handles per direction), so the central and peripheral payloads
+    // must be combined by device identity, not by a single address — otherwise a
+    // late renegotiation on one link would flush an MTU unbounded by the other and
+    // the notify egress overflows it (the offline 1:1 Welcome stall this fix
+    // targets). The per-address maps above are the deferral buffer for a payload
+    // negotiated before the device id resolves; [flushPeerMtu] promotes them into
+    // these per-device slots and mins across THESE. Cleared per-direction on that
+    // link's teardown. Main-thread only.
+    private val centralPayloadByDevice = HashMap<String, Int>()
+    private val peripheralPayloadByDevice = HashMap<String, Int>()
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
@@ -945,6 +965,14 @@ class BleTransportFacade(
         // handshake stages its own MTU.
         peerMaxPayloads.clear()
         peripheralMaxPayloads.clear()
+        centralPayloadByDevice.clear()
+        peripheralPayloadByDevice.clear()
+        // The per-peer write gate is otherwise self-healing across a restart
+        // (watchdogs fire within the gate window and the stale-check covers a
+        // fast restart since elapsedRealtime is monotonic), but clear it here to
+        // match the documented "drop prior-session state" intent and remove the
+        // cross-session reasoning burden.
+        writeInFlight.clear()
         centralClient.clearAll()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
@@ -1990,28 +2018,69 @@ class BleTransportFacade(
      * central link but egressed as a notify overflows the peripheral link and
      * is truncated/dropped on air — the offline 1:1 Welcome-delivery stall.
      *
+     * The two links can use DIFFERENT BLE addresses for the same peer (iOS uses
+     * distinct connection handles per direction) and Rust is keyed by device id,
+     * so the min MUST be taken per DEVICE, not per address: a single call sees
+     * only one link's [address], so it promotes that address's staged value into
+     * the matching per-device direction slot ([centralPayloadByDevice] /
+     * [peripheralPayloadByDevice]) and mins across those. This accumulates both
+     * directions across the two links' separate flushes, so a late renegotiation
+     * on one link can no longer drop the bound the other imposed.
+     *
      * Called whenever either link's MTU is (re)negotiated, when the device id
      * resolves ([CentralGattClient.Host.onDeviceIdResolved]), and when a link
-     * tears down (to restore the surviving link's MTU). If neither link has a
-     * value the Rust entry is cleared so the fragmenter reverts to its
+     * tears down (to restore the surviving link's MTU). If neither direction has
+     * a value the Rust entry is cleared so the fragmenter reverts to its
      * 185-byte floor rather than retaining a dead link's value. Idempotent and
-     * main-thread only. The staged values are NOT removed on flush (they are
-     * inputs to the min); link-teardown paths clear them explicitly.
+     * main-thread only. The per-address staged values are NOT removed on flush
+     * (they are inputs to the min); link-teardown paths clear the dropped
+     * direction's per-device slot explicitly.
      */
     private fun flushPeerMtu(address: String, deviceId: String) {
         assertMainThread("flushPeerMtu")
-        val central = peerMaxPayloads[address]
-        val peripheral = peripheralMaxPayloads[address]
+        // Promote this link's staged (per-address) payload into the per-DEVICE
+        // direction slot. On asymmetric-address peers each flush sees only its own
+        // link's address, so both directions accumulate across the two links'
+        // separate flushes; on a symmetric (single-address) peer both promote
+        // together. Promotion only sets — never clears — so a flush via one link
+        // cannot wipe the bound the other imposed.
+        peerMaxPayloads[address]?.let { centralPayloadByDevice[deviceId] = it }
+        peripheralMaxPayloads[address]?.let { peripheralPayloadByDevice[deviceId] = it }
+
+        val central = centralPayloadByDevice[deviceId]
+        val peripheral = peripheralPayloadByDevice[deviceId]
         val effective = listOfNotNull(central, peripheral).minOrNull()
         if (effective == null) {
-            // Both links gone — drop the Rust entry so the fragmenter falls
-            // back to the floor instead of keeping a stale per-peer size.
+            // Both directions gone — drop the Rust entry so the fragmenter falls
+            // back to the floor instead of keeping a stale per-peer size, and the
+            // now-empty per-device slots.
+            centralPayloadByDevice.remove(deviceId)
+            peripheralPayloadByDevice.remove(deviceId)
             try {
                 protocol.bleClearPeerMtu(deviceId)
             } catch (e: Exception) {
                 Log.w(TAG, "bleClearPeerMtu failed for $deviceId", e)
             }
             return
+        }
+        // A link that negotiated BELOW the fragment floor is a real offline-
+        // failure case: Rust rejects a sub-floor MTU and reverts to the 185-byte
+        // floor (see `set_peer_mtu`), which is LARGER than this link can carry, so
+        // a multi-fragment notify can still overflow. Rare on modern stacks (both
+        // platforms request the BLE-5 max) but it is exactly the legacy/quirky-peer
+        // population, so surface it to Metro instead of failing silently. (Honoring
+        // a sub-floor notify fragment size is a deeper fragmenter change tracked
+        // separately.)
+        if (effective < MAX_FRAGMENT_SIZE) {
+            emitDiagnostic(
+                "warning",
+                "BLE link negotiated below fragment floor; notify may overflow",
+                mapOf(
+                    "deviceId" to deviceId,
+                    "effectivePayload" to effective,
+                    "floor" to MAX_FRAGMENT_SIZE,
+                ),
+            )
         }
         try {
             protocol.bleSetPeerMtu(deviceId, effective.toUInt())
@@ -2053,14 +2122,23 @@ class BleTransportFacade(
      * [handleCentralDisconnectedOnMain] for the bug this invariant
      * exists to prevent.
      *
-     * [address] may be null on paths where we only know the device
-     * id, in which case this is a no-op. Main-thread only.
+     * [address] may be null on paths where we only know the device id; the
+     * per-device direction slots keyed by [deviceId] are still cleared.
+     * Main-thread only.
      */
-    private fun dropStagedPeerMtu(address: String?) {
+    private fun dropStagedPeerMtu(address: String?, deviceId: String?) {
         assertMainThread("dropStagedPeerMtu")
         if (address != null) {
             peerMaxPayloads.remove(address)
             peripheralMaxPayloads.remove(address)
+        }
+        // Also clear the per-device direction slots [flushPeerMtu] promotes into,
+        // or a stale value would survive this address's teardown and skew the min
+        // on the peer's next link. Callers that drop the whole peer (blePeerLost)
+        // pass the device id so both directions are cleared.
+        if (deviceId != null) {
+            centralPayloadByDevice.remove(deviceId)
+            peripheralPayloadByDevice.remove(deviceId)
         }
     }
 
@@ -2154,7 +2232,7 @@ class BleTransportFacade(
             outboundQueue.removeAll(peerId)
             // Facade-only staged drop; the Rust-side MTU entry is cleared
             // by `protocol.blePeerLost` below via `on_peer_lost`.
-            dropStagedPeerMtu(address)
+            dropStagedPeerMtu(address, peerId)
             meshController.registerDisconnection(peerId)
             refreshSelfMetrics()
 
@@ -2318,6 +2396,13 @@ class BleTransportFacade(
      */
     fun onWriteCompleted(address: String) {
         assertMainThread("onWriteCompleted")
+        // Address-keyed, not per-write: a stale onCharacteristicWrite for an
+        // earlier write that fires after the watchdog/stale-check already advanced
+        // the gate to a newer write on the same address will clear the NEWER
+        // write's gate. Android's write callback carries no per-op token, so
+        // completion cannot be correlated to a specific write. The worst case is a
+        // single ERROR_GATT_WRITE_REQUEST_BUSY (201) on that newer write, which
+        // self-heals via the caller's re-enqueue + BACKPRESSURE_RETRY — no data loss.
         writeInFlight.remove(address)
         if (state == TransportState.RUNNING) {
             // Pace the next completion-driven send by one BLE connection
@@ -3285,6 +3370,11 @@ class BleTransportFacade(
         // peer_mtus wholesale) + dropStagedPeerMtu, so we defer to that path.
         if (isCleanDisconnect && peripheralMaxPayloads.remove(address) != null) {
             connections.deviceIdForAddress(address)?.let { peerId ->
+                // Drop the per-device peripheral slot too, or the recompute would
+                // re-min against the dead notify link's (smaller) bound. With it
+                // gone, flushPeerMtu restores the per-peer MTU from the surviving
+                // central link's per-device slot.
+                peripheralPayloadByDevice.remove(peerId)
                 flushPeerMtu(address, peerId)
             }
         }
@@ -3301,7 +3391,7 @@ class BleTransportFacade(
                 // `blePeerLost` above already dropped the Rust-side MTU
                 // entry via `on_peer_lost`; only the facade-side staged
                 // slot (keyed by BLE address) still needs clearing here.
-                dropStagedPeerMtu(address)
+                dropStagedPeerMtu(address, peerId)
                 meshController.registerDisconnection(peerId)
                 refreshSelfMetrics()
                 connections.removeIdentifiersForAddress(address)

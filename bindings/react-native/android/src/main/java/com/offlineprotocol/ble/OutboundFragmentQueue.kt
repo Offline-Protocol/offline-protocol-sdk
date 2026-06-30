@@ -153,6 +153,15 @@ internal class OutboundFragmentQueue(
         for (recipientId in queues.keys.toList()) {
             val queue = queues[recipientId] ?: continue
 
+            // Expiry is per-fragment, not per-message. These entries are opaque
+            // fragment bytes from the Rust fragmenter with no message grouping at
+            // this layer, so on a stall longer than timeoutMs the early fragments
+            // of a multi-fragment message can be dropped while later ones survive,
+            // tearing it. Bounded, not silent: the receiver's idle reassembly times
+            // out the partial and the sender's higher layer (Welcome retransmit /
+            // ack-driven retry) re-sends the whole message. True whole-message
+            // expiry would need message ids threaded down from Rust — tracked
+            // separately.
             var expired = 0
             val expiryIter = queue.iterator()
             while (expiryIter.hasNext()) {

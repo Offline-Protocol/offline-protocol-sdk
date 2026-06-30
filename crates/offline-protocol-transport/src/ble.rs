@@ -797,6 +797,12 @@ impl BleTransport {
             // Idle-timeout anchor: refresh on every fragment so an actively
             // arriving multi-fragment message keeps its buffer alive past the
             // BLE_FRAGMENT_TIMEOUT_SECS window measured from the first fragment.
+            // Security note: a peer dribbling one fragment per sub-timeout interval
+            // can therefore hold a partial assembly open indefinitely (vs. a hard
+            // first-fragment deadline). The exposure is bounded by the
+            // BLE_MAX_FRAGMENT_ASSEMBLIES cap + low-progress priority eviction, and
+            // is the deliberate tradeoff for not tearing a slow-but-legitimate
+            // multi-fragment message mid-flight.
             assembly.last_seen = now;
 
             // Check if complete
