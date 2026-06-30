@@ -2452,11 +2452,34 @@ class BleTransportFacade(
         // status 201, no error) — so the central path "succeeds" forever while the
         // peer, never getting our reply, retransmits and eventually gives up. This
         // is the dominant offline failure for a peer that connected to us.
-        if (address != null && peripheralGattServer?.isSubscribed(address) == true) {
-            if (logThrottler.shouldLog("reply_via_notify_$recipientId", intervalMs = 5000)) {
-                Log.i(TAG, "Replying to $recipientId via peripheral notify (asymmetric link)")
+        //
+        // Resolve the notify egress by PEER IDENTITY, not just `address`: the
+        // address we hold for the peer (the central link WE opened to it,
+        // addressForDevice) can differ from the address it subscribed under (the
+        // link IT opened to our GATT server) — iOS uses distinct handles per
+        // direction. So if the resolved address isn't the subscribed one, fall back
+        // to any subscribed central that maps back to this recipient. Without this
+        // the notify path silently never engages for the very peers it exists for.
+        val notifyAddress = peripheralGattServer?.let { server ->
+            if (address != null && server.isSubscribed(address)) {
+                address
+            } else {
+                server.subscribedAddresses().firstOrNull { subscribed ->
+                    connections.deviceIdForAddress(subscribed) == recipientId
+                }
             }
-            return sendViaNotify(recipientId, address, data)
+        }
+        if (notifyAddress != null) {
+            if (logThrottler.shouldLog("reply_via_notify_$recipientId", intervalMs = 5000)) {
+                Log.i(TAG, "Replying to $recipientId via peripheral notify (asymmetric link) addr=$notifyAddress")
+                emitDiagnostic("info", "BLE reply via peripheral notify", mapOf(
+                    "recipientId" to recipientId,
+                    "notifyAddress" to notifyAddress,
+                    "resolvedAddress" to (address ?: "null"),
+                    "matchedByIdentity" to (notifyAddress != address).toString(),
+                ))
+            }
+            return sendViaNotify(recipientId, notifyAddress, data)
         }
 
         // Until the remote has ack'd our CCCD write, the return path is not

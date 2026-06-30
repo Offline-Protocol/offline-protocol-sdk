@@ -263,6 +263,12 @@ class PeripheralGattServer(
     fun isSubscribed(address: String): Boolean =
         subscribedCentralAddresses.contains(address)
 
+    /** Snapshot of the addresses of centrals currently subscribed via CCCD.
+     *  Used to resolve the notify egress by PEER IDENTITY when the address we
+     *  hold for a peer (the central link we opened to it) differs from the
+     *  address it subscribed under (the link it opened to our server). */
+    fun subscribedAddresses(): Set<String> = subscribedCentralAddresses.toSet()
+
     /**
      * Reply to a central by notifying the message characteristic over the
      * connection IT opened to our GATT server. This is the egress for
