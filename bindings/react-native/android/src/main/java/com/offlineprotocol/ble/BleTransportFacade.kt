@@ -3397,6 +3397,26 @@ class BleTransportFacade(
             }
         }
 
+        override fun onCentralUnsubscribed(device: BluetoothDevice) {
+            // A central disabled notifications on the link it opened to us. The peer
+            // is no longer notify-reachable, so re-flush: flushPeerMtu drops the
+            // 185-byte notify floor now that subscribedNotifyAddressFor no longer
+            // resolves, relaxing the per-peer MTU back to min(central, peripheral) —
+            // or clearing it when neither direction's MTU is known. Without this, a
+            // peer that subscribed (pinning the floor) and then unsubscribed on a
+            // live link would keep the stale 185 floor, throttling its central-write
+            // egress, until some later unrelated flush. Symmetric with
+            // onCentralSubscribed.
+            if (shuttingDown) return
+            mainHandler.post {
+                if (shuttingDown) return@post
+                assertMainThread("onCentralUnsubscribed.reflush")
+                val address = device.address
+                val deviceId = connections.deviceIdForAddress(address) ?: return@post
+                flushPeerMtu(address, deviceId)
+            }
+        }
+
         override fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray) {
             if (shuttingDown) return
             Log.i(TAG, "MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")

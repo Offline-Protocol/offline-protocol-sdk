@@ -13,8 +13,8 @@ import org.junit.Test
  * link, or a multi-fragment MLS Welcome egressed over the notify link overflows
  * it and is silently truncated on air, stalling 1:1 MLS convergence (the owner
  * loops "Welcome send confirmation timed out"). 514 is the typical central-link
- * payload; 185 is [BLE]'s conservative fragment cap that every notify link can
- * carry.
+ * payload; 185 is [BleTransportFacade]'s conservative fragment cap that every
+ * notify link can carry.
  */
 class EffectivePayloadTest {
     private val floor = 185

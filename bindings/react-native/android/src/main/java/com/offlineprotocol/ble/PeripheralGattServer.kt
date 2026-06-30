@@ -129,6 +129,15 @@ class PeripheralGattServer(
          * floor for this peer.
          */
         fun onCentralSubscribed(device: BluetoothDevice)
+        /**
+         * A remote central disabled notifications (CCCD unsubscribe) on the link it
+         * opened to our GATT server. The transport re-flushes the per-peer MTU so
+         * the notify floor applied on [onCentralSubscribed] is dropped now that the
+         * peer is no longer notify-reachable, relaxing the per-peer size back to the
+         * observed link MTU(s) — or clearing it when neither direction is known.
+         * Symmetric with [onCentralSubscribed].
+         */
+        fun onCentralUnsubscribed(device: BluetoothDevice)
         /** Return the current device-ID bytes, or null to fail the read. */
         fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray?
         /** Return the current signed-identity bytes, or null to fail the read. */
@@ -792,6 +801,14 @@ class PeripheralGattServer(
                                     "subscribedCount" to subscribedCentralAddresses.size,
                                 ),
                             )
+                            // This central is no longer notify-subscribed. Signal the
+                            // transport to re-flush so the per-peer MTU floor applied
+                            // on subscribe is dropped (the peer is no longer notify-
+                            // reachable); without it the stale 185 floor would persist
+                            // and throttle central egress until some later unrelated
+                            // flush. Mirrors the ENABLE path; only enqueues work, so it
+                            // does not delay the CCCD ack sent below.
+                            listener.onCentralUnsubscribed(device)
                         }
                     }
                     if (responseNeeded) {
