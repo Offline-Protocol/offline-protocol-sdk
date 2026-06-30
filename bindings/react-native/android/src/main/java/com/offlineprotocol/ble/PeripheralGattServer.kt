@@ -112,6 +112,13 @@ class PeripheralGattServer(
          *  go. Lets the transport release its per-peer send gate on real
          *  completion instead of relying solely on the watchdog timeout. */
         fun onNotificationSent(device: BluetoothDevice, status: Int)
+        /** The ATT MTU for [device]'s connection to OUR GATT server has been
+         *  (re)negotiated by that central. [maxPayload] is the header-adjusted
+         *  max NOTIFY payload (MTU − 3) we can push to it via [notifyFragment].
+         *  The transport bounds the per-peer fragment size by this so a message
+         *  sized for OUR central link to the peer is not over-sized for this
+         *  notify link — the cause of the offline 1:1 Welcome-delivery stall. */
+        fun onPeripheralMtuNegotiated(device: BluetoothDevice, maxPayload: Int)
         /** Return the current device-ID bytes, or null to fail the read. */
         fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray?
         /** Return the current signed-identity bytes, or null to fail the read. */
@@ -130,6 +137,11 @@ class PeripheralGattServer(
          *  facade's MAX_FRAGMENT_SIZE (185 bytes) to tolerate MTU-negotiation
          *  headroom, but bounded so a hostile central cannot balloon memory. */
         const val MAX_INBOUND_WRITE_BYTES = 4096
+        /** ATT protocol header subtracted from a negotiated ATT MTU to get the
+         *  usable NOTIFY payload (MTU − 3). Matches CentralGattClient's
+         *  ATT_HEADER_BYTES so both link directions report payloads on the
+         *  same basis. */
+        private const val ATT_HEADER_BYTES = 3
         /** Maximum age of a per-central identity long-read snapshot. A
          *  coherent long-read session finishes in well under a second on
          *  real hardware; anything older is either the result of a central
@@ -289,7 +301,7 @@ class PeripheralGattServer(
         val characteristic = messageCharacteristic ?: return false
         if (!subscribedCentralAddresses.contains(device.address)) return false
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val accepted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 server.notifyCharacteristicChanged(device, characteristic, false, bytes) ==
                     BluetoothStatusCodes.SUCCESS
             } else {
@@ -298,6 +310,18 @@ class PeripheralGattServer(
                 @Suppress("DEPRECATION")
                 server.notifyCharacteristicChanged(device, characteristic, false)
             }
+            if (!accepted) {
+                // The stack refused the notification. The dominant cause for a
+                // multi-fragment payload is a fragment larger than this notify
+                // link's ATT_MTU − 3. Surface the size so a stalled Welcome is
+                // attributable to an MTU mismatch rather than silent loss.
+                diagnosticEmitter(
+                    "warning",
+                    "notify rejected by stack",
+                    mapOf("address" to device.address, "fragmentSize" to bytes.size),
+                )
+            }
+            accepted
         } catch (e: Exception) {
             Log.e(TAG, "notifyFragment failed for ${device.address}", e)
             false
@@ -499,6 +523,24 @@ class PeripheralGattServer(
                     listener.onCentralDisconnected(device, status)
                 }
             }
+        }
+
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            // A remote central (re)negotiated the ATT MTU on the connection IT
+            // opened to OUR GATT server. This callback is the ONLY place the
+            // peripheral/NOTIFY link's capacity is observable on the server
+            // side — without it the transport keeps sizing notifications for
+            // our central link to the peer and overflows this one, silently
+            // truncating/dropping the multi-fragment MLS Welcome on air.
+            // Surface the raw value as a diagnostic and the header-adjusted
+            // payload to the transport, which folds it into the per-peer MTU.
+            val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
+            diagnosticEmitter(
+                "info",
+                "peripheral_link_mtu",
+                mapOf("address" to device.address, "mtu" to mtu, "maxPayload" to maxPayload),
+            )
+            listener.onPeripheralMtuNegotiated(device, maxPayload)
         }
 
         override fun onCharacteristicReadRequest(

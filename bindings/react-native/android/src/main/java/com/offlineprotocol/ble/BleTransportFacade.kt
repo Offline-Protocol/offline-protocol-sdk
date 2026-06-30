@@ -147,6 +147,23 @@ class BleTransportFacade(
          *  write doesn't out-run it into ERROR_GATT_WRITE_REQUEST_BUSY (201).
          *  An occasional 201 here still self-heals via the backpressure retry. */
         private const val WRITE_GATE_WATCHDOG_MS = 30L
+        /** Minimum spacing between two completion-driven fragment sends to the
+         *  same link.
+         *
+         *  The write gate's fast path ([onWriteCompleted]) drains the next
+         *  fragment the instant the local stack signals completion
+         *  (onCharacteristicWrite / onNotificationSent). But for a peripheral
+         *  NOTIFY that completion fires when the notification leaves OUR
+         *  controller, NOT when the central (e.g. an iOS device) has drained it
+         *  from its receive buffer — so back-to-back notifies out-run a slower
+         *  central and it silently drops fragments mid-burst. A small multi-
+         *  fragment message (a few fragments) survives; a large one (an MLS
+         *  Welcome, ~15 fragments) deterministically loses a fragment every
+         *  pass and never reassembles. Spacing completion-driven sends by ~one
+         *  BLE connection interval lets the peer drain between notifications.
+         *  Tiny relative to a message's lifetime (15 fragments ≈ 0.3s) and
+         *  well under the reassembly TTL. */
+        private const val INTER_FRAGMENT_PACING_MS = 20L
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
@@ -388,20 +405,27 @@ class BleTransportFacade(
     private val connections = MeshConnectionRegistry()
     private val lastSeenRssi = ConcurrentHashMap<String, Short>()
 
-    // Per-address staging map for negotiated ATT payload sizes. Populated
-    // from [CentralGattClient.Host.onPeerMtuNegotiated] (which reposts to
-    // main before touching this map) and drained in
-    // [CentralGattClient.Host.onDeviceIdResolved] once the reverse GATT
-    // read has mapped the address to a stable device id — at that point
-    // we flush into Rust via `protocol.bleSetPeerMtu` so the fragmenter
-    // can size outbound chunks per peer instead of using the 185-byte
-    // fallback. Entries are removed on successful flush (so a reconnect
-    // cannot observe a stale value) and on disconnect alongside the
-    // matching `bleClearPeerMtu` call. Main-thread only — every access
-    // is guarded by [assertMainThread], and the type is a plain `HashMap`
-    // to make the discipline visible rather than silently tolerate cross-
-    // thread writes.
+    // Per-address negotiated ATT payload for the CENTRAL link — the
+    // connection WE opened to the peer's GATT server. Populated from
+    // [CentralGattClient.Host.onPeerMtuNegotiated] and flushed once
+    // [CentralGattClient.Host.onDeviceIdResolved] maps the address to a stable
+    // device id. The Rust core stores ONE MTU per peer, so the value flushed
+    // is min(this, the peripheral-link payload below) — see [flushPeerMtu].
+    // Entries persist until link teardown (they are inputs to the min, not
+    // one-shot), and are cleared in [dropStagedPeerMtu] / on stop. Main-thread
+    // only — every access is guarded by [assertMainThread], and the type is a
+    // plain `HashMap` to make the discipline visible.
     private val peerMaxPayloads = HashMap<String, Int>()
+    // Per-address negotiated ATT payload for the PERIPHERAL/NOTIFY link — the
+    // connection the peer opened to OUR GATT server, reported by
+    // [PeripheralGattServer.Listener.onPeripheralMtuNegotiated]. A multi-
+    // fragment message (e.g. an MLS Welcome) sized for the central link but
+    // egressed as a peripheral notify would overflow this link and be
+    // truncated/dropped on air; folding this into the per-peer MTU via min()
+    // is the offline-convergence fix. Cleared when the peripheral link drops
+    // (in [handleCentralDisconnectedOnMain]) so the central MTU is restored.
+    // Main-thread only.
+    private val peripheralMaxPayloads = HashMap<String, Int>()
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
@@ -920,6 +944,7 @@ class BleTransportFacade(
         // a stale value from the prior session before the new
         // handshake stages its own MTU.
         peerMaxPayloads.clear()
+        peripheralMaxPayloads.clear()
         centralClient.clearAll()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
@@ -1955,36 +1980,55 @@ class BleTransportFacade(
     private fun currentConnectionCount(): Int = connections.connectionCount()
 
     /**
-     * Flushes a staged negotiated-MTU value into the Rust transport keyed by
-     * [deviceId]. Called from both the MTU-first-then-deviceId path (the
-     * normal handshake order, triggered via
-     * [CentralGattClient.Host.onDeviceIdResolved]) and the
-     * deviceId-first-then-MTU path (triggered from
-     * [CentralGattClient.Host.onPeerMtuNegotiated] when the address already
-     * has a resolved identifier). Idempotent: if no staged value exists the
-     * call is a no-op and the Rust fragmenter falls back to the 185-byte
-     * floor for that peer.
+     * Recomputes and flushes the effective per-peer ATT payload into the Rust
+     * transport keyed by [deviceId]. The core stores ONE MTU per peer but a
+     * peer can be reachable over two links with different MTUs — the central
+     * link WE opened ([peerMaxPayloads]) and the peripheral/NOTIFY link the
+     * peer opened to our GATT server ([peripheralMaxPayloads]). A single
+     * fragment stream must fit BOTH, so we flush the **minimum** of whatever
+     * is currently known. Without this, a message sized for the (larger)
+     * central link but egressed as a notify overflows the peripheral link and
+     * is truncated/dropped on air — the offline 1:1 Welcome-delivery stall.
      *
-     * On successful flush the staged entry is removed so that a reconnect
-     * on the same BLE address cannot observe a stale value before the new
-     * handshake stages its own MTU. If the controller later renegotiates
-     * mid-link (rare), [CentralGattClient.Host.onPeerMtuNegotiated] re-
-     * stages and re-flushes from scratch. Main-thread only.
+     * Called whenever either link's MTU is (re)negotiated, when the device id
+     * resolves ([CentralGattClient.Host.onDeviceIdResolved]), and when a link
+     * tears down (to restore the surviving link's MTU). If neither link has a
+     * value the Rust entry is cleared so the fragmenter reverts to its
+     * 185-byte floor rather than retaining a dead link's value. Idempotent and
+     * main-thread only. The staged values are NOT removed on flush (they are
+     * inputs to the min); link-teardown paths clear them explicitly.
      */
     private fun flushPeerMtu(address: String, deviceId: String) {
         assertMainThread("flushPeerMtu")
-        val staged = peerMaxPayloads[address] ?: return
+        val central = peerMaxPayloads[address]
+        val peripheral = peripheralMaxPayloads[address]
+        val effective = listOfNotNull(central, peripheral).minOrNull()
+        if (effective == null) {
+            // Both links gone — drop the Rust entry so the fragmenter falls
+            // back to the floor instead of keeping a stale per-peer size.
+            try {
+                protocol.bleClearPeerMtu(deviceId)
+            } catch (e: Exception) {
+                Log.w(TAG, "bleClearPeerMtu failed for $deviceId", e)
+            }
+            return
+        }
         try {
-            protocol.bleSetPeerMtu(deviceId, staged.toUInt())
-            peerMaxPayloads.remove(address)
+            protocol.bleSetPeerMtu(deviceId, effective.toUInt())
             emitDiagnostic(
                 "info",
                 "BLE per-peer MTU flushed to Rust",
-                mapOf("address" to address, "deviceId" to deviceId, "maxPayload" to staged),
+                mapOf(
+                    "address" to address,
+                    "deviceId" to deviceId,
+                    "centralPayload" to (central ?: -1),
+                    "peripheralPayload" to (peripheral ?: -1),
+                    "effectivePayload" to effective,
+                ),
             )
         } catch (e: Exception) {
-            // Leave the staged entry in place on failure so the next
-            // flush opportunity (re-entry via onPeerMtuNegotiated or
+            // Leave the staged entries in place on failure so the next
+            // flush opportunity (re-entry via either link's negotiation or
             // onDeviceIdResolved) can retry without losing the value.
             Log.w(TAG, "bleSetPeerMtu failed for $deviceId", e)
             emitDiagnostic(
@@ -2016,6 +2060,7 @@ class BleTransportFacade(
         assertMainThread("dropStagedPeerMtu")
         if (address != null) {
             peerMaxPayloads.remove(address)
+            peripheralMaxPayloads.remove(address)
         }
     }
 
@@ -2275,7 +2320,19 @@ class BleTransportFacade(
         assertMainThread("onWriteCompleted")
         writeInFlight.remove(address)
         if (state == TransportState.RUNNING) {
-            drainAndSendFragments()
+            // Pace the next completion-driven send by one BLE connection
+            // interval instead of draining immediately. onNotificationSent /
+            // onCharacteristicWrite signal that OUR controller accepted the
+            // op, not that the peer has drained it — firing the next notify
+            // instantly out-runs a slower central (iOS) and drops fragments
+            // mid-burst, so a large multi-fragment Welcome never reassembles.
+            // The brief spacing lets the peer keep up; small messages are
+            // unaffected in practice.
+            mainHandler.postDelayed({
+                if (state == TransportState.RUNNING) {
+                    drainAndSendFragments()
+                }
+            }, INTER_FRAGMENT_PACING_MS)
         }
     }
 
@@ -2477,6 +2534,7 @@ class BleTransportFacade(
                     "notifyAddress" to notifyAddress,
                     "resolvedAddress" to (address ?: "null"),
                     "matchedByIdentity" to (notifyAddress != address).toString(),
+                    "fragmentSize" to data.size,
                 ))
             }
             return sendViaNotify(recipientId, notifyAddress, data)
@@ -3067,6 +3125,27 @@ class BleTransportFacade(
             }
         }
 
+        override fun onPeripheralMtuNegotiated(device: BluetoothDevice, maxPayload: Int) {
+            // Fired on the GATT-server binder thread when a central renegotiates
+            // the MTU on the link it opened to us. Repost to main to touch the
+            // staging maps and the connection registry without racing the
+            // handshake state machine, mirroring onPeerMtuNegotiated.
+            if (shuttingDown) return
+            mainHandler.post {
+                if (shuttingDown) return@post
+                assertMainThread("onPeripheralMtuNegotiated.stage")
+                val address = device.address
+                peripheralMaxPayloads[address] = maxPayload
+                // Flush now if the peer's device id is already resolved (via our
+                // central link's device-id read); otherwise onDeviceIdResolved →
+                // flushPeerMtu picks up this staged peripheral payload later.
+                val deviceId = connections.deviceIdForAddress(address)
+                if (deviceId != null) {
+                    flushPeerMtu(address, deviceId)
+                }
+            }
+        }
+
         override fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray) {
             if (shuttingDown) return
             Log.i(TAG, "MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
@@ -3170,9 +3249,13 @@ class BleTransportFacade(
         // RSSI cached to speed up reconnection. Any other status is a real
         // failure and we tear the peer state down.
         //
-        // MTU state invariant: this handler MUST NOT touch the Rust-side
-        // `peer_mtus` entry for the peer, and MUST NOT touch the facade
-        // staging map either. This function runs on a peripheral-role
+        // MTU state invariant: this handler MUST NOT clear or demote the
+        // CENTRAL-owned `peer_mtus` value or its staging slot
+        // (`peerMaxPayloads`). It MAY drop the peripheral/NOTIFY-link slot
+        // (`peripheralMaxPayloads`) — that link IS this connection — and
+        // re-flush the recomputed min, which only ever RAISES the per-peer
+        // MTU back toward the central value (see the clean-disconnect block
+        // below). This function runs on a peripheral-role
         // disconnect (a remote central disconnected from our GATT
         // server). The `peer_mtus[deviceId]` entry is owned by our
         // *central-role* link to the same peer, populated via
@@ -3194,6 +3277,17 @@ class BleTransportFacade(
         // `peer_mtus` via `on_peer_lost`, which is correct for a path
         // that *also* drops the peer from the Rust `peers` map.
         val isCleanDisconnect = status == 0 || status == 19
+        // The peripheral/NOTIFY link to this central is gone. Drop its payload
+        // and, on a clean disconnect (peer likely returns, deviceId mapping
+        // kept), recompute the per-peer MTU from the surviving central link —
+        // restoring it from any min() demotion the notify link imposed. On a
+        // non-clean disconnect the teardown below calls blePeerLost (drops
+        // peer_mtus wholesale) + dropStagedPeerMtu, so we defer to that path.
+        if (isCleanDisconnect && peripheralMaxPayloads.remove(address) != null) {
+            connections.deviceIdForAddress(address)?.let { peerId ->
+                flushPeerMtu(address, peerId)
+            }
+        }
         if (!isCleanDisconnect) {
             lastSeenRssi.remove(address)
             connections.deviceIdForAddress(address)?.let { peerId ->
