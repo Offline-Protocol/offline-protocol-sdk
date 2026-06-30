@@ -3239,7 +3239,15 @@ extension BleManager: CBPeripheralManagerDelegate {
     /// draining queued NOTIFY fragments. Without this, a multi-fragment NOTIFY (an
     /// MLS Welcome) that hits backpressure would stall until the next unrelated
     /// drain. Mirrors the central-side `peripheralIsReady(toSendWriteWithoutResponse:)`.
-    public func peripheralManagerIsReadyToUpdateSubscribers(_ peripheral: CBPeripheralManager) {
+    // iOS 26.5 SDK renamed the Swift import of this delegate method to
+    // `peripheralManagerIsReady(toUpdateSubscribers:)` and marked the old
+    // auto-imported name unavailable, so the old spelling is a hard compile error
+    // on new Xcode. The underlying ObjC selector is unchanged, so pin it with an
+    // explicit `@objc(...)`: that keeps CoreBluetooth dispatching to this method on
+    // older SDKs (where the new Swift name is not the protocol requirement) while
+    // satisfying the renamed requirement on 26.5+.
+    @objc(peripheralManagerIsReadyToUpdateSubscribers:)
+    public func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
         pumpNotifyOutbound()
     }
 }
