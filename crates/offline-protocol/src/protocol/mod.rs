@@ -727,6 +727,11 @@ impl OfflineProtocol {
         // Flush any pending outbox messages destined for this peer
         self.flush_outbox_for_peer(peer_id);
 
+        // A Welcome that stalled or expired while this peer was unreachable now
+        // has a fresh delivery opportunity over the carrier that surfaced this
+        // peer — re-arm it. No-op when there is no pending Welcome for the peer.
+        self.rearm_welcome_for_peer(peer_id, "peer_rediscovered");
+
         // Only send key package if encryption is enabled and auto key exchange is on
         if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
             return;

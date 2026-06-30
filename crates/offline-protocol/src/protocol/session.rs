@@ -610,7 +610,12 @@ impl OfflineProtocol {
             return Ok(false);
         }
 
-        if record.expires_at <= now {
+        // Only honor the TTL when a carrier actually exists: a Welcome that has
+        // never had a deliverable transport must not age out. With no carrier we
+        // fall through to the send attempt, which fails no-carrier and is kept
+        // alive (non-terminal) by apply_welcome_send_failure.
+        let carrier_available = !self.transport_manager.get_available_transports().is_empty();
+        if carrier_available && record.expires_at <= now {
             self.transition_welcome_state(peer_id, WelcomeDeliveryState::Expired, source_event)?;
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::welcome_send_expired(
@@ -683,22 +688,97 @@ impl OfflineProtocol {
                 Ok(false)
             }
             Err(err) => {
+                let no_carrier = Self::is_no_carrier_error(&err);
                 let reason = Self::map_welcome_reason_code(&err);
                 self.apply_welcome_send_failure(
                     peer_id,
                     reason,
                     Some(err.to_string()),
+                    no_carrier,
                     source_event,
                 )
             }
         }
     }
 
+    /// Re-arms a stalled or expired outbound Welcome when a peer becomes
+    /// reachable again, so a session that never converged while the peer was
+    /// offline gets a fresh delivery attempt over the now-available carrier.
+    ///
+    /// No-op when the peer's session is already confirmed, when there is no
+    /// Welcome lifecycle, or when the Welcome is already `Sent` or still
+    /// in-flight (`SendAttempted`). An `Expired` lifecycle is rebuilt from its
+    /// retained Welcome message — the MLS group is not torn down on expiry, so
+    /// the stored Welcome is still valid to re-send — while a `Created`/`Failed`
+    /// lifecycle has its budget and TTL reset and is retried immediately.
+    pub(super) fn rearm_welcome_for_peer(&mut self, peer_id: &str, source_event: &str) {
+        if self.confirmed_sessions.contains(peer_id) {
+            return;
+        }
+        let Some(record) = self.welcome_lifecycles.get(peer_id).cloned() else {
+            return;
+        };
+        match record.state {
+            WelcomeDeliveryState::Sent | WelcomeDeliveryState::SendAttempted => {}
+            WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed => {
+                if let Some(entry) = self.welcome_lifecycles.get_mut(peer_id) {
+                    entry.attempt = 0;
+                    entry.next_retry_at = Some(Utc::now());
+                    entry.last_reason_code = None;
+                    entry.last_transport_error = None;
+                    entry.expires_at =
+                        Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
+                }
+                if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to re-arm welcome on peer reachability"
+                    );
+                }
+            }
+            WelcomeDeliveryState::Expired => {
+                // Expired is terminal in the lifecycle state machine, so rebuild
+                // from the retained Welcome message (upsert permits overwrite
+                // from Expired) before re-sending.
+                let welcome_message = record.welcome_message.clone();
+                let group_id = record.group_id.clone();
+                if let Err(err) =
+                    self.upsert_welcome_lifecycle(peer_id, &group_id, welcome_message, source_event)
+                {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to rebuild expired welcome on peer reachability"
+                    );
+                    return;
+                }
+                if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to re-arm expired welcome on peer reachability"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Records a Welcome send failure and decides whether to retry or expire.
+    ///
+    /// `no_carrier` is `true` when the failure was simply that no transport
+    /// carrier exists yet (vs. a present carrier that failed mid-send). A
+    /// no-carrier failure must NOT age the Welcome: it neither counts toward
+    /// the retry budget nor lets the TTL expire it, because the peer is merely
+    /// unreachable for now and will be retried once a carrier appears. The
+    /// speculative attempt increment from [`Self::try_send_welcome`] is rolled
+    /// back so a long offline period leaves the real-delivery budget intact.
     pub(super) fn apply_welcome_send_failure(
         &mut self,
         peer_id: &str,
         reason: crate::events::WelcomeReasonCode,
         transport_error: Option<String>,
+        no_carrier: bool,
         source_event: &str,
     ) -> Result<bool> {
         let mut updated = self
@@ -715,7 +795,11 @@ impl OfflineProtocol {
         }
 
         let max_attempts = self.config.reliability.retry.max_retries.max(1);
-        let should_expire = updated.attempt >= max_attempts || updated.expires_at <= Utc::now();
+        // A no-carrier failure never expires the Welcome: neither the retry
+        // budget nor the TTL applies while the peer is simply unreachable. Only
+        // a carrier-backed failure (SendFailed / Timeout) ages it toward expiry.
+        let should_expire =
+            !no_carrier && (updated.attempt >= max_attempts || updated.expires_at <= Utc::now());
         if should_expire {
             let terminal_reason = crate::events::WelcomeReasonCode::RetryExhausted;
             {
@@ -772,6 +856,16 @@ impl OfflineProtocol {
             let record = self.welcome_lifecycles.get_mut(peer_id).ok_or_else(|| {
                 Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
             })?;
+            // Roll back the speculative attempt increment from try_send_welcome
+            // for a no-carrier failure so the retry budget stays reserved for
+            // real delivery attempts over an available carrier, and push the TTL
+            // forward so a never-deliverable Welcome does not age out — the TTL
+            // clock is carrier-relative, not creation-relative.
+            if no_carrier {
+                record.attempt = record.attempt.saturating_sub(1);
+                record.expires_at =
+                    Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
+            }
             record.last_reason_code = Some(reason);
             record.last_transport_error = transport_error;
             record.next_retry_at = Some(retry_at);
@@ -954,6 +1048,19 @@ impl OfflineProtocol {
         SessionStateError::classify(error).to_welcome_reason_code()
     }
 
+    /// True when a send failed because no transport carrier exists yet, as
+    /// opposed to a present-but-unhealthy carrier (`SendFailed`) or a
+    /// sent-but-unconfirmed timeout. A no-carrier failure means the peer is
+    /// simply unreachable right now, so the Welcome must be kept alive and
+    /// retried rather than counted against its budget — see
+    /// [`Self::apply_welcome_send_failure`].
+    pub(super) fn is_no_carrier_error(error: &Error) -> bool {
+        matches!(
+            error,
+            Error::Transport(offline_protocol_transport::Error::TransportNotAvailable(_))
+        )
+    }
+
     pub(super) fn session_ready_context_for_source(source_event: &str) -> MlsOperationContext {
         match source_event {
             "confirmation_ack_received" | "confirmation_probe_received" | "decrypt_success" => {
@@ -1003,6 +1110,9 @@ impl OfflineProtocol {
                 &peer_id,
                 crate::events::WelcomeReasonCode::Timeout,
                 Some("Welcome send confirmation timed out".to_string()),
+                // A confirm timeout means the Welcome was sent over a carrier;
+                // this is not a no-carrier failure, so it ages normally.
+                false,
                 "welcome_confirm_timeout",
             )?;
         }

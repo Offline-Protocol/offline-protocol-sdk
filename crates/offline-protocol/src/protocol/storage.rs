@@ -2,10 +2,10 @@
 
 use super::{
     storage_keys, OfflineProtocol, PendingMessage, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::{Error, Result};
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::LamportClock;
 use offline_protocol_mls::MlsManager;
 use std::sync::{Arc, RwLock};
@@ -380,8 +380,11 @@ impl OfflineProtocol {
                     if matches!(
                         record.last_reason_code,
                         Some(crate::events::WelcomeReasonCode::RetryExhausted)
-                    ) || record.expires_at <= Utc::now()
-                    {
+                    ) {
+                        // Only genuine retry exhaustion (a present carrier that
+                        // kept failing) is terminal here. A stale TTL alone must
+                        // NOT expire a no-carrier Welcome on restart — the TTL
+                        // clock is carrier-relative and is refreshed below.
                         record.state = WelcomeDeliveryState::Expired;
                         warn!(
                             event = "welcome_lifecycle_repaired",
@@ -405,6 +408,25 @@ impl OfflineProtocol {
                         );
                     }
                     self.persist_welcome_lifecycle_entry(&record)?;
+                }
+                // The TTL clock is carrier-relative: a Welcome must not be
+                // restored already-expired after an offline period. Restart the
+                // window for any non-terminal lifecycle whose TTL has lapsed so
+                // it gets a fresh chance once a carrier (or the peer) reappears.
+                if matches!(record.state, WelcomeDeliveryState::Failed)
+                    && record.expires_at <= Utc::now()
+                {
+                    record.expires_at =
+                        Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
+                    self.persist_welcome_lifecycle_entry(&record)?;
+                    warn!(
+                        event = "welcome_lifecycle_repaired",
+                        session_or_group_id = %peer_id,
+                        repair_action = "ttl_refreshed_carrier_relative",
+                        state = record.state.as_str(),
+                        attempt = record.attempt,
+                        "welcome_lifecycle_repaired"
+                    );
                 }
                 if matches!(
                     record.state,

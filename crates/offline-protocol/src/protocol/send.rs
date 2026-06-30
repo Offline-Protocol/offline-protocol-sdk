@@ -1574,8 +1574,17 @@ impl OfflineProtocol {
             return Ok(());
         };
         let reason = crate::events::WelcomeReasonCode::TransportUnavailable;
-        let _ =
-            self.apply_welcome_send_failure(&peer_id, reason, transport_error, "transport_failed")?;
+        // No raw error is available on this async path, so infer no-carrier from
+        // live connectivity: with no transport currently available the peer is
+        // simply unreachable and the Welcome must be kept alive, not aged.
+        let no_carrier = self.transport_manager.get_available_transports().is_empty();
+        let _ = self.apply_welcome_send_failure(
+            &peer_id,
+            reason,
+            transport_error,
+            no_carrier,
+            "transport_failed",
+        )?;
         Ok(())
     }
 
