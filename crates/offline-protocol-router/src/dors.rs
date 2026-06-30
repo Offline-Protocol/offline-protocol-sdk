@@ -604,6 +604,15 @@ impl TransportSelector {
             }
 
             let score = self.calculate_transport_score(message, *transport_type, metrics);
+            // INVARIANT: `score.total` recorded here may be the *negative*
+            // fallback-demotion sentinel for a demoted Internet transport
+            // (prefer_online=false), not a real 0–125 quality score. The
+            // stability-window consumers (`is_stable_better` / `get_scores_in_window`)
+            // tolerate this by sign today (it makes "leave Internet for mesh"
+            // trivially allowed, which matches intent). Any FUTURE consumer that
+            // *aggregates* this history across transports (e.g. a global average)
+            // must first map entries through `display_routing_score`, or the
+            // sentinel will skew the result.
             self.record_score(*transport_type, score.total);
             scored_transports.push((*transport_type, score));
         }
@@ -648,6 +657,11 @@ impl TransportSelector {
         // Log all scored transports for observability.
         // Guard allocation behind level check to avoid Vec<String> on every call.
         if tracing::enabled!(tracing::Level::DEBUG) {
+            // These are the RAW totals, intentionally NOT passed through
+            // `display_routing_score`: a negative Internet total here is the
+            // fallback-demotion rank (prefer_online=false), and showing it raw is
+            // exactly what explains why a lower-quality mesh transport outranks it.
+            // Sanitizing here would hide the demotion and make selection look wrong.
             let scores_summary: Vec<_> = scored_transports
                 .iter()
                 .map(|(t, s)| format!("{:?}={:.1}", t, s.total))
@@ -898,11 +912,24 @@ impl TransportSelector {
             return false;
         }
 
-        // Emergency bypass: if current transport has critical degradation, switch immediately.
-        // `candidate_score` is the best (argmax) score, so it is always a non-negative mesh
-        // score whenever Internet is fallback-demoted (the negative sentinel can only be the
-        // *best* when Internet is the sole transport, and then `should_switch` is not reached).
-        // So the `> 10.0` "reasonable candidate" floor never sees the demotion sentinel.
+        // Emergency bypass: if current transport has critical degradation, switch
+        // immediately to any reasonably scored candidate. `candidate_score` is the
+        // argmax score, so whenever Internet is fallback-demoted it is a
+        // non-negative mesh score (the negative sentinel can only be the argmax
+        // when Internet is the sole transport, and then `should_switch` is not
+        // reached), so the `> 10.0` floor never sees the sentinel.
+        //
+        // IMPORTANT behavioral note for prefer_online=false: when the ONLY
+        // alternative to a critically degraded mesh link is the demoted Internet,
+        // `best_transport` is still that mesh link (demoted Internet ranks below
+        // it), so `select_transport` returns early on `current == best_transport`
+        // BEFORE reaching this emergency check. Proactive mesh→Internet escalation
+        // is therefore intentionally delegated to the `send()` fallback loop (which
+        // escalates only when a mesh send returns a hard error), NOT driven from
+        // here. Consequence: a mesh link that is degraded yet still returns Ok from
+        // send() is not proactively abandoned for Internet — by design, to keep the
+        // offline-first preference. Do not read this bypass as a general mesh→
+        // Internet safety net under the default config.
         if self.is_emergency_switch_needed(current_transport) {
             return candidate_score > 10.0; // Any reasonably scored candidate is acceptable
         }
@@ -1818,7 +1845,10 @@ mod tests {
     fn test_display_routing_score_reverses_fallback_demotion() {
         // A demoted Internet total (real score 42 minus the demotion) recovers to 42.
         let demoted = 42.0 - INTERNET_FALLBACK_DEMOTION;
-        assert!(demoted < 0.0, "precondition: demotion makes the total negative");
+        assert!(
+            demoted < 0.0,
+            "precondition: demotion makes the total negative"
+        );
         assert!((display_routing_score(demoted) - 42.0).abs() < 1e-3);
 
         // Normal mesh scores pass through untouched.
@@ -1838,7 +1868,10 @@ mod tests {
         let raw = selector
             .calculate_transport_score(&message, TransportType::Internet, &metrics)
             .total;
-        assert!(raw < 0.0, "Internet is demoted negative under default config");
+        assert!(
+            raw < 0.0,
+            "Internet is demoted negative under default config"
+        );
         assert!(display_routing_score(raw) >= 0.0);
     }
 
