@@ -45,6 +45,41 @@ private class LogThrottler(private val defaultIntervalMs: Long = 5000L) {
 }
 
 /**
+ * Computes the effective per-peer ATT payload to flush to the Rust fragmenter
+ * from the two link directions' known payloads.
+ *
+ * A single fragment stream must fit BOTH the central link we opened and the
+ * peripheral/NOTIFY link the peer opened to us, so the result is the **minimum**
+ * of whatever is known. The subtlety this captures: the notify link's MTU is only
+ * observable via the GATT-server `onMtuChanged`, which is unreliable for the
+ * server role and often never fires (an iOS central negotiates a smaller MTU on
+ * the link it opens to us, or none). Without a peripheral value the `min()` would
+ * collapse to the (larger) central payload, and a multi-fragment notify — an MLS
+ * Welcome — would egress at central size, overflow the notify link, and be
+ * silently truncated on air (the offline 1:1 Welcome-delivery stall).
+ *
+ * So when the peer has an active notify subscription ([notifySubscribed]) but no
+ * observed peripheral payload, the peripheral term falls back to the conservative
+ * [floor] (the 185-byte fragment cap every BLE link can carry) until a real value
+ * arrives. A real observed payload always wins — [peripheralStaged] is consulted
+ * first — so the floor never demotes a link whose MTU we actually know.
+ *
+ * Returns null only when neither direction is known AND the peer is not
+ * notify-subscribed, signalling the caller to clear the Rust entry (the
+ * fragmenter then reverts to its own floor). Pure and side-effect free so the
+ * floor/min arithmetic is unit-testable without the Android BLE stack.
+ */
+internal fun computeEffectivePayload(
+    central: Int?,
+    peripheralStaged: Int?,
+    notifySubscribed: Boolean,
+    floor: Int,
+): Int? {
+    val peripheral = peripheralStaged ?: if (notifySubscribed) floor else null
+    return listOfNotNull(central, peripheral).minOrNull()
+}
+
+/**
  * BLE transport facade implementing [TransportManager] for Bluetooth Low
  * Energy communication. Ensures iOS ↔ Android cross-platform compatibility.
  *
@@ -2050,7 +2085,11 @@ class BleTransportFacade(
      * resolves ([CentralGattClient.Host.onDeviceIdResolved]), and when a link
      * tears down (to restore the surviving link's MTU). If neither direction has
      * a value the Rust entry is cleared so the fragmenter reverts to its
-     * 185-byte floor rather than retaining a dead link's value. Idempotent and
+     * 185-byte floor rather than retaining a dead link's value — unless the peer
+     * is still notify-subscribed, in which case the peripheral term is floored to
+     * the 185-byte fragment cap (via [computeEffectivePayload]) so a notify-
+     * egressed message (an MLS Welcome) is never sized for the central link when
+     * the notify link's own MTU was never observed. Idempotent and
      * main-thread only. The per-address staged values are NOT removed on flush
      * (they are inputs to the min); link-teardown paths clear the dropped
      * direction's per-device slot explicitly.
@@ -2067,8 +2106,28 @@ class BleTransportFacade(
         peripheralMaxPayloads[address]?.let { peripheralPayloadByDevice[deviceId] = it }
 
         val central = centralPayloadByDevice[deviceId]
-        val peripheral = peripheralPayloadByDevice[deviceId]
-        val effective = listOfNotNull(central, peripheral).minOrNull()
+        // The notify link's MTU is only observable via the GATT-server
+        // onMtuChanged, which is unreliable for the server role and often never
+        // fires (an iOS central negotiates a smaller MTU on the link it opens to
+        // us, or none). Without a peripheral value the min() would collapse to the
+        // central payload and a multi-fragment notify — an MLS Welcome — would
+        // overflow the notify link and be silently truncated on air. So when any
+        // notify-subscribed address maps to this peer but no peripheral payload is
+        // on file, [computeEffectivePayload] floors the peripheral term to the
+        // 185-byte fragment cap until a real value arrives. The subscription check
+        // is device-scoped, not address-scoped: the two links can use different BLE
+        // addresses for the same peer (iOS uses distinct handles per direction), so
+        // we match by device id exactly as the notify-egress resolution does.
+        val peripheralStaged = peripheralPayloadByDevice[deviceId]
+        val notifySubscribed = peripheralGattServer?.subscribedAddresses()?.any {
+            connections.deviceIdForAddress(it) == deviceId
+        } == true
+        val effective = computeEffectivePayload(
+            central = central,
+            peripheralStaged = peripheralStaged,
+            notifySubscribed = notifySubscribed,
+            floor = MAX_FRAGMENT_SIZE,
+        )
         if (effective == null) {
             // Both directions gone — drop the Rust entry so the fragmenter falls
             // back to the floor instead of keeping a stale per-peer size, and the
@@ -2110,7 +2169,7 @@ class BleTransportFacade(
                     "address" to address,
                     "deviceId" to deviceId,
                     "centralPayload" to (central ?: -1),
-                    "peripheralPayload" to (peripheral ?: -1),
+                    "peripheralPayload" to (peripheralStaged ?: -1),
                     "effectivePayload" to effective,
                 ),
             )
@@ -3256,6 +3315,27 @@ class BleTransportFacade(
                 if (deviceId != null) {
                     flushPeerMtu(address, deviceId)
                 }
+            }
+        }
+
+        override fun onCentralSubscribed(device: BluetoothDevice) {
+            // A central enabled notifications on the link it opened to us. Its
+            // notify-link MTU may never be reported (server-role onMtuChanged is
+            // unreliable), so re-flush now: flushPeerMtu applies the 185-byte
+            // notify floor for a subscribed peer whose peripheral MTU is still
+            // unknown, bounding multi-fragment notify egress (the MLS Welcome).
+            // The CCCD subscribe lands after the central-link MTU flush, so without
+            // this the floor would never be applied for this peer until some later
+            // unrelated flush. If the device id isn't resolved yet, the
+            // onDeviceIdResolved -> flushPeerMtu path applies the floor later (it
+            // will see the subscription).
+            if (shuttingDown) return
+            mainHandler.post {
+                if (shuttingDown) return@post
+                assertMainThread("onCentralSubscribed.reflush")
+                val address = device.address
+                val deviceId = connections.deviceIdForAddress(address) ?: return@post
+                flushPeerMtu(address, deviceId)
             }
         }
 
