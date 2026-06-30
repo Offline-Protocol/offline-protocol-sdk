@@ -8,7 +8,7 @@ PODS:
   - hermes-engine (0.82.1):
     - hermes-engine/Pre-built (= 0.82.1)
   - hermes-engine/Pre-built (0.82.1)
-  - MeshSdk (0.10.0):
+  - MeshSdk (0.11.0):
     - React-Core
   - RCT-Folly (2024.11.18.00):
     - boost
@@ -2657,7 +2657,7 @@ SPEC CHECKSUMS:
   fmt: a40bb5bd0294ea969aaaba240a927bd33d878cdd
   glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
   hermes-engine: 273e30e7fb618279934b0b95ffab60ecedb7acf5
-  MeshSdk: 11fc68ea0b66fd6e0c76397177108a4f648f917c
+  MeshSdk: a2eb21a52b8a6ab8525824421bbcd76c87d09c46
   RCT-Folly: 846fda9475e61ec7bcbf8a3fe81edfcaeb090669
   RCTDeprecation: f17e2ebc07876ca9ab8eb6e4b0a4e4647497ae3a
   RCTRequired: e2c574c1b45231f7efb0834936bd609d75072b63
@@ -2727,6 +2727,6 @@ SPEC CHECKSUMS:
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
   Yoga: 689c8e04277f3ad631e60fe2a08e41d411daf8eb
 
-PODFILE CHECKSUM: 4b4f66ccf85d5682c7d482df4ef11267374fec0d
+PODFILE CHECKSUM: cdeff5cea62acd208f013bf81c309c760b26359a
 
 COCOAPODS: 1.16.2
