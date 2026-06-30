@@ -2833,11 +2833,13 @@ class BleTransportFacade(
             // single-threaded decision is race-free — no lock is required.
             val resolvedSender = connections.deviceIdForAddress(address)
             val hasPendingForAddress = pendingInbound.hasPending(address)
-            val queued = resolvedSender == null || hasPendingForAddress
-            if (queued) {
+            // Inline the queue-vs-direct condition (rather than a `val queued`)
+            // so Kotlin can smart-cast `resolvedSender` to non-null after this
+            // guard returns: smart-casting tracks the inline `== null` disjunct
+            // here, but NOT a null check stored in a separate Boolean `val`.
+            if (resolvedSender == null || hasPendingForAddress) {
                 pendingInbound.enqueue(address, data)
-                val senderId: String? = resolvedSender
-                if (senderId == null) {
+                if (resolvedSender == null) {
                     if (logThrottler.shouldLog("queue_pending_$address")) {
                         Log.d(TAG, "Queued fragment while awaiting device ID for $address")
                         emitDiagnostic(
@@ -2894,7 +2896,8 @@ class BleTransportFacade(
 
             // Device ID is already resolved and no earlier bytes are waiting
             // — process directly. Kotlin smart-casts `resolvedSender` to
-            // non-null here because the `queued` branch above returns.
+            // non-null here: the `resolvedSender == null` disjunct in the guard
+            // above returns, so reaching this point proves it is non-null.
             val resolvedSenderId: String = resolvedSender
 
             lastSeenRssi[address]?.toInt()?.let { observedRssi ->
