@@ -209,7 +209,16 @@ internal class InboundFragmentBuffer(
     companion object {
         const val DEFAULT_MAX_PER_PEER: Int = 100
         const val DEFAULT_MAX_PEERS: Int = 32
-        const val DEFAULT_TIMEOUT_MS: Long = 5_000L
+        // Idle window (reset by each fragment) before a partial buffer is evicted.
+        // This holds inbound fragments only until the sender's device-id resolves —
+        // a GATT connect+read throttled to one attempt per MIN_RECONNECT_INTERVAL
+        // (5s) and prone to GATT-133 retries. At 5s a first-contact multi-fragment
+        // MLS Welcome that arrives in a burst could be evicted before resolution
+        // completes, losing the Welcome before it ever reaches the Rust reassembler.
+        // 15s comfortably exceeds the reverse-resolution worst case while staying
+        // well under the 30s Rust reassembly window; memory stays bounded by the
+        // per-peer / peer caps above.
+        const val DEFAULT_TIMEOUT_MS: Long = 15_000L
 
         val DEFAULT_MAIN_THREAD_CHECK: () -> Unit = {
             check(Looper.myLooper() == Looper.getMainLooper()) {

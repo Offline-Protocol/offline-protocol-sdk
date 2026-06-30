@@ -4710,6 +4710,87 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
     );
 }
 
+/// Regression (Android↔iOS "receives but never sends"): a both-create owner
+/// whose own Welcome timed out to the terminal `Expired` state on a lossy /
+/// asymmetric BLE link must STILL confirm the session the moment it decrypts a
+/// real group message from the peer. A successful group decrypt is definitive
+/// proof the peer adopted our group; gating decrypt-confirmation on a still-active
+/// local Welcome left the owner able to receive but never reply (every outbound
+/// send → SessionNotReady). The both-create gate is preserved: a plaintext probe
+/// must NOT confirm such an owner — only a decrypt may.
+#[test]
+fn test_both_create_owner_confirms_via_decrypt_after_welcome_expired() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    // We are the both-create owner: we created our own group for "bob" and sent a
+    // Welcome that never reached `Sent` — retries exhausted it to `Expired`.
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    {
+        let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+    protocol
+        .ensure_session_state_entry("bob", "test_setup")
+        .unwrap();
+
+    let welcome_msg = protocol
+        .create_message("bob", "placeholder", Some(MessagePriority::High), None)
+        .unwrap();
+    protocol
+        .upsert_welcome_lifecycle("bob", "session:bob:user123", welcome_msg, "test_setup")
+        .unwrap();
+    // Drive the welcome through to the terminal Expired state along its legal
+    // lifecycle path (SendAttempted -> Failed -> Expired) — what a Welcome that
+    // times out after retry exhaustion actually does.
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_setup")
+        .unwrap();
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_setup")
+        .unwrap();
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::Expired, "test_setup")
+        .unwrap();
+    // Both-create owner: confirmation is gated on a group-aware decrypt.
+    protocol.mark_both_create_awaiting_decrypt("bob");
+
+    // A plaintext probe is NOT proof of adoption — the gate must still reject it.
+    assert!(
+        !protocol.can_confirm_from_source("bob", "confirmation_probe_received"),
+        "a plaintext probe must not confirm a both-create owner"
+    );
+
+    // A successful group decrypt IS definitive proof — it must confirm even though
+    // our local Welcome is Expired. Pre-fix this returned false, leaving the owner
+    // permanently able to receive but never send.
+    assert!(
+        protocol.can_confirm_from_source("bob", "decrypt_success"),
+        "a group decrypt must confirm the owner regardless of an expired local Welcome"
+    );
+    assert!(
+        matches!(
+            protocol.confirm_session_state("bob", "decrypt_success"),
+            Ok(true)
+        ),
+        "confirm_session_state must transition Pending->Confirmed on decrypt_success"
+    );
+    assert!(
+        protocol.confirmed_sessions.contains("bob"),
+        "session must be confirmed so outbound sends stop failing SessionNotReady"
+    );
+}
+
 #[test]
 fn test_welcome_delayed_confirmation_after_timeout_converges_to_sent() {
     let mut config = create_test_config();
