@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-AGPL--3.0--only%20or%20Commercial-blue.svg)](#license)
 [![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20Android%20%7C%20React%20Native-lightgrey.svg)](#building-the-sdk)
 
-**License:** AGPL-3.0-only **or** [Commercial](LICENSE-COMMERCIAL.md) — pick one. AGPL-3.0 carries a network-use source-disclosure obligation (section 13); the commercial option exists for closed-source mobile apps, embedded firmware, and SaaS deployments. Full details in the [License](#license) section below.
+**Dual-licensed:** use it under [AGPL-3.0-only](LICENSE), or buy a [commercial license](LICENSE-COMMERCIAL.md), your call. The AGPL requires you to publish your source whenever you distribute the SDK or expose it over a network (section 13); the commercial license lifts that requirement for closed-source mobile apps, embedded firmware, and SaaS deployments. See the [License](#license) section for the full breakdown.
 
 ## Features
 
