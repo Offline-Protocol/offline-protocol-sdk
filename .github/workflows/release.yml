@@ -185,10 +185,6 @@ jobs:
             target: aarch64-apple-darwin
             runner: macos-14
             lib_name: liboffline_protocol_uniffi.dylib
-          - arch: x86_64
-            target: x86_64-apple-darwin
-            runner: macos-13
-            lib_name: liboffline_protocol_uniffi.dylib
     steps:
       - uses: actions/checkout@v4
 
@@ -414,10 +410,6 @@ jobs:
             artifact: desktop-macos-arm64
             lib_subdir: macos-arm64
             plat_name: macosx_14_0_arm64
-          - platform: macos-x86_64
-            artifact: desktop-macos-x86_64
-            lib_subdir: macos-x86_64
-            plat_name: macosx_13_0_x86_64
           - platform: linux-x86_64
             artifact: desktop-linux-x86_64
             lib_subdir: linux-x86_64
