@@ -24,6 +24,16 @@ else
   exit 1
 fi
 
+if [ -f "$IOS_SIM_LIB" ]; then
+  echo "✅ iOS simulator library found: $IOS_SIM_LIB"
+  echo "   Size: $(du -h "$IOS_SIM_LIB" | cut -f1)"
+  echo "   Architectures: $(lipo -info "$IOS_SIM_LIB" | cut -d: -f3)"
+else
+  echo "❌ iOS simulator library missing: $IOS_SIM_LIB"
+  echo "   Run: npm run build:ios"
+  exit 1
+fi
+
 echo ""
 
 # Check Android libraries
