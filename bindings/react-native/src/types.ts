@@ -1138,6 +1138,40 @@ export interface DorsEscalationTriggeredEvent extends BaseEvent {
 }
 
 /**
+ * Machine-readable classification for a {@link SecurityWarningEvent}. Branch on
+ * this instead of parsing the human-readable `reason` string, which is for
+ * logs/UI and may change between versions.
+ */
+export type SecurityWarningCode =
+  | 'TOFU_KEY_MISMATCH'
+  | 'TOFU_STORE_FULL'
+  | 'TRANSPORT_IDENTITY_MISMATCH'
+  | 'SIGNATURE_DOWNGRADE'
+  | 'CONTROL_SIGNATURE_INVALID';
+
+/**
+ * A security-relevant anomaly was detected for a peer. `TOFU_KEY_MISMATCH`
+ * signals the peer re-identified (reinstall / new device); the remedy, if the
+ * change is legitimate, is `resetTofuForPeer` followed by re-establishing the
+ * session.
+ */
+export interface SecurityWarningEvent extends BaseEvent {
+  type: 'security_warning';
+  peer_id: string;
+  reason_code: SecurityWarningCode;
+  reason: string;
+}
+
+/**
+ * The TOFU-pinned key for a peer was reset (via `resetTofuForPeer`), allowing
+ * the peer to re-pin with a new public key on next contact.
+ */
+export interface TofuResetEvent extends BaseEvent {
+  type: 'tofu_reset';
+  peer_id: string;
+}
+
+/**
  * Union type of all events
  */
 export type ProtocolEvent =
@@ -1189,7 +1223,9 @@ export type ProtocolEvent =
   | TypingIndicatorReceivedEvent
   | ReadReceiptReceivedEvent
   | MessageRelayedEvent
-  | MessageDeferredEvent;
+  | MessageDeferredEvent
+  | SecurityWarningEvent
+  | TofuResetEvent;
 
 /**
  * Event listener type

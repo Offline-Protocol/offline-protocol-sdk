@@ -52,6 +52,43 @@ impl WelcomeReasonCode {
     }
 }
 
+/// Machine-readable taxonomy for [`Event::SecurityWarning`], so consumers can
+/// branch on a stable code instead of matching the human-readable `reason`
+/// string (which is for logs/UI and may change between versions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SecurityWarningCode {
+    /// A pinned peer presented a different public key — legitimate reinstall /
+    /// new device, or a key-substitution / impersonation attempt. If the change
+    /// is legitimate, the remedy is [`OfflineProtocol::reset_tofu_for_peer`].
+    TofuKeyMismatch,
+    /// The TOFU store is full and no entry was old enough to evict, so a new
+    /// peer's key could not be pinned (it is re-verified on each contact).
+    TofuStoreFull,
+    /// A control message's signed sender did not match its transport peer
+    /// identity.
+    TransportIdentityMismatch,
+    /// An unsigned control message arrived from a peer that already has a pinned
+    /// key — a suspicious signature downgrade.
+    SignatureDowngrade,
+    /// A control message's signature failed verification (invalid signature,
+    /// TOFU violation, or malformed metadata).
+    ControlSignatureInvalid,
+}
+
+impl SecurityWarningCode {
+    /// Returns the stable machine-readable reason code.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TofuKeyMismatch => "TOFU_KEY_MISMATCH",
+            Self::TofuStoreFull => "TOFU_STORE_FULL",
+            Self::TransportIdentityMismatch => "TRANSPORT_IDENTITY_MISMATCH",
+            Self::SignatureDowngrade => "SIGNATURE_DOWNGRADE",
+            Self::ControlSignatureInvalid => "CONTROL_SIGNATURE_INVALID",
+        }
+    }
+}
+
 /// Machine-readable reason for DORS selection or switch (observability).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -817,6 +854,9 @@ pub enum Event {
     SecurityWarning {
         /// Peer ID involved in the warning.
         peer_id: String,
+        /// Stable machine-readable classification of the warning. Branch on
+        /// this rather than parsing `reason`.
+        reason_code: SecurityWarningCode,
         /// Human-readable description of the security issue.
         reason: String,
     },
@@ -1526,8 +1566,16 @@ impl Event {
     }
 
     /// Creates a SecurityWarning event.
-    pub fn security_warning(peer_id: String, reason: String) -> Self {
-        Self::SecurityWarning { peer_id, reason }
+    pub fn security_warning(
+        peer_id: String,
+        reason_code: SecurityWarningCode,
+        reason: String,
+    ) -> Self {
+        Self::SecurityWarning {
+            peer_id,
+            reason_code,
+            reason,
+        }
     }
 
     /// Creates a MessageRelayed event.
@@ -2231,9 +2279,14 @@ impl fmt::Debug for Event {
                 .field("reason_code", reason_code)
                 .field("reason_detail", reason_detail)
                 .finish(),
-            Self::SecurityWarning { peer_id, reason } => f
+            Self::SecurityWarning {
+                peer_id,
+                reason_code,
+                reason,
+            } => f
                 .debug_struct("SecurityWarning")
                 .field("peer_id", peer_id)
+                .field("reason_code", reason_code)
                 .field("reason", reason)
                 .finish(),
             Self::MessageRelayed {
@@ -2476,6 +2529,42 @@ mod tests {
                 assert!(!file_data.is_empty());
             }
             _ => panic!("Wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_security_warning_code_as_str_matches_serde_wire_form() {
+        // `SecurityWarningCode::as_str()` is hand-written, while the JSON wire
+        // form is derived from `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`.
+        // JS consumers branch on the wire string (fernweh keys reinstall handling
+        // off `TOFU_KEY_MISMATCH`), so the two must never drift. Pin every variant
+        // to its serialized form — a single-variant test would let the other four
+        // rot.
+        let all = [
+            SecurityWarningCode::TofuKeyMismatch,
+            SecurityWarningCode::TofuStoreFull,
+            SecurityWarningCode::TransportIdentityMismatch,
+            SecurityWarningCode::SignatureDowngrade,
+            SecurityWarningCode::ControlSignatureInvalid,
+        ];
+        for code in all {
+            // serde renders a unit enum variant as a quoted JSON string.
+            let wire = serde_json::to_string(&code).unwrap();
+            assert_eq!(
+                format!("\"{}\"", code.as_str()),
+                wire,
+                "as_str() drifted from the serde wire form for {code:?}",
+            );
+            // Exhaustiveness guard (no wildcard): adding a variant makes this
+            // match fail to compile until it is also added to `all` above and
+            // pinned to its wire form.
+            match code {
+                SecurityWarningCode::TofuKeyMismatch
+                | SecurityWarningCode::TofuStoreFull
+                | SecurityWarningCode::TransportIdentityMismatch
+                | SecurityWarningCode::SignatureDowngrade
+                | SecurityWarningCode::ControlSignatureInvalid => {}
+            }
         }
     }
 }

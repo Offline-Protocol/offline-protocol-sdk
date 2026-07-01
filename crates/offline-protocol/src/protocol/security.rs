@@ -5,7 +5,7 @@ use super::{
     CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIG_META_KEY, DATA_PLANE_PREFIXES, INTERNAL_PREFIXES,
     MAX_TOFU_PEERS, TOFU_MIN_EVICTION_AGE_MS,
 };
-use crate::events::Event;
+use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
 use chrono::Utc;
 use offline_protocol_core::{Message, UserId};
@@ -176,6 +176,7 @@ impl OfflineProtocol {
                 );
                 self.emit_security_warning(
                     sender,
+                    SecurityWarningCode::TofuKeyMismatch,
                     "Public key changed for known peer (possible impersonation)",
                 );
                 return Err(Error::Other(format!(
@@ -215,6 +216,7 @@ impl OfflineProtocol {
                         );
                         self.emit_security_warning(
                             sender,
+                            SecurityWarningCode::TofuStoreFull,
                             "TOFU store full, cannot pin new peer key",
                         );
                         // Still accept the message (signature was valid) but
@@ -271,6 +273,7 @@ impl OfflineProtocol {
             );
             self.emit_security_warning(
                 sender,
+                SecurityWarningCode::TransportIdentityMismatch,
                 "Control message sender does not match transport peer identity",
             );
             return Some(InternalMessageResult::SecurityRejected);
@@ -306,6 +309,7 @@ impl OfflineProtocol {
                     );
                     self.emit_security_warning(
                         sender,
+                        SecurityWarningCode::SignatureDowngrade,
                         "Unsigned control message from peer with pinned key (possible downgrade attack)",
                     );
                     return Some(InternalMessageResult::SecurityRejected);
@@ -324,7 +328,11 @@ impl OfflineProtocol {
                     error = %err,
                     "Dropping control message: signature verification failed"
                 );
-                self.emit_security_warning(sender, format!("Control message rejected: {}", err));
+                self.emit_security_warning(
+                    sender,
+                    SecurityWarningCode::ControlSignatureInvalid,
+                    format!("Control message rejected: {}", err),
+                );
                 return Some(InternalMessageResult::SecurityRejected);
             }
         }
@@ -374,8 +382,17 @@ impl OfflineProtocol {
     }
 
     /// Emits a `SecurityWarning` event for the given peer.
-    pub(super) fn emit_security_warning(&self, peer_id: &str, reason: impl Into<String>) {
-        self.emit_event(Event::security_warning(peer_id.to_string(), reason.into()));
+    pub(super) fn emit_security_warning(
+        &self,
+        peer_id: &str,
+        reason_code: SecurityWarningCode,
+        reason: impl Into<String>,
+    ) {
+        self.emit_event(Event::security_warning(
+            peer_id.to_string(),
+            reason_code,
+            reason.into(),
+        ));
     }
 
     /// Returns `true` if the message content starts with any internal prefix.
@@ -425,20 +442,56 @@ impl OfflineProtocol {
         }
     }
 
-    /// Resets the TOFU-pinned public key for a specific peer.
+    /// Resets the TOFU-pinned public key for a specific peer, and drops any
+    /// existing MLS session with them.
     ///
-    /// This allows the peer to re-establish trust with a new public key on
-    /// next contact. Use this when a peer has legitimately re-initialized
-    /// their MLS identity (e.g., reinstalled the app, new device).
+    /// Use this when a peer has legitimately re-initialized their MLS identity
+    /// (e.g., reinstalled the app, new device) — typically in response to a
+    /// [`Event::SecurityWarning`] carrying [`SecurityWarningCode::TofuKeyMismatch`].
+    /// Unpinning the key lets the peer re-pin with their new public key on next
+    /// contact.
     ///
-    /// Returns `true` if an entry was removed, `false` if no entry existed.
+    /// The stale MLS session is dropped in the same call because it is bound to
+    /// the peer's now-dead credential; without this, the next
+    /// `establish_secure_session` would be a no-op against the old session and
+    /// the new keys would never take effect. Session deletion is best-effort,
+    /// not atomic: the key un-pin is committed first (so this still returns
+    /// `true`), then the session is dropped — no existing session (or MLS not
+    /// initialized) is a harmless no-op, while a genuine deletion failure is
+    /// logged at `warn` and leaves the stale session in place.
+    ///
+    /// Returns `true` if a TOFU entry was removed, `false` if none existed.
     /// The call is idempotent — resetting a peer with no pinned key is a no-op.
     ///
     /// Emits a `TofuReset` event only when an entry was actually removed.
     pub fn reset_tofu_for_peer(&mut self, peer_id: &str) -> bool {
         if self.known_peer_public_keys.remove(peer_id).is_some() {
             self.delete_tofu_entry(peer_id);
-            info!(peer_id = %peer_id, "TOFU key reset for peer");
+            // The peer re-identified, so any existing session is bound to their
+            // now-dead credential — drop it so re-establishment isn't a no-op
+            // against a stale session. The drop is best-effort, not atomic: the
+            // un-pin above is already committed. `delete_session` is idempotent
+            // (no session returns `Ok`) and `MlsNotInitialized` means none can
+            // exist, so both are benign. Any *other* error means the drop
+            // genuinely failed and the stale session may have outlived the
+            // un-pin (the next `establish_secure_session` would no-op against
+            // it), so surface it with a `warn!` instead of swallowing it.
+            match self.manual_mls_delete_session(peer_id) {
+                Ok(()) => {
+                    info!(peer_id = %peer_id, "TOFU key reset for peer (pinned key + stale MLS session cleared)");
+                }
+                Err(Error::MlsNotInitialized) => {
+                    info!(peer_id = %peer_id, "TOFU key reset for peer (pinned key cleared; MLS not initialized, no session to drop)");
+                }
+                Err(e) => {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "TOFU key reset un-pinned the key but could NOT drop the stale MLS session; \
+                         re-establishment may no-op against it until it is cleared"
+                    );
+                }
+            }
             self.emit_event(Event::TofuReset {
                 peer_id: peer_id.to_string(),
             });

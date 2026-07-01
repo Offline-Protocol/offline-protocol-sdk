@@ -499,7 +499,11 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             reason_code: _,
             reason_detail: _,
         } => {}
-        Event::SecurityWarning { peer_id, reason: _ } => {
+        Event::SecurityWarning {
+            peer_id,
+            reason_code: _,
+            reason: _,
+        } => {
             hash_string(peer_id, scrubber);
         }
         Event::MessageRelayed {

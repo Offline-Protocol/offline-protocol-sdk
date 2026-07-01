@@ -161,6 +161,11 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const userNameRef = useRef(userName);
   const userIdRef = useRef(userId);
   const blockedUsersRef = useRef<Set<string>>(new Set());
+  // Peers with an established MLS session. autoKeyExchange establishes these
+  // under the hood on discovery, independent of the app-level accept — so when a
+  // peer is later accepted into contacts, its hasSession can reflect a session
+  // that already converged before the accept (needed for group creation).
+  const sessionPeersRef = useRef<Set<string>>(new Set());
 
   // Keep refs in sync
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
@@ -261,32 +266,11 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         const peerId = event.sender || event.peerId || event.peer_id || event.fromUserId || event.from_user_id;
         if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
         const peerName = event.sender_name || event.userName || event.user_name || peerId;
+        // fernweh-parity: ALWAYS require an explicit manual Accept — never
+        // auto-accept, even on a mutual request. Just record the incoming
+        // request so it appears in the pending list for the user to accept.
         setConnectionRequests(prev => {
           if (prev.some(r => r.peerId === peerId && r.direction === 'in')) {return prev;}
-          const hasOutgoing = prev.some(r => r.peerId === peerId && r.direction === 'out');
-          if (hasOutgoing) {
-            // Mutual request: we already sent them a request and they sent one back.
-            // Auto-accept to complete the connection.
-            protocolRef.current?.acceptConnectionRequest({
-              recipient: peerId,
-              accepterName: userNameRef.current,
-            }).catch(() => {});
-            setContacts(prevContacts => {
-              const next = new Map(prevContacts);
-              const existing = next.get(peerId);
-              next.set(peerId, {
-                peerId,
-                name: existing?.name || peerName,
-                lastSeen: Date.now(),
-                isNearby: neighborsRef.current.has(peerId),
-                hasSession: existing?.hasSession || false,
-                isBlocked: false,
-                presenceStatus: existing?.presenceStatus || 'offline',
-              });
-              return next;
-            });
-            return prev.filter(r => r.peerId !== peerId);
-          }
           return [...prev, {
             peerId,
             name: peerName,
@@ -310,7 +294,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
             name: existing?.name || event.accepted_by_name || event.userName || event.user_name || peerId,
             lastSeen: Date.now(),
             isNearby: neighborsRef.current.has(peerId),
-            hasSession: existing?.hasSession || false,
+            hasSession: existing?.hasSession || sessionPeersRef.current.has(peerId),
             isBlocked: false,
             presenceStatus: existing?.presenceStatus || 'offline',
           });
@@ -337,18 +321,18 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         const peerId = event.peerId || event.peer_id || event.otherUserId || event.other_user_id;
         console.log('[ProtocolContext] secure_session_established raw event:', JSON.stringify(event), 'resolved peerId:', peerId);
         if (!peerId) {break;}
+        // Record the session regardless of contact status — the peer may not be
+        // an accepted contact yet (autoKeyExchange establishes on discovery).
+        sessionPeersRef.current.add(peerId);
+        // fernweh-parity: a secure session establishing under the hood must NOT
+        // auto-create a "connected" contact. Only mark hasSession on a contact
+        // the user has already connected to via an accepted request. The MLS
+        // session still exists; the peer stays unconnected in the UI until Accept.
         setContacts(prev => {
+          const existing = prev.get(peerId);
+          if (!existing) {return prev;}
           const next = new Map(prev);
-          const existing = next.get(peerId);
-          next.set(peerId, {
-            peerId,
-            name: existing?.name || peerId,
-            lastSeen: Date.now(),
-            isNearby: neighborsRef.current.has(peerId),
-            hasSession: true,
-            isBlocked: false,
-            presenceStatus: existing?.presenceStatus || 'offline',
-          });
+          next.set(peerId, {...existing, hasSession: true, lastSeen: Date.now()});
           return next;
         });
         break;
@@ -1156,7 +1140,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
           name: existing?.name || peerName,
           lastSeen: Date.now(),
           isNearby: neighborsRef.current.has(peerId),
-          hasSession: existing?.hasSession || false,
+          hasSession: existing?.hasSession || sessionPeersRef.current.has(peerId),
           isBlocked: false,
           presenceStatus: existing?.presenceStatus || 'offline',
         });

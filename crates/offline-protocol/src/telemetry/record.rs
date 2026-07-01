@@ -80,7 +80,7 @@ mod tests {
     use super::*;
     use crate::events::{
         DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, PresenceStatus,
-        WelcomeReasonCode,
+        SecurityWarningCode, WelcomeReasonCode,
     };
     use crate::mls_observability::{DecryptionFailureKind, MlsOperationContext};
     use std::collections::{HashMap, HashSet};
@@ -646,6 +646,7 @@ mod tests {
             },
             Event::SecurityWarning {
                 peer_id: String::new(),
+                reason_code: SecurityWarningCode::TofuKeyMismatch,
                 reason: String::new(),
             },
             Event::MessageRelayed {
