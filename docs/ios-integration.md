@@ -6,7 +6,6 @@ This guide shows how to integrate the Offline Protocol SDK into a native iOS app
 
 - Xcode 15+
 - Rust toolchain with iOS targets
-- CocoaPods or Swift Package Manager
 
 ## Setup
 
@@ -116,23 +115,21 @@ Add to `Info.plist`:
 </array>
 ```
 
-## CocoaPods
+## Distribution
 
-Add to your `Podfile`:
+The SDK ships as an npm package for React Native apps:
 
-```ruby
-pod 'OfflineProtocolSDK', '~> 0.1'
+```bash
+npm install @offline-protocol/mesh-sdk
 ```
 
-## Swift Package Manager
+For a **native** iOS app (no React Native), integrate the Rust core directly via the
+manual XCFramework build in steps 1–4 above: build the `offline-protocol-uniffi` static
+libraries for the device and simulator targets, package them into an XCFramework, and add
+it to your Xcode project alongside the UniFFI-generated Swift bindings.
 
-Add to `Package.swift`:
-
-```swift
-dependencies: [
-    .package(url: "https://github.com/Offline-Protocol/offline-protocol-sdk", from: "0.1.0")
-]
-```
+> A standalone CocoaPods pod and a Swift Package Manager manifest are not currently
+> published — use the npm module (React Native) or the manual XCFramework path (native).
 
 ## Architecture
 
