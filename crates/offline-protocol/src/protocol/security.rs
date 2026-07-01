@@ -454,8 +454,11 @@ impl OfflineProtocol {
     /// The stale MLS session is dropped in the same call because it is bound to
     /// the peer's now-dead credential; without this, the next
     /// `establish_secure_session` would be a no-op against the old session and
-    /// the new keys would never take effect. Session deletion is best-effort —
-    /// no existing session (or MLS not initialized) is a harmless no-op.
+    /// the new keys would never take effect. Session deletion is best-effort,
+    /// not atomic: the key un-pin is committed first (so this still returns
+    /// `true`), then the session is dropped — no existing session (or MLS not
+    /// initialized) is a harmless no-op, while a genuine deletion failure is
+    /// logged at `warn` and leaves the stale session in place.
     ///
     /// Returns `true` if a TOFU entry was removed, `false` if none existed.
     /// The call is idempotent — resetting a peer with no pinned key is a no-op.
@@ -465,12 +468,30 @@ impl OfflineProtocol {
         if self.known_peer_public_keys.remove(peer_id).is_some() {
             self.delete_tofu_entry(peer_id);
             // The peer re-identified, so any existing session is bound to their
-            // now-dead credential. Drop it (best-effort) so re-establishment
-            // isn't a no-op against a stale session.
-            if let Err(e) = self.manual_mls_delete_session(peer_id) {
-                debug!(peer_id = %peer_id, error = %e, "No MLS session to clear on TOFU reset (ok)");
+            // now-dead credential — drop it so re-establishment isn't a no-op
+            // against a stale session. The drop is best-effort, not atomic: the
+            // un-pin above is already committed. `delete_session` is idempotent
+            // (no session returns `Ok`) and `MlsNotInitialized` means none can
+            // exist, so both are benign. Any *other* error means the drop
+            // genuinely failed and the stale session may have outlived the
+            // un-pin (the next `establish_secure_session` would no-op against
+            // it), so surface it with a `warn!` instead of swallowing it.
+            match self.manual_mls_delete_session(peer_id) {
+                Ok(()) => {
+                    info!(peer_id = %peer_id, "TOFU key reset for peer (pinned key + stale MLS session cleared)");
+                }
+                Err(Error::MlsNotInitialized) => {
+                    info!(peer_id = %peer_id, "TOFU key reset for peer (pinned key cleared; MLS not initialized, no session to drop)");
+                }
+                Err(e) => {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "TOFU key reset un-pinned the key but could NOT drop the stale MLS session; \
+                         re-establishment may no-op against it until it is cleared"
+                    );
+                }
             }
-            info!(peer_id = %peer_id, "TOFU key reset for peer (pinned key + stale MLS session cleared)");
             self.emit_event(Event::TofuReset {
                 peer_id: peer_id.to_string(),
             });
