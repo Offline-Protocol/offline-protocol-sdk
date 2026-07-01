@@ -2,6 +2,11 @@
 
 > Offline-first messaging protocol with intelligent multi-transport switching, mesh networking, and automatic end-to-end encryption
 
+[![CI](https://github.com/Offline-Protocol/offline-protocol-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Offline-Protocol/offline-protocol-sdk/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@offline-protocol/mesh-sdk.svg?logo=npm)](https://www.npmjs.com/package/@offline-protocol/mesh-sdk)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only%20or%20Commercial-blue.svg)](#license)
+[![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20Android%20%7C%20React%20Native-lightgrey.svg)](#building-the-sdk)
+
 **License:** AGPL-3.0-only **or** [Commercial](LICENSE-COMMERCIAL.md) — pick one. AGPL-3.0 carries a network-use source-disclosure obligation (section 13); the commercial option exists for closed-source mobile apps, embedded firmware, and SaaS deployments. Full details in the [License](#license) section below.
 
 ## Features
