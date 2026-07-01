@@ -2531,4 +2531,40 @@ mod tests {
             _ => panic!("Wrong event type"),
         }
     }
+
+    #[test]
+    fn test_security_warning_code_as_str_matches_serde_wire_form() {
+        // `SecurityWarningCode::as_str()` is hand-written, while the JSON wire
+        // form is derived from `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`.
+        // JS consumers branch on the wire string (fernweh keys reinstall handling
+        // off `TOFU_KEY_MISMATCH`), so the two must never drift. Pin every variant
+        // to its serialized form — a single-variant test would let the other four
+        // rot.
+        let all = [
+            SecurityWarningCode::TofuKeyMismatch,
+            SecurityWarningCode::TofuStoreFull,
+            SecurityWarningCode::TransportIdentityMismatch,
+            SecurityWarningCode::SignatureDowngrade,
+            SecurityWarningCode::ControlSignatureInvalid,
+        ];
+        for code in all {
+            // serde renders a unit enum variant as a quoted JSON string.
+            let wire = serde_json::to_string(&code).unwrap();
+            assert_eq!(
+                format!("\"{}\"", code.as_str()),
+                wire,
+                "as_str() drifted from the serde wire form for {code:?}",
+            );
+            // Exhaustiveness guard (no wildcard): adding a variant makes this
+            // match fail to compile until it is also added to `all` above and
+            // pinned to its wire form.
+            match code {
+                SecurityWarningCode::TofuKeyMismatch
+                | SecurityWarningCode::TofuStoreFull
+                | SecurityWarningCode::TransportIdentityMismatch
+                | SecurityWarningCode::SignatureDowngrade
+                | SecurityWarningCode::ControlSignatureInvalid => {}
+            }
+        }
+    }
 }
