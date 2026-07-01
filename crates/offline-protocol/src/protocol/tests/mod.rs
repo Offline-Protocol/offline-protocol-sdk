@@ -1,6 +1,6 @@
 use super::*;
 use crate::constants::ACK_FOR_KEY;
-use crate::events::{DecryptionFailureCode, PresenceStatus};
+use crate::events::{DecryptionFailureCode, PresenceStatus, SecurityWarningCode};
 use crate::mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsLifecycleEvent, MlsOperationContext,
 };
@@ -1290,6 +1290,42 @@ fn test_process_internal_message_connection_request_event() {
         }
         _ => panic!("Wrong event type"),
     }
+}
+
+#[test]
+fn test_tofu_key_mismatch_emits_security_warning_with_stable_code() {
+    // fernweh (and any consumer) gates a peer re-handshake on this exact signal,
+    // so the reason_code contract must not drift. A pinned peer presenting a
+    // different key (reinstall / new device / impersonation) must be rejected
+    // AND emit SecurityWarning carrying a stable TOFU_KEY_MISMATCH code — not
+    // merely a human-readable `reason` string that could be reworded.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    // First contact pins the key; a different key for the same peer mismatches.
+    assert!(protocol.tofu_check_or_pin("alice", vec![1, 2, 3]).is_ok());
+    assert!(protocol.tofu_check_or_pin("alice", vec![4, 5, 6]).is_err());
+
+    let captured = events.lock().unwrap();
+    let (peer_id, reason_code) = captured
+        .iter()
+        .find_map(|e| match e {
+            Event::SecurityWarning {
+                peer_id,
+                reason_code,
+                ..
+            } => Some((peer_id.clone(), *reason_code)),
+            _ => None,
+        })
+        .expect("a SecurityWarning event should have been emitted on key mismatch");
+    assert_eq!(peer_id, "alice");
+    assert_eq!(reason_code, SecurityWarningCode::TofuKeyMismatch);
+    // The serialized code is the stable string JS consumers match on.
+    assert_eq!(reason_code.as_str(), "TOFU_KEY_MISMATCH");
 }
 
 #[test]

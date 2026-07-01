@@ -947,4 +947,47 @@ mod tests {
             "Key package should be consumed after auto-establish"
         );
     }
+
+    #[test]
+    fn test_reset_tofu_for_peer_clears_mls_session() {
+        use crate::mls::InMemoryStorage as MlsInMemoryStorage;
+
+        // Establish an alice→bob MLS session (alice owns the group).
+        let mut alice = make_protocol("alice");
+        alice
+            .initialize_mls(Arc::new(MlsInMemoryStorage::new()))
+            .unwrap();
+        let mut bob = make_protocol("bob");
+        bob.initialize_mls(Arc::new(MlsInMemoryStorage::new()))
+            .unwrap();
+
+        let bob_key_pkg = {
+            let mls = bob.mls_manager.as_ref().unwrap();
+            let manager = mls.read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        {
+            let mls = alice.mls_manager.as_ref().unwrap();
+            let manager = mls.read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_pkg.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap();
+            assert!(manager.has_session("bob").unwrap());
+        }
+
+        // Pin bob's TOFU key (real API) so the reset engages and returns true.
+        alice.tofu_check_or_pin("bob", vec![7u8; 32]).unwrap();
+
+        // Reset re-identifies bob: unpin the key AND drop the now-stale session.
+        assert!(alice.reset_tofu_for_peer("bob"));
+        assert!(!alice.known_peer_public_keys.contains_key("bob"));
+        {
+            let mls = alice.mls_manager.as_ref().unwrap();
+            assert!(
+                !mls.read().unwrap().has_session("bob").unwrap(),
+                "reset_tofu_for_peer must drop the stale MLS session"
+            );
+        }
+    }
 }
