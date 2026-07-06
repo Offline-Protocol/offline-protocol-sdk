@@ -26,6 +26,11 @@ pub const DEFAULT_CIPHERSUITE: Ciphersuite =
 /// delayed chunk *permanently* undecryptable and stall the transfer. 32 gives
 /// 4x headroom over the largest window at the cost of retaining up to 32
 /// unused message keys per sender ratchet.
+///
+/// The protocol layer keeps the combined in-flight budget within this bound
+/// by capping concurrent media transfers per peer
+/// (`MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER` in `offline-protocol`); revisit
+/// both together if either changes.
 pub const SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE: u32 = 32;
 
 /// How far ahead of the highest seen generation a sender ratchet may be

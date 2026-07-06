@@ -1147,7 +1147,8 @@ export type SecurityWarningCode =
   | 'TOFU_STORE_FULL'
   | 'TRANSPORT_IDENTITY_MISMATCH'
   | 'SIGNATURE_DOWNGRADE'
-  | 'CONTROL_SIGNATURE_INVALID';
+  | 'CONTROL_SIGNATURE_INVALID'
+  | 'MEDIA_SENDER_GROUP_MISMATCH';
 
 /**
  * A security-relevant anomaly was detected for a peer. `TOFU_KEY_MISMATCH`

@@ -74,6 +74,11 @@ pub enum SecurityWarningCode {
     /// A control message's signature failed verification (invalid signature,
     /// TOFU violation, or malformed metadata).
     ControlSignatureInvalid,
+    /// An encrypted media chunk's MLS group did not match the 1:1 session
+    /// group of the claimed wire sender — a valid ciphertext (from some
+    /// session) delivered under a different sender's name is a media
+    /// forgery/misattribution attempt.
+    MediaSenderGroupMismatch,
 }
 
 impl SecurityWarningCode {
@@ -85,6 +90,7 @@ impl SecurityWarningCode {
             Self::TransportIdentityMismatch => "TRANSPORT_IDENTITY_MISMATCH",
             Self::SignatureDowngrade => "SIGNATURE_DOWNGRADE",
             Self::ControlSignatureInvalid => "CONTROL_SIGNATURE_INVALID",
+            Self::MediaSenderGroupMismatch => "MEDIA_SENDER_GROUP_MISMATCH",
         }
     }
 }
@@ -187,6 +193,11 @@ pub enum DecryptionFailureCode {
     IdentityMismatch,
     /// Cryptographic operation failed.
     CryptoFailure,
+    /// The message was dropped from the pending-decryption queue (overflow or
+    /// TTL expiry) before the sender's session became ready. It was ACKed on
+    /// receipt, so the sender will not retransmit it; for a media chunk this
+    /// means the file transfer it belongs to can no longer complete.
+    PendingQueueDropped,
     /// Failure class is unknown.
     Unknown,
 }
@@ -2546,6 +2557,7 @@ mod tests {
             SecurityWarningCode::TransportIdentityMismatch,
             SecurityWarningCode::SignatureDowngrade,
             SecurityWarningCode::ControlSignatureInvalid,
+            SecurityWarningCode::MediaSenderGroupMismatch,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -2563,7 +2575,8 @@ mod tests {
                 | SecurityWarningCode::TofuStoreFull
                 | SecurityWarningCode::TransportIdentityMismatch
                 | SecurityWarningCode::SignatureDowngrade
-                | SecurityWarningCode::ControlSignatureInvalid => {}
+                | SecurityWarningCode::ControlSignatureInvalid
+                | SecurityWarningCode::MediaSenderGroupMismatch => {}
             }
         }
     }

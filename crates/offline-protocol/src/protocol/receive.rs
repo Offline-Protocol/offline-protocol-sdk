@@ -5,13 +5,13 @@ use super::{
     ProtocolState,
 };
 use crate::constants::{ACK_FOR_KEY, RELAY_LEARNED_ROUTE_QUALITY};
-use crate::events::Event;
+use crate::events::{Event, SecurityWarningCode};
 use crate::file_transfer::FileChunk;
 use crate::media_envelope::{decode_media_envelope, is_media_envelope, MediaChunkPlaintext};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 use crate::SessionStateError;
 use offline_protocol_core::{ContentType, MediaMetadata, Message};
-use offline_protocol_mls::EncryptedMessage;
+use offline_protocol_mls::{EncryptedMessage, GroupId};
 use offline_protocol_router::relay::RelayPriority;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -440,7 +440,10 @@ impl OfflineProtocol {
         if self.config.encryption.require_encryption {
             return false;
         }
-        if self.should_auto_encrypt() && self.is_session_confirmed(sender).unwrap_or(false) {
+        // Fail closed: if the confirmation lookup errors (storage failure),
+        // treat the session as confirmed and reject — accepting plaintext on
+        // error would let a storage fault disable the downgrade gate.
+        if self.should_auto_encrypt() && self.is_session_confirmed(sender).unwrap_or(true) {
             return false;
         }
         true
@@ -459,6 +462,27 @@ impl OfflineProtocol {
         message: &Message,
     ) -> Option<Vec<u8>> {
         let group_id = encrypted.group_id.as_str().to_string();
+
+        // Media envelopes are only ever produced for the sender's 1:1 session,
+        // whose MLS group id is deterministic. Enforce that binding before
+        // decrypting: MLS authenticates group membership, not the wire sender
+        // claim, so without this check any peer holding a valid session with
+        // us could deliver its own ciphertext under an arbitrary
+        // `message.sender` and have the file attributed to that identity.
+        let expected_group = GroupId::for_session(&self.config.user_id, sender);
+        if encrypted.group_id != expected_group {
+            warn!(
+                sender = %sender,
+                group_id = %group_id,
+                "Encrypted media chunk MLS group does not match the sender's 1:1 session, dropping"
+            );
+            self.emit_security_warning(
+                sender,
+                SecurityWarningCode::MediaSenderGroupMismatch,
+                "Encrypted media chunk MLS group does not match the claimed sender",
+            );
+            return None;
+        }
 
         let Some(mls) = self.mls_manager.clone() else {
             warn!(

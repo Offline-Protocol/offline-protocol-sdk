@@ -570,6 +570,43 @@ impl OfflineProtocol {
             return self.encrypt_bytes_confirmed_session(&mls, recipient, plaintext);
         }
 
+        self.ensure_session_establishment(&mls, recipient)?;
+
+        // Only encrypt if session is confirmed (Welcome processed or successful decrypt).
+        // Confirmation truth comes from persisted session state.
+        if !self.is_session_confirmed(recipient)? {
+            debug!(recipient = %recipient, "Session exists but not confirmed, queuing message");
+            return Err(Error::SessionNotReady(self.establishment_state(recipient)?));
+        }
+
+        // Encrypt the message
+        let encrypted = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager
+                .encrypt_for_user(recipient, plaintext)
+                .map_err(|_| Error::EncryptFailed("encryption operation failed".to_string()))?
+        };
+
+        self.emit_mls_encryption_used(recipient);
+        Ok(encrypted)
+    }
+
+    /// Ensures MLS session establishment with `recipient` has at least been
+    /// initiated: when no session exists in storage, imports a stored/pending
+    /// key package, creates the session, and sends the Welcome.
+    ///
+    /// Returns `Ok(())` when a session already exists (possibly unconfirmed —
+    /// callers must still gate on `is_session_confirmed`) or when no usable
+    /// key package remains (expired). Returns `Err(SessionNotReady)` when no
+    /// key package is available, or right after creating a session with
+    /// `store_pending` enabled (the session cannot be confirmed yet).
+    pub(super) fn ensure_session_establishment(
+        &mut self,
+        mls: &Arc<RwLock<MlsManager>>,
+        recipient: &str,
+    ) -> Result<()> {
         // Check for existing session (requires storage I/O via load_group)
         let has_session = {
             let manager = mls
@@ -656,25 +693,7 @@ impl OfflineProtocol {
             }
         }
 
-        // Only encrypt if session is confirmed (Welcome processed or successful decrypt).
-        // Confirmation truth comes from persisted session state.
-        if !self.is_session_confirmed(recipient)? {
-            debug!(recipient = %recipient, "Session exists but not confirmed, queuing message");
-            return Err(Error::SessionNotReady(self.establishment_state(recipient)?));
-        }
-
-        // Encrypt the message
-        let encrypted = {
-            let manager = mls
-                .read()
-                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-            manager
-                .encrypt_for_user(recipient, plaintext)
-                .map_err(|_| Error::EncryptFailed("encryption operation failed".to_string()))?
-        };
-
-        self.emit_mls_encryption_used(recipient);
-        Ok(encrypted)
+        Ok(())
     }
 
     /// Serializes an [`EncryptedMessage`] into the prefixed string form used
@@ -1126,10 +1145,30 @@ impl OfflineProtocol {
             if !self.is_session_confirmed(&recipient_str)? {
                 // Kick session establishment exactly like the text path
                 // (import a stored key package, create the session, send the
-                // Welcome). The session cannot be confirmed yet, so this
-                // returns SessionNotReady without encrypting anything; on the
-                // off chance the probe finds a usable session, fall through.
-                self.encrypt_bytes_for_recipient(&recipient_str, &[])?;
+                // Welcome), then report not-ready: the session cannot be
+                // confirmed synchronously, so callers retry after
+                // `secure_session_established`.
+                if let Some(mls) = self.mls_manager.clone() {
+                    self.ensure_session_establishment(&mls, &recipient_str)?;
+                }
+                return Err(Error::SessionNotReady(
+                    self.establishment_state(&recipient_str)?,
+                ));
+            }
+
+            // Encrypted chunks share the recipient's session ratchet with
+            // text, and the receiver keeps out-of-order message keys for a
+            // bounded number of generations — cap concurrent transfers so
+            // the combined in-flight windows cannot push a delayed chunk
+            // beyond that tolerance and permanently stall it.
+            use crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER;
+            let active_transfers = self
+                .outbound_media_transfers
+                .values()
+                .filter(|transfer| transfer.recipient == recipient_str)
+                .count();
+            if active_transfers >= MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
+                return Err(Error::MediaTransferLimit(recipient_str));
             }
         } else if self.config.encryption.require_encryption {
             return Err(Error::EncryptFailed(

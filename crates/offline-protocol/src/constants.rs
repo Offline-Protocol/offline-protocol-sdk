@@ -59,6 +59,19 @@ pub const DEFAULT_MEDIA_WINDOW_SIZE: usize = 4;
 /// Smaller than the main outbox since the sliding window limits in-flight chunks.
 pub const MAX_MEDIA_OUTBOX_ENTRIES: usize = 100;
 
+/// Maximum concurrent outbound media transfers per recipient when chunks are
+/// MLS-encrypted.
+///
+/// Encrypted chunks share the recipient's 1:1 session ratchet with text, and
+/// the receiver retains out-of-order message keys for only
+/// `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` (32) generations. Each transfer
+/// keeps up to `MEDIA_WINDOW_SIZE_INTERNET` (8) chunks in flight, so two
+/// concurrent transfers bound the in-flight gap at 16 generations — 2x
+/// headroom for interleaved text. Without this cap, enough concurrent
+/// transfers could push a delayed chunk beyond the tolerance and permanently
+/// stall its transfer.
+pub const MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER: usize = 2;
+
 /// Metadata key indicating preferred transport for a message.
 pub const TRANSPORT_PREFERENCE_KEY: &str = "transport_preference";
 

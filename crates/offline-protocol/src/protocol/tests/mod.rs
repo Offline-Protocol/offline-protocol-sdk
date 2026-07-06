@@ -6786,7 +6786,7 @@ fn test_pending_queue_ttl_expiration_is_deterministic_and_monotonic() {
         protocol
             .pending_queue
             .prune_expired_for_peer(&config, "sender123", Instant::now());
-    assert_eq!(expired, 1);
+    assert_eq!(expired.len(), 1);
     assert_eq!(protocol.pending_queue.peer_queue_len("sender123"), 1);
     assert_eq!(
         protocol
@@ -12647,4 +12647,246 @@ fn test_encrypted_media_chunk_queued_until_session_ready() {
     );
     assert_eq!(got[0].0, "queued.bin");
     assert_eq!(got[0].4, file_data);
+}
+
+#[test]
+fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
+    use crate::events::SecurityWarningCode;
+    use crate::file_transfer::FileChunk;
+    use crate::media_envelope::{encode_media_envelope, MediaChunkPlaintext};
+    use sha2::{Digest, Sha256};
+
+    // Carol holds a real, confirmed MLS session with bob. A valid ciphertext
+    // from that session delivered under wire sender "alice" must be rejected:
+    // MLS authenticates group membership, not the wire sender claim.
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    let (mut carol, _carol_handle) = media_test_protocol("carol");
+    {
+        // establish carol <-> bob at the manager level (mirrors
+        // establish_media_session, which is hardcoded to alice/bob).
+        let bob_kp = {
+            let mls = bob.mls_manager.as_ref().unwrap().clone();
+            let manager = mls.read().unwrap();
+            manager.generate_key_package().unwrap()
+        };
+        let welcome = {
+            let mls = carol.mls_manager.as_ref().unwrap().clone();
+            let manager = mls.read().unwrap();
+            manager
+                .import_key_package("bob", &bob_kp.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap()
+        };
+        let mls = bob.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager.process_welcome(&welcome).unwrap();
+    }
+    carol.confirm_session_state("bob", "test_setup").unwrap();
+    bob.confirm_session_state("carol", "test_setup").unwrap();
+
+    let received = capture_file_received(&mut bob);
+    let warnings: Arc<Mutex<Vec<(String, SecurityWarningCode)>>> = Arc::new(Mutex::new(Vec::new()));
+    let warnings_clone = warnings.clone();
+    bob.on_event(move |event| {
+        if let Event::SecurityWarning {
+            peer_id,
+            reason_code,
+            ..
+        } = event
+        {
+            warnings_clone
+                .lock()
+                .unwrap()
+                .push((peer_id.clone(), reason_code));
+        }
+    });
+
+    // A perfectly valid encrypted media chunk for session:bob:carol...
+    let data = vec![3u8; 64];
+    let chunk = FileChunk {
+        file_id: "file_forged1".to_string(),
+        file_name: "forged.bin".to_string(),
+        file_size: data.len() as u64,
+        total_chunks: 1,
+        chunk_index: 0,
+        chunk_data: data.clone(),
+        file_checksum: format!("{:x}", Sha256::digest(&data)),
+    };
+    let inner = MediaChunkPlaintext {
+        chunk_bytes: chunk.to_bytes(),
+        media_metadata: None,
+        original_content_type: None,
+    };
+    let encrypted = {
+        let mls = carol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .encrypt_for_user("bob", &inner.encode().unwrap())
+            .unwrap()
+    };
+
+    // ...delivered with wire sender "alice".
+    let mut msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "",
+    );
+    msg.content_type = ContentType::FileChunk;
+    msg.binary_content = Some(encode_media_envelope(&encrypted));
+    bob_handle.queue_message(msg);
+    while bob.receive_message().is_some() {}
+
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "media from a mismatched MLS group must never surface under the claimed sender"
+    );
+    assert!(
+        warnings
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(peer, code)| peer == "alice"
+                && *code == SecurityWarningCode::MediaSenderGroupMismatch),
+        "a MediaSenderGroupMismatch security warning must be emitted"
+    );
+}
+
+#[test]
+fn test_send_media_caps_concurrent_transfers_per_peer() {
+    use crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER;
+
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    // Start the maximum number of transfers; none complete (no ACKs ferried),
+    // so they all stay active.
+    for i in 0..MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
+        alice
+            .send_media(
+                "bob",
+                vec![i as u8; 512],
+                &format!("f{}.bin", i),
+                ContentType::File,
+                None,
+            )
+            .unwrap();
+    }
+
+    // One more must be rejected: the combined in-flight windows would exceed
+    // the receiver's sender-ratchet out-of-order tolerance budget.
+    let result = alice.send_media(
+        "bob",
+        vec![9u8; 512],
+        "overflow.bin",
+        ContentType::File,
+        None,
+    );
+    assert!(
+        matches!(result, Err(Error::MediaTransferLimit(_))),
+        "transfer beyond the per-peer cap must be rejected, got {:?}",
+        result.map(|_| ())
+    );
+
+    // A different recipient is not affected by bob's cap.
+    // (No session with carol -> SessionNotReady, NOT MediaTransferLimit.)
+    let other = alice.send_media("carol", vec![1u8; 64], "c.bin", ContentType::File, None);
+    assert!(matches!(other, Err(Error::SessionNotReady(_))));
+}
+
+#[test]
+fn test_dropped_pending_media_chunk_fails_loudly() {
+    use crate::events::DecryptionFailureCode;
+
+    // Bob's per-peer pending queue holds only 2 messages, and his session
+    // with alice is not ready (Welcome never processed). Alice's windowed
+    // transfer outruns the queue: the third chunk evicts the first, which was
+    // already ACKed and dedup-marked — the transfer can never complete and
+    // MUST fail loudly rather than stall silently.
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_per_peer = 2;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let bob_handle = mock_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    bob.start().unwrap();
+
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+
+    // Alice-side session only: bob never processes the Welcome.
+    let bob_kp = {
+        let mls = bob.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager.generate_key_package().unwrap()
+    };
+    {
+        let mls = alice.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+    alice.confirm_session_state("bob", "test_setup").unwrap();
+
+    let dropped_events: Arc<Mutex<Vec<(String, DecryptionFailureCode)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let dropped_clone = dropped_events.clone();
+    bob.on_event(move |event| {
+        if let Event::MessageDecryptionFailed { sender, code, .. } = event {
+            dropped_clone.lock().unwrap().push((sender.clone(), code));
+        }
+    });
+
+    // 3 chunks over 4 KB BLE chunks (window 2): the initial window fills the
+    // queue; the pumped third chunk overflows it.
+    let file_data = vec![0x5Au8; 9 * 1024];
+    alice
+        .send_media("bob", file_data, "big.bin", ContentType::File, None)
+        .unwrap();
+
+    let mut rounds = 0;
+    while !dropped_events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, code)| *code == DecryptionFailureCode::PendingQueueDropped)
+    {
+        rounds += 1;
+        assert!(
+            rounds < 16,
+            "pending queue overflow never surfaced a PendingQueueDropped failure"
+        );
+
+        // Ferry alice -> bob (bob queues, but still ACKs).
+        let outbound = alice_handle.sent_messages();
+        alice_handle.clear_sent_messages();
+        for msg in outbound {
+            bob_handle.queue_message(msg);
+        }
+        while bob.receive_message().is_some() {}
+
+        // Ferry bob's ACKs -> alice, then pump the send window.
+        let acks = bob_handle.sent_messages();
+        bob_handle.clear_sent_messages();
+        for msg in acks {
+            alice_handle.queue_message(msg);
+        }
+        while alice.receive_message().is_some() {}
+        alice.pump_media_transfers();
+    }
+
+    let events = dropped_events.lock().unwrap();
+    assert!(
+        events.iter().any(|(sender, code)| sender == "alice"
+            && *code == DecryptionFailureCode::PendingQueueDropped),
+        "the dropped chunk must be attributed to its sender, got {:?}",
+        events
+    );
 }

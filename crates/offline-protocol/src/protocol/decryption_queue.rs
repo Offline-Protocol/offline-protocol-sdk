@@ -29,6 +29,16 @@ struct EntryRef {
     sequence: u64,
 }
 
+/// A message dropped from the pending queue (overflow or TTL expiry),
+/// together with the machine-readable drop reason. Returned to the protocol
+/// layer so it can surface user-visible consequences — in particular an
+/// encrypted media chunk that was already ACKed and dedup-marked on receipt
+/// and therefore can never be recovered.
+pub(crate) struct DroppedPendingMessage {
+    pub(crate) message: Message,
+    pub(crate) reason: &'static str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueLimit {
     PerPeer,
@@ -375,13 +385,11 @@ impl PendingDecryptionQueue {
         reason: DropReason,
         limit_triggered: QueueLimit,
         overflow_policy: OverflowPolicy,
-    ) -> bool {
+    ) -> Option<PendingDecryptMessage> {
         self.cleanup_global_order_front();
-        let Some(entry_ref) = self.global_order.pop_front() else {
-            return false;
-        };
+        let entry_ref = self.global_order.pop_front()?;
         if !self.live_sequences.contains(&entry_ref.sequence) {
-            return false;
+            return None;
         }
         if let Some(evicted) = self.remove_entry_by_sequence(&entry_ref.peer_id, entry_ref.sequence)
         {
@@ -392,7 +400,7 @@ impl PendingDecryptionQueue {
                 &evicted.message_id,
                 overflow_policy,
             );
-            return true;
+            return Some(evicted);
         }
         warn!(
             peer_id = %entry_ref.peer_id,
@@ -400,19 +408,19 @@ impl PendingDecryptionQueue {
             sequence = entry_ref.sequence,
             "Failed to evict pending message by global order reference"
         );
-        false
+        None
     }
 
     // ---- Public queue operations ----
 
-    /// Prunes expired entries for a specific peer. Returns the count of expired entries.
+    /// Prunes expired entries for a specific peer. Returns the dropped entries.
     pub(crate) fn prune_expired_for_peer(
         &mut self,
         config: &PendingQueueConfig,
         peer_id: &str,
         now: Instant,
-    ) -> usize {
-        let mut expired_count = 0usize;
+    ) -> Vec<DroppedPendingMessage> {
+        let mut expired_entries = Vec::new();
         let mut expired_sequences = Vec::new();
         let mut expired_ids = Vec::new();
         if let Some(queue) = self.queues.get(peer_id) {
@@ -428,7 +436,7 @@ impl PendingDecryptionQueue {
 
         let overflow_policy = config.overflow_policy;
         for (sequence, message_id) in expired_sequences.into_iter().zip(expired_ids) {
-            if self.remove_entry_by_sequence(peer_id, sequence).is_some() {
+            if let Some(expired) = self.remove_entry_by_sequence(peer_id, sequence) {
                 self.record_drop(
                     DropReason::TtlExpired,
                     None,
@@ -436,33 +444,36 @@ impl PendingDecryptionQueue {
                     &message_id,
                     overflow_policy,
                 );
-                expired_count = expired_count.saturating_add(1);
+                expired_entries.push(DroppedPendingMessage {
+                    message: expired.message,
+                    reason: DropReason::TtlExpired.as_str(),
+                });
             }
         }
 
-        if expired_count >= TTL_SPIKE_WARN_THRESHOLD {
+        if expired_entries.len() >= TTL_SPIKE_WARN_THRESHOLD {
             warn!(
                 peer_id = %peer_id,
-                expired = expired_count,
+                expired = expired_entries.len(),
                 ttl_ms = config.pending_ttl_ms,
                 "Pending encrypted message TTL eviction spike"
             );
         }
 
         self.cleanup_global_order_front();
-        expired_count
+        expired_entries
     }
 
-    /// Prunes expired entries from the front of the global order. Returns the count evicted.
+    /// Prunes expired entries from the front of the global order. Returns the dropped entries.
     pub(crate) fn prune_expired_global_front(
         &mut self,
         config: &PendingQueueConfig,
         now: Instant,
         max_evictions: usize,
-    ) -> usize {
-        let mut evicted = 0usize;
+    ) -> Vec<DroppedPendingMessage> {
+        let mut evicted = Vec::new();
         let overflow_policy = config.overflow_policy;
-        while evicted < max_evictions {
+        while evicted.len() < max_evictions {
             self.cleanup_global_order_front();
             let Some(front) = self.global_order.front().cloned() else {
                 break;
@@ -494,15 +505,18 @@ impl PendingDecryptionQueue {
                     &expired.message_id,
                     overflow_policy,
                 );
-                evicted = evicted.saturating_add(1);
+                evicted.push(DroppedPendingMessage {
+                    message: expired.message,
+                    reason: DropReason::TtlExpired.as_str(),
+                });
             } else {
                 self.global_order.pop_front();
             }
         }
 
-        if evicted >= TTL_SPIKE_WARN_THRESHOLD {
+        if evicted.len() >= TTL_SPIKE_WARN_THRESHOLD {
             warn!(
-                expired = evicted,
+                expired = evicted.len(),
                 ttl_ms = config.pending_ttl_ms,
                 "Pending encrypted message TTL eviction spike"
             );
@@ -512,7 +526,16 @@ impl PendingDecryptionQueue {
     }
 
     /// Enqueues an encrypted message that arrived before the MLS session was ready.
-    pub(crate) fn enqueue(&mut self, config: &PendingQueueConfig, sender: &str, message: &Message) {
+    ///
+    /// Returns every message dropped in the process — TTL-expired entries,
+    /// entries evicted to make room, or the incoming message itself when it
+    /// could not be admitted — so the protocol layer can surface the loss.
+    pub(crate) fn enqueue(
+        &mut self,
+        config: &PendingQueueConfig,
+        sender: &str,
+        message: &Message,
+    ) -> Vec<DroppedPendingMessage> {
         self.metrics.pending_messages_received_total = self
             .metrics
             .pending_messages_received_total
@@ -520,8 +543,8 @@ impl PendingDecryptionQueue {
         let incoming_message_id = message.id.as_str();
 
         let now = Instant::now();
-        let _ = self.prune_expired_for_peer(config, sender, now);
-        let _ = self.prune_expired_global_front(config, now, 64);
+        let mut dropped = self.prune_expired_for_peer(config, sender, now);
+        dropped.extend(self.prune_expired_global_front(config, now, 64));
 
         let per_peer_limit = config.max_pending_per_peer;
         let global_limit = config.max_pending_global;
@@ -539,7 +562,11 @@ impl PendingDecryptionQueue {
                         &incoming_message_id,
                         overflow_policy,
                     );
-                    return;
+                    dropped.push(DroppedPendingMessage {
+                        message: message.clone(),
+                        reason: DropReason::OverflowDropNewest.as_str(),
+                    });
+                    return dropped;
                 }
                 OverflowPolicy::DropOldest => {
                     let evicted_sequence = self
@@ -556,6 +583,10 @@ impl PendingDecryptionQueue {
                                 &evicted.message_id,
                                 overflow_policy,
                             );
+                            dropped.push(DroppedPendingMessage {
+                                message: evicted.message,
+                                reason: DropReason::OverflowDropOldest.as_str(),
+                            });
                             evicted_any = true;
                         }
                     }
@@ -573,7 +604,11 @@ impl PendingDecryptionQueue {
                             &incoming_message_id,
                             overflow_policy,
                         );
-                        return;
+                        dropped.push(DroppedPendingMessage {
+                            message: message.clone(),
+                            reason: DropReason::OverflowDropNewest.as_str(),
+                        });
+                        return dropped;
                     }
                 }
             }
@@ -593,7 +628,11 @@ impl PendingDecryptionQueue {
                 &incoming_message_id,
                 overflow_policy,
             );
-            return;
+            dropped.push(DroppedPendingMessage {
+                message: message.clone(),
+                reason: DropReason::OverflowDropNewest.as_str(),
+            });
+            return dropped;
         }
 
         if self.total >= global_limit {
@@ -610,22 +649,32 @@ impl PendingDecryptionQueue {
                         &incoming_message_id,
                         overflow_policy,
                     );
-                    return;
+                    dropped.push(DroppedPendingMessage {
+                        message: message.clone(),
+                        reason: DropReason::OverflowDropNewest.as_str(),
+                    });
+                    return dropped;
                 }
                 OverflowPolicy::DropOldest => {
                     while self.total >= global_limit {
-                        if !self.evict_global_oldest(
+                        match self.evict_global_oldest(
                             DropReason::OverflowDropOldest,
                             QueueLimit::Global,
                             overflow_policy,
                         ) {
-                            self.record_eviction_failure(
-                                QueueLimit::Global,
-                                sender,
-                                &incoming_message_id,
-                                "drop_oldest failed to evict global oldest",
-                            );
-                            break;
+                            Some(evicted) => dropped.push(DroppedPendingMessage {
+                                message: evicted.message,
+                                reason: DropReason::OverflowDropOldest.as_str(),
+                            }),
+                            None => {
+                                self.record_eviction_failure(
+                                    QueueLimit::Global,
+                                    sender,
+                                    &incoming_message_id,
+                                    "drop_oldest failed to evict global oldest",
+                                );
+                                break;
+                            }
                         }
                     }
                 }
@@ -639,7 +688,11 @@ impl PendingDecryptionQueue {
                 &incoming_message_id,
                 overflow_policy,
             );
-            return;
+            dropped.push(DroppedPendingMessage {
+                message: message.clone(),
+                reason: DropReason::OverflowDropNewest.as_str(),
+            });
+            return dropped;
         }
 
         let sequence = self.next_sequence();
@@ -691,7 +744,13 @@ impl PendingDecryptionQueue {
                 &incoming_message_id,
                 overflow_policy,
             );
+            dropped.push(DroppedPendingMessage {
+                message: message.clone(),
+                reason: DropReason::OverflowDropNewest.as_str(),
+            });
         }
+
+        dropped
     }
 
     /// Drains all pending messages for a peer, updating bookkeeping.

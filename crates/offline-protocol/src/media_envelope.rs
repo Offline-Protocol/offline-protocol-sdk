@@ -90,6 +90,10 @@ pub(crate) struct MediaChunkPlaintext {
 
 impl MediaChunkPlaintext {
     /// Serializes the plaintext for encryption.
+    ///
+    /// Enforces the same field bounds `decode` does, so an oversized payload
+    /// fails the send with a clear error instead of being silently dropped by
+    /// the receiver.
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
         let meta_json = match &self.media_metadata {
             Some(meta) => Some(
@@ -98,7 +102,25 @@ impl MediaChunkPlaintext {
             ),
             None => None,
         };
+        if let Some(meta) = &meta_json {
+            if meta.len() > MAX_METADATA_JSON_LEN {
+                return Err(format!(
+                    "media metadata length {} exceeds maximum {} (thumbnail too large?)",
+                    meta.len(),
+                    MAX_METADATA_JSON_LEN
+                ));
+            }
+        }
         let oct = self.original_content_type.as_ref().map(|ct| ct.to_string());
+        if let Some(oct) = &oct {
+            if oct.len() > u8::MAX as usize {
+                return Err(format!(
+                    "content type string length {} exceeds maximum {}",
+                    oct.len(),
+                    u8::MAX
+                ));
+            }
+        }
 
         let mut flags = 0u8;
         if meta_json.is_some() {
@@ -120,7 +142,6 @@ impl MediaChunkPlaintext {
         }
         if let Some(oct) = oct {
             let bytes = oct.as_bytes();
-            debug_assert!(bytes.len() <= u8::MAX as usize);
             buf.push(bytes.len() as u8);
             buf.extend_from_slice(bytes);
         }
@@ -297,6 +318,23 @@ mod tests {
                 len
             );
         }
+    }
+
+    #[test]
+    fn test_plaintext_encode_oversized_metadata_rejected() {
+        // An oversized thumbnail must fail at the sender with a clear error,
+        // not encode successfully and be dropped by the receiver's decode cap.
+        let mut meta = sample_metadata();
+        meta.thumbnail_base64 = Some("A".repeat(MAX_METADATA_JSON_LEN + 1));
+        let plain = MediaChunkPlaintext {
+            chunk_bytes: vec![1, 2, 3],
+            media_metadata: Some(meta),
+            original_content_type: None,
+        };
+        assert!(plain
+            .encode()
+            .unwrap_err()
+            .contains("media metadata length"));
     }
 
     #[test]
