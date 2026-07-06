@@ -1211,4 +1211,48 @@ mod tests {
             Some(&b"still converged after retransmit"[..])
         );
     }
+
+    /// Windowed media transfers keep up to 8 encrypted chunks in flight
+    /// (interleaved with text on the same session ratchet), so a delayed chunk
+    /// can arrive many generations behind the newest decrypted message. The
+    /// OpenMLS default tolerance (5) would delete its key and permanently stall
+    /// the transfer; `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` (32) must cover it.
+    #[test]
+    fn test_out_of_order_decryption_within_sender_ratchet_tolerance() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        let welcome = alice.create_session("bob").unwrap();
+        bob.join_session(&welcome).unwrap();
+
+        let ciphertexts: Vec<_> = (0..40)
+            .map(|i| {
+                alice
+                    .encrypt_for_user("bob", format!("chunk {}", i).as_bytes())
+                    .unwrap()
+            })
+            .collect();
+
+        // Decrypt the newest message first, ratcheting bob's receive state far
+        // ahead of every earlier generation.
+        let pt = bob.decrypt_from_user(&ciphertexts[39]).unwrap();
+        assert_eq!(pt.as_deref(), Some(&b"chunk 39"[..]));
+
+        // 29 generations behind: far beyond the OpenMLS default of 5, but
+        // within our tolerance of 32 — must still decrypt.
+        let pt = bob.decrypt_from_user(&ciphertexts[10]).unwrap();
+        assert_eq!(pt.as_deref(), Some(&b"chunk 10"[..]));
+
+        // 39 generations behind: beyond the tolerance, the key is deleted and
+        // the message must NOT decrypt (proves the configured bound applies).
+        let res = bob.decrypt_from_user(&ciphertexts[0]);
+        assert!(
+            !matches!(res, Ok(Some(_))),
+            "generation beyond the tolerance must not decrypt"
+        );
+    }
 }

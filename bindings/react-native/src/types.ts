@@ -667,6 +667,18 @@ export interface MediaSentEvent extends BaseEvent {
 }
 
 /**
+ * An outbound media transfer was aborted before all chunks were delivered
+ * (chunk encryption failed, or a chunk failed terminally). No `media_sent`
+ * will follow for this `file_id`; retry with a new `sendMedia` call.
+ */
+export interface MediaSendFailedEvent extends BaseEvent {
+  type: 'media_send_failed';
+  file_id: string;
+  recipient: string;
+  reason: string;
+}
+
+/**
  * Diagnostic event emitted by native modules for debugging purposes
  */
 export interface DiagnosticEvent extends BaseEvent {
@@ -1147,7 +1159,8 @@ export type SecurityWarningCode =
   | 'TOFU_STORE_FULL'
   | 'TRANSPORT_IDENTITY_MISMATCH'
   | 'SIGNATURE_DOWNGRADE'
-  | 'CONTROL_SIGNATURE_INVALID';
+  | 'CONTROL_SIGNATURE_INVALID'
+  | 'MEDIA_SENDER_GROUP_MISMATCH';
 
 /**
  * A security-relevant anomaly was detected for a peer. `TOFU_KEY_MISMATCH`
@@ -1188,6 +1201,7 @@ export type ProtocolEvent =
   | FileProgressEvent
   | FileReceivedEvent
   | MediaSentEvent
+  | MediaSendFailedEvent
   | DiagnosticEvent
   | SecureSessionEstablishedEvent
   | SecureSessionFailedEvent

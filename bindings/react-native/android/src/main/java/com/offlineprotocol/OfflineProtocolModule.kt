@@ -286,6 +286,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 code = "EncryptFailed",
                 message = "Message encryption failed"
             )
+            is ProtocolException.MediaTransferLimit -> BridgeProtocolError(
+                code = "MediaTransferLimit",
+                message = "Too many concurrent media transfers to this recipient; retry after an active transfer completes"
+            )
             else -> null
         }
     }

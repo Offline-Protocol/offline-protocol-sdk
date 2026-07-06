@@ -102,6 +102,7 @@ enum ProtocolError {
     "MlsNotInitialized",
     "MlsError",
     "UserBlocked",
+    "MediaTransferLimit",
     "LockPoisoned",
     "Other",
 };

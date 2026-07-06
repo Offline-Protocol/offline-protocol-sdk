@@ -6558,6 +6558,10 @@ class ProtocolError:  # type: ignore
         def __repr__(self):
             return "ProtocolError.UserBlocked({})".format(repr(str(self)))
     _UniffiTempProtocolError.UserBlocked = UserBlocked # type: ignore
+    class MediaTransferLimit(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.MediaTransferLimit({})".format(repr(str(self)))
+    _UniffiTempProtocolError.MediaTransferLimit = MediaTransferLimit # type: ignore
     class LockPoisoned(_UniffiTempProtocolError):
         def __repr__(self):
             return "ProtocolError.LockPoisoned({})".format(repr(str(self)))
@@ -6620,10 +6624,14 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
                 _UniffiFfiConverterString.read(buf),
             )
         if variant == 12:
-            return ProtocolError.LockPoisoned(
+            return ProtocolError.MediaTransferLimit(
                 _UniffiFfiConverterString.read(buf),
             )
         if variant == 13:
+            return ProtocolError.LockPoisoned(
+                _UniffiFfiConverterString.read(buf),
+            )
+        if variant == 14:
             return ProtocolError.Other(
                 _UniffiFfiConverterString.read(buf),
             )
@@ -6652,6 +6660,8 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
         if isinstance(value, ProtocolError.MlsError):
             return
         if isinstance(value, ProtocolError.UserBlocked):
+            return
+        if isinstance(value, ProtocolError.MediaTransferLimit):
             return
         if isinstance(value, ProtocolError.LockPoisoned):
             return
@@ -6682,10 +6692,12 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             buf.write_i32(10)
         if isinstance(value, ProtocolError.UserBlocked):
             buf.write_i32(11)
-        if isinstance(value, ProtocolError.LockPoisoned):
+        if isinstance(value, ProtocolError.MediaTransferLimit):
             buf.write_i32(12)
-        if isinstance(value, ProtocolError.Other):
+        if isinstance(value, ProtocolError.LockPoisoned):
             buf.write_i32(13)
+        if isinstance(value, ProtocolError.Other):
+            buf.write_i32(14)
 
 
 

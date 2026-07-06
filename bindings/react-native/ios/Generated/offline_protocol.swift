@@ -5875,6 +5875,8 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     
     case UserBlocked(message: String)
     
+    case MediaTransferLimit(message: String)
+    
     case LockPoisoned(message: String)
     
     case Other(message: String)
@@ -5950,11 +5952,15 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 12: return .LockPoisoned(
+        case 12: return .MediaTransferLimit(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 13: return .Other(
+        case 13: return .LockPoisoned(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 14: return .Other(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -5991,10 +5997,12 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(10))
         case .UserBlocked(_ /* message is ignored*/):
             writeInt(&buf, Int32(11))
-        case .LockPoisoned(_ /* message is ignored*/):
+        case .MediaTransferLimit(_ /* message is ignored*/):
             writeInt(&buf, Int32(12))
-        case .Other(_ /* message is ignored*/):
+        case .LockPoisoned(_ /* message is ignored*/):
             writeInt(&buf, Int32(13))
+        case .Other(_ /* message is ignored*/):
+            writeInt(&buf, Int32(14))
 
         
         }

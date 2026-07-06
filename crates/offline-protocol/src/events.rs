@@ -74,6 +74,11 @@ pub enum SecurityWarningCode {
     /// A control message's signature failed verification (invalid signature,
     /// TOFU violation, or malformed metadata).
     ControlSignatureInvalid,
+    /// An encrypted media chunk's MLS group did not match the 1:1 session
+    /// group of the claimed wire sender — a valid ciphertext (from some
+    /// session) delivered under a different sender's name is a media
+    /// forgery/misattribution attempt.
+    MediaSenderGroupMismatch,
 }
 
 impl SecurityWarningCode {
@@ -85,6 +90,7 @@ impl SecurityWarningCode {
             Self::TransportIdentityMismatch => "TRANSPORT_IDENTITY_MISMATCH",
             Self::SignatureDowngrade => "SIGNATURE_DOWNGRADE",
             Self::ControlSignatureInvalid => "CONTROL_SIGNATURE_INVALID",
+            Self::MediaSenderGroupMismatch => "MEDIA_SENDER_GROUP_MISMATCH",
         }
     }
 }
@@ -187,6 +193,11 @@ pub enum DecryptionFailureCode {
     IdentityMismatch,
     /// Cryptographic operation failed.
     CryptoFailure,
+    /// The message was dropped from the pending-decryption queue (overflow or
+    /// TTL expiry) before the sender's session became ready. It was ACKed on
+    /// receipt, so the sender will not retransmit it; for a media chunk this
+    /// means the file transfer it belongs to can no longer complete.
+    PendingQueueDropped,
     /// Failure class is unknown.
     Unknown,
 }
@@ -404,6 +415,19 @@ pub enum Event {
         content_type: String,
         /// Recipient's user ID.
         recipient: String,
+    },
+
+    /// An outbound media transfer was aborted before all chunks were
+    /// delivered — a chunk failed to encrypt, or a chunk failed terminally
+    /// in the outbox. No `MediaSent` will follow for this `file_id`; retry
+    /// with a new `send_media` call.
+    MediaSendFailed {
+        /// File identifier for tracking.
+        file_id: String,
+        /// Recipient's user ID.
+        recipient: String,
+        /// Reason the transfer was aborted.
+        reason: String,
     },
 
     /// A message was deferred due to network conditions.
@@ -1088,6 +1112,15 @@ impl Event {
         }
     }
 
+    /// Creates a MediaSendFailed event.
+    pub fn media_send_failed(file_id: String, recipient: String, reason: String) -> Self {
+        Self::MediaSendFailed {
+            file_id,
+            recipient,
+            reason,
+        }
+    }
+
     /// Creates a MessageDeferred event.
     pub fn message_deferred(
         message_id: MessageId,
@@ -1640,6 +1673,7 @@ impl Event {
             Self::FileProgress { .. } => "protocol.file.progress",
             Self::FileReceived { .. } => "protocol.file.received",
             Self::MediaSent { .. } => "protocol.media.sent",
+            Self::MediaSendFailed { .. } => "protocol.media.send_failed",
             Self::MessageDeferred { .. } => "protocol.message.deferred",
             Self::AckEvicted { .. } => "protocol.ack.evicted",
             Self::FragmentAssemblyEvicted { .. } => "protocol.fragment.assembly_evicted",
@@ -1905,6 +1939,16 @@ impl fmt::Debug for Event {
                 .field("file_id", file_id)
                 .field("content_type", content_type)
                 .field("recipient", &"[REDACTED]")
+                .finish(),
+            Self::MediaSendFailed {
+                file_id,
+                recipient: _,
+                reason,
+            } => f
+                .debug_struct("MediaSendFailed")
+                .field("file_id", file_id)
+                .field("recipient", &"[REDACTED]")
+                .field("reason", reason)
                 .finish(),
             Self::MessageDeferred {
                 message_id,
@@ -2546,6 +2590,7 @@ mod tests {
             SecurityWarningCode::TransportIdentityMismatch,
             SecurityWarningCode::SignatureDowngrade,
             SecurityWarningCode::ControlSignatureInvalid,
+            SecurityWarningCode::MediaSenderGroupMismatch,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -2563,7 +2608,8 @@ mod tests {
                 | SecurityWarningCode::TofuStoreFull
                 | SecurityWarningCode::TransportIdentityMismatch
                 | SecurityWarningCode::SignatureDowngrade
-                | SecurityWarningCode::ControlSignatureInvalid => {}
+                | SecurityWarningCode::ControlSignatureInvalid
+                | SecurityWarningCode::MediaSenderGroupMismatch => {}
             }
         }
     }

@@ -561,64 +561,8 @@ impl OfflineProtocol {
                     } else {
                         Some(InternalMessageResult::Decrypted(text))
                     };
-                    if !self.can_confirm_from_source(&sender_owned, "decrypt_success") {
-                        debug!(
-                            sender = %sender_owned,
-                            "Skipping decrypt-based confirmation until welcome send is at least attempted"
-                        );
-                        surfaced
-                    } else {
-                        match self.confirm_session_state(&sender_owned, "decrypt_success") {
-                            Ok(true) => {
-                                info!(sender = %sender_owned, "Session confirmed via successful decryption");
-                                let _ = self.flush_pending_messages(&sender_owned);
-                                self.emit_mls_session_ready(
-                                    &sender_owned,
-                                    &group_id,
-                                    MlsOperationContext::Receive,
-                                );
-
-                                // Surface the app-facing established event for the
-                                // both-create owner. `can_confirm_from_source` restricts a
-                                // `both_create_awaiting_decrypt` owner to confirm ONLY via a
-                                // group-aware decrypt (a plaintext probe/ack is rejected), so
-                                // this is its sole convergence path — and the one place it can
-                                // tell the app the session exists. `confirm_session_state`
-                                // deliberately skips emission for `decrypt_success` (it does
-                                // not know the group id), deferring to this call site exactly
-                                // as the Welcome-receive path above does for the adopter.
-                                // Without this the owner has a fully working 1:1 session (it
-                                // sends and receives) but the app never receives
-                                // `secure_session_established`, so UI gated on a known secure
-                                // session — e.g. the demo's group-creation contact list —
-                                // silently excludes the peer. Gate on `session:` so multi-party
-                                // group decrypts (which also reach this arm) are not reported as
-                                // 1:1 sessions. Reaching `Ok(true)` here implies we own the 1:1
-                                // group (an adopter would already be Confirmed via
-                                // `welcome_received` and return `Ok(false)`), so
-                                // `initiated_by_local` is true.
-                                if group_id.starts_with("session:") {
-                                    if let Ok(state) = lock_shared_state(&self.shared_state) {
-                                        state.emit_event(Event::secure_session_established(
-                                            sender_owned.clone(),
-                                            group_id.clone(),
-                                            true,
-                                            true,
-                                        ));
-                                    }
-                                }
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                warn!(
-                                    sender = %sender_owned,
-                                    error = %e,
-                                    "Failed to persist session confirmation after decrypt"
-                                );
-                            }
-                        }
-                        surfaced
-                    }
+                    self.confirm_session_from_successful_decrypt(&sender_owned, &group_id);
+                    surfaced
                 }
                 DecryptResult::Empty => {
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -693,6 +637,64 @@ impl OfflineProtocol {
                 ));
             }
             Some(InternalMessageResult::Consumed)
+        }
+    }
+
+    /// Attempts to confirm the sender's session off the back of a successful
+    /// group-aware decrypt (text or media chunk). No-op when confirmation is
+    /// gated or already recorded.
+    pub(super) fn confirm_session_from_successful_decrypt(&mut self, sender: &str, group_id: &str) {
+        if !self.can_confirm_from_source(sender, "decrypt_success") {
+            debug!(
+                sender = %sender,
+                "Skipping decrypt-based confirmation until welcome send is at least attempted"
+            );
+            return;
+        }
+        match self.confirm_session_state(sender, "decrypt_success") {
+            Ok(true) => {
+                info!(sender = %sender, "Session confirmed via successful decryption");
+                let _ = self.flush_pending_messages(sender);
+                self.emit_mls_session_ready(sender, group_id, MlsOperationContext::Receive);
+
+                // Surface the app-facing established event for the
+                // both-create owner. `can_confirm_from_source` restricts a
+                // `both_create_awaiting_decrypt` owner to confirm ONLY via a
+                // group-aware decrypt (a plaintext probe/ack is rejected), so
+                // this is its sole convergence path — and the one place it can
+                // tell the app the session exists. `confirm_session_state`
+                // deliberately skips emission for `decrypt_success` (it does
+                // not know the group id), deferring to this call site exactly
+                // as the Welcome-receive path above does for the adopter.
+                // Without this the owner has a fully working 1:1 session (it
+                // sends and receives) but the app never receives
+                // `secure_session_established`, so UI gated on a known secure
+                // session — e.g. the demo's group-creation contact list —
+                // silently excludes the peer. Gate on `session:` so multi-party
+                // group decrypts (which also reach this arm) are not reported as
+                // 1:1 sessions. Reaching `Ok(true)` here implies we own the 1:1
+                // group (an adopter would already be Confirmed via
+                // `welcome_received` and return `Ok(false)`), so
+                // `initiated_by_local` is true.
+                if group_id.starts_with("session:") {
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::secure_session_established(
+                            sender.to_string(),
+                            group_id.to_string(),
+                            true,
+                            true,
+                        ));
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!(
+                    sender = %sender,
+                    error = %e,
+                    "Failed to persist session confirmation after decrypt"
+                );
+            }
         }
     }
 

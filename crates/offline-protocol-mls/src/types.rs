@@ -224,6 +224,27 @@ impl MlsMessageType {
             _ => None,
         }
     }
+
+    /// Returns a stable single-byte tag for the compact binary wire format.
+    pub fn as_u8(&self) -> u8 {
+        match self {
+            Self::Application => 0,
+            Self::Welcome => 1,
+            Self::Commit => 2,
+            Self::Proposal => 3,
+        }
+    }
+
+    /// Parses a wire-format tag, returning None for unknown values.
+    pub fn from_u8(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Application),
+            1 => Some(Self::Welcome),
+            2 => Some(Self::Commit),
+            3 => Some(Self::Proposal),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for MlsMessageType {
@@ -270,6 +291,130 @@ impl EncryptedMessage {
         let json = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
             .map_err(|e| crate::MlsError::Deserialization(e.to_string()))?;
         serde_json::from_slice(&json).map_err(|e| crate::MlsError::Deserialization(e.to_string()))
+    }
+
+    /// Maximum allowed length for a string field (group_id, sender_id) in the
+    /// compact binary wire format. Prevents allocation bombs from crafted payloads.
+    const MAX_STRING_FIELD_LEN: usize = 4096;
+    /// Maximum allowed ciphertext length in the compact binary wire format.
+    const MAX_CIPHERTEXT_LEN: usize = 128 * 1024 * 1024; // 128 MB
+
+    /// Serializes to a compact binary format, avoiding base64/JSON overhead.
+    ///
+    /// JSON renders `ciphertext` as an integer array (~3.7x inflation), which
+    /// is unacceptable for large payloads such as encrypted file chunks.
+    ///
+    /// Wire format (all multi-byte integers are little-endian):
+    /// ```text
+    /// [group_id_len:4][group_id][sender_len:4][sender_id]
+    /// [message_type:1][epoch:8][timestamp_ms:8]
+    /// [ciphertext_len:4][ciphertext]
+    /// ```
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let group_id = self.group_id.as_str().as_bytes();
+        let sender_id = self.sender_id.as_bytes();
+
+        let capacity =
+            4 + group_id.len() + 4 + sender_id.len() + 1 + 8 + 8 + 4 + self.ciphertext.len();
+        let mut buf = Vec::with_capacity(capacity);
+
+        buf.extend_from_slice(&(group_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(group_id);
+        buf.extend_from_slice(&(sender_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(sender_id);
+        buf.push(self.message_type.as_u8());
+        buf.extend_from_slice(&self.epoch.to_le_bytes());
+        buf.extend_from_slice(&self.timestamp_ms.to_le_bytes());
+        buf.extend_from_slice(&(self.ciphertext.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&self.ciphertext);
+
+        buf
+    }
+
+    /// Deserializes from the compact binary format produced by `to_bytes`.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, crate::MlsError> {
+        let err = |msg: String| crate::MlsError::Deserialization(msg);
+        let mut pos = 0;
+
+        let read_u32 = |pos: &mut usize| -> Result<u32, crate::MlsError> {
+            if *pos + 4 > data.len() {
+                return Err(err("unexpected end of data reading u32".to_string()));
+            }
+            let val = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+            *pos += 4;
+            Ok(val)
+        };
+
+        let read_u64 = |pos: &mut usize| -> Result<u64, crate::MlsError> {
+            if *pos + 8 > data.len() {
+                return Err(err("unexpected end of data reading u64".to_string()));
+            }
+            let val = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            *pos += 8;
+            Ok(val)
+        };
+
+        let read_bytes = |pos: &mut usize, len: usize| -> Result<Vec<u8>, crate::MlsError> {
+            if *pos + len > data.len() {
+                return Err(err("unexpected end of data reading bytes".to_string()));
+            }
+            let val = data[*pos..*pos + len].to_vec();
+            *pos += len;
+            Ok(val)
+        };
+
+        let group_id_len = read_u32(&mut pos)? as usize;
+        if group_id_len > Self::MAX_STRING_FIELD_LEN {
+            return Err(err(format!(
+                "group_id_len {} exceeds maximum {}",
+                group_id_len,
+                Self::MAX_STRING_FIELD_LEN
+            )));
+        }
+        let group_id = String::from_utf8(read_bytes(&mut pos, group_id_len)?)
+            .map_err(|e| err(format!("invalid group_id UTF-8: {}", e)))?;
+
+        let sender_len = read_u32(&mut pos)? as usize;
+        if sender_len > Self::MAX_STRING_FIELD_LEN {
+            return Err(err(format!(
+                "sender_len {} exceeds maximum {}",
+                sender_len,
+                Self::MAX_STRING_FIELD_LEN
+            )));
+        }
+        let sender_id = String::from_utf8(read_bytes(&mut pos, sender_len)?)
+            .map_err(|e| err(format!("invalid sender_id UTF-8: {}", e)))?;
+
+        if pos + 1 > data.len() {
+            return Err(err(
+                "unexpected end of data reading message_type".to_string()
+            ));
+        }
+        let message_type = MlsMessageType::from_u8(data[pos])
+            .ok_or_else(|| err(format!("unknown message_type tag {}", data[pos])))?;
+        pos += 1;
+
+        let epoch = read_u64(&mut pos)?;
+        let timestamp_ms = read_u64(&mut pos)?;
+
+        let ciphertext_len = read_u32(&mut pos)? as usize;
+        if ciphertext_len > Self::MAX_CIPHERTEXT_LEN {
+            return Err(err(format!(
+                "ciphertext_len {} exceeds maximum {}",
+                ciphertext_len,
+                Self::MAX_CIPHERTEXT_LEN
+            )));
+        }
+        let ciphertext = read_bytes(&mut pos, ciphertext_len)?;
+
+        Ok(Self {
+            group_id: GroupId::new(group_id),
+            message_type,
+            epoch,
+            ciphertext,
+            sender_id,
+            timestamp_ms,
+        })
     }
 }
 
@@ -465,5 +610,100 @@ impl StorageKeyType {
 impl std::fmt::Display for StorageKeyType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_encrypted_message() -> EncryptedMessage {
+        EncryptedMessage {
+            group_id: GroupId::for_session("alice", "bob"),
+            message_type: MlsMessageType::Application,
+            epoch: 42,
+            ciphertext: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
+            sender_id: "alice".to_string(),
+            timestamp_ms: 1_700_000_000_123,
+        }
+    }
+
+    #[test]
+    fn test_encrypted_message_bytes_roundtrip() {
+        let msg = sample_encrypted_message();
+        let bytes = msg.to_bytes();
+        let decoded = EncryptedMessage::from_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.group_id, msg.group_id);
+        assert_eq!(decoded.message_type, msg.message_type);
+        assert_eq!(decoded.epoch, msg.epoch);
+        assert_eq!(decoded.ciphertext, msg.ciphertext);
+        assert_eq!(decoded.sender_id, msg.sender_id);
+        assert_eq!(decoded.timestamp_ms, msg.timestamp_ms);
+    }
+
+    #[test]
+    fn test_encrypted_message_bytes_roundtrip_empty_ciphertext() {
+        let mut msg = sample_encrypted_message();
+        msg.ciphertext = Vec::new();
+        let decoded = EncryptedMessage::from_bytes(&msg.to_bytes()).unwrap();
+        assert!(decoded.ciphertext.is_empty());
+    }
+
+    #[test]
+    fn test_encrypted_message_from_bytes_truncated() {
+        let bytes = sample_encrypted_message().to_bytes();
+        // Every strict prefix must fail cleanly, never panic.
+        for len in 0..bytes.len() {
+            assert!(
+                EncryptedMessage::from_bytes(&bytes[..len]).is_err(),
+                "truncation at {} unexpectedly succeeded",
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn test_encrypted_message_from_bytes_oversized_group_id_rejected() {
+        // Claim a group_id length far beyond the cap without supplying data.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(u32::MAX).to_le_bytes());
+        let err = EncryptedMessage::from_bytes(&bytes).unwrap_err();
+        assert!(err.to_string().contains("group_id_len"));
+    }
+
+    #[test]
+    fn test_encrypted_message_from_bytes_oversized_ciphertext_rejected() {
+        let mut msg = sample_encrypted_message();
+        msg.ciphertext = vec![0u8; 4];
+        let mut bytes = msg.to_bytes();
+        // Overwrite the ciphertext length prefix (last 4 + 4 bytes from the end).
+        let ct_len_offset = bytes.len() - 4 - 4;
+        bytes[ct_len_offset..ct_len_offset + 4].copy_from_slice(&(u32::MAX).to_le_bytes());
+        let err = EncryptedMessage::from_bytes(&bytes).unwrap_err();
+        assert!(err.to_string().contains("ciphertext_len"));
+    }
+
+    #[test]
+    fn test_encrypted_message_from_bytes_unknown_message_type_rejected() {
+        let msg = sample_encrypted_message();
+        let mut bytes = msg.to_bytes();
+        let tag_offset = 4 + msg.group_id.as_str().len() + 4 + msg.sender_id.len();
+        bytes[tag_offset] = 0xFF;
+        let err = EncryptedMessage::from_bytes(&bytes).unwrap_err();
+        assert!(err.to_string().contains("message_type"));
+    }
+
+    #[test]
+    fn test_mls_message_type_u8_roundtrip() {
+        for msg_type in [
+            MlsMessageType::Application,
+            MlsMessageType::Welcome,
+            MlsMessageType::Commit,
+            MlsMessageType::Proposal,
+        ] {
+            assert_eq!(MlsMessageType::from_u8(msg_type.as_u8()), Some(msg_type));
+        }
+        assert_eq!(MlsMessageType::from_u8(4), None);
     }
 }

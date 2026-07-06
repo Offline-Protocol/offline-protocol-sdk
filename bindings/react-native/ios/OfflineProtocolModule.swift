@@ -231,6 +231,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             return ("SessionNotReady", "Session not ready; establishment in progress")
         case .EncryptFailed:
             return ("EncryptFailed", "Message encryption failed")
+        case .MediaTransferLimit:
+            return ("MediaTransferLimit", "Too many concurrent media transfers to this recipient; retry after an active transfer completes")
         default:
             return nil
         }

@@ -176,6 +176,14 @@ pub enum Error {
     #[error("User is blocked: {0}")]
     UserBlocked(String),
 
+    /// Too many concurrent media transfers to the same recipient. Encrypted
+    /// transfers share the recipient's session ratchet, whose out-of-order
+    /// tolerance bounds how many chunks may be in flight at once.
+    #[error(
+        "Too many concurrent media transfers to {0}; retry after an active transfer completes"
+    )]
+    MediaTransferLimit(String),
+
     /// Generic error.
     #[error("{0}")]
     Other(String),

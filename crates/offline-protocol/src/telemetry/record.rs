@@ -121,6 +121,7 @@ mod tests {
         "protocol.file.progress",
         "protocol.file.received",
         "protocol.media.sent",
+        "protocol.media.send_failed",
         "protocol.message.deferred",
         "protocol.ack.evicted",
         "protocol.fragment.assembly_evicted",
@@ -287,6 +288,7 @@ mod tests {
             | Event::FileProgress { .. }
             | Event::FileReceived { .. }
             | Event::MediaSent { .. }
+            | Event::MediaSendFailed { .. }
             | Event::MessageDeferred { .. }
             | Event::AckEvicted { .. }
             | Event::FragmentAssemblyEvicted { .. }
@@ -438,6 +440,11 @@ mod tests {
                 file_id: String::new(),
                 content_type: String::new(),
                 recipient: String::new(),
+            },
+            Event::MediaSendFailed {
+                file_id: String::new(),
+                recipient: String::new(),
+                reason: String::new(),
             },
             Event::MessageDeferred {
                 message_id: String::new(),
