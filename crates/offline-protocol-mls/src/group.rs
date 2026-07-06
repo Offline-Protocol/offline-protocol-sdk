@@ -17,6 +17,29 @@ use tracing::{debug, warn};
 pub const DEFAULT_CIPHERSUITE: Ciphersuite =
     Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 
+/// How many generations behind the latest decrypted message a sender ratchet
+/// key is kept, so late/reordered messages remain decryptable.
+///
+/// The OpenMLS default (5) is smaller than the windowed media transfer's
+/// in-flight budget (up to 8 chunks on internet transports, interleaved with
+/// text on the same 1:1 session ratchet), which would make a sufficiently
+/// delayed chunk *permanently* undecryptable and stall the transfer. 32 gives
+/// 4x headroom over the largest window at the cost of retaining up to 32
+/// unused message keys per sender ratchet.
+pub const SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE: u32 = 32;
+
+/// How far ahead of the highest seen generation a sender ratchet may be
+/// fast-forwarded when messages are lost (OpenMLS default).
+pub const SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE: u32 = 1000;
+
+/// Sender ratchet configuration applied to every created and joined group.
+fn sender_ratchet_configuration() -> SenderRatchetConfiguration {
+    SenderRatchetConfiguration::new(
+        SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+        SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE,
+    )
+}
+
 /// Manages MLS groups for encrypted messaging.
 pub struct GroupManager {
     /// Storage backend for persisting group state.
@@ -47,6 +70,7 @@ impl GroupManager {
         let group_config = MlsGroupCreateConfig::builder()
             .ciphersuite(DEFAULT_CIPHERSUITE)
             .use_ratchet_tree_extension(true)
+            .sender_ratchet_configuration(sender_ratchet_configuration())
             .build();
 
         let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
@@ -237,6 +261,7 @@ impl GroupManager {
     pub fn join_group(&self, welcome: Welcome, group_id: &GroupId) -> Result<MlsGroup> {
         let group_config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
+            .sender_ratchet_configuration(sender_ratchet_configuration())
             .build();
 
         let group = StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)
@@ -277,6 +302,7 @@ impl GroupManager {
     pub fn join_group_replacing(&self, welcome: Welcome, group_id: &GroupId) -> Result<MlsGroup> {
         let group_config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
+            .sender_ratchet_configuration(sender_ratchet_configuration())
             .build();
 
         // Stage first — non-destructive failure point (consumes the key package).
