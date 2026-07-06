@@ -29,7 +29,12 @@ mod base64_bytes {
 /// File transfer configuration.
 #[derive(Debug, Clone)]
 pub struct FileTransferConfig {
-    /// Size of each chunk in bytes.
+    /// Size of each chunk in bytes. Chunk sizes that would split a file
+    /// into more chunks than the receive-side cap derived from
+    /// `max_file_size` (one chunk per KiB of `max_file_size`, minimum 1024)
+    /// are rejected by [`FileTransferManager::chunk_file`] — a receiver
+    /// with the same configuration would drop every chunk of such a
+    /// transfer.
     pub chunk_size: usize,
 
     /// Maximum file size allowed (bytes).
@@ -512,7 +517,12 @@ impl FileTransferManager {
     ///
     /// # Returns
     ///
-    /// Returns a vector of FileChunk ready to send.
+    /// Returns a vector of FileChunk ready to send. Fails if the file is
+    /// empty or exceeds `max_file_size`, if the chunk size is zero, or if
+    /// the chunking is so fine that the chunk count would exceed the
+    /// receive-side `total_chunks` cap — [`Self::process_chunk`] on a
+    /// receiver with the same `max_file_size` would silently drop every
+    /// chunk of such a transfer.
     pub fn chunk_file(
         &self,
         file_id: String,
@@ -539,9 +549,21 @@ impl FileTransferManager {
                 "Chunk size must be greater than zero".to_string(),
             ));
         }
-        let file_checksum = format!("{:x}", Sha256::digest(&file_data));
 
-        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
+        // Mirror the receive-side cap: process_chunk rejects total_chunks
+        // above this, so a finer chunking would have every chunk silently
+        // dropped by any receiver with the same max_file_size.
+        let total_chunks = (file_size + chunk_size as u64 - 1) / chunk_size as u64;
+        let max_total_chunks = Self::derived_total_chunks_cap(self.config.max_file_size);
+        if total_chunks > max_total_chunks {
+            return Err(crate::Error::Other(format!(
+                "Chunk size {} splits {} bytes into {} chunks, exceeding the receive-side cap of {}; use a larger chunk size",
+                chunk_size, file_size, total_chunks, max_total_chunks
+            )));
+        }
+        let total_chunks = total_chunks as u32;
+
+        let file_checksum = format!("{:x}", Sha256::digest(&file_data));
 
         let mut chunks = Vec::new();
 
@@ -844,6 +866,15 @@ impl FileTransferManager {
     /// Gets the number of active file transfers.
     pub fn active_transfer_count(&self) -> usize {
         self.active_assemblies.len()
+    }
+
+    /// Rewinds every active assembly's last-update time (test-only), so
+    /// staleness paths can be exercised without sleeping.
+    #[cfg(test)]
+    pub(crate) fn backdate_transfers(&mut self, by: Duration) {
+        for assembly in self.active_assemblies.values_mut() {
+            assembly.last_updated_at -= by;
+        }
     }
 }
 
@@ -1585,6 +1616,54 @@ mod tests {
                 None,
             )
             .unwrap();
+        for chunk in chunks {
+            manager.process_chunk("peer", chunk).unwrap();
+        }
+        assert_eq!(manager.finalize_file("f").unwrap(), file_data);
+    }
+
+    #[test]
+    fn test_chunk_file_rejects_chunking_finer_than_receive_cap() {
+        // A 1 MiB max_file_size derives a receive-side cap of 1025 chunks;
+        // chunking a full-size file at 512 bytes would need 2048. Every
+        // chunk of such a transfer would be ACKed then dropped by the
+        // receiver, so the send side must refuse to produce it.
+        let config = FileTransferConfig {
+            chunk_size: 512,
+            max_file_size: 1024 * 1024,
+            ..FileTransferConfig::default()
+        };
+        let manager = FileTransferManager::with_config(config);
+        let result = manager.chunk_file(
+            "f".to_string(),
+            "big.bin".to_string(),
+            vec![0u8; 1024 * 1024],
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_chunk_file_small_chunk_size_round_trips_within_cap() {
+        // Small chunk sizes stay valid while the chunk count fits the
+        // receive-side cap: 400 KiB at 512 bytes is 800 chunks (cap 1025),
+        // and a same-config receiver accepts the whole transfer.
+        let config = FileTransferConfig {
+            chunk_size: 512,
+            max_file_size: 1024 * 1024,
+            ..FileTransferConfig::default()
+        };
+        let mut manager = FileTransferManager::with_config(config);
+        let file_data: Vec<u8> = (0..400 * 1024).map(|i| (i % 251) as u8).collect();
+        let chunks = manager
+            .chunk_file(
+                "f".to_string(),
+                "ok.bin".to_string(),
+                file_data.clone(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(chunks.len(), 800);
         for chunk in chunks {
             manager.process_chunk("peer", chunk).unwrap();
         }

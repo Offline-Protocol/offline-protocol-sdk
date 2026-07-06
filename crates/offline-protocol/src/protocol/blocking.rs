@@ -921,6 +921,73 @@ mod tests {
     }
 
     #[test]
+    fn test_stale_transfer_sweep_emits_receive_failed_event() {
+        use crate::events::Event;
+        use crate::file_transfer::FileChunk;
+        use crate::protocol::MEDIA_TRANSFER_STALE_TIMEOUT_SECS;
+        use offline_protocol_core::{AppId, Message, UserId};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let mut proto = make_protocol("alice");
+
+        let failed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let failed_events_clone = failed_events.clone();
+        proto.on_event(move |event| {
+            if matches!(event, Event::FileReceiveFailed { .. }) {
+                failed_events_clone.lock().unwrap().push(event);
+            }
+        });
+
+        // A partial inbound transfer from bob (1 of 2 chunks).
+        let chunk = FileChunk {
+            file_id: "stale-file".to_string(),
+            file_name: "photo.jpg".to_string(),
+            file_size: 200,
+            total_chunks: 2,
+            chunk_index: 0,
+            chunk_data: vec![0u8; 100],
+            file_checksum: "abc".to_string(),
+        };
+        let message = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("alice").unwrap(),
+            AppId::new("test-app").unwrap(),
+            chunk.to_json().unwrap(),
+        );
+        proto.handle_incoming_file_chunk(&message);
+        assert_eq!(proto.file_transfer_manager.active_transfer_count(), 1);
+        assert!(proto.pending_media_metadata.contains_key("stale-file"));
+
+        // Age the assembly past the stale timeout and run the periodic
+        // sweep — the app must hear about the dropped transfer (its chunks
+        // were ACKed and will never be retransmitted).
+        proto
+            .file_transfer_manager
+            .backdate_transfers(Duration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS + 1));
+        proto.cleanup_expired_entries();
+
+        assert_eq!(proto.file_transfer_manager.active_transfer_count(), 0);
+        assert!(!proto.pending_media_metadata.contains_key("stale-file"));
+        let events = failed_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::FileReceiveFailed {
+                file_id,
+                file_name,
+                sender,
+                reason,
+            } => {
+                assert_eq!(file_id, "stale-file");
+                assert_eq!(file_name, "photo.jpg");
+                assert_eq!(sender, "bob");
+                assert_eq!(reason, "stale_timeout");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_connection_request_to_blocked_user_rejected() {
         use offline_protocol_transport::{mock::MockTransport, TransportType};
 
