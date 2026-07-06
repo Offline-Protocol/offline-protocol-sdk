@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn test_cleanup_cancels_inbound_file_transfers() {
         use crate::file_transfer::FileChunk;
-        use offline_protocol_core::{AppId, ContentType, Message, UserId};
+        use offline_protocol_core::ContentType;
 
         let mut proto = make_protocol("alice");
 
@@ -745,6 +745,52 @@ mod tests {
             !proto.pending_media_metadata.contains_key("file-from-bob"),
             "Pending media metadata should be removed on unblock cleanup"
         );
+    }
+
+    #[test]
+    fn test_rejected_file_chunk_leaves_no_state() {
+        use crate::file_transfer::FileChunk;
+        use offline_protocol_core::{AppId, Message, UserId};
+
+        let mut proto = make_protocol("alice");
+
+        let chunk_message = |chunk: &FileChunk| {
+            Message::new(
+                UserId::new("bob").unwrap(),
+                UserId::new("alice").unwrap(),
+                AppId::new("test-app").unwrap(),
+                chunk.to_json().unwrap(),
+            )
+        };
+
+        // Control: an in-bounds chunk 0 is accepted and records its metadata.
+        let good = FileChunk {
+            file_id: "good-file".to_string(),
+            file_name: "photo.jpg".to_string(),
+            file_size: 11,
+            total_chunks: 2,
+            chunk_index: 0,
+            chunk_data: vec![1u8; 6],
+            file_checksum: "abc".to_string(),
+        };
+        proto.handle_incoming_file_chunk(&chunk_message(&good));
+        assert!(proto.pending_media_metadata.contains_key("good-file"));
+        assert_eq!(proto.file_transfer_manager.active_transfer_count(), 1);
+
+        // SEC-H2: a chunk with an absurd file_size claim is rejected and
+        // leaves neither an assembly nor pending media metadata behind.
+        let evil = FileChunk {
+            file_id: "evil-file".to_string(),
+            file_name: "evil.bin".to_string(),
+            file_size: u64::MAX,
+            total_chunks: 1,
+            chunk_index: 0,
+            chunk_data: vec![0u8; 16],
+            file_checksum: "def".to_string(),
+        };
+        proto.handle_incoming_file_chunk(&chunk_message(&evil));
+        assert!(!proto.pending_media_metadata.contains_key("evil-file"));
+        assert_eq!(proto.file_transfer_manager.active_transfer_count(), 1);
     }
 
     #[test]

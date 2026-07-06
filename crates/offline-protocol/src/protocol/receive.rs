@@ -367,21 +367,22 @@ impl OfflineProtocol {
         let file_id = chunk.file_id.clone();
         let file_name = chunk.file_name.clone();
         let file_size = chunk.file_size;
+        let is_first_chunk = chunk.chunk_index == 0;
 
-        if chunk.chunk_index == 0 {
-            self.pending_media_metadata.insert(
-                file_id.clone(),
-                PendingMediaMetadataEntry {
-                    content_type: original_content_type.unwrap_or(ContentType::File),
-                    media_metadata,
-                    last_updated_at: Instant::now(),
-                    sender: sender.clone(),
-                },
-            );
-        }
-
+        // Metadata is recorded only for chunks the manager accepts — a
+        // rejected chunk must leave no state behind (SEC-H2).
         if let Some(progress) = self.file_transfer_manager.process_chunk(chunk) {
-            if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
+            if is_first_chunk {
+                self.pending_media_metadata.insert(
+                    file_id.clone(),
+                    PendingMediaMetadataEntry {
+                        content_type: original_content_type.unwrap_or(ContentType::File),
+                        media_metadata,
+                        last_updated_at: Instant::now(),
+                        sender: sender.clone(),
+                    },
+                );
+            } else if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
                 entry.last_updated_at = Instant::now();
             }
             if let Ok(state) = lock_shared_state(&self.shared_state) {

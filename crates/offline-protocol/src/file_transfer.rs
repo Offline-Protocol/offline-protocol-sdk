@@ -34,6 +34,11 @@ pub struct FileTransferConfig {
 
     /// Maximum file size allowed (bytes).
     pub max_file_size: u64,
+
+    /// Maximum number of inbound files that may be reassembling at once.
+    /// Chunks that would start an additional assembly are rejected; slots
+    /// free when a transfer completes, is cancelled, or goes stale.
+    pub max_concurrent_assemblies: usize,
 }
 
 impl Default for FileTransferConfig {
@@ -41,6 +46,7 @@ impl Default for FileTransferConfig {
         Self {
             chunk_size: DEFAULT_CHUNK_SIZE,
             max_file_size: 100 * 1024 * 1024, // 100 MB
+            max_concurrent_assemblies: 8,
         }
     }
 }
@@ -259,6 +265,8 @@ struct FileAssembly {
     total_chunks: u32,
     file_checksum: String,
     received_chunks: HashMap<u32, Vec<u8>>,
+    /// Total bytes currently held in `received_chunks`.
+    received_bytes: u64,
     last_updated_at: Instant,
 }
 
@@ -270,11 +278,16 @@ impl FileAssembly {
             total_chunks: chunk.total_chunks,
             file_checksum: chunk.file_checksum.clone(),
             received_chunks: HashMap::new(),
+            received_bytes: 0,
             last_updated_at: Instant::now(),
         }
     }
 
     fn add_chunk(&mut self, chunk_index: u32, data: Vec<u8>) {
+        if let Some(old) = self.received_chunks.get(&chunk_index) {
+            self.received_bytes -= old.len() as u64;
+        }
+        self.received_bytes += data.len() as u64;
         self.received_chunks.insert(chunk_index, data);
         self.last_updated_at = Instant::now();
     }
@@ -306,7 +319,9 @@ impl FileAssembly {
             return None;
         }
 
-        let mut file_data = Vec::with_capacity(self.file_size as usize);
+        // Size the buffer from bytes actually received — file_size is a
+        // sender-controlled claim and must never drive an allocation.
+        let mut file_data = Vec::with_capacity(self.received_bytes as usize);
 
         // Reassemble chunks in order
         for i in 0..self.total_chunks {
@@ -328,6 +343,16 @@ pub struct FileTransferManager {
 }
 
 impl FileTransferManager {
+    /// Floor on the average chunk payload assumed when bounding a sender's
+    /// `total_chunks` claim, so per-assembly bookkeeping stays proportional
+    /// to `max_file_size` even when every chunk is tiny. The SDK's own
+    /// senders never chunk below `CHUNK_SIZE_BLE` (4 KiB).
+    const MIN_ACCEPTED_CHUNK_PAYLOAD: u64 = 1024;
+
+    /// Lower bound on the derived `total_chunks` cap so configurations with
+    /// a small `max_file_size` still admit fine-grained chunking.
+    const MIN_TOTAL_CHUNKS_CAP: u64 = 1024;
+
     /// Creates a new file transfer manager.
     pub fn new() -> Self {
         Self::with_config(FileTransferConfig::default())
@@ -408,6 +433,11 @@ impl FileTransferManager {
 
     /// Processes a received file chunk.
     ///
+    /// All wire-supplied fields (`file_size`, `total_chunks`, `chunk_data`,
+    /// `file_id`) are bounded here before any assembly state is created, so
+    /// a remote peer cannot force oversized allocations or unbounded
+    /// bookkeeping.
+    ///
     /// # Arguments
     ///
     /// * `chunk` - The received file chunk
@@ -420,7 +450,56 @@ impl FileTransferManager {
             return None;
         }
 
+        if chunk.file_size == 0 || chunk.file_size > self.config.max_file_size {
+            tracing::warn!(
+                file_id = %chunk.file_id,
+                file_size = chunk.file_size,
+                max_file_size = self.config.max_file_size,
+                "Rejecting file chunk: claimed file_size out of bounds"
+            );
+            return None;
+        }
+
+        // Ceiling division without u64::div_ceil (MSRV) or overflow.
+        let max_total_chunks = (self.config.max_file_size / Self::MIN_ACCEPTED_CHUNK_PAYLOAD)
+            .saturating_add(1)
+            .max(Self::MIN_TOTAL_CHUNKS_CAP);
+        if chunk.total_chunks as u64 > max_total_chunks
+            || chunk.total_chunks as u64 > chunk.file_size
+        {
+            tracing::warn!(
+                file_id = %chunk.file_id,
+                total_chunks = chunk.total_chunks,
+                file_size = chunk.file_size,
+                max_total_chunks,
+                "Rejecting file chunk: claimed total_chunks out of bounds"
+            );
+            return None;
+        }
+
+        if chunk.chunk_data.is_empty() || chunk.chunk_data.len() as u64 > chunk.file_size {
+            tracing::warn!(
+                file_id = %chunk.file_id,
+                chunk_len = chunk.chunk_data.len(),
+                file_size = chunk.file_size,
+                "Rejecting file chunk: chunk data length inconsistent with claimed file_size"
+            );
+            return None;
+        }
+
         let file_id = chunk.file_id.clone();
+
+        if !self.active_assemblies.contains_key(&file_id)
+            && self.active_assemblies.len() >= self.config.max_concurrent_assemblies
+        {
+            tracing::warn!(
+                file_id = %file_id,
+                active = self.active_assemblies.len(),
+                max = self.config.max_concurrent_assemblies,
+                "Rejecting file chunk: too many concurrent inbound transfers"
+            );
+            return None;
+        }
 
         // Get or create assembly for this file
         let assembly = self
@@ -434,6 +513,25 @@ impl FileTransferManager {
             || assembly.file_checksum != chunk.file_checksum
         {
             return None; // Mismatched file metadata
+        }
+
+        // Duplicates replace their earlier copy, so discount it before
+        // checking the cumulative received bytes against the claimed size.
+        let replaced_len = assembly
+            .received_chunks
+            .get(&chunk.chunk_index)
+            .map_or(0, |c| c.len() as u64);
+        if assembly.received_bytes - replaced_len + chunk.chunk_data.len() as u64
+            > assembly.file_size
+        {
+            tracing::warn!(
+                file_id = %file_id,
+                received_bytes = assembly.received_bytes,
+                chunk_len = chunk.chunk_data.len(),
+                file_size = assembly.file_size,
+                "Rejecting file chunk: received bytes exceed claimed file_size"
+            );
+            return None;
         }
 
         // Add chunk
@@ -464,10 +562,23 @@ impl FileTransferManager {
     ///
     /// # Returns
     ///
-    /// Returns `Some(Vec<u8>)` if file is complete and checksum matches, `None` otherwise.
+    /// Returns `Some(Vec<u8>)` if file is complete, its size matches the
+    /// claimed `file_size`, and the checksum matches, `None` otherwise.
     pub fn finalize_file(&mut self, file_id: &str) -> Option<Vec<u8>> {
         let assembly = self.active_assemblies.get(file_id)?;
         let file_data = assembly.reassemble()?;
+
+        // A completed transfer must deliver exactly the bytes it claimed.
+        if file_data.len() as u64 != assembly.file_size {
+            tracing::warn!(
+                file_id = %file_id,
+                claimed = assembly.file_size,
+                actual = file_data.len(),
+                "File size mismatch — corrupted or tampered transfer"
+            );
+            self.active_assemblies.remove(file_id);
+            return None;
+        }
 
         // Verify checksum before returning
         let actual_checksum = format!("{:x}", Sha256::digest(&file_data));
@@ -642,6 +753,7 @@ mod tests {
         let config = FileTransferConfig {
             chunk_size: 100, // Small chunk for testing
             max_file_size: 1024 * 1024,
+            ..FileTransferConfig::default()
         };
         let manager = FileTransferManager::with_config(config);
 
@@ -663,6 +775,7 @@ mod tests {
         let config = FileTransferConfig {
             chunk_size: 1024,
             max_file_size: 1000,
+            ..FileTransferConfig::default()
         };
         let manager = FileTransferManager::with_config(config);
 
@@ -701,6 +814,7 @@ mod tests {
         let config = FileTransferConfig {
             chunk_size: 10,
             max_file_size: 1024,
+            ..FileTransferConfig::default()
         };
         let mut manager = FileTransferManager::with_config(config);
 
@@ -730,6 +844,7 @@ mod tests {
         let config = FileTransferConfig {
             chunk_size: 10,
             max_file_size: 1024,
+            ..FileTransferConfig::default()
         };
         let mut manager = FileTransferManager::with_config(config);
 
@@ -762,6 +877,7 @@ mod tests {
         let config = FileTransferConfig {
             chunk_size: 100,
             max_file_size: 1024,
+            ..FileTransferConfig::default()
         };
         let mut manager = FileTransferManager::with_config(config);
 
@@ -814,6 +930,7 @@ mod tests {
         let config = FileTransferConfig {
             chunk_size: 10,
             max_file_size: 1024,
+            ..FileTransferConfig::default()
         };
         let mut manager = FileTransferManager::with_config(config);
 
@@ -915,6 +1032,179 @@ mod tests {
 
         assert!(manager.process_chunk(invalid_chunk).is_none());
         assert!(manager.get_progress("file1").is_none());
+    }
+
+    fn attack_chunk(
+        file_id: &str,
+        file_size: u64,
+        total_chunks: u32,
+        chunk_index: u32,
+        data: Vec<u8>,
+    ) -> FileChunk {
+        FileChunk {
+            file_id: file_id.to_string(),
+            file_name: "attack.bin".to_string(),
+            file_size,
+            total_chunks,
+            chunk_index,
+            chunk_data: data,
+            file_checksum: "0000".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_huge_file_size_claim_rejected() {
+        // SEC-H2 regression: a single chunk claiming u64::MAX bytes used to
+        // reach reassemble() and panic on Vec::with_capacity.
+        let mut manager = FileTransferManager::new();
+        let chunk = attack_chunk("evil", u64::MAX, 1, 0, vec![0u8; 16]);
+        assert!(manager.process_chunk(chunk).is_none());
+        assert_eq!(manager.active_transfer_count(), 0);
+        assert!(!manager.is_complete("evil"));
+        assert!(manager.finalize_file("evil").is_none());
+    }
+
+    #[test]
+    fn test_file_size_over_configured_max_rejected() {
+        let config = FileTransferConfig {
+            chunk_size: 1024,
+            max_file_size: 1000,
+            ..FileTransferConfig::default()
+        };
+        let mut manager = FileTransferManager::with_config(config);
+        let chunk = attack_chunk("f", 2000, 2, 0, vec![0u8; 100]);
+        assert!(manager.process_chunk(chunk).is_none());
+        assert_eq!(manager.active_transfer_count(), 0);
+    }
+
+    #[test]
+    fn test_zero_file_size_rejected() {
+        let mut manager = FileTransferManager::new();
+        let chunk = attack_chunk("f", 0, 1, 0, vec![0u8; 8]);
+        assert!(manager.process_chunk(chunk).is_none());
+    }
+
+    #[test]
+    fn test_total_chunks_exceeding_file_size_rejected() {
+        // More chunks than bytes is inherently bogus (chunks are non-empty).
+        let mut manager = FileTransferManager::new();
+        let chunk = attack_chunk("f", 10_000, 20_000, 0, vec![0u8; 8]);
+        assert!(manager.process_chunk(chunk).is_none());
+    }
+
+    #[test]
+    fn test_total_chunks_exceeding_derived_cap_rejected() {
+        // Default config: 100 MB / 1 KiB payload floor ≈ 102_400 max chunks.
+        let mut manager = FileTransferManager::new();
+        let chunk = attack_chunk("f", 100 * 1024 * 1024, 200_000, 0, vec![0u8; 8]);
+        assert!(manager.process_chunk(chunk).is_none());
+    }
+
+    #[test]
+    fn test_empty_chunk_data_rejected() {
+        let mut manager = FileTransferManager::new();
+        let chunk = attack_chunk("f", 100, 2, 0, vec![]);
+        assert!(manager.process_chunk(chunk).is_none());
+    }
+
+    #[test]
+    fn test_chunk_data_larger_than_file_size_rejected() {
+        let mut manager = FileTransferManager::new();
+        let chunk = attack_chunk("f", 10, 1, 0, vec![0u8; 64]);
+        assert!(manager.process_chunk(chunk).is_none());
+    }
+
+    #[test]
+    fn test_cumulative_bytes_exceeding_claim_rejected() {
+        let mut manager = FileTransferManager::new();
+        // Claim 2048 bytes in 2 chunks, then send two 1500-byte chunks.
+        let first = attack_chunk("f", 2048, 2, 0, vec![0u8; 1500]);
+        assert!(manager.process_chunk(first).is_some());
+        let second = attack_chunk("f", 2048, 2, 1, vec![0u8; 1500]);
+        assert!(manager.process_chunk(second).is_none());
+        // The first chunk's state survives; only the offending chunk drops.
+        let progress = manager.get_progress("f").unwrap();
+        assert_eq!(progress.chunks_completed, 1);
+    }
+
+    #[test]
+    fn test_duplicate_chunk_does_not_double_count_bytes() {
+        let mut manager = FileTransferManager::new();
+        // 1500 + 548 = 2048 claimed bytes; resending chunk 0 must replace
+        // (not add), so the transfer still completes.
+        let data0 = vec![7u8; 1500];
+        let data1 = vec![9u8; 548];
+        let mut whole = data0.clone();
+        whole.extend_from_slice(&data1);
+        let checksum = format!("{:x}", Sha256::digest(&whole));
+
+        let make = |index: u32, data: Vec<u8>| FileChunk {
+            file_id: "f".to_string(),
+            file_name: "file.bin".to_string(),
+            file_size: 2048,
+            total_chunks: 2,
+            chunk_index: index,
+            chunk_data: data,
+            file_checksum: checksum.clone(),
+        };
+
+        assert!(manager.process_chunk(make(0, data0.clone())).is_some());
+        assert!(manager.process_chunk(make(0, data0)).is_some());
+        assert!(manager.process_chunk(make(1, data1)).is_some());
+        assert!(manager.is_complete("f"));
+        assert_eq!(manager.finalize_file("f").unwrap(), whole);
+    }
+
+    #[test]
+    fn test_concurrent_assembly_cap_enforced() {
+        let config = FileTransferConfig {
+            max_concurrent_assemblies: 2,
+            ..FileTransferConfig::default()
+        };
+        let mut manager = FileTransferManager::with_config(config);
+
+        assert!(manager
+            .process_chunk(attack_chunk("f1", 100, 2, 0, vec![0u8; 10]))
+            .is_some());
+        assert!(manager
+            .process_chunk(attack_chunk("f2", 100, 2, 0, vec![0u8; 10]))
+            .is_some());
+        // Third simultaneous transfer is rejected...
+        assert!(manager
+            .process_chunk(attack_chunk("f3", 100, 2, 0, vec![0u8; 10]))
+            .is_none());
+        // ...but chunks for existing assemblies still flow.
+        assert!(manager
+            .process_chunk(attack_chunk("f1", 100, 2, 1, vec![0u8; 10]))
+            .is_some());
+        // Freeing a slot re-admits new transfers.
+        assert!(manager.cancel_transfer("f2"));
+        assert!(manager
+            .process_chunk(attack_chunk("f3", 100, 2, 0, vec![0u8; 10]))
+            .is_some());
+    }
+
+    #[test]
+    fn test_finalize_rejects_size_mismatch() {
+        let mut manager = FileTransferManager::new();
+        // Single 100-byte chunk with a valid checksum of those bytes, but a
+        // claimed file_size of 2048.
+        let data = vec![3u8; 100];
+        let checksum = format!("{:x}", Sha256::digest(&data));
+        let chunk = FileChunk {
+            file_id: "f".to_string(),
+            file_name: "file.bin".to_string(),
+            file_size: 2048,
+            total_chunks: 1,
+            chunk_index: 0,
+            chunk_data: data,
+            file_checksum: checksum,
+        };
+        assert!(manager.process_chunk(chunk).is_some());
+        assert!(manager.is_complete("f"));
+        assert!(manager.finalize_file("f").is_none());
+        // The failed transfer is discarded.
+        assert_eq!(manager.active_transfer_count(), 0);
     }
 
     #[test]
