@@ -7979,6 +7979,8 @@ sealed class ProtocolException(message: String): kotlin.Exception(message) {
         
         class UserBlocked(message: String) : ProtocolException(message)
         
+        class MediaTransferLimit(message: String) : ProtocolException(message)
+        
         class LockPoisoned(message: String) : ProtocolException(message)
         
         class Other(message: String) : ProtocolException(message)
@@ -8007,8 +8009,9 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
             9 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
             10 -> ProtocolException.MlsException(FfiConverterString.read(buf))
             11 -> ProtocolException.UserBlocked(FfiConverterString.read(buf))
-            12 -> ProtocolException.LockPoisoned(FfiConverterString.read(buf))
-            13 -> ProtocolException.Other(FfiConverterString.read(buf))
+            12 -> ProtocolException.MediaTransferLimit(FfiConverterString.read(buf))
+            13 -> ProtocolException.LockPoisoned(FfiConverterString.read(buf))
+            14 -> ProtocolException.Other(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
         
@@ -8064,12 +8067,16 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
                 buf.putInt(11)
                 Unit
             }
-            is ProtocolException.LockPoisoned -> {
+            is ProtocolException.MediaTransferLimit -> {
                 buf.putInt(12)
                 Unit
             }
-            is ProtocolException.Other -> {
+            is ProtocolException.LockPoisoned -> {
                 buf.putInt(13)
+                Unit
+            }
+            is ProtocolException.Other -> {
+                buf.putInt(14)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
