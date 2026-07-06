@@ -4,6 +4,22 @@ All notable changes to the Offline Protocol SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This changelog covers everything after the **v0.7.1** release.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Media and file transfers are now MLS end-to-end encrypted (SEC-H1)**
+  File chunks were previously sent as cleartext `binary_content` across every transport, including public internet relays — only the text path was encrypted. Chunk bytes now travel through the same MLS session machinery text uses, wrapped in a versioned binary envelope (`"ML"` magic + version byte + a compact `EncryptedMessage` encoding). The chunk-0 cleartext leaks are closed too: `MediaMetadata` (file name, preview thumbnail) and the original content type ride **inside** the ciphertext instead of on the wire `Message`. This is a **wire-format break** for media transfer:
+  - *New sender → old receiver*: encrypted chunks fail to parse and are dropped; the transfer times out (no plaintext is ever exposed).
+  - *Old sender → new receiver*: legacy plaintext chunks are accepted only when `require_encryption` is `false` **and** no confirmed MLS session exists with the sender. Once a session is confirmed, plaintext media from that peer is rejected as a downgrade/forgery attempt (plaintext chunks carry no sender authentication). With `require_encryption = true`, all plaintext media is rejected.
+  - *Sending*: with auto-encryption active (`encryption.enabled` and MLS initialized), `send_media` now requires a confirmed session and returns `SessionNotReady` otherwise (kicking establishment when a key package is available — retry after `secure_session_established`). Media is never queued pending establishment and never falls back to plaintext. With `require_encryption = true` and MLS uninitialized, `send_media` fails with `EncryptFailed`. Only the explicit `EncryptionConfig::disabled()` opt-out keeps the legacy plaintext format.
+
+### Changed
+
+- **MLS sender-ratchet out-of-order tolerance raised from the OpenMLS default (5) to 32**
+  Windowed media transfers keep up to 8 encrypted chunks in flight, interleaved with text on the same 1:1 session ratchet; with tolerance 5 a delayed chunk could become permanently undecryptable and stall a transfer. Applies to newly created/joined groups and sessions; pre-existing persisted sessions keep the configuration they were created with until re-established.
+- **Encrypted media chunks that arrive before the session is ready are queued** through the same pending-decryption queue the text path uses and are re-processed on session confirmation.
+
 ## [0.11.0] — 2026-07-01
 
 ### Licensing

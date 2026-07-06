@@ -5,6 +5,7 @@
 use super::{lock_shared_state, InternalMessageResult, OfflineProtocol};
 use crate::events::Event;
 use chrono::Utc;
+use offline_protocol_core::ContentType;
 use std::time::Instant;
 use tracing::{debug, info};
 
@@ -57,6 +58,15 @@ impl OfflineProtocol {
                     message_id = %msg.id,
                     "Dropping pending message from blocked user"
                 );
+                continue;
+            }
+
+            // Encrypted media chunks don't go through process_internal_message
+            // (their payload is in binary_content, not a content prefix) —
+            // route them back through the chunk handler now that the session
+            // is ready.
+            if msg.content_type == ContentType::FileChunk {
+                self.handle_incoming_file_chunk(&msg);
                 continue;
             }
 

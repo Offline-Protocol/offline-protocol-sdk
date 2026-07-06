@@ -7,10 +7,14 @@ use super::{
 use crate::constants::{ACK_FOR_KEY, RELAY_LEARNED_ROUTE_QUALITY};
 use crate::events::Event;
 use crate::file_transfer::FileChunk;
-use offline_protocol_core::{ContentType, Message};
+use crate::media_envelope::{decode_media_envelope, is_media_envelope, MediaChunkPlaintext};
+use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
+use crate::SessionStateError;
+use offline_protocol_core::{ContentType, MediaMetadata, Message};
+use offline_protocol_mls::EncryptedMessage;
 use offline_protocol_router::relay::RelayPriority;
 use std::time::Instant;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {
     /// Receives the next available message.
@@ -265,20 +269,87 @@ impl OfflineProtocol {
     }
 
     pub(super) fn handle_incoming_file_chunk(&mut self, message: &Message) {
-        let chunk = if let Some(ref binary) = message.binary_content {
-            match FileChunk::from_bytes(binary) {
-                Ok(c) => c,
-                Err(e) => {
+        let sender = message.sender.as_str().to_string();
+
+        // SEC-H1: encrypted chunks carry the chunk bytes, media metadata, and
+        // original content type inside the MLS ciphertext; legacy plaintext
+        // chunks carry them on the wire Message and are accepted only where
+        // policy allows.
+        let (chunk, media_metadata, original_content_type) = if let Some(ref binary) =
+            message.binary_content
+        {
+            if is_media_envelope(binary) {
+                let encrypted = match decode_media_envelope(binary) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!(
+                            message_id = %message.id,
+                            error = %e,
+                            "Failed to decode encrypted media envelope, dropping"
+                        );
+                        return;
+                    }
+                };
+                let Some(plaintext) = self.decrypt_media_chunk(&sender, &encrypted, message) else {
+                    // Queued for delayed decryption or dropped — handled inside.
+                    return;
+                };
+                let inner = match MediaChunkPlaintext::decode(&plaintext) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        warn!(
+                            message_id = %message.id,
+                            error = %e,
+                            "Failed to parse decrypted media chunk plaintext, dropping"
+                        );
+                        return;
+                    }
+                };
+                let chunk = match FileChunk::from_bytes(&inner.chunk_bytes) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(
+                            message_id = %message.id,
+                            error = %e,
+                            "Failed to deserialize decrypted file chunk, dropping"
+                        );
+                        return;
+                    }
+                };
+                (chunk, inner.media_metadata, inner.original_content_type)
+            } else {
+                if !self.accept_plaintext_media(&sender) {
                     warn!(
                         message_id = %message.id,
-                        error = %e,
-                        "Failed to deserialize binary file chunk, dropping"
+                        sender = %sender,
+                        "Rejecting unencrypted media chunk (encryption policy)"
                     );
                     return;
                 }
+                let chunk = match FileChunk::from_bytes(binary) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(
+                            message_id = %message.id,
+                            error = %e,
+                            "Failed to deserialize binary file chunk, dropping"
+                        );
+                        return;
+                    }
+                };
+                let (meta, oct) = Self::wire_media_metadata(message);
+                (chunk, meta, oct)
             }
         } else {
-            match FileChunk::from_json(&message.content) {
+            if !self.accept_plaintext_media(&sender) {
+                warn!(
+                    message_id = %message.id,
+                    sender = %sender,
+                    "Rejecting unencrypted media chunk (encryption policy)"
+                );
+                return;
+            }
+            let chunk = match FileChunk::from_json(&message.content) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
@@ -288,28 +359,23 @@ impl OfflineProtocol {
                     );
                     return;
                 }
-            }
+            };
+            let (meta, oct) = Self::wire_media_metadata(message);
+            (chunk, meta, oct)
         };
 
         let file_id = chunk.file_id.clone();
         let file_name = chunk.file_name.clone();
         let file_size = chunk.file_size;
-        let sender = message.sender.as_str().to_string();
 
         if chunk.chunk_index == 0 {
-            use crate::constants::ORIGINAL_CONTENT_TYPE_KEY;
-            let original_ct = message
-                .metadata
-                .get(ORIGINAL_CONTENT_TYPE_KEY)
-                .map(|s| ContentType::parse(s))
-                .unwrap_or(ContentType::File);
             self.pending_media_metadata.insert(
                 file_id.clone(),
                 PendingMediaMetadataEntry {
-                    content_type: original_ct,
-                    media_metadata: message.media_metadata.clone(),
+                    content_type: original_content_type.unwrap_or(ContentType::File),
+                    media_metadata,
                     last_updated_at: Instant::now(),
-                    sender: message.sender.as_str().to_string(),
+                    sender: sender.clone(),
                 },
             );
         }
@@ -350,6 +416,123 @@ impl OfflineProtocol {
                     media_metadata,
                     file_data,
                 ));
+            }
+        }
+    }
+
+    /// Extracts the chunk-0 metadata a legacy (unencrypted) chunk carries on
+    /// the wire `Message`.
+    fn wire_media_metadata(message: &Message) -> (Option<MediaMetadata>, Option<ContentType>) {
+        use crate::constants::ORIGINAL_CONTENT_TYPE_KEY;
+        let original_ct = message
+            .metadata
+            .get(ORIGINAL_CONTENT_TYPE_KEY)
+            .map(|s| ContentType::parse(s));
+        (message.media_metadata.clone(), original_ct)
+    }
+
+    /// Policy gate for legacy (unencrypted) media chunks: rejected when this
+    /// node requires encryption, and rejected once a confirmed MLS session
+    /// exists with the sender — an encryption-capable peer sending plaintext
+    /// media is a downgrade/forgery attempt (plaintext chunks carry no sender
+    /// authentication, so anyone could inject them under a contact's name).
+    fn accept_plaintext_media(&mut self, sender: &str) -> bool {
+        if self.config.encryption.require_encryption {
+            return false;
+        }
+        if self.should_auto_encrypt() && self.is_session_confirmed(sender).unwrap_or(false) {
+            return false;
+        }
+        true
+    }
+
+    /// Decrypts an encrypted media chunk envelope, returning the plaintext on
+    /// success. On session-not-ready the whole message is queued for delayed
+    /// decryption (mirroring the text path — the deduplicator has already
+    /// marked this message seen, so dropping it would strand the transfer);
+    /// other failures emit decryption telemetry and drop. A successful decrypt
+    /// doubles as a session confirmation signal, exactly like text decrypts.
+    fn decrypt_media_chunk(
+        &mut self,
+        sender: &str,
+        encrypted: &EncryptedMessage,
+        message: &Message,
+    ) -> Option<Vec<u8>> {
+        let group_id = encrypted.group_id.as_str().to_string();
+
+        let Some(mls) = self.mls_manager.clone() else {
+            warn!(
+                sender = %sender,
+                "Encrypted media chunk received but MLS is not initialized, dropping"
+            );
+            self.emit_mls_decryption_failed(
+                sender,
+                Some(&group_id),
+                DecryptionFailureKind::NotInitialized,
+                MlsOperationContext::Receive,
+            );
+            return None;
+        };
+
+        let decrypt_result = {
+            let manager = match mls.read() {
+                Ok(m) => m,
+                Err(_) => {
+                    error!("MLS lock poisoned while decrypting media chunk");
+                    return None;
+                }
+            };
+            manager.decrypt(encrypted)
+        };
+
+        match decrypt_result {
+            Ok(Some(plaintext)) => {
+                // A group-aware decrypt is the same confirmation signal the
+                // text path uses; skip when already cache-confirmed to avoid
+                // per-chunk storage I/O.
+                if !self.confirmed_sessions.contains(sender) {
+                    self.confirm_session_from_successful_decrypt(sender, &group_id);
+                }
+                Some(plaintext)
+            }
+            Ok(None) => {
+                warn!(sender = %sender, "Media chunk decryption returned empty, dropping");
+                None
+            }
+            Err(e) => {
+                let classification = SessionStateError::from(&e);
+                match classification {
+                    SessionStateError::SessionNotReady | SessionStateError::GroupNotFound => {
+                        info!(
+                            sender = %sender,
+                            error_code = classification.code(),
+                            "Encrypted media chunk received before session ready, queuing"
+                        );
+                        self.emit_mls_session_missing(
+                            Some(sender),
+                            Some(&group_id),
+                            MlsOperationContext::SessionLookup,
+                            MlsErrorCategory::SessionStateMissing,
+                        );
+                        self.enqueue_pending_decryption(sender, message);
+                        None
+                    }
+                    _ => {
+                        warn!(
+                            sender = %sender,
+                            error = %e,
+                            error_code = classification.code(),
+                            "Failed to decrypt media chunk, dropping"
+                        );
+                        self.emit_mls_decryption_failed(
+                            sender,
+                            Some(&group_id),
+                            DecryptionFailureKind::from_mls_error(&e),
+                            MlsOperationContext::Receive,
+                        );
+                        None
+                    }
+                }
             }
         }
     }

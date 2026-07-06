@@ -11,6 +11,7 @@ use crate::constants::{
 };
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
+use crate::media_envelope::{encode_media_envelope, MediaChunkPlaintext};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 use crate::{Error, Result};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -18,7 +19,7 @@ use offline_protocol_core::{
     AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, UserId,
     TTL,
 };
-use offline_protocol_mls::MlsManager;
+use offline_protocol_mls::{EncryptedMessage, MlsManager};
 use offline_protocol_transport::TransportType;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
@@ -539,6 +540,19 @@ impl OfflineProtocol {
         content: &str,
         _priority: MessagePriority,
     ) -> Result<String> {
+        let encrypted = self.encrypt_bytes_for_recipient(recipient, content.as_bytes())?;
+        Self::seal_encrypted_content(&encrypted)
+    }
+
+    /// Bytes-level core of [`Self::encrypt_content_for_recipient`]: initiates
+    /// session establishment when a key package is available and encrypts once
+    /// the session is confirmed. Text content and media chunk plaintexts share
+    /// this path.
+    pub(super) fn encrypt_bytes_for_recipient(
+        &mut self,
+        recipient: &str,
+        plaintext: &[u8],
+    ) -> Result<EncryptedMessage> {
         // Clone the Arc to avoid borrow issues
         let mls = self.mls_manager.clone().ok_or_else(|| {
             self.emit_mls_session_missing(
@@ -553,7 +567,7 @@ impl OfflineProtocol {
         // Fast path: if the session is already confirmed (in-memory cache hit),
         // skip the has_session() storage call — we know the session exists.
         if self.confirmed_sessions.contains(recipient) {
-            return self.encrypt_confirmed_session(&mls, recipient, content);
+            return self.encrypt_bytes_confirmed_session(&mls, recipient, plaintext);
         }
 
         // Check for existing session (requires storage I/O via load_group)
@@ -655,37 +669,42 @@ impl OfflineProtocol {
                 .read()
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
             manager
-                .encrypt_for_user(recipient, content.as_bytes())
+                .encrypt_for_user(recipient, plaintext)
                 .map_err(|_| Error::EncryptFailed("encryption operation failed".to_string()))?
         };
 
-        // Serialize encrypted message with prefix
-        let serialized =
-            serde_json::to_string(&encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
-
         self.emit_mls_encryption_used(recipient);
+        Ok(encrypted)
+    }
+
+    /// Serializes an [`EncryptedMessage`] into the prefixed string form used
+    /// by the text path (`__MLS_ENC__` + JSON).
+    fn seal_encrypted_content(encrypted: &EncryptedMessage) -> Result<String> {
+        let serialized =
+            serde_json::to_string(encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
-    /// Encrypts content for a recipient whose session is known to be confirmed
-    /// (in-memory cache hit). Uses `encrypt_for_existing_session` to skip both
-    /// the external `has_session()` and the internal one inside `encrypt_for_user`,
-    /// reducing storage I/O from 2 round-trips to 1 (`load_group` for encrypt).
+    /// Encrypts a plaintext for a recipient whose session is known to be
+    /// confirmed (in-memory cache hit). Uses `encrypt_for_existing_session` to
+    /// skip both the external `has_session()` and the internal one inside
+    /// `encrypt_for_user`, reducing storage I/O from 2 round-trips to 1
+    /// (`load_group` for encrypt).
     ///
     /// Only evicts the cache on `SessionNotFound` (session deleted externally).
     /// Transient errors (crypto, storage I/O) propagate without cache eviction
     /// so the fast path is preserved for the next attempt.
-    pub(super) fn encrypt_confirmed_session(
+    pub(super) fn encrypt_bytes_confirmed_session(
         &mut self,
         mls: &Arc<RwLock<MlsManager>>,
         recipient: &str,
-        content: &str,
-    ) -> Result<String> {
+        plaintext: &[u8],
+    ) -> Result<EncryptedMessage> {
         let encrypt_result = {
             let manager = mls
                 .read()
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-            manager.encrypt_for_existing_session(recipient, content.as_bytes())
+            manager.encrypt_for_existing_session(recipient, plaintext)
         };
 
         let encrypted = match encrypt_result {
@@ -714,10 +733,8 @@ impl OfflineProtocol {
             }
         };
 
-        let serialized =
-            serde_json::to_string(&encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
         self.emit_mls_encryption_used(recipient);
-        Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
+        Ok(encrypted)
     }
 
     pub(super) fn encrypt_content_for_recipient_strict(
@@ -725,6 +742,18 @@ impl OfflineProtocol {
         recipient: &str,
         content: &str,
     ) -> Result<String> {
+        let encrypted = self.encrypt_bytes_for_recipient_strict(recipient, content.as_bytes())?;
+        Self::seal_encrypted_content(&encrypted)
+    }
+
+    /// Bytes-level core of [`Self::encrypt_content_for_recipient_strict`]:
+    /// requires an existing confirmed session and never initiates
+    /// establishment.
+    pub(super) fn encrypt_bytes_for_recipient_strict(
+        &mut self,
+        recipient: &str,
+        plaintext: &[u8],
+    ) -> Result<EncryptedMessage> {
         let mls = self.mls_manager.clone().ok_or_else(|| {
             self.emit_mls_session_missing(
                 Some(recipient),
@@ -737,7 +766,7 @@ impl OfflineProtocol {
 
         // Fast path: if session is confirmed (in-memory cache), skip has_session() I/O
         if self.confirmed_sessions.contains(recipient) {
-            return self.encrypt_confirmed_session(&mls, recipient, content);
+            return self.encrypt_bytes_confirmed_session(&mls, recipient, plaintext);
         }
 
         let has_session = {
@@ -782,14 +811,12 @@ impl OfflineProtocol {
                 .read()
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
             manager
-                .encrypt_for_user(recipient, content.as_bytes())
+                .encrypt_for_user(recipient, plaintext)
                 .map_err(|_| Error::EncryptFailed("encryption operation failed".to_string()))?
         };
 
-        let serialized =
-            serde_json::to_string(&encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
         self.emit_mls_encryption_used(recipient);
-        Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
+        Ok(encrypted)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1052,6 +1079,19 @@ impl OfflineProtocol {
     /// logic so delivery is tracked and recoverable per chunk. `MediaSent` is
     /// emitted only after all chunks are ACKed.
     ///
+    /// # Encryption
+    ///
+    /// With auto-encryption active (encryption enabled and MLS initialized),
+    /// chunk bytes — and the chunk-0 media metadata and original content type —
+    /// travel inside MLS ciphertext, using the same session the text path uses.
+    /// The session must already be confirmed: media is never queued pending
+    /// establishment and never falls back to plaintext. When the session is
+    /// not ready this returns [`Error::SessionNotReady`] (after kicking
+    /// establishment if a key package is available); retry after the
+    /// `secure_session_established` event. When encryption is required but MLS
+    /// is not initialized this returns [`Error::EncryptFailed`]. Only the
+    /// explicit encryption opt-out sends plaintext chunks.
+    ///
     /// Returns a `file_id` that can be used to track progress or cancel.
     pub fn send_media(
         &mut self,
@@ -1075,6 +1115,26 @@ impl OfflineProtocol {
         // we neither receive from nor send to a blocked peer.
         if self.is_user_blocked(&recipient_str) {
             return Err(Error::UserBlocked(recipient_str));
+        }
+
+        // SEC-H1: media rides the same MLS session machinery as text. With
+        // auto-encryption active the session must already be confirmed —
+        // files are too large for the pending-message queue, so media is
+        // never queued pending establishment and never falls back to
+        // plaintext. Callers should retry after `secure_session_established`.
+        if self.should_auto_encrypt() {
+            if !self.is_session_confirmed(&recipient_str)? {
+                // Kick session establishment exactly like the text path
+                // (import a stored key package, create the session, send the
+                // Welcome). The session cannot be confirmed yet, so this
+                // returns SessionNotReady without encrypting anything; on the
+                // off chance the probe finds a usable session, fall through.
+                self.encrypt_bytes_for_recipient(&recipient_str, &[])?;
+            }
+        } else if self.config.encryption.require_encryption {
+            return Err(Error::EncryptFailed(
+                "MLS encryption is required but MLS is not initialized".to_string(),
+            ));
         }
 
         let file_id = format!("file_{}", MessageId::new().as_str());
@@ -1158,7 +1218,6 @@ impl OfflineProtocol {
     ) -> Result<()> {
         for chunk in chunks {
             let chunk_index = chunk.chunk_index;
-            let binary_payload = chunk.to_bytes();
 
             let meta_for_chunk = if chunk_index == 0 {
                 media_metadata.cloned()
@@ -1166,15 +1225,33 @@ impl OfflineProtocol {
                 None
             };
 
+            // SEC-H1: with auto-encryption active, chunk bytes AND the chunk-0
+            // metadata (file name, preview thumbnail, original content type)
+            // travel inside the MLS ciphertext — the wire Message carries none
+            // of them. The plaintext fields are only populated for the
+            // explicitly-unencrypted configuration.
+            let (binary_payload, wire_metadata, wire_original_ct) = if self.should_auto_encrypt() {
+                let inner = MediaChunkPlaintext {
+                    chunk_bytes: chunk.to_bytes(),
+                    media_metadata: meta_for_chunk,
+                    original_content_type: (chunk_index == 0).then_some(content_type),
+                };
+                let plaintext = inner.encode().map_err(Error::Serialization)?;
+                let encrypted = self.encrypt_bytes_for_recipient_strict(recipient, &plaintext)?;
+                (encode_media_envelope(&encrypted), None, false)
+            } else {
+                (chunk.to_bytes(), meta_for_chunk, chunk_index == 0)
+            };
+
             let mut message = self.create_media_message(
                 recipient,
                 String::new(),
                 ContentType::FileChunk,
-                meta_for_chunk,
+                wire_metadata,
             )?;
             message.binary_content = Some(binary_payload);
 
-            if chunk_index == 0 {
+            if wire_original_ct {
                 use crate::constants::ORIGINAL_CONTENT_TYPE_KEY;
                 message.metadata.insert(
                     ORIGINAL_CONTENT_TYPE_KEY.to_string(),

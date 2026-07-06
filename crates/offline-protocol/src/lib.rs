@@ -14,6 +14,7 @@ pub mod error;
 pub mod events;
 pub mod file_transfer;
 mod group_mesh;
+mod media_envelope;
 pub mod mls;
 pub mod mls_observability;
 pub mod protocol;
