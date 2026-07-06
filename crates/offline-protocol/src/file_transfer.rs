@@ -46,8 +46,12 @@ pub struct FileTransferConfig {
 
     /// Maximum total bytes buffered across all inbound assemblies. This —
     /// not the assembly counts — is the hard bound on receive-path memory.
-    /// Must be at least `max_file_size`, or a maximum-size file can never
-    /// complete.
+    /// Each stored chunk is charged its payload plus a small fixed
+    /// bookkeeping overhead, so floods of tiny chunks cannot pin more
+    /// memory than the budget admits. Values below what a single
+    /// `max_file_size` transfer charges are clamped up to it by
+    /// [`FileTransferManager::with_config`], or a maximum-size file could
+    /// never complete.
     pub max_total_buffered_bytes: u64,
 }
 
@@ -317,6 +321,18 @@ impl FileProgress {
     }
 }
 
+/// An incomplete transfer removed by
+/// [`FileTransferManager::cleanup_stale_transfers`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleTransfer {
+    /// File identifier of the dropped transfer.
+    pub file_id: String,
+    /// File name from the chunk metadata.
+    pub file_name: String,
+    /// Sender the assembly was bound to.
+    pub sender: String,
+}
+
 /// Tracks file reassembly state.
 struct FileAssembly {
     /// Sender the first accepted chunk arrived from; all later chunks must
@@ -353,6 +369,14 @@ impl FileAssembly {
         self.received_bytes += data.len() as u64;
         self.received_chunks.insert(chunk_index, data);
         self.last_updated_at = Instant::now();
+    }
+
+    /// Bytes this assembly charges against the global buffer budget:
+    /// payload plus a fixed per-chunk bookkeeping charge, so many tiny
+    /// chunks cannot evade the budget.
+    fn charged_bytes(&self) -> u64 {
+        self.received_bytes
+            + self.received_chunks.len() as u64 * FileTransferManager::PER_CHUNK_OVERHEAD
     }
 
     fn is_complete(&self) -> bool {
@@ -416,10 +440,18 @@ impl FileTransferManager {
     /// a small `max_file_size` still admit fine-grained chunking.
     const MIN_TOTAL_CHUNKS_CAP: u64 = 1024;
 
+    /// Flat per-stored-chunk charge against `max_total_buffered_bytes`,
+    /// approximating the bookkeeping memory the payload sum does not see
+    /// (hashmap entry, allocator rounding). Without it, a flood of 1-byte
+    /// chunks pins far more memory than the budget records.
+    const PER_CHUNK_OVERHEAD: u64 = 64;
+
     /// Pseudo-sender bound to assemblies fed through the manual
     /// `process_file_chunk` FFI path, which carries no wire sender. All
-    /// manual chunks share this identity for sender binding and quota.
-    pub const MANUAL_SENDER: &'static str = "__manual__";
+    /// manual chunks share this identity for sender binding and quota. The
+    /// `:` is rejected by wire `UserId` validation, so no remote peer can
+    /// ever claim this identity.
+    pub const MANUAL_SENDER: &'static str = "manual:ffi";
 
     /// Creates a new file transfer manager.
     pub fn new() -> Self {
@@ -427,11 +459,45 @@ impl FileTransferManager {
     }
 
     /// Creates a new file transfer manager with custom configuration.
-    pub fn with_config(config: FileTransferConfig) -> Self {
+    ///
+    /// `max_total_buffered_bytes` is clamped up to what a single
+    /// `max_file_size` transfer charges (payload plus per-chunk overhead) —
+    /// any lower value would make `max_file_size` unachievable.
+    pub fn with_config(mut config: FileTransferConfig) -> Self {
+        let min_budget = Self::min_viable_budget(&config);
+        if config.max_total_buffered_bytes < min_budget {
+            tracing::warn!(
+                configured = config.max_total_buffered_bytes,
+                clamped_to = min_budget,
+                "max_total_buffered_bytes below what one max_file_size transfer charges; clamping"
+            );
+            config.max_total_buffered_bytes = min_budget;
+        }
         Self {
             config,
             active_assemblies: HashMap::new(),
         }
+    }
+
+    /// Upper bound on a sender's `total_chunks` claim, derived from
+    /// `max_file_size`. Floor division plus one — always at least the exact
+    /// ceiling — without u64::div_ceil (MSRV) or overflow.
+    fn derived_total_chunks_cap(max_file_size: u64) -> u64 {
+        (max_file_size / Self::MIN_ACCEPTED_CHUNK_PAYLOAD)
+            .saturating_add(1)
+            .max(Self::MIN_TOTAL_CHUNKS_CAP)
+    }
+
+    /// The smallest budget that still admits one maximum-size transfer:
+    /// its payload plus the per-chunk overhead of the most chunks such a
+    /// transfer may legally claim (bounded by both the derived cap and the
+    /// one-byte-per-chunk minimum).
+    fn min_viable_budget(config: &FileTransferConfig) -> u64 {
+        let max_chunks =
+            Self::derived_total_chunks_cap(config.max_file_size).min(config.max_file_size);
+        config
+            .max_file_size
+            .saturating_add(max_chunks.saturating_mul(Self::PER_CHUNK_OVERHEAD))
     }
 
     /// Chunks a file for sending.
@@ -536,11 +602,7 @@ impl FileTransferManager {
             return Err(ChunkRejection::Invalid);
         }
 
-        // Floor division plus one — always at least the exact ceiling —
-        // without u64::div_ceil (MSRV) or overflow.
-        let max_total_chunks = (self.config.max_file_size / Self::MIN_ACCEPTED_CHUNK_PAYLOAD)
-            .saturating_add(1)
-            .max(Self::MIN_TOTAL_CHUNKS_CAP);
+        let max_total_chunks = Self::derived_total_chunks_cap(self.config.max_file_size);
         if chunk.total_chunks as u64 > max_total_chunks
             || chunk.total_chunks as u64 > chunk.file_size
         {
@@ -569,7 +631,7 @@ impl FileTransferManager {
         // A chunk for an existing assembly must be consistent with it; a
         // chunk starting a new assembly must fit within the count caps.
         // Everything is checked before any state is created or mutated.
-        let replaced_len = match self.active_assemblies.get(&file_id) {
+        let replaced_charge = match self.active_assemblies.get(&file_id) {
             Some(assembly) => {
                 if assembly.sender != sender {
                     tracing::warn!(
@@ -595,8 +657,8 @@ impl FileTransferManager {
                 let replaced = assembly
                     .received_chunks
                     .get(&chunk.chunk_index)
-                    .map_or(0, |c| c.len() as u64);
-                if assembly.received_bytes - replaced + chunk.chunk_data.len() as u64
+                    .map(|c| c.len() as u64);
+                if assembly.received_bytes - replaced.unwrap_or(0) + chunk.chunk_data.len() as u64
                     > assembly.file_size
                 {
                     tracing::warn!(
@@ -608,7 +670,9 @@ impl FileTransferManager {
                     );
                     return Err(ChunkRejection::Invalid);
                 }
-                replaced
+                // A replaced duplicate refunds its full charge — payload and
+                // overhead — since its map entry is reused, not added.
+                replaced.map_or(0, |len| len + Self::PER_CHUNK_OVERHEAD)
             }
             None => {
                 if self.active_assemblies.len() >= self.config.max_concurrent_assemblies {
@@ -639,14 +703,15 @@ impl FileTransferManager {
             }
         };
 
-        // Hard memory bound: total bytes buffered across every assembly.
+        // Hard memory bound: total bytes charged across every assembly,
+        // where each stored chunk costs its payload plus PER_CHUNK_OVERHEAD.
         // Iterating is fine — the count caps above keep this map small.
         let buffered: u64 = self
             .active_assemblies
             .values()
-            .map(|a| a.received_bytes)
+            .map(FileAssembly::charged_bytes)
             .sum();
-        if buffered - replaced_len + chunk.chunk_data.len() as u64
+        if buffered - replaced_charge + chunk.chunk_data.len() as u64 + Self::PER_CHUNK_OVERHEAD
             > self.config.max_total_buffered_bytes
         {
             tracing::warn!(
@@ -733,8 +798,9 @@ impl FileTransferManager {
     }
 
     /// Removes stale/incomplete transfers that have not received any chunk
-    /// updates within `max_age`.
-    pub fn cleanup_stale_transfers(&mut self, max_age: Duration) -> Vec<String> {
+    /// updates within `max_age`, returning what was dropped so callers can
+    /// surface the loss.
+    pub fn cleanup_stale_transfers(&mut self, max_age: Duration) -> Vec<StaleTransfer> {
         let now = Instant::now();
         let stale_file_ids: Vec<String> = self
             .active_assemblies
@@ -747,11 +813,18 @@ impl FileTransferManager {
             })
             .collect();
 
-        for file_id in &stale_file_ids {
-            self.active_assemblies.remove(file_id);
-        }
-
         stale_file_ids
+            .into_iter()
+            .filter_map(|file_id| {
+                self.active_assemblies
+                    .remove(&file_id)
+                    .map(|assembly| StaleTransfer {
+                        file_id,
+                        file_name: assembly.file_name,
+                        sender: assembly.sender,
+                    })
+            })
+            .collect()
     }
 
     /// Gets the progress of an active file transfer.
@@ -1369,21 +1442,29 @@ mod tests {
 
     #[test]
     fn test_buffer_budget_rejects_new_transfer() {
+        // 1_065_536 is exactly the minimum viable budget for a 1 MB
+        // max_file_size, so with_config leaves it unclamped.
         let config = FileTransferConfig {
-            max_file_size: 1000,
-            max_total_buffered_bytes: 1000,
+            max_file_size: 1_000_000,
+            max_total_buffered_bytes: 1_065_536,
             ..FileTransferConfig::default()
         };
         let mut manager = FileTransferManager::with_config(config);
 
         assert!(manager
-            .process_chunk("alice", attack_chunk("f1", 1000, 2, 0, vec![0u8; 600]))
+            .process_chunk(
+                "alice",
+                attack_chunk("f1", 1_000_000, 2, 0, vec![0u8; 600_000])
+            )
             .is_ok());
-        // 600 + 500 would exceed the 1000-byte budget; the new transfer is
-        // rejected before any of its state is created.
+        // 600_064 + 500_064 charged would exceed the budget; the new
+        // transfer is rejected before any of its state is created.
         assert_eq!(
             manager
-                .process_chunk("bob", attack_chunk("f2", 1000, 2, 0, vec![0u8; 500]))
+                .process_chunk(
+                    "bob",
+                    attack_chunk("f2", 1_000_000, 2, 0, vec![0u8; 500_000])
+                )
                 .unwrap_err(),
             ChunkRejection::BufferBudgetExhausted
         );
@@ -1396,25 +1477,31 @@ mod tests {
     #[test]
     fn test_buffer_budget_drops_existing_assembly() {
         let config = FileTransferConfig {
-            max_file_size: 1000,
-            max_total_buffered_bytes: 1000,
+            max_file_size: 1_000_000,
+            max_total_buffered_bytes: 1_065_536,
             ..FileTransferConfig::default()
         };
         let mut manager = FileTransferManager::with_config(config);
 
         assert!(manager
-            .process_chunk("alice", attack_chunk("f1", 1000, 3, 0, vec![0u8; 600]))
+            .process_chunk(
+                "alice",
+                attack_chunk("f1", 1_000_000, 3, 0, vec![0u8; 600_000])
+            )
             .is_ok());
         assert!(manager
-            .process_chunk("bob", attack_chunk("f2", 400, 2, 0, vec![0u8; 300]))
+            .process_chunk("bob", attack_chunk("f2", 400_000, 2, 0, vec![0u8; 300_000]))
             .is_ok());
-        // f1's next chunk busts the budget (600 + 300 + 300 > 1000). The
-        // dropped chunk is never retransmitted, so f1 can no longer complete
-        // — its partial buffer is freed immediately rather than squatting
-        // the budget until the stale sweep.
+        // f1's next chunk busts the budget. The dropped chunk is never
+        // retransmitted, so f1 can no longer complete — its partial buffer
+        // is freed immediately rather than squatting the budget until the
+        // stale sweep.
         assert_eq!(
             manager
-                .process_chunk("alice", attack_chunk("f1", 1000, 3, 1, vec![0u8; 300]))
+                .process_chunk(
+                    "alice",
+                    attack_chunk("f1", 1_000_000, 3, 1, vec![0u8; 300_000])
+                )
                 .unwrap_err(),
             ChunkRejection::BufferBudgetExhausted
         );
@@ -1422,12 +1509,65 @@ mod tests {
         assert_eq!(manager.active_transfer_count(), 1);
         // The freed budget re-admits other traffic.
         assert!(manager
-            .process_chunk("bob", attack_chunk("f2", 400, 2, 1, vec![0u8; 100]))
+            .process_chunk("bob", attack_chunk("f2", 400_000, 2, 1, vec![0u8; 100_000]))
             .is_ok());
     }
 
     #[test]
+    fn test_budget_charges_per_chunk_overhead() {
+        // A flood of 1-byte chunks must be stopped by its bookkeeping
+        // charge, not its (negligible) payload sum. Budget 0 is clamped up
+        // to the minimum viable value: 10_000 + 1024 * 64 = 75_536.
+        let config = FileTransferConfig {
+            max_file_size: 10_000,
+            max_total_buffered_bytes: 0,
+            ..FileTransferConfig::default()
+        };
+        let mut manager = FileTransferManager::with_config(config);
+
+        // 1024 chunks is the derived cap for this config; f1 fills it.
+        for i in 0..1024u32 {
+            manager
+                .process_chunk("alice", attack_chunk("f1", 10_000, 1024, i, vec![0u8; 1]))
+                .unwrap();
+        }
+
+        // f2's identical flood must hit the budget long before its payload
+        // (a few hundred bytes) comes anywhere near 75_536.
+        let mut rejected = None;
+        for i in 0..1024u32 {
+            if let Err(e) =
+                manager.process_chunk("bob", attack_chunk("f2", 10_000, 1024, i, vec![0u8; 1]))
+            {
+                rejected = Some((i, e));
+                break;
+            }
+        }
+        let (index, err) = rejected.expect("tiny-chunk flood must exhaust the budget");
+        assert_eq!(err, ChunkRejection::BufferBudgetExhausted);
+        let total_payload = 1024 + u64::from(index);
+        assert!(
+            total_payload < 2_000,
+            "rejection must be overhead-driven, but {} payload bytes were buffered",
+            total_payload
+        );
+        // The busting transfer is dropped with its chunk.
+        assert!(manager.get_progress("f2").is_none());
+    }
+
+    #[test]
+    fn test_manual_sender_cannot_be_a_wire_user_id() {
+        // Sender binding for the manual FFI path relies on this sentinel
+        // being unrepresentable as a wire UserId (':' is rejected), so no
+        // remote peer can alias it.
+        assert!(offline_protocol_core::UserId::new(FileTransferManager::MANUAL_SENDER).is_err());
+    }
+
+    #[test]
     fn test_file_at_exactly_max_file_size_completes() {
+        // The configured budget equals max_file_size, which cannot cover
+        // the per-chunk overhead — with_config clamps it up so a
+        // maximum-size file still completes.
         let config = FileTransferConfig {
             chunk_size: 512,
             max_file_size: 1000,
@@ -1543,7 +1683,14 @@ mod tests {
         std::thread::sleep(Duration::from_millis(3));
 
         let removed = manager.cleanup_stale_transfers(Duration::from_millis(1));
-        assert_eq!(removed, vec!["file1".to_string()]);
+        assert_eq!(
+            removed,
+            vec![StaleTransfer {
+                file_id: "file1".to_string(),
+                file_name: "test.txt".to_string(),
+                sender: "peer".to_string(),
+            }]
+        );
         assert!(manager.get_progress("file1").is_none());
     }
 }

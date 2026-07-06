@@ -659,9 +659,10 @@ export interface FileReceivedEvent extends BaseEvent {
 /**
  * An inbound file transfer was dropped before completion — the receiver hit
  * a resource limit (too many concurrent transfers, per-sender quota, or the
- * buffered-bytes budget) or the reassembled file failed its integrity
- * checks. No `file_received` will follow for this `file_id`; the sender
- * must re-send the file to retry.
+ * buffered-bytes budget), the reassembled file failed its integrity checks,
+ * or the transfer went stale (no chunks within the stale timeout). No
+ * `file_received` will follow for this `file_id`; the sender must re-send
+ * the file to retry.
  */
 export interface FileReceiveFailedEvent extends BaseEvent {
   type: 'file_receive_failed';
@@ -670,7 +671,7 @@ export interface FileReceiveFailedEvent extends BaseEvent {
   sender: string;
   /**
    * Machine-readable reason: 'too_many_transfers' | 'sender_quota_exceeded'
-   * | 'buffer_budget_exhausted' | 'integrity_check_failed'
+   * | 'buffer_budget_exhausted' | 'integrity_check_failed' | 'stale_timeout'
    */
   reason: string;
 }

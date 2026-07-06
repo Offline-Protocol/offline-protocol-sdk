@@ -4,6 +4,7 @@ use super::{
     lock_shared_state, OfflineProtocol, PendingQueueMetrics, ProtocolState,
     MEDIA_TRANSFER_STALE_TIMEOUT_SECS,
 };
+use crate::events::Event;
 use crate::file_transfer::FileTransferManager;
 use crate::{Error, ProtocolConfig, Result, TransportManager};
 use offline_protocol_core::{MessageId, ServiceDescriptor};
@@ -135,11 +136,20 @@ impl OfflineProtocol {
         self.check_epoch_forks();
         self.check_leave_election_timeouts();
         self.check_relay_group_sync();
-        let stale_file_ids = self
+        let stale_transfers = self
             .file_transfer_manager
             .cleanup_stale_transfers(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
-        for file_id in stale_file_ids {
-            self.pending_media_metadata.remove(&file_id);
+        for stale in stale_transfers {
+            self.pending_media_metadata.remove(&stale.file_id);
+            // Like the resource-limit drops, a stale transfer is
+            // unrecoverable (its chunks were ACKed and will not be
+            // retransmitted) — tell the app instead of going silent.
+            self.emit_event(Event::file_receive_failed(
+                stale.file_id,
+                stale.file_name,
+                stale.sender,
+                "stale_timeout".to_string(),
+            ));
         }
         self.cleanup_stale_media_state(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
         // Prune old timed-out ACKs that weren't cleaned up by normal retry flow

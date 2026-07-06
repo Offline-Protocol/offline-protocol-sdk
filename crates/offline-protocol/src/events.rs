@@ -409,8 +409,9 @@ pub enum Event {
 
     /// An inbound file transfer was dropped before completion — the receiver
     /// hit a resource limit (too many concurrent transfers, per-sender
-    /// quota, or the buffered-bytes budget) or the reassembled file failed
-    /// its integrity checks. No `FileReceived` will follow for this
+    /// quota, or the buffered-bytes budget), the reassembled file failed
+    /// its integrity checks, or the transfer went stale (no chunks within
+    /// the stale timeout). No `FileReceived` will follow for this
     /// `file_id`; the sender must re-send the file to retry.
     FileReceiveFailed {
         /// File identifier.
