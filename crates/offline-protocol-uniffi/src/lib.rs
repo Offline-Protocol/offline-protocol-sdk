@@ -3956,7 +3956,7 @@ impl OfflineProtocol {
     ) -> Result<(), ProtocolError> {
         let mut protocol = self.lock_inner()?;
 
-        use offline_protocol::file_transfer::FileChunk;
+        use offline_protocol::file_transfer::{FileChunk, FileTransferManager};
         let chunk = FileChunk {
             file_id,
             file_name,
@@ -3967,7 +3967,13 @@ impl OfflineProtocol {
             file_checksum,
         };
 
-        protocol.file_transfer_manager_mut().process_chunk(chunk);
+        // The manual path carries no wire sender; all manual chunks share
+        // the MANUAL_SENDER pseudo-identity for sender binding and quota.
+        // Rejections are logged by the manager; platforms on this path poll
+        // progress themselves.
+        let _ = protocol
+            .file_transfer_manager_mut()
+            .process_chunk(FileTransferManager::MANUAL_SENDER, chunk);
         Ok(())
     }
 

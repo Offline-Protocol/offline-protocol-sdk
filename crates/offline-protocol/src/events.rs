@@ -407,6 +407,22 @@ pub enum Event {
         file_data: String,
     },
 
+    /// An inbound file transfer was dropped before completion — the receiver
+    /// hit a resource limit (too many concurrent transfers, per-sender
+    /// quota, or the buffered-bytes budget) or the reassembled file failed
+    /// its integrity checks. No `FileReceived` will follow for this
+    /// `file_id`; the sender must re-send the file to retry.
+    FileReceiveFailed {
+        /// File identifier.
+        file_id: String,
+        /// File name from the chunk metadata.
+        file_name: String,
+        /// Sender's user ID.
+        sender: String,
+        /// Machine-readable reason the transfer was dropped.
+        reason: String,
+    },
+
     /// All chunks of a media attachment were ACK-delivered.
     MediaSent {
         /// File identifier for tracking.
@@ -1103,6 +1119,21 @@ impl Event {
         }
     }
 
+    /// Creates a FileReceiveFailed event.
+    pub fn file_receive_failed(
+        file_id: String,
+        file_name: String,
+        sender: String,
+        reason: String,
+    ) -> Self {
+        Self::FileReceiveFailed {
+            file_id,
+            file_name,
+            sender,
+            reason,
+        }
+    }
+
     /// Creates a MediaSent event.
     pub fn media_sent(file_id: String, content_type: ContentType, recipient: String) -> Self {
         Self::MediaSent {
@@ -1672,6 +1703,7 @@ impl Event {
             Self::NetworkMetrics { .. } => "protocol.network.metrics",
             Self::FileProgress { .. } => "protocol.file.progress",
             Self::FileReceived { .. } => "protocol.file.received",
+            Self::FileReceiveFailed { .. } => "protocol.file.receive_failed",
             Self::MediaSent { .. } => "protocol.media.sent",
             Self::MediaSendFailed { .. } => "protocol.media.send_failed",
             Self::MessageDeferred { .. } => "protocol.message.deferred",
@@ -1929,6 +1961,18 @@ impl fmt::Debug for Event {
                 .field("sender", &"[REDACTED]")
                 .field("content_type", content_type)
                 .field("file_data", &format!("[{} bytes base64]", file_data.len()))
+                .finish(),
+            Self::FileReceiveFailed {
+                file_id,
+                file_name,
+                sender: _,
+                reason,
+            } => f
+                .debug_struct("FileReceiveFailed")
+                .field("file_id", file_id)
+                .field("file_name", file_name)
+                .field("sender", &"[REDACTED]")
+                .field("reason", reason)
                 .finish(),
             Self::MediaSent {
                 file_id,

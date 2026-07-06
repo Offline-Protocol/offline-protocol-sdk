@@ -211,6 +211,14 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         } => {
             hash_string(sender, scrubber);
         }
+        Event::FileReceiveFailed {
+            sender,
+            file_id: _,
+            file_name: _,
+            reason: _,
+        } => {
+            hash_string(sender, scrubber);
+        }
         Event::MediaSent {
             recipient,
             file_id: _,
@@ -558,6 +566,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::NetworkMetrics { .. }
         | Event::FileProgress { .. }
         | Event::FileReceived { .. }
+        | Event::FileReceiveFailed { .. }
         | Event::MediaSent { .. }
         | Event::MediaSendFailed { .. }
         | Event::MessageDeferred { .. }
