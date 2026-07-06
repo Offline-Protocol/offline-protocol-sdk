@@ -864,6 +864,210 @@ mod tests {
     }
 
     #[test]
+    fn test_resource_rejected_transfer_emits_single_failed_event() {
+        use crate::events::Event;
+        use crate::file_transfer::FileChunk;
+        use offline_protocol_core::{AppId, Message, UserId};
+        use std::sync::{Arc, Mutex};
+
+        let mut proto = make_protocol("alice");
+        proto.file_transfer_manager = crate::file_transfer::FileTransferManager::with_config(
+            crate::file_transfer::FileTransferConfig {
+                max_concurrent_assemblies: 1,
+                ..crate::file_transfer::FileTransferConfig::default()
+            },
+        );
+
+        let failed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let failed_events_clone = failed_events.clone();
+        proto.on_event(move |event| {
+            if matches!(event, Event::FileReceiveFailed { .. }) {
+                failed_events_clone.lock().unwrap().push(event);
+            }
+        });
+
+        let chunk_message = |chunk: &FileChunk| {
+            Message::new(
+                UserId::new("bob").unwrap(),
+                UserId::new("alice").unwrap(),
+                AppId::new("test-app").unwrap(),
+                chunk.to_json().unwrap(),
+            )
+        };
+        let make_chunk = |file_id: &str, index: u32| FileChunk {
+            file_id: file_id.to_string(),
+            file_name: "photo.jpg".to_string(),
+            file_size: 1000,
+            total_chunks: 10,
+            chunk_index: index,
+            chunk_data: vec![0u8; 100],
+            file_checksum: "abc".to_string(),
+        };
+
+        // First transfer occupies the single assembly slot.
+        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-1", 0)));
+
+        // Every chunk of the second transfer was already ACKed and keeps
+        // streaming in after the rejection. The app must be told the
+        // transfer is lost exactly once — not once per remaining chunk.
+        for index in 0..6u32 {
+            proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-2", index)));
+        }
+
+        let events = failed_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::FileReceiveFailed {
+                file_id, reason, ..
+            } => {
+                assert_eq!(file_id, "file-2");
+                assert_eq!(reason, "too_many_transfers");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        // And no ghost assembly formed for the failed transfer.
+        assert_eq!(proto.file_transfer_manager.active_transfer_count(), 1);
+        assert!(proto.file_transfer_manager.get_progress("file-2").is_none());
+    }
+
+    #[test]
+    fn test_budget_dropped_transfer_emits_no_second_stale_event() {
+        use crate::events::Event;
+        use crate::file_transfer::FileChunk;
+        use crate::protocol::MEDIA_TRANSFER_STALE_TIMEOUT_SECS;
+        use offline_protocol_core::{AppId, Message, UserId};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let mut proto = make_protocol("alice");
+        proto.file_transfer_manager = crate::file_transfer::FileTransferManager::with_config(
+            crate::file_transfer::FileTransferConfig {
+                max_file_size: 1_000_000,
+                max_total_buffered_bytes: 1_065_536,
+                ..crate::file_transfer::FileTransferConfig::default()
+            },
+        );
+
+        let failed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let failed_events_clone = failed_events.clone();
+        proto.on_event(move |event| {
+            if matches!(event, Event::FileReceiveFailed { .. }) {
+                failed_events_clone.lock().unwrap().push(event);
+            }
+        });
+
+        let chunk_message = |chunk: &FileChunk| {
+            Message::new(
+                UserId::new("bob").unwrap(),
+                UserId::new("alice").unwrap(),
+                AppId::new("test-app").unwrap(),
+                chunk.to_json().unwrap(),
+            )
+        };
+        let make_chunk =
+            |file_id: &str, file_size: u64, total: u32, index: u32, len: usize| FileChunk {
+                file_id: file_id.to_string(),
+                file_name: "big.bin".to_string(),
+                file_size,
+                total_chunks: total,
+                chunk_index: index,
+                chunk_data: vec![0u8; len],
+                file_checksum: "abc".to_string(),
+            };
+
+        // f1 and f2 fill most of the budget; f1's next chunk busts it and
+        // drops f1 with a buffer_budget_exhausted event.
+        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk(
+            "f1", 1_000_000, 3, 0, 600_000,
+        )));
+        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("f2", 400_000, 2, 0, 300_000)));
+        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk(
+            "f1", 1_000_000, 3, 1, 300_000,
+        )));
+        assert_eq!(failed_events.lock().unwrap().len(), 1);
+
+        // f1's last in-flight chunk must not resurrect it as a
+        // never-completable assembly.
+        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk(
+            "f1", 1_000_000, 3, 2, 100_000,
+        )));
+        assert_eq!(proto.file_transfer_manager.active_transfer_count(), 1);
+        assert!(proto.file_transfer_manager.get_progress("f1").is_none());
+
+        // The stale sweep must not report f1 a second time; only f2 (still
+        // partially assembled and now stale) fails.
+        proto
+            .file_transfer_manager
+            .backdate_transfers(Duration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS + 1));
+        proto.cleanup_expired_entries();
+
+        let events = failed_events.lock().unwrap();
+        let f1_reasons: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::FileReceiveFailed {
+                    file_id, reason, ..
+                } if file_id == "f1" => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(f1_reasons, vec!["buffer_budget_exhausted"]);
+        let f2_reasons: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::FileReceiveFailed {
+                    file_id, reason, ..
+                } if file_id == "f2" => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(f2_reasons, vec!["stale_timeout"]);
+    }
+
+    #[test]
+    fn test_malformed_chunk_emits_no_failed_event() {
+        use crate::events::Event;
+        use crate::file_transfer::FileChunk;
+        use offline_protocol_core::{AppId, Message, UserId};
+        use std::sync::{Arc, Mutex};
+
+        let mut proto = make_protocol("alice");
+
+        let failed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let failed_events_clone = failed_events.clone();
+        proto.on_event(move |event| {
+            if matches!(event, Event::FileReceiveFailed { .. }) {
+                failed_events_clone.lock().unwrap().push(event);
+            }
+        });
+
+        // An old-format sender chunking a max-size file below the 1 KiB
+        // payload floor claims more chunks than the derived cap. Such
+        // attacker-shaped input is dropped with only a warning log — no
+        // FileReceiveFailed, no state.
+        let chunk = FileChunk {
+            file_id: "fine-chunked".to_string(),
+            file_name: "old.bin".to_string(),
+            file_size: 100 * 1024 * 1024,
+            total_chunks: 200_000,
+            chunk_index: 0,
+            chunk_data: vec![0u8; 512],
+            file_checksum: "abc".to_string(),
+        };
+        let message = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("alice").unwrap(),
+            AppId::new("test-app").unwrap(),
+            chunk.to_json().unwrap(),
+        );
+        proto.handle_incoming_file_chunk(&message);
+
+        assert!(failed_events.lock().unwrap().is_empty());
+        assert_eq!(proto.file_transfer_manager.active_transfer_count(), 0);
+        assert!(!proto.pending_media_metadata.contains_key("fine-chunked"));
+    }
+
+    #[test]
     fn test_finalize_failure_clears_metadata_and_emits_event() {
         use crate::events::Event;
         use crate::file_transfer::FileChunk;

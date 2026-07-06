@@ -3949,7 +3949,10 @@ impl OfflineProtocol {
     /// resource limit (all manual chunks share one pseudo-sender, so they are
     /// collectively subject to the per-sender concurrent-transfer quota and
     /// the global buffer budget). The error message carries the stable
-    /// rejection reason.
+    /// rejection reason. Once a transfer fails, its remaining chunks are
+    /// rejected with reason `previously_failed`; retry the transfer under a
+    /// fresh `file_id` (the failed id is re-admitted only after no chunk for
+    /// it has been seen for the 300 s stale timeout).
     #[allow(clippy::too_many_arguments)]
     pub fn process_file_chunk(
         &self,

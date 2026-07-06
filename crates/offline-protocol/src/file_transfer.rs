@@ -3,7 +3,9 @@
 use crate::constants::DEFAULT_CHUNK_SIZE;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::RandomState;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
 mod base64_bytes {
@@ -46,7 +48,11 @@ pub struct FileTransferConfig {
     pub max_concurrent_assemblies: usize,
 
     /// Maximum number of inbound files a single sender may have reassembling
-    /// at once, so one peer cannot occupy every assembly slot.
+    /// at once, so one peer cannot occupy every assembly slot. Only as
+    /// strong as sender authentication: MLS-path senders are
+    /// cryptographically bound, but legacy plaintext senders are wire
+    /// claims a peer can rotate — there, this quota bounds only honest
+    /// peers, and the global count and byte caps are the real limits.
     pub max_assemblies_per_sender: usize,
 
     /// Maximum total bytes buffered across all inbound assemblies. This —
@@ -92,6 +98,13 @@ pub enum ChunkRejection {
     /// chunk is never retransmitted, so the transfer could no longer
     /// complete and its buffer would only prolong the exhaustion.
     BufferBudgetExhausted,
+    /// The chunk belongs to a transfer that already failed (resource drop,
+    /// integrity failure, or stale sweep). Its remaining in-flight chunks
+    /// are dropped without re-creating assembly state or re-notifying the
+    /// application — `FileReceiveFailed` fires at most once per transfer.
+    /// Retries must use a fresh `file_id`; the failed id is admitted again
+    /// only after its tombstone expires (no chunks for the stale timeout).
+    PreviouslyFailed,
 }
 
 impl ChunkRejection {
@@ -115,6 +128,7 @@ impl ChunkRejection {
             Self::TooManyTransfers => "too_many_transfers",
             Self::SenderQuotaExceeded => "sender_quota_exceeded",
             Self::BufferBudgetExhausted => "buffer_budget_exhausted",
+            Self::PreviouslyFailed => "previously_failed",
         }
     }
 }
@@ -432,6 +446,20 @@ impl FileAssembly {
 pub struct FileTransferManager {
     config: FileTransferConfig,
     active_assemblies: HashMap<String, FileAssembly>,
+    /// Tombstones for failed transfers, keyed by a keyed hash of the
+    /// `file_id` (never the id itself, so attacker-length ids cannot grow
+    /// this map) mapping to the last time a chunk for that id was seen.
+    /// While tombstoned, an id's chunks are dropped as `PreviouslyFailed` —
+    /// they were already ACKed and will keep streaming in, but must neither
+    /// resurrect a partial assembly nor re-emit the failure event.
+    failed_transfers: HashMap<u64, Instant>,
+    /// Insertion order of `failed_transfers` keys, for FIFO eviction at
+    /// [`Self::TOMBSTONE_CAPACITY`].
+    failed_transfer_order: VecDeque<u64>,
+    /// Randomly keyed hasher for tombstone keys: collisions (a fresh
+    /// transfer misread as previously failed) cannot be crafted by a peer
+    /// and are a ~2⁻⁵⁴ accident at capacity.
+    tombstone_hasher: RandomState,
 }
 
 impl FileTransferManager {
@@ -458,6 +486,13 @@ impl FileTransferManager {
     /// ever claim this identity.
     pub const MANUAL_SENDER: &'static str = "manual:ffi";
 
+    /// Most failed-transfer tombstones retained at once. Each costs ~50
+    /// bytes (hash key, timestamp, deque slot), so the set is capped around
+    /// 50 KiB. Evicting a tombstone early only means one extra
+    /// `FileReceiveFailed` if that transfer's chunks are still arriving —
+    /// filling the set costs an attacker one rejected transfer per slot.
+    const TOMBSTONE_CAPACITY: usize = 1024;
+
     /// Creates a new file transfer manager.
     pub fn new() -> Self {
         Self::with_config(FileTransferConfig::default())
@@ -481,6 +516,49 @@ impl FileTransferManager {
         Self {
             config,
             active_assemblies: HashMap::new(),
+            failed_transfers: HashMap::new(),
+            failed_transfer_order: VecDeque::new(),
+            tombstone_hasher: RandomState::new(),
+        }
+    }
+
+    /// Keyed hash under which a `file_id` is tombstoned. Hashing bounds the
+    /// tombstone set's memory regardless of how long a peer makes its ids.
+    fn tombstone_key(&self, file_id: &str) -> u64 {
+        let mut hasher = self.tombstone_hasher.build_hasher();
+        file_id.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Marks a transfer as failed so its remaining in-flight chunks are
+    /// dropped as [`ChunkRejection::PreviouslyFailed`] instead of
+    /// re-creating assembly state or re-notifying the application.
+    fn tombstone(&mut self, file_id: &str) {
+        let key = self.tombstone_key(file_id);
+        if self.failed_transfers.insert(key, Instant::now()).is_none() {
+            self.failed_transfer_order.push_back(key);
+            while self.failed_transfers.len() > Self::TOMBSTONE_CAPACITY {
+                match self.failed_transfer_order.pop_front() {
+                    Some(oldest) => {
+                        self.failed_transfers.remove(&oldest);
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    /// Whether `file_id` belongs to a failed transfer. A hit refreshes the
+    /// tombstone's timestamp, so it outlives the transfer's chunk stream
+    /// and expires only once chunks stop arriving for the stale timeout.
+    fn is_tombstoned(&mut self, file_id: &str) -> bool {
+        let key = self.tombstone_key(file_id);
+        match self.failed_transfers.get_mut(&key) {
+            Some(last_seen) => {
+                *last_seen = Instant::now();
+                true
+            }
+            None => false,
         }
     }
 
@@ -648,6 +726,17 @@ impl FileTransferManager {
             return Err(ChunkRejection::Invalid);
         }
 
+        // A failed transfer's chunks were already ACKed and keep streaming
+        // in; drop them without state or (further) events. Logged at debug
+        // — a large drained transfer produces thousands of these.
+        if self.is_tombstoned(&chunk.file_id) {
+            tracing::debug!(
+                file_id = %chunk.file_id,
+                "Dropping chunk of a previously failed transfer"
+            );
+            return Err(ChunkRejection::PreviouslyFailed);
+        }
+
         let file_id = chunk.file_id.clone();
 
         // A chunk for an existing assembly must be consistent with it; a
@@ -704,6 +793,10 @@ impl FileTransferManager {
                         max = self.config.max_concurrent_assemblies,
                         "Rejecting file chunk: too many concurrent inbound transfers"
                     );
+                    // The rejected chunk was already ACKed and is lost for
+                    // good, so the whole transfer is unrecoverable —
+                    // tombstone it so its remaining chunks drop silently.
+                    self.tombstone(&file_id);
                     return Err(ChunkRejection::TooManyTransfers);
                 }
                 let sender_active = self
@@ -719,6 +812,7 @@ impl FileTransferManager {
                         max = self.config.max_assemblies_per_sender,
                         "Rejecting file chunk: sender's concurrent-transfer quota reached"
                     );
+                    self.tombstone(&file_id);
                     return Err(ChunkRejection::SenderQuotaExceeded);
                 }
                 0
@@ -745,8 +839,11 @@ impl FileTransferManager {
             );
             // The dropped chunk is never retransmitted, so this transfer can
             // no longer complete — free its partial buffer now instead of
-            // letting it squat the budget until the stale sweep.
+            // letting it squat the budget until the stale sweep, and
+            // tombstone the id so later chunks cannot resurrect it as a
+            // never-completable assembly.
             self.active_assemblies.remove(&file_id);
+            self.tombstone(&file_id);
             return Err(ChunkRejection::BufferBudgetExhausted);
         }
 
@@ -799,6 +896,7 @@ impl FileTransferManager {
                 "File size mismatch — corrupted or tampered transfer"
             );
             self.active_assemblies.remove(file_id);
+            self.tombstone(file_id);
             return None;
         }
 
@@ -812,6 +910,7 @@ impl FileTransferManager {
                 "File checksum mismatch — corrupted or tampered transfer"
             );
             self.active_assemblies.remove(file_id);
+            self.tombstone(file_id);
             return None;
         }
 
@@ -821,9 +920,18 @@ impl FileTransferManager {
 
     /// Removes stale/incomplete transfers that have not received any chunk
     /// updates within `max_age`, returning what was dropped so callers can
-    /// surface the loss.
+    /// surface the loss. Swept ids are tombstoned so straggler chunks
+    /// cannot resurrect them; tombstones themselves expire by the same
+    /// rule — no chunks for `max_age` — freeing the id for reuse.
     pub fn cleanup_stale_transfers(&mut self, max_age: Duration) -> Vec<StaleTransfer> {
         let now = Instant::now();
+
+        self.failed_transfers
+            .retain(|_, last_seen| now.duration_since(*last_seen) <= max_age);
+        let failed_transfers = &self.failed_transfers;
+        self.failed_transfer_order
+            .retain(|key| failed_transfers.contains_key(key));
+
         let stale_file_ids: Vec<String> = self
             .active_assemblies
             .iter()
@@ -838,13 +946,13 @@ impl FileTransferManager {
         stale_file_ids
             .into_iter()
             .filter_map(|file_id| {
-                self.active_assemblies
-                    .remove(&file_id)
-                    .map(|assembly| StaleTransfer {
-                        file_id,
-                        file_name: assembly.file_name,
-                        sender: assembly.sender,
-                    })
+                let assembly = self.active_assemblies.remove(&file_id)?;
+                self.tombstone(&file_id);
+                Some(StaleTransfer {
+                    file_id,
+                    file_name: assembly.file_name,
+                    sender: assembly.sender,
+                })
             })
             .collect()
     }
@@ -868,12 +976,21 @@ impl FileTransferManager {
         self.active_assemblies.len()
     }
 
-    /// Rewinds every active assembly's last-update time (test-only), so
-    /// staleness paths can be exercised without sleeping.
+    /// Rewinds every active assembly's last-update time and every tombstone
+    /// (test-only), so staleness paths can be exercised without sleeping.
     #[cfg(test)]
     pub(crate) fn backdate_transfers(&mut self, by: Duration) {
+        // checked_sub instead of `-=`: Instant underflows (and panics) when
+        // the monotonic clock's epoch is closer than `by` — a fresh CI VM.
+        // Failing loudly beats an intermittent subtraction panic.
+        let backdated = Instant::now()
+            .checked_sub(by)
+            .expect("backdate_transfers needs system uptime longer than the backdate duration");
         for assembly in self.active_assemblies.values_mut() {
-            assembly.last_updated_at -= by;
+            assembly.last_updated_at = backdated;
+        }
+        for last_seen in self.failed_transfers.values_mut() {
+            *last_seen = backdated;
         }
     }
 }
@@ -1421,10 +1538,18 @@ mod tests {
         assert!(manager
             .process_chunk("peer", attack_chunk("f1", 100, 2, 1, vec![0u8; 10]))
             .is_ok());
-        // Freeing a slot re-admits new transfers.
+        // Freeing a slot re-admits new transfers — but not the failed id:
+        // f3's rejected chunk was ACKed and lost, so the transfer could
+        // never complete. A retry must use a fresh file id.
         assert!(manager.cancel_transfer("f2"));
+        assert_eq!(
+            manager
+                .process_chunk("peer", attack_chunk("f3", 100, 2, 0, vec![0u8; 10]))
+                .unwrap_err(),
+            ChunkRejection::PreviouslyFailed
+        );
         assert!(manager
-            .process_chunk("peer", attack_chunk("f3", 100, 2, 0, vec![0u8; 10]))
+            .process_chunk("peer", attack_chunk("f4", 100, 2, 0, vec![0u8; 10]))
             .is_ok());
     }
 
@@ -1592,6 +1717,239 @@ mod tests {
         // being unrepresentable as a wire UserId (':' is rejected), so no
         // remote peer can alias it.
         assert!(offline_protocol_core::UserId::new(FileTransferManager::MANUAL_SENDER).is_err());
+    }
+
+    #[test]
+    fn test_resource_rejected_transfer_is_tombstoned() {
+        // Once a transfer is refused for a resource reason, its remaining
+        // in-flight chunks are dropped as previously_failed — no repeated
+        // resource rejections (which would re-emit FileReceiveFailed
+        // upstream) and no ghost assembly, even after capacity frees up.
+        let config = FileTransferConfig {
+            max_concurrent_assemblies: 1,
+            ..FileTransferConfig::default()
+        };
+        let mut manager = FileTransferManager::with_config(config);
+
+        assert!(manager
+            .process_chunk("alice", attack_chunk("f1", 100, 2, 0, vec![0u8; 10]))
+            .is_ok());
+        assert_eq!(
+            manager
+                .process_chunk("bob", attack_chunk("f2", 1000, 10, 0, vec![0u8; 100]))
+                .unwrap_err(),
+            ChunkRejection::TooManyTransfers
+        );
+        for index in 1..10u32 {
+            assert_eq!(
+                manager
+                    .process_chunk("bob", attack_chunk("f2", 1000, 10, index, vec![0u8; 100]))
+                    .unwrap_err(),
+                ChunkRejection::PreviouslyFailed
+            );
+        }
+        // Even with the slot freed, the failed id stays dead: its first
+        // chunk was ACKed and lost, so the transfer could never complete.
+        assert!(manager.cancel_transfer("f1"));
+        assert_eq!(
+            manager
+                .process_chunk("bob", attack_chunk("f2", 1000, 10, 5, vec![0u8; 100]))
+                .unwrap_err(),
+            ChunkRejection::PreviouslyFailed
+        );
+        assert_eq!(manager.active_transfer_count(), 0);
+    }
+
+    #[test]
+    fn test_budget_dropped_transfer_cannot_resurrect() {
+        let config = FileTransferConfig {
+            max_file_size: 1_000_000,
+            max_total_buffered_bytes: 1_065_536,
+            ..FileTransferConfig::default()
+        };
+        let mut manager = FileTransferManager::with_config(config);
+
+        assert!(manager
+            .process_chunk(
+                "alice",
+                attack_chunk("f1", 1_000_000, 3, 0, vec![0u8; 600_000])
+            )
+            .is_ok());
+        assert!(manager
+            .process_chunk("bob", attack_chunk("f2", 400_000, 2, 0, vec![0u8; 300_000]))
+            .is_ok());
+        assert_eq!(
+            manager
+                .process_chunk(
+                    "alice",
+                    attack_chunk("f1", 1_000_000, 3, 1, vec![0u8; 300_000])
+                )
+                .unwrap_err(),
+            ChunkRejection::BufferBudgetExhausted
+        );
+        // f1's remaining in-flight chunk must not start a fresh assembly —
+        // it would miss the dropped chunk forever, squatting a slot and the
+        // budget until the stale sweep and then failing a second time.
+        assert_eq!(
+            manager
+                .process_chunk(
+                    "alice",
+                    attack_chunk("f1", 1_000_000, 3, 2, vec![0u8; 100_000])
+                )
+                .unwrap_err(),
+            ChunkRejection::PreviouslyFailed
+        );
+        assert!(manager.get_progress("f1").is_none());
+        assert_eq!(manager.active_transfer_count(), 1);
+    }
+
+    #[test]
+    fn test_finalize_integrity_failure_tombstones_id() {
+        let mut manager = FileTransferManager::new();
+
+        // Checksum matches the bytes but the claimed file_size does not, so
+        // finalize fails its size check and drops the transfer.
+        let data = vec![3u8; 100];
+        let checksum = format!("{:x}", Sha256::digest(&data));
+        let chunk = FileChunk {
+            file_id: "f".to_string(),
+            file_name: "bad.bin".to_string(),
+            file_size: 2048,
+            total_chunks: 1,
+            chunk_index: 0,
+            chunk_data: data,
+            file_checksum: checksum,
+        };
+        assert!(manager.process_chunk("peer", chunk.clone()).is_ok());
+        assert!(manager.is_complete("f"));
+        assert!(manager.finalize_file("f").is_none());
+
+        // The failed id cannot be restarted by resending its chunks.
+        assert_eq!(
+            manager.process_chunk("peer", chunk).unwrap_err(),
+            ChunkRejection::PreviouslyFailed
+        );
+        assert_eq!(manager.active_transfer_count(), 0);
+    }
+
+    #[test]
+    fn test_stale_swept_transfer_is_tombstoned() {
+        let mut manager = FileTransferManager::new();
+
+        assert!(manager
+            .process_chunk("peer", attack_chunk("f", 200, 2, 0, vec![0u8; 100]))
+            .is_ok());
+        manager.backdate_transfers(Duration::from_secs(2));
+        let swept = manager.cleanup_stale_transfers(Duration::from_secs(1));
+        assert_eq!(swept.len(), 1);
+
+        // A straggler chunk must not resurrect the swept transfer — the
+        // caller already emitted its stale_timeout failure.
+        assert_eq!(
+            manager
+                .process_chunk("peer", attack_chunk("f", 200, 2, 1, vec![0u8; 100]))
+                .unwrap_err(),
+            ChunkRejection::PreviouslyFailed
+        );
+        assert_eq!(manager.active_transfer_count(), 0);
+    }
+
+    #[test]
+    fn test_tombstone_expires_after_max_age() {
+        let config = FileTransferConfig {
+            max_concurrent_assemblies: 1,
+            ..FileTransferConfig::default()
+        };
+        let mut manager = FileTransferManager::with_config(config);
+
+        assert!(manager
+            .process_chunk("alice", attack_chunk("f1", 100, 2, 0, vec![0u8; 10]))
+            .is_ok());
+        assert_eq!(
+            manager
+                .process_chunk("bob", attack_chunk("f2", 100, 2, 0, vec![0u8; 10]))
+                .unwrap_err(),
+            ChunkRejection::TooManyTransfers
+        );
+        assert!(manager.cancel_transfer("f1"));
+
+        // Once no chunk for the failed id has been seen for max_age, the
+        // stale sweep releases it and the id may be reused (the manual FFI
+        // path retries with app-chosen ids).
+        manager.backdate_transfers(Duration::from_secs(2));
+        manager.cleanup_stale_transfers(Duration::from_secs(1));
+        assert!(manager
+            .process_chunk("bob", attack_chunk("f2", 100, 2, 0, vec![0u8; 10]))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_cancel_does_not_tombstone() {
+        // Cancellation is an app decision, not a failure — the id may be
+        // restarted immediately (nothing was lost that a full resend
+        // cannot supply).
+        let mut manager = FileTransferManager::new();
+        assert!(manager
+            .process_chunk("peer", attack_chunk("f", 100, 2, 0, vec![0u8; 10]))
+            .is_ok());
+        assert!(manager.cancel_transfer("f"));
+        assert!(manager
+            .process_chunk("peer", attack_chunk("f", 100, 2, 0, vec![0u8; 10]))
+            .is_ok());
+        assert_eq!(manager.active_transfer_count(), 1);
+    }
+
+    #[test]
+    fn test_duplicate_chunk_resent_with_different_size_replaces() {
+        // A duplicate whose payload differs in size must fully replace the
+        // earlier copy in both bytes and budget accounting, so the transfer
+        // still completes and delivers exactly the claimed size.
+        let mut manager = FileTransferManager::new();
+        let data0 = vec![7u8; 1500];
+        let data1 = vec![9u8; 548];
+        let mut whole = data0.clone();
+        whole.extend_from_slice(&data1);
+        let checksum = format!("{:x}", Sha256::digest(&whole));
+
+        let make = |index: u32, data: Vec<u8>| FileChunk {
+            file_id: "f".to_string(),
+            file_name: "file.bin".to_string(),
+            file_size: 2048,
+            total_chunks: 2,
+            chunk_index: index,
+            chunk_data: data,
+            file_checksum: checksum.clone(),
+        };
+
+        // Undersized garbage first, then the real 1500-byte chunk 0.
+        assert!(manager
+            .process_chunk("peer", make(0, vec![0u8; 1400]))
+            .is_ok());
+        assert!(manager.process_chunk("peer", make(0, data0)).is_ok());
+        assert!(manager.process_chunk("peer", make(1, data1)).is_ok());
+        assert!(manager.is_complete("f"));
+        // finalize checks reassembled length against the claimed file_size,
+        // so this also proves the replacement byte accounting is exact.
+        assert_eq!(manager.finalize_file("f").unwrap(), whole);
+    }
+
+    #[test]
+    fn test_single_chunk_at_exactly_file_size_completes() {
+        let mut manager = FileTransferManager::new();
+        let data = vec![4u8; 512];
+        let checksum = format!("{:x}", Sha256::digest(&data));
+        let chunk = FileChunk {
+            file_id: "f".to_string(),
+            file_name: "exact.bin".to_string(),
+            file_size: 512,
+            total_chunks: 1,
+            chunk_index: 0,
+            chunk_data: data.clone(),
+            file_checksum: checksum,
+        };
+        assert!(manager.process_chunk("peer", chunk).is_ok());
+        assert!(manager.is_complete("f"));
+        assert_eq!(manager.finalize_file("f").unwrap(), data);
     }
 
     #[test]

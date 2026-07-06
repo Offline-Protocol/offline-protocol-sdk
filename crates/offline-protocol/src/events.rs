@@ -411,8 +411,10 @@ pub enum Event {
     /// hit a resource limit (too many concurrent transfers, per-sender
     /// quota, or the buffered-bytes budget), the reassembled file failed
     /// its integrity checks, or the transfer went stale (no chunks within
-    /// the stale timeout). No `FileReceived` will follow for this
-    /// `file_id`; the sender must re-send the file to retry.
+    /// the stale timeout). Terminal and fired at most once per transfer:
+    /// the failed transfer's remaining in-flight chunks are dropped
+    /// silently. No `FileReceived` will follow for this `file_id`; the
+    /// sender must re-send the file (under a fresh `file_id`) to retry.
     FileReceiveFailed {
         /// File identifier.
         file_id: String,

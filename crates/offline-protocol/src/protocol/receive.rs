@@ -411,7 +411,9 @@ impl OfflineProtocol {
                 return;
             }
             // Malformed or mismatched chunks are logged by the manager; the
-            // assembly they targeted (if any) stays intact.
+            // assembly they targeted (if any) stays intact. Chunks of an
+            // already-failed transfer land here too (`previously_failed`) —
+            // its FileReceiveFailed event already fired exactly once.
             Err(_) => return,
         }
 
