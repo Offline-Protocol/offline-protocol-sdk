@@ -1108,8 +1108,10 @@ impl OfflineProtocol {
     /// not ready this returns [`Error::SessionNotReady`] (after kicking
     /// establishment if a key package is available); retry after the
     /// `secure_session_established` event. When encryption is required but MLS
-    /// is not initialized this returns [`Error::EncryptFailed`]. Only the
-    /// explicit encryption opt-out sends plaintext chunks.
+    /// is not initialized this returns [`Error::EncryptFailed`]. Plaintext
+    /// chunks are sent only when auto-encryption is inactive: the explicit
+    /// encryption opt-out, or encryption enabled but MLS never initialized
+    /// while `require_encryption` is unset (matching the text path).
     ///
     /// Returns a `file_id` that can be used to track progress or cancel.
     pub fn send_media(
@@ -1267,16 +1269,33 @@ impl OfflineProtocol {
             // SEC-H1: with auto-encryption active, chunk bytes AND the chunk-0
             // metadata (file name, preview thumbnail, original content type)
             // travel inside the MLS ciphertext — the wire Message carries none
-            // of them. The plaintext fields are only populated for the
-            // explicitly-unencrypted configuration.
+            // of them. The plaintext fields are only populated when
+            // auto-encryption is inactive.
             let (binary_payload, wire_metadata, wire_original_ct) = if self.should_auto_encrypt() {
                 let inner = MediaChunkPlaintext {
                     chunk_bytes: chunk.to_bytes(),
                     media_metadata: meta_for_chunk,
                     original_content_type: (chunk_index == 0).then_some(content_type),
                 };
-                let plaintext = inner.encode().map_err(Error::Serialization)?;
-                let encrypted = self.encrypt_bytes_for_recipient_strict(recipient, &plaintext)?;
+                let sealed = inner
+                    .encode()
+                    .map_err(Error::Serialization)
+                    .and_then(|plaintext| {
+                        self.encrypt_bytes_for_recipient_strict(recipient, &plaintext)
+                    });
+                let encrypted = match sealed {
+                    Ok(encrypted) => encrypted,
+                    Err(err) => {
+                        // The chunks this batch popped from the window are
+                        // marked in-flight with no outbox entry — nothing
+                        // would ever ACK or retry them, so the transfer can
+                        // only wedge while holding a per-peer transfer slot.
+                        // Encryption failure is not per-chunk transient:
+                        // abort the whole transfer loudly.
+                        self.abort_outbound_media_transfer(file_id, "chunk encryption failed");
+                        return Err(err);
+                    }
+                };
                 (encode_media_envelope(&encrypted), None, false)
             } else {
                 (chunk.to_bytes(), meta_for_chunk, chunk_index == 0)
@@ -1751,17 +1770,31 @@ impl OfflineProtocol {
         let Some((file_id, _chunk_index)) = self.outbound_media_chunks.remove(message_id) else {
             return;
         };
+        self.abort_outbound_media_transfer(&file_id, reason);
+    }
 
-        if self.outbound_media_transfers.remove(&file_id).is_some() {
-            self.outbound_media_chunks
-                .retain(|_, (candidate_file_id, _)| candidate_file_id != &file_id);
-            self.outbound_media_windows.remove(&file_id);
-            warn!(
-                file_id = %file_id,
-                message_id = %message_id,
-                reason = %reason,
-                "Aborting outbound media transfer after terminal chunk failure"
-            );
+    /// Aborts an active outbound media transfer: removes all transfer
+    /// tracking (freeing its per-peer transfer slot) and emits
+    /// [`Event::MediaSendFailed`] so the app learns the transfer will never
+    /// complete. Idempotent — a second call for the same `file_id` is a no-op.
+    pub(super) fn abort_outbound_media_transfer(&mut self, file_id: &str, reason: &str) {
+        let Some(transfer) = self.outbound_media_transfers.remove(file_id) else {
+            return;
+        };
+        self.outbound_media_chunks
+            .retain(|_, (candidate_file_id, _)| candidate_file_id.as_str() != file_id);
+        self.outbound_media_windows.remove(file_id);
+        warn!(
+            file_id = %file_id,
+            reason = %reason,
+            "Aborting outbound media transfer"
+        );
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::media_send_failed(
+                file_id.to_string(),
+                transfer.recipient,
+                reason.to_string(),
+            ));
         }
     }
 

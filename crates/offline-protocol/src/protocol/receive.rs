@@ -548,12 +548,28 @@ impl OfflineProtocol {
                             error_code = classification.code(),
                             "Failed to decrypt media chunk, dropping"
                         );
+                        let kind = DecryptionFailureKind::from_mls_error(&e);
                         self.emit_mls_decryption_failed(
                             sender,
                             Some(&group_id),
-                            DecryptionFailureKind::from_mls_error(&e),
+                            kind,
                             MlsOperationContext::Receive,
                         );
+                        // The chunk was already ACKed and dedup-marked on
+                        // receipt, so this loss is permanent — surface it to
+                        // the app like a pending-queue drop, not just as MLS
+                        // telemetry.
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::message_decryption_failed(
+                                message.id.clone(),
+                                sender.to_string(),
+                                Self::decryption_failure_code_from_kind(kind),
+                                format!(
+                                    "encrypted media chunk failed to decrypt ({}); its file transfer cannot complete",
+                                    classification.code()
+                                ),
+                            ));
+                        }
                         None
                     }
                 }

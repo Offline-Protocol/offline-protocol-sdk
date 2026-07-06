@@ -43,6 +43,8 @@ pub(crate) struct DroppedPendingMessage {
 enum QueueLimit {
     PerPeer,
     Global,
+    PerPeerBytes,
+    GlobalBytes,
 }
 
 impl QueueLimit {
@@ -50,6 +52,8 @@ impl QueueLimit {
         match self {
             Self::PerPeer => "per_peer",
             Self::Global => "global",
+            Self::PerPeerBytes => "per_peer_bytes",
+            Self::GlobalBytes => "global_bytes",
         }
     }
 }
@@ -88,6 +92,8 @@ pub struct PendingQueueMetrics {
     pub pending_queue_invariant_violations_total: u64,
     /// Current number of messages in pending queues across all peers.
     pub pending_messages_current: usize,
+    /// Current payload bytes (content plus binary content) queued across all peers.
+    pub pending_bytes_current: usize,
     /// Current per-peer pending queue sizes.
     pub pending_messages_per_peer: HashMap<String, usize>,
 }
@@ -105,6 +111,10 @@ pub(crate) struct PendingDecryptionQueue {
     live_sequences: HashSet<u64>,
     /// Current number of pending encrypted messages across all peers.
     total: usize,
+    /// Current payload bytes queued across all peers.
+    total_bytes: usize,
+    /// Current payload bytes queued per peer.
+    peer_bytes: HashMap<String, usize>,
     /// Monotonic sequence assigned on enqueue for deterministic tie-breaking.
     next_seq: u64,
     /// Pending queue observability counters and gauges.
@@ -145,6 +155,12 @@ impl PendingDecryptionQueue {
     #[cfg(test)]
     pub(crate) fn total(&self) -> usize {
         self.total
+    }
+
+    /// Returns the total payload bytes queued across all peers.
+    #[cfg(test)]
+    pub(crate) fn total_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     /// Returns a reference to a specific entry in a peer's queue.
@@ -194,6 +210,21 @@ impl PendingDecryptionQueue {
 
     fn update_current_gauge(&mut self) {
         self.metrics.pending_messages_current = self.total;
+        self.metrics.pending_bytes_current = self.total_bytes;
+    }
+
+    /// Payload footprint of a queued message: text content plus binary content.
+    fn message_bytes(message: &Message) -> usize {
+        message.content.len()
+            + message
+                .binary_content
+                .as_ref()
+                .map(|binary| binary.len())
+                .unwrap_or(0)
+    }
+
+    fn peer_bytes_for(&self, peer_id: &str) -> usize {
+        self.peer_bytes.get(peer_id).copied().unwrap_or(0)
     }
 
     fn next_sequence(&mut self) -> u64 {
@@ -233,10 +264,16 @@ impl PendingDecryptionQueue {
 
         self.live_sequences.remove(&sequence);
         self.total = self.total.saturating_sub(1);
+        let removed_bytes = Self::message_bytes(&removed.message);
+        self.total_bytes = self.total_bytes.saturating_sub(removed_bytes);
+        if let Some(bytes) = self.peer_bytes.get_mut(peer_id) {
+            *bytes = bytes.saturating_sub(removed_bytes);
+        }
         self.update_current_gauge();
 
         if queue_empty {
             self.queues.remove(peer_id);
+            self.peer_bytes.remove(peer_id);
         }
         self.update_peer_gauge(peer_id);
         Some(removed)
@@ -344,7 +381,11 @@ impl PendingDecryptionQueue {
         let live_count = self.live_sequences.len();
         let current_gauge = self.metrics.pending_messages_current;
         let total = self.total;
-        let valid = per_peer_sum == total && live_count == total && current_gauge == total;
+        let peer_bytes_sum: usize = self.peer_bytes.values().sum();
+        let valid = per_peer_sum == total
+            && live_count == total
+            && current_gauge == total
+            && peer_bytes_sum == self.total_bytes;
         if valid {
             return;
         }
@@ -548,7 +589,33 @@ impl PendingDecryptionQueue {
 
         let per_peer_limit = config.max_pending_per_peer;
         let global_limit = config.max_pending_global;
+        let per_peer_bytes_limit = config.max_pending_bytes_per_peer;
+        let global_bytes_limit = config.max_pending_bytes_global;
         let overflow_policy = config.overflow_policy;
+        let incoming_bytes = Self::message_bytes(message);
+
+        // A message that can never fit within the byte budgets is dropped
+        // outright — evicting the entire queue would not make room for it.
+        // This also guarantees the byte-eviction loops below terminate.
+        if incoming_bytes > per_peer_bytes_limit || incoming_bytes > global_bytes_limit {
+            let limit = if incoming_bytes > per_peer_bytes_limit {
+                QueueLimit::PerPeerBytes
+            } else {
+                QueueLimit::GlobalBytes
+            };
+            self.record_drop(
+                DropReason::OverflowDropNewest,
+                Some(limit),
+                sender,
+                &incoming_message_id,
+                overflow_policy,
+            );
+            dropped.push(DroppedPendingMessage {
+                message: message.clone(),
+                reason: DropReason::OverflowDropNewest.as_str(),
+            });
+            return dropped;
+        }
 
         let peer_len = self.queues.get(sender).map(VecDeque::len).unwrap_or(0);
         if peer_len >= per_peer_limit {
@@ -635,6 +702,71 @@ impl PendingDecryptionQueue {
             return dropped;
         }
 
+        if self.peer_bytes_for(sender) + incoming_bytes > per_peer_bytes_limit {
+            self.record_peer_overflow_pressure(sender, per_peer_limit);
+            if overflow_policy == OverflowPolicy::DropNewest {
+                self.record_drop(
+                    DropReason::OverflowDropNewest,
+                    Some(QueueLimit::PerPeerBytes),
+                    sender,
+                    &incoming_message_id,
+                    overflow_policy,
+                );
+                dropped.push(DroppedPendingMessage {
+                    message: message.clone(),
+                    reason: DropReason::OverflowDropNewest.as_str(),
+                });
+                return dropped;
+            }
+            // DropOldest: evict from the peer's front until the incoming
+            // message fits. Terminates: each eviction shrinks the peer's byte
+            // total, and an empty queue leaves it at 0 (the incoming message
+            // fits by the oversized pre-check above).
+            while self.peer_bytes_for(sender) + incoming_bytes > per_peer_bytes_limit {
+                let evicted_sequence = self
+                    .queues
+                    .get(sender)
+                    .and_then(|queue| queue.front().map(|entry| entry.sequence));
+                let evicted = evicted_sequence
+                    .and_then(|sequence| self.remove_entry_by_sequence(sender, sequence));
+                match evicted {
+                    Some(evicted) => {
+                        self.record_drop(
+                            DropReason::OverflowDropOldest,
+                            Some(QueueLimit::PerPeerBytes),
+                            &evicted.peer_id,
+                            &evicted.message_id,
+                            overflow_policy,
+                        );
+                        dropped.push(DroppedPendingMessage {
+                            message: evicted.message,
+                            reason: DropReason::OverflowDropOldest.as_str(),
+                        });
+                    }
+                    None => {
+                        self.record_eviction_failure(
+                            QueueLimit::PerPeerBytes,
+                            sender,
+                            &incoming_message_id,
+                            "drop_oldest failed to evict per-peer oldest for byte budget",
+                        );
+                        self.record_drop(
+                            DropReason::OverflowDropNewest,
+                            Some(QueueLimit::PerPeerBytes),
+                            sender,
+                            &incoming_message_id,
+                            overflow_policy,
+                        );
+                        dropped.push(DroppedPendingMessage {
+                            message: message.clone(),
+                            reason: DropReason::OverflowDropNewest.as_str(),
+                        });
+                        return dropped;
+                    }
+                }
+            }
+        }
+
         if self.total >= global_limit {
             warn!(
                 queue_size = self.total,
@@ -695,6 +827,62 @@ impl PendingDecryptionQueue {
             return dropped;
         }
 
+        if self.total_bytes + incoming_bytes > global_bytes_limit {
+            warn!(
+                queue_bytes = self.total_bytes,
+                global_bytes_limit, "Pending encrypted queue at global byte budget"
+            );
+            if overflow_policy == OverflowPolicy::DropNewest {
+                self.record_drop(
+                    DropReason::OverflowDropNewest,
+                    Some(QueueLimit::GlobalBytes),
+                    sender,
+                    &incoming_message_id,
+                    overflow_policy,
+                );
+                dropped.push(DroppedPendingMessage {
+                    message: message.clone(),
+                    reason: DropReason::OverflowDropNewest.as_str(),
+                });
+                return dropped;
+            }
+            while self.total_bytes + incoming_bytes > global_bytes_limit {
+                match self.evict_global_oldest(
+                    DropReason::OverflowDropOldest,
+                    QueueLimit::GlobalBytes,
+                    overflow_policy,
+                ) {
+                    Some(evicted) => dropped.push(DroppedPendingMessage {
+                        message: evicted.message,
+                        reason: DropReason::OverflowDropOldest.as_str(),
+                    }),
+                    None => {
+                        self.record_eviction_failure(
+                            QueueLimit::GlobalBytes,
+                            sender,
+                            &incoming_message_id,
+                            "drop_oldest failed to evict global oldest for byte budget",
+                        );
+                        break;
+                    }
+                }
+            }
+            if self.total_bytes + incoming_bytes > global_bytes_limit {
+                self.record_drop(
+                    DropReason::OverflowDropNewest,
+                    Some(QueueLimit::GlobalBytes),
+                    sender,
+                    &incoming_message_id,
+                    overflow_policy,
+                );
+                dropped.push(DroppedPendingMessage {
+                    message: message.clone(),
+                    reason: DropReason::OverflowDropNewest.as_str(),
+                });
+                return dropped;
+            }
+        }
+
         let sequence = self.next_sequence();
         let entry = PendingDecryptMessage {
             peer_id: sender.to_string(),
@@ -715,31 +903,34 @@ impl PendingDecryptionQueue {
         });
         self.live_sequences.insert(sequence);
         self.total = self.total.saturating_add(1);
+        self.total_bytes = self.total_bytes.saturating_add(incoming_bytes);
+        let peer_bytes = self.peer_bytes.entry(sender.to_string()).or_insert(0);
+        *peer_bytes = peer_bytes.saturating_add(incoming_bytes);
         self.update_peer_gauge(sender);
         self.update_current_gauge();
         self.cleanup_global_order_front();
         self.verify_invariants("enqueue");
 
         let peer_len_post_insert = self.queues.get(sender).map(VecDeque::len).unwrap_or(0);
-        if self.total > global_limit || peer_len_post_insert > per_peer_limit {
+        let over_global = self.total > global_limit || self.total_bytes > global_bytes_limit;
+        let over_peer = peer_len_post_insert > per_peer_limit
+            || self.peer_bytes_for(sender) > per_peer_bytes_limit;
+        if over_global || over_peer {
             let _ = self.remove_entry_by_sequence(sender, sequence);
+            let limit = if over_global {
+                QueueLimit::Global
+            } else {
+                QueueLimit::PerPeer
+            };
             self.record_eviction_failure(
-                if self.total > global_limit {
-                    QueueLimit::Global
-                } else {
-                    QueueLimit::PerPeer
-                },
+                limit,
                 sender,
                 &incoming_message_id,
                 "post-insert hard-bound check failed; rolled back enqueue",
             );
             self.record_drop(
                 DropReason::OverflowDropNewest,
-                Some(if self.total > global_limit {
-                    QueueLimit::Global
-                } else {
-                    QueueLimit::PerPeer
-                }),
+                Some(limit),
                 sender,
                 &incoming_message_id,
                 overflow_policy,
@@ -776,7 +967,11 @@ impl PendingDecryptionQueue {
         for entry in &drained {
             self.live_sequences.remove(&entry.sequence);
             self.total = self.total.saturating_sub(1);
+            self.total_bytes = self
+                .total_bytes
+                .saturating_sub(Self::message_bytes(&entry.message));
         }
+        self.peer_bytes.remove(sender);
         self.update_peer_gauge(sender);
         self.update_current_gauge();
         self.cleanup_global_order_front();

@@ -150,6 +150,13 @@ pub enum ProtocolError {
     #[error("User is blocked: {0}")]
     UserBlocked(String),
 
+    /// Too many concurrent media transfers to the same recipient; retry
+    /// after an active transfer completes.
+    #[error(
+        "Too many concurrent media transfers to {0}; retry after an active transfer completes"
+    )]
+    MediaTransferLimit(String),
+
     /// Internal lock was poisoned by a panicked thread.
     #[error("Internal lock poisoned: {0}")]
     LockPoisoned(String),
@@ -333,6 +340,9 @@ impl From<offline_protocol::Error> for ProtocolError {
             offline_protocol::Error::MlsNotInitialized => ProtocolError::MlsNotInitialized,
             offline_protocol::Error::Mls(err) => ProtocolError::MlsError(err.to_string()),
             offline_protocol::Error::UserBlocked(user_id) => ProtocolError::UserBlocked(user_id),
+            offline_protocol::Error::MediaTransferLimit(user_id) => {
+                ProtocolError::MediaTransferLimit(user_id)
+            }
             _ => ProtocolError::Other(err.to_string()),
         }
     }
@@ -1636,6 +1646,8 @@ impl From<ProtocolConfig> for CoreConfig {
                 OverflowPolicy::DropOldest => CoreOverflowPolicy::DropOldest,
                 OverflowPolicy::DropNewest => CoreOverflowPolicy::DropNewest,
             },
+            // Byte budgets are not FFI-exposed; core defaults apply.
+            ..CorePendingQueueConfig::default()
         };
         core_config.group.max_group_members = config.max_group_members as usize;
         core_config.group.relay_enabled = config.group_relay_enabled;

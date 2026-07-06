@@ -23,10 +23,33 @@ pub struct PendingQueueConfig {
     pub max_pending_per_peer: usize,
     /// Maximum number of pending encrypted messages across all peers.
     pub max_pending_global: usize,
+    /// Maximum total payload bytes (content plus binary content) queued per
+    /// peer.
+    ///
+    /// Encrypted media chunks are queued whole while the sender's session is
+    /// not yet ready, so the count limits alone would admit up to
+    /// `max_pending_per_peer` × chunk-size bytes of ciphertext. The default
+    /// (4 MB) covers the largest legitimate pre-session backlog: 2 concurrent
+    /// transfers × 8 in-flight chunks × 256 KB internet chunks.
+    #[serde(default = "default_max_pending_bytes_per_peer")]
+    pub max_pending_bytes_per_peer: usize,
+    /// Maximum total payload bytes queued across all peers. The default
+    /// (32 MB) bounds worst-case queue memory on mobile devices regardless of
+    /// how many peers are mid-establishment.
+    #[serde(default = "default_max_pending_bytes_global")]
+    pub max_pending_bytes_global: usize,
     /// Time-to-live for pending encrypted messages in milliseconds.
     pub pending_ttl_ms: u64,
     /// Overflow policy when queue limits are reached.
     pub overflow_policy: OverflowPolicy,
+}
+
+fn default_max_pending_bytes_per_peer() -> usize {
+    4 * 1024 * 1024
+}
+
+fn default_max_pending_bytes_global() -> usize {
+    32 * 1024 * 1024
 }
 
 impl Default for PendingQueueConfig {
@@ -34,6 +57,8 @@ impl Default for PendingQueueConfig {
         Self {
             max_pending_per_peer: 64,
             max_pending_global: 4096,
+            max_pending_bytes_per_peer: default_max_pending_bytes_per_peer(),
+            max_pending_bytes_global: default_max_pending_bytes_global(),
             pending_ttl_ms: 120_000,
             overflow_policy: OverflowPolicy::DropOldest,
         }
@@ -650,6 +675,7 @@ mod tests {
                 max_pending_global: 512,
                 pending_ttl_ms: 30_000,
                 overflow_policy: OverflowPolicy::DropNewest,
+                ..Default::default()
             })
             .build()
             .unwrap();

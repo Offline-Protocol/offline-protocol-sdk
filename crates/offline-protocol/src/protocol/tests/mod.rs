@@ -12890,3 +12890,358 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
         events
     );
 }
+
+/// Builds a legacy chunk message using the pre-binary JSON content format.
+fn legacy_json_chunk_message(sender: &str, recipient: &str, data: &[u8]) -> Message {
+    use crate::file_transfer::FileChunk;
+    use sha2::{Digest, Sha256};
+
+    let chunk = FileChunk {
+        file_id: "file_legacy_json".to_string(),
+        file_name: "legacy-json.bin".to_string(),
+        file_size: data.len() as u64,
+        total_chunks: 1,
+        chunk_index: 0,
+        chunk_data: data.to_vec(),
+        file_checksum: format!("{:x}", Sha256::digest(data)),
+    };
+
+    let mut msg = Message::new(
+        UserId::new(sender).unwrap(),
+        UserId::new(recipient).unwrap(),
+        AppId::new("test-app").unwrap(),
+        chunk.to_json().unwrap(),
+    );
+    msg.content_type = ContentType::FileChunk;
+    msg
+}
+
+#[test]
+fn test_plaintext_json_media_rejected_once_session_confirmed() {
+    // The legacy JSON-content chunk path (no binary_content) must be gated by
+    // the same downgrade policy as the binary path.
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let received = capture_file_received(&mut bob);
+    bob_handle.queue_message(legacy_json_chunk_message("alice", "bob", &[7u8; 64]));
+    while bob.receive_message().is_some() {}
+
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "JSON-content plaintext media from a session-confirmed peer must be rejected"
+    );
+}
+
+#[test]
+fn test_plaintext_json_media_accepted_without_session_when_not_required() {
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+
+    let received = capture_file_received(&mut bob);
+    bob_handle.queue_message(legacy_json_chunk_message("alice", "bob", &[7u8; 64]));
+    while bob.receive_message().is_some() {}
+
+    let got = received.lock().unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].4, vec![7u8; 64]);
+}
+
+#[test]
+fn test_media_transfer_encryption_failure_aborts_loudly() {
+    // A chunk that fails to encrypt mid-transfer (session invalidated
+    // concurrently) must abort the whole transfer — emitting MediaSendFailed
+    // and freeing the per-peer transfer slot — instead of wedging until the
+    // stale sweep.
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let failed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let failed_clone = failed.clone();
+    alice.on_event(move |event| {
+        if let Event::MediaSendFailed {
+            file_id, recipient, ..
+        } = event
+        {
+            failed_clone
+                .lock()
+                .unwrap()
+                .push((file_id.clone(), recipient.clone()));
+        }
+    });
+
+    // 9 KB over 4 KB BLE chunks (window 2): chunk 2 is sent by a later pump.
+    let file_data = vec![0x77u8; 9 * 1024];
+    let file_id = alice
+        .send_media("bob", file_data, "wedge.bin", ContentType::File, None)
+        .unwrap();
+
+    // Invalidate the session mid-transfer; the next pumped batch cannot encrypt.
+    {
+        let mls = alice.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager.delete_session("bob").unwrap();
+    }
+
+    // Ferry the initial window to bob, ferry his ACKs back, then pump.
+    let outbound = alice_handle.sent_messages();
+    alice_handle.clear_sent_messages();
+    for msg in outbound {
+        bob_handle.queue_message(msg);
+    }
+    while bob.receive_message().is_some() {}
+    let acks = bob_handle.sent_messages();
+    bob_handle.clear_sent_messages();
+    for msg in acks {
+        alice_handle.queue_message(msg);
+    }
+    while alice.receive_message().is_some() {}
+    alice.pump_media_transfers();
+
+    {
+        let got = failed.lock().unwrap();
+        assert_eq!(
+            got.len(),
+            1,
+            "encryption failure must surface exactly one MediaSendFailed, got {:?}",
+            got
+        );
+        assert_eq!(got[0].0, file_id);
+        assert_eq!(got[0].1, "bob");
+    }
+    assert!(
+        alice.outbound_media_transfers.is_empty(),
+        "aborted transfer must release all tracking state"
+    );
+
+    // The freed slot means a retry is gated on the missing session — it must
+    // never be rejected with MediaTransferLimit by the dead transfer.
+    let retry = alice.send_media("bob", vec![1u8; 64], "retry.bin", ContentType::File, None);
+    assert!(
+        matches!(retry, Err(Error::SessionNotReady(_))),
+        "retry after abort must be gated on the session, got {:?}",
+        retry.map(|_| ())
+    );
+}
+
+#[test]
+fn test_send_media_initial_encryption_failure_leaves_no_zombie_transfer() {
+    use crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER;
+
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+
+    // Repeated initial-batch encryption failures (stale confirmed cache, no
+    // real MLS session) must never accumulate transfers toward the per-peer
+    // cap: each failed send aborts and frees its slot.
+    for _ in 0..=MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
+        alice.confirmed_sessions.insert("bob".to_string());
+        let result = alice.send_media("bob", vec![1u8; 64], "z.bin", ContentType::File, None);
+        assert!(
+            matches!(result, Err(Error::SessionNotReady(_))),
+            "failed initial batch must return SessionNotReady (never MediaTransferLimit), got {:?}",
+            result.map(|_| ())
+        );
+        assert!(
+            alice.outbound_media_transfers.is_empty(),
+            "failed initial batch must not leave a zombie transfer"
+        );
+    }
+    assert!(
+        alice_handle.sent_messages().is_empty(),
+        "no chunk may reach the wire when encryption fails"
+    );
+}
+
+#[test]
+fn test_media_chunk_hard_decrypt_failure_emits_decryption_failed_event() {
+    use crate::events::DecryptionFailureCode;
+    use crate::media_envelope::encode_media_envelope;
+
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let failures: Arc<Mutex<Vec<(String, DecryptionFailureCode, String)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let failures_clone = failures.clone();
+    bob.on_event(move |event| {
+        if let Event::MessageDecryptionFailed {
+            sender,
+            code,
+            reason,
+            ..
+        } = event
+        {
+            failures_clone
+                .lock()
+                .unwrap()
+                .push((sender.clone(), code, reason.clone()));
+        }
+    });
+
+    // A structurally valid envelope for the correct session group whose MLS
+    // ciphertext is garbage: decryption hard-fails (not session-not-ready),
+    // and the loss is permanent because the chunk was ACKed on receipt.
+    let mut encrypted = {
+        let mls = alice.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager.encrypt_for_user("bob", b"payload").unwrap()
+    };
+    encrypted.ciphertext = vec![0u8; 24];
+
+    let mut msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "",
+    );
+    msg.content_type = ContentType::FileChunk;
+    msg.binary_content = Some(encode_media_envelope(&encrypted));
+    bob_handle.queue_message(msg);
+    while bob.receive_message().is_some() {}
+
+    let got = failures.lock().unwrap();
+    assert!(
+        got.iter().any(|(sender, code, reason)| sender == "alice"
+            && *code != DecryptionFailureCode::PendingQueueDropped
+            && reason.contains("file transfer cannot complete")),
+        "hard decrypt failure of a media chunk must surface MessageDecryptionFailed, got {:?}",
+        got
+    );
+}
+
+// ============================================================================
+// PENDING QUEUE BYTE BUDGETS
+// ============================================================================
+
+fn pending_test_message_with_bytes(sender: &str, payload_len: usize) -> Message {
+    let mut msg = pending_test_message(sender, "");
+    msg.binary_content = Some(vec![0u8; payload_len]);
+    msg
+}
+
+#[test]
+fn test_pending_queue_per_peer_byte_budget_evicts_oldest() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_bytes_per_peer = 1024;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let queue_config = protocol.config.encryption.pending_queue.clone();
+
+    let m1 = pending_test_message_with_bytes("peer", 400);
+    let m2 = pending_test_message_with_bytes("peer", 400);
+    let m3 = pending_test_message_with_bytes("peer", 400);
+
+    assert!(protocol
+        .pending_queue
+        .enqueue(&queue_config, "peer", &m1)
+        .is_empty());
+    assert!(protocol
+        .pending_queue
+        .enqueue(&queue_config, "peer", &m2)
+        .is_empty());
+
+    // 1200 bytes would exceed the 1024 budget: the oldest is evicted.
+    let dropped = protocol.pending_queue.enqueue(&queue_config, "peer", &m3);
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(dropped[0].message.id, m1.id, "oldest entry must be evicted");
+    assert_eq!(protocol.pending_queue.peer_queue_len("peer"), 2);
+    assert!(protocol.pending_queue.total_bytes() <= 1024);
+}
+
+#[test]
+fn test_pending_queue_per_peer_byte_budget_drop_newest_policy() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_bytes_per_peer = 1024;
+    config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let queue_config = protocol.config.encryption.pending_queue.clone();
+
+    let m1 = pending_test_message_with_bytes("peer", 600);
+    let m2 = pending_test_message_with_bytes("peer", 600);
+
+    assert!(protocol
+        .pending_queue
+        .enqueue(&queue_config, "peer", &m1)
+        .is_empty());
+    let dropped = protocol.pending_queue.enqueue(&queue_config, "peer", &m2);
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(
+        dropped[0].message.id, m2.id,
+        "DropNewest must reject the incoming message"
+    );
+    assert_eq!(protocol.pending_queue.peer_queue_len("peer"), 1);
+}
+
+#[test]
+fn test_pending_queue_global_byte_budget_evicts_oldest_across_peers() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_bytes_global = 1024;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let queue_config = protocol.config.encryption.pending_queue.clone();
+
+    let m1 = pending_test_message_with_bytes("peer-a", 600);
+    let m2 = pending_test_message_with_bytes("peer-b", 600);
+
+    assert!(protocol
+        .pending_queue
+        .enqueue(&queue_config, "peer-a", &m1)
+        .is_empty());
+    let dropped = protocol.pending_queue.enqueue(&queue_config, "peer-b", &m2);
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(
+        dropped[0].message.id, m1.id,
+        "global budget must evict the globally oldest"
+    );
+    assert!(!protocol.pending_queue.contains_peer("peer-a"));
+    assert_eq!(protocol.pending_queue.peer_queue_len("peer-b"), 1);
+    assert!(protocol.pending_queue.total_bytes() <= 1024);
+}
+
+#[test]
+fn test_pending_queue_oversized_message_dropped_outright() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_bytes_per_peer = 256;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let queue_config = protocol.config.encryption.pending_queue.clone();
+
+    // A message that can never fit is rejected without evicting anything.
+    let small = pending_test_message_with_bytes("peer", 100);
+    assert!(protocol
+        .pending_queue
+        .enqueue(&queue_config, "peer", &small)
+        .is_empty());
+
+    let oversized = pending_test_message_with_bytes("peer", 512);
+    let dropped = protocol
+        .pending_queue
+        .enqueue(&queue_config, "peer", &oversized);
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(dropped[0].message.id, oversized.id);
+    assert_eq!(
+        protocol.pending_queue.peer_queue_len("peer"),
+        1,
+        "existing entries must not be evicted for a message that cannot fit"
+    );
+}
+
+#[test]
+fn test_pending_queue_byte_accounting_across_drain() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let queue_config = protocol.config.encryption.pending_queue.clone();
+
+    let m1 = pending_test_message_with_bytes("peer", 300);
+    let m2 = pending_test_message_with_bytes("peer", 200);
+    protocol.pending_queue.enqueue(&queue_config, "peer", &m1);
+    protocol.pending_queue.enqueue(&queue_config, "peer", &m2);
+    assert_eq!(protocol.pending_queue.total_bytes(), 500);
+    assert_eq!(protocol.pending_queue.metrics().pending_bytes_current, 500);
+
+    let drained = protocol.pending_queue.drain_for_peer(&queue_config, "peer");
+    assert_eq!(drained.len(), 2);
+    assert_eq!(protocol.pending_queue.total_bytes(), 0);
+}

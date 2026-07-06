@@ -66,10 +66,14 @@ pub const MAX_MEDIA_OUTBOX_ENTRIES: usize = 100;
 /// the receiver retains out-of-order message keys for only
 /// `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` (32) generations. Each transfer
 /// keeps up to `MEDIA_WINDOW_SIZE_INTERNET` (8) chunks in flight, so two
-/// concurrent transfers bound the in-flight gap at 16 generations — 2x
-/// headroom for interleaved text. Without this cap, enough concurrent
-/// transfers could push a delayed chunk beyond the tolerance and permanently
-/// stall its transfer.
+/// concurrent transfers bound the media-side in-flight gap at 16
+/// generations, leaving room for up to 16 further messages interleaved on
+/// the same ratchet before a delayed chunk's key is deleted. That residual
+/// is not a guarantee: text sends are unbounded, and a chunk delayed while
+/// 32+ interleaved messages decrypt first is permanently undecryptable (the
+/// receiver surfaces this as `MessageDecryptionFailed`). Without this cap,
+/// concurrent transfers alone could push a delayed chunk beyond the
+/// tolerance and permanently stall its transfer.
 pub const MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER: usize = 2;
 
 /// Metadata key indicating preferred transport for a message.

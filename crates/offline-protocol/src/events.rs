@@ -417,6 +417,19 @@ pub enum Event {
         recipient: String,
     },
 
+    /// An outbound media transfer was aborted before all chunks were
+    /// delivered — a chunk failed to encrypt, or a chunk failed terminally
+    /// in the outbox. No `MediaSent` will follow for this `file_id`; retry
+    /// with a new `send_media` call.
+    MediaSendFailed {
+        /// File identifier for tracking.
+        file_id: String,
+        /// Recipient's user ID.
+        recipient: String,
+        /// Reason the transfer was aborted.
+        reason: String,
+    },
+
     /// A message was deferred due to network conditions.
     /// The message will be retried automatically.
     MessageDeferred {
@@ -1099,6 +1112,15 @@ impl Event {
         }
     }
 
+    /// Creates a MediaSendFailed event.
+    pub fn media_send_failed(file_id: String, recipient: String, reason: String) -> Self {
+        Self::MediaSendFailed {
+            file_id,
+            recipient,
+            reason,
+        }
+    }
+
     /// Creates a MessageDeferred event.
     pub fn message_deferred(
         message_id: MessageId,
@@ -1651,6 +1673,7 @@ impl Event {
             Self::FileProgress { .. } => "protocol.file.progress",
             Self::FileReceived { .. } => "protocol.file.received",
             Self::MediaSent { .. } => "protocol.media.sent",
+            Self::MediaSendFailed { .. } => "protocol.media.send_failed",
             Self::MessageDeferred { .. } => "protocol.message.deferred",
             Self::AckEvicted { .. } => "protocol.ack.evicted",
             Self::FragmentAssemblyEvicted { .. } => "protocol.fragment.assembly_evicted",
@@ -1916,6 +1939,16 @@ impl fmt::Debug for Event {
                 .field("file_id", file_id)
                 .field("content_type", content_type)
                 .field("recipient", &"[REDACTED]")
+                .finish(),
+            Self::MediaSendFailed {
+                file_id,
+                recipient: _,
+                reason,
+            } => f
+                .debug_struct("MediaSendFailed")
+                .field("file_id", file_id)
+                .field("recipient", &"[REDACTED]")
+                .field("reason", reason)
                 .finish(),
             Self::MessageDeferred {
                 message_id,
