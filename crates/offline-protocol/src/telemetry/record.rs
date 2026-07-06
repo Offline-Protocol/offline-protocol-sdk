@@ -120,6 +120,7 @@ mod tests {
         "protocol.network.metrics",
         "protocol.file.progress",
         "protocol.file.received",
+        "protocol.file.receive_failed",
         "protocol.media.sent",
         "protocol.media.send_failed",
         "protocol.message.deferred",
@@ -287,6 +288,7 @@ mod tests {
             | Event::NetworkMetrics { .. }
             | Event::FileProgress { .. }
             | Event::FileReceived { .. }
+            | Event::FileReceiveFailed { .. }
             | Event::MediaSent { .. }
             | Event::MediaSendFailed { .. }
             | Event::MessageDeferred { .. }
@@ -435,6 +437,12 @@ mod tests {
                 content_type: String::new(),
                 media_metadata: None,
                 file_data: String::new(),
+            },
+            Event::FileReceiveFailed {
+                file_id: String::new(),
+                file_name: String::new(),
+                sender: String::new(),
+                reason: String::new(),
             },
             Event::MediaSent {
                 file_id: String::new(),

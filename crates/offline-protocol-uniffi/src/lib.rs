@@ -3943,6 +3943,16 @@ impl OfflineProtocol {
 
     /// Processes a received file chunk (manual path, for platforms handling
     /// their own chunk routing outside the protocol receive loop).
+    ///
+    /// Fails if the chunk is rejected: malformed or out-of-bounds fields,
+    /// metadata that does not match the existing assembly, or a receive-path
+    /// resource limit (all manual chunks share one pseudo-sender, so they are
+    /// collectively subject to the per-sender concurrent-transfer quota and
+    /// the global buffer budget). The error message carries the stable
+    /// rejection reason. Once a transfer fails, its remaining chunks are
+    /// rejected with reason `previously_failed`; retry the transfer under a
+    /// fresh `file_id` (the failed id is re-admitted only after no chunk for
+    /// it has been seen for the 300 s stale timeout).
     #[allow(clippy::too_many_arguments)]
     pub fn process_file_chunk(
         &self,
@@ -3956,7 +3966,7 @@ impl OfflineProtocol {
     ) -> Result<(), ProtocolError> {
         let mut protocol = self.lock_inner()?;
 
-        use offline_protocol::file_transfer::FileChunk;
+        use offline_protocol::file_transfer::{FileChunk, FileTransferManager};
         let chunk = FileChunk {
             file_id,
             file_name,
@@ -3967,7 +3977,14 @@ impl OfflineProtocol {
             file_checksum,
         };
 
-        protocol.file_transfer_manager_mut().process_chunk(chunk);
+        // The manual path carries no wire sender; all manual chunks share
+        // the MANUAL_SENDER pseudo-identity for sender binding and quota.
+        protocol
+            .file_transfer_manager_mut()
+            .process_chunk(FileTransferManager::MANUAL_SENDER, chunk)
+            .map_err(|rejection| {
+                ProtocolError::Other(format!("File chunk rejected: {}", rejection.as_str()))
+            })?;
         Ok(())
     }
 

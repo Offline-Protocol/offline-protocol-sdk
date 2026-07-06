@@ -657,6 +657,28 @@ export interface FileReceivedEvent extends BaseEvent {
 }
 
 /**
+ * An inbound file transfer was dropped before completion — the receiver hit
+ * a resource limit (too many concurrent transfers, per-sender quota, or the
+ * buffered-bytes budget), the reassembled file failed its integrity checks,
+ * or the transfer went stale (no chunks within the stale timeout). Terminal
+ * and fired at most once per transfer: the failed transfer's remaining
+ * in-flight chunks are dropped silently. No `file_received` will follow for
+ * this `file_id`; the sender must re-send the file (under a fresh `file_id`)
+ * to retry.
+ */
+export interface FileReceiveFailedEvent extends BaseEvent {
+  type: 'file_receive_failed';
+  file_id: string;
+  file_name: string;
+  sender: string;
+  /**
+   * Machine-readable reason: 'too_many_transfers' | 'sender_quota_exceeded'
+   * | 'buffer_budget_exhausted' | 'integrity_check_failed' | 'stale_timeout'
+   */
+  reason: string;
+}
+
+/**
  * Media sent event - all chunks ACK-delivered
  */
 export interface MediaSentEvent extends BaseEvent {
@@ -1200,6 +1222,7 @@ export type ProtocolEvent =
   | NetworkMetricsEvent
   | FileProgressEvent
   | FileReceivedEvent
+  | FileReceiveFailedEvent
   | MediaSentEvent
   | MediaSendFailedEvent
   | DiagnosticEvent

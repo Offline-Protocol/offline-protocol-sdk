@@ -367,38 +367,71 @@ impl OfflineProtocol {
         let file_id = chunk.file_id.clone();
         let file_name = chunk.file_name.clone();
         let file_size = chunk.file_size;
+        let is_first_chunk = chunk.chunk_index == 0;
 
-        if chunk.chunk_index == 0 {
-            self.pending_media_metadata.insert(
-                file_id.clone(),
-                PendingMediaMetadataEntry {
-                    content_type: original_content_type.unwrap_or(ContentType::File),
-                    media_metadata,
-                    last_updated_at: Instant::now(),
-                    sender: sender.clone(),
-                },
-            );
-        }
-
-        if let Some(progress) = self.file_transfer_manager.process_chunk(chunk) {
-            if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
-                entry.last_updated_at = Instant::now();
+        // Metadata is recorded only for chunks the manager accepts — a
+        // rejected chunk must leave no state behind (SEC-H2).
+        match self.file_transfer_manager.process_chunk(&sender, chunk) {
+            Ok(progress) => {
+                if is_first_chunk {
+                    self.pending_media_metadata.insert(
+                        file_id.clone(),
+                        PendingMediaMetadataEntry {
+                            content_type: original_content_type.unwrap_or(ContentType::File),
+                            media_metadata,
+                            last_updated_at: Instant::now(),
+                            sender: sender.clone(),
+                        },
+                    );
+                } else if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
+                    entry.last_updated_at = Instant::now();
+                }
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::file_progress(
+                        file_id.clone(),
+                        progress.chunks_completed,
+                        progress.total_chunks,
+                    ));
+                }
             }
-            if let Ok(state) = lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::file_progress(
-                    file_id.clone(),
-                    progress.chunks_completed,
-                    progress.total_chunks,
-                ));
+            Err(rejection) if rejection.is_resource_exhaustion() => {
+                // A well-formed transfer was dropped by a receiver-side
+                // resource limit. The chunk was already ACKed and will not
+                // be retransmitted, so the transfer is unrecoverable —
+                // surface that to the application instead of going silent.
+                self.pending_media_metadata.remove(&file_id);
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::file_receive_failed(
+                        file_id,
+                        file_name,
+                        sender,
+                        rejection.as_str().to_string(),
+                    ));
+                }
+                return;
             }
+            // Malformed or mismatched chunks are logged by the manager; the
+            // assembly they targeted (if any) stays intact. Chunks of an
+            // already-failed transfer land here too (`previously_failed`) —
+            // its FileReceiveFailed event already fired exactly once.
+            Err(_) => return,
         }
 
         if self.file_transfer_manager.is_complete(&file_id) {
             let Some(file_data) = self.file_transfer_manager.finalize_file(&file_id) else {
                 warn!(
                     file_id = %file_id,
-                    "File transfer marked complete but reassembly failed"
+                    "File transfer marked complete but reassembly or integrity checks failed"
                 );
+                self.pending_media_metadata.remove(&file_id);
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::file_receive_failed(
+                        file_id,
+                        file_name,
+                        sender,
+                        "integrity_check_failed".to_string(),
+                    ));
+                }
                 return;
             };
             let metadata_entry = self.pending_media_metadata.remove(&file_id);
