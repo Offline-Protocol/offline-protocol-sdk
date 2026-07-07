@@ -413,6 +413,43 @@ mod tests {
     }
 
     #[test]
+    fn test_backoff_non_finite_multiplier_collapses_to_max_delay() {
+        // Locks down the totality claim on delay_for_retry: NaN and infinity
+        // collapse to exactly max_delay_ms, not merely something <= it.
+        for multiplier in [f32::NAN, f32::INFINITY] {
+            let config = RetryConfig {
+                initial_delay_ms: 1000,
+                backoff_multiplier: multiplier,
+                max_delay_ms: 30_000,
+                ..Default::default()
+            };
+
+            for retry_count in [1, 20, u32::MAX] {
+                assert_eq!(
+                    config.delay_for_retry(retry_count),
+                    30_000,
+                    "multiplier {multiplier} retry {retry_count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_backoff_retry_zero_clamped_to_max_delay() {
+        // retry 0 no longer bypasses the max_delay_ms clamp: a misconfigured
+        // initial_delay_ms > max_delay_ms yields max_delay_ms, not the raw
+        // initial delay.
+        let config = RetryConfig {
+            initial_delay_ms: 60_000,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 30_000,
+            ..Default::default()
+        };
+
+        assert_eq!(config.delay_for_retry(0), 30_000);
+    }
+
+    #[test]
     fn test_enqueue_backoff_clamped_to_max_delay() {
         // Exercise the real enqueue path with a multiplier that overflowed
         // the old inline formula.
