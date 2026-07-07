@@ -40,7 +40,7 @@ await protocol.start();
 // Initialize MLS encryption (required once)
 await protocol.initializeMlsWithSecureStorage();
 
-// Messages are automatically encrypted when possible!
+// Messages are automatically encrypted!
 const messageId = await protocol.sendMessage({
   recipient: 'recipient456',
   content: 'Hello!',  // Automatically encrypted
@@ -50,6 +50,11 @@ const messageId = await protocol.sendMessage({
 
 ### Encryption Configuration
 
+Encryption is **fail-closed by default**: if a message cannot be encrypted
+(e.g. MLS was never initialized), the send fails with a typed error instead of
+silently falling back to plaintext. Messages to peers whose secure session is
+still being established are queued and delivered encrypted once it is ready.
+
 ```typescript
 const protocol = new OfflineProtocol({
   appId: 'my-app',
@@ -58,9 +63,15 @@ const protocol = new OfflineProtocol({
     enabled: true,           // Auto-encrypt (default)
     autoKeyExchange: true,   // Exchange keys on peer discovery (default)
     storePending: true,      // Queue messages until session ready (default)
+    requireEncryption: true, // Fail closed, never silent plaintext (default)
   },
 });
 ```
+
+To deliberately operate in plaintext (e.g. an open-broadcast mesh with no
+provisioned key storage), opt out explicitly with `requireEncryption: false` —
+each plaintext send then emits a `security_warning` event with the
+`PLAINTEXT_SEND` reason code (once per peer).
 
 
 ## Building the SDK

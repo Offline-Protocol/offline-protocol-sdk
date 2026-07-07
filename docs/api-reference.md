@@ -86,10 +86,10 @@ let config = ProtocolConfig::builder("my-app", "user123")
     .wifi_direct_enabled(true)
     .online_first(false)
     .initial_ttl(10)
-    .encryption_enabled(true)      // NEW: Auto-encryption
-    .auto_key_exchange(true)       // NEW: Auto key exchange
-    .store_pending_messages(true)  // NEW: Queue pending messages
-    .require_encryption(false)     // NEW: Strict encryption policy
+    .encryption_enabled(true)      // Auto-encryption
+    .auto_key_exchange(true)       // Auto key exchange
+    .store_pending_messages(true)  // Queue pending messages
+    .require_encryption(true)      // Strict fail-closed policy (the default)
     .build()?;
 ```
 
@@ -108,7 +108,8 @@ pub struct EncryptionConfig {
     /// Store pending messages when no session exists (default: true)
     pub store_pending: bool,
 
-    /// Require encryption for outbound sends (default: false)
+    /// Require encryption for outbound sends (default: true — fail-closed;
+    /// set to false to explicitly opt in to plaintext operation)
     pub require_encryption: bool,
 
     /// Bounds and eviction policy for encrypted messages received
@@ -301,13 +302,17 @@ Called when a neighbor is lost. Cleans up tracking state.
 2. Creates a session and sends Welcome if we have the recipient's key package
 3. Queues the message if `store_pending` is `true` and no session/key package exists
 
-With default settings, encryption is best-effort. Set `encryption.require_encryption = true`
-to guarantee encrypted delivery or fail with a typed error (`SessionNotReady`
-or `EncryptFailed`).
+Encryption is required by default (`encryption.require_encryption = true`):
+encrypted delivery is guaranteed, or the send fails with a typed error
+(`SessionNotReady` or `EncryptFailed`) / queues when `store_pending` is enabled.
+Set `require_encryption = false` to explicitly opt in to plaintext operation;
+each plaintext send then emits a `SecurityWarning` event with the
+`PLAINTEXT_SEND` reason code (once per peer).
 
 In strict mode, send failures are fail-fast and do not transmit transport payloads.
-Connection-control APIs that require plaintext bootstrap messages are rejected while
-`encryption.require_encryption = true`.
+Connection-control APIs (connection request/accept/reject) are internal plaintext
+bootstrap messages and are exempt from `require_encryption` — same as key
+packages and service discovery.
 
 Rust migration note:
 - `offline_protocol::Error` includes strict-mode variants (`SessionNotReady`, `EncryptFailed`).

@@ -85,17 +85,9 @@ Service discovery broadcasts to **all known peers**, not just those with establi
 
 ### Encryption Interaction
 
-Service discovery, requests, and responses use `send_internal_message()` and are sent as **plaintext control messages**. If `require_encryption` is set to `true` in the protocol config, all service APIs will return an error:
+Service discovery, requests, and responses use `send_internal_message()` and are sent as **signed plaintext control messages** (Ed25519 control-message signing, not MLS). They are internal control messages — not user content — so they are **exempt from `require_encryption`**: service APIs work unchanged under the default fail-closed encryption policy (`require_encryption = true`), just like key packages, Welcome messages, and connection requests.
 
-```
-"discover_services sends plaintext control messages; disable require_encryption for bootstrap flows"
-```
-
-To use service discovery, either:
-- Leave `require_encryption` as `false` (default), or
-- Set it to `false` during the bootstrap/discovery phase, then enable it later.
-
-Note: If MLS encryption **is** established with a peer but `require_encryption` is false, service messages still benefit from the encryption layer automatically through `send_internal_message`.
+Treat service payloads accordingly: anything passed through service discovery/request/response bodies travels unencrypted on the wire. Do not put sensitive user content in them.
 
 ## Rust API
 
@@ -368,7 +360,7 @@ Service discovery is built on top of existing protocol infrastructure:
 
 - **Transport**: All service messages route through the DORS multi-transport selector (BLE, WiFi Direct, Internet, Reticulum). The best available transport is chosen automatically.
 - **Reliability**: ACK/retry mechanisms from the reliability layer are automatically applied to request/response messages.
-- **Encryption**: When MLS sessions exist, service messages are encrypted transparently. When they don't, messages are sent in plaintext (as long as `require_encryption` is false).
+- **Encryption**: Service messages are signed plaintext control messages, exempt from `require_encryption` (they bootstrap connectivity before sessions exist). Do not put sensitive user content in service payloads.
 - **Routing**: Discovery queries use the existing gossip and message forwarding infrastructure with the same deduplication and hop-counting as other mesh messages.
 - **Events**: Integrated with the existing `EventCallback` system — no separate event subscription needed.
 

@@ -89,8 +89,8 @@ const protocol = new OfflineProtocol({
     // Queue messages if no session exists yet (default: true)
     storePending: true,
 
-    // Require encrypted delivery or fail send (default: false)
-    requireEncryption: false,
+    // Require encrypted delivery or fail send (default: true, fail-closed)
+    requireEncryption: true,
   }
 });
 ```
@@ -100,15 +100,19 @@ const protocol = new OfflineProtocol({
 | `enabled` | `true` | Enable automatic encryption/decryption |
 | `autoKeyExchange` | `true` | Automatically exchange key packages on peer discovery |
 | `storePending` | `true` | Queue messages when no session exists (sent after session established) |
-| `requireEncryption` | `false` | Enforce encrypted delivery (send fails if encryption cannot be applied) |
+| `requireEncryption` | `true` | Enforce encrypted delivery (send fails closed if encryption cannot be applied) |
 | `pendingQueue.maxPendingPerPeer` | `64` | Per-peer cap for encrypted messages received before session readiness |
 | `pendingQueue.maxPendingGlobal` | `4096` | Global cap for encrypted messages received before session readiness |
 | `pendingQueue.pendingTtlMs` | `120000` | TTL for encrypted messages queued before session readiness |
 | `pendingQueue.overflowPolicy` | `drop_oldest` | Overflow policy: `drop_oldest` or `drop_newest` |
 
-Encryption is best-effort by default. Set `requireEncryption: true` to guarantee encrypted delivery or failure.
-In strict mode, outbound sends fail without transport transmission if encryption cannot be applied.
-Connection bootstrap APIs that depend on plaintext control messages are rejected while strict mode is enabled.
+Encryption is required by default (fail-closed): outbound sends fail without transport
+transmission if encryption cannot be applied, instead of silently degrading to plaintext.
+Set `requireEncryption: false` to explicitly opt in to plaintext operation — each
+plaintext send then emits a `security_warning` event with the `PLAINTEXT_SEND` reason
+code (once per peer). Connection bootstrap APIs (connection requests, key packages,
+service discovery) are internal plaintext control messages and are exempt from strict
+mode — they continue to work.
 
 Queued encrypted messages received before session readiness use bounded storage with deterministic eviction:
 - Enforced limits: per-peer + global
