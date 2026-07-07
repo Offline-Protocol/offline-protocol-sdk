@@ -1546,7 +1546,9 @@ pub struct EncryptionConfig {
     pub auto_key_exchange: bool,
     /// Store pending messages when no session exists (default: true)
     pub store_pending: bool,
-    /// Require encryption for outbound sends (default: false)
+    /// Require encryption for outbound sends (default: true — sends fail
+    /// closed instead of silently degrading to plaintext; set to false to
+    /// explicitly opt in to plaintext operation)
     pub require_encryption: bool,
     /// Pending queue configuration for encrypted pre-session messages.
     pub pending_queue: PendingQueueConfig,
@@ -1558,7 +1560,7 @@ impl Default for EncryptionConfig {
             enabled: true,
             auto_key_exchange: true,
             store_pending: true,
-            require_encryption: false,
+            require_encryption: true,
             pending_queue: PendingQueueConfig::default(),
         }
     }
