@@ -160,8 +160,8 @@ public class NostrManager: NSObject, TransportManager {
 
         // Get the Nostr signing pubkey from the Rust core. This is a
         // per-install key that settles when MLS initialization installs the
-        // persisted signing secret, so configure() should run after
-        // initializeMls for a stable value.
+        // persisted signing secret; sendSubscription() refreshes it on every
+        // relay (re)connect in case that happens after configure().
         self.publicKeyHex = protocolInstance.nostrGetPublicKey() ?? ""
 
         isConfigured = true
@@ -434,6 +434,14 @@ public class NostrManager: NSObject, TransportManager {
     /// Send subscription request to receive DMs addressed to this device's pubkey.
     /// The subscription filter is created by the Rust core (real secp256k1 pubkey).
     private func sendSubscription(to relayUrl: String) {
+        // Re-read the signing pubkey used for self-event filtering: it
+        // rotates when MLS initialization installs the persisted signing
+        // secret, and this runs on every relay (re)connect — before any
+        // event can arrive on this subscription.
+        if let freshKey = protocolInstance.nostrGetPublicKey(), !freshKey.isEmpty {
+            publicKeyHex = freshKey
+        }
+
         let subId = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)
         let subIdStr = String(subId)
 

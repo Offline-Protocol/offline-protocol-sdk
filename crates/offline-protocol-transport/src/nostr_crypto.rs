@@ -114,18 +114,19 @@ impl NostrKeypair {
     /// process start. Callers that want a stable identity install a
     /// persisted secret afterwards via [`Self::from_install_secret`].
     pub fn generate_ephemeral() -> Result<Self> {
-        let secret = Zeroizing::new(Self::generate_install_secret()?);
+        let secret = Self::generate_install_secret()?;
         Self::from_install_secret(&*secret)
     }
 
     /// Generates a new 32-byte install secret from the OS CSPRNG.
     ///
     /// The caller is responsible for persisting it in platform-secure
-    /// storage; this module never stores anything.
-    pub fn generate_install_secret() -> Result<[u8; 32]> {
-        let mut secret = [0u8; 32];
+    /// storage; this module never stores anything. The returned buffer is
+    /// zeroed on drop.
+    pub fn generate_install_secret() -> Result<Zeroizing<[u8; 32]>> {
+        let mut secret = Zeroizing::new([0u8; 32]);
         OsRng
-            .try_fill_bytes(&mut secret)
+            .try_fill_bytes(&mut *secret)
             .map_err(|e| Error::CryptoError(format!("OS RNG failure: {}", e)))?;
         Ok(secret)
     }
@@ -315,8 +316,8 @@ mod tests {
     fn test_generate_install_secret_is_random() {
         let s1 = NostrKeypair::generate_install_secret().unwrap();
         let s2 = NostrKeypair::generate_install_secret().unwrap();
-        assert_ne!(s1, s2);
-        assert_ne!(s1, [0u8; 32]);
+        assert_ne!(*s1, *s2);
+        assert_ne!(*s1, [0u8; 32]);
     }
 
     #[test]
