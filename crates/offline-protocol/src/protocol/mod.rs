@@ -170,6 +170,13 @@ pub struct OfflineProtocol {
     /// re-load and rebuild the scrubber a second time).
     telemetry_secret_persisted: bool,
 
+    /// Whether the persistent per-install Nostr signing secret has been
+    /// loaded from (or initialized into) secure storage and installed into
+    /// the Nostr transport yet. Same idempotency role across the two
+    /// storage-entry paths as `telemetry_secret_persisted`; see
+    /// `restore_or_init_nostr_signing_secret`.
+    nostr_secret_persisted: bool,
+
     /// Installed telemetry context (sink + config + scrubber). `None` until
     /// `install_telemetry_sink` is called; thereafter shared with
     /// `SharedState` via `Arc` clone so both emit paths dispatch through the
@@ -323,6 +330,7 @@ impl OfflineProtocol {
             ),
             telemetry_fallback_secret,
             telemetry_secret_persisted: false,
+            nostr_secret_persisted: false,
             telemetry: None,
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),
@@ -386,6 +394,10 @@ impl OfflineProtocol {
         // the next attempt).
         self.restore_or_init_scrub_secret();
 
+        // Same reasoning for the Nostr signing secret: independent of MLS
+        // state, idempotent, and must survive an MLS-restore rollback.
+        self.restore_or_init_nostr_signing_secret();
+
         // Restore state from previous session
         let restore_result = (|| {
             self.restore_pending_messages()?;
@@ -428,6 +440,7 @@ impl OfflineProtocol {
     pub fn enable_message_persistence(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
         self.message_storage = Some(storage);
         self.restore_or_init_scrub_secret();
+        self.restore_or_init_nostr_signing_secret();
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
         self.restore_tofu_keys();

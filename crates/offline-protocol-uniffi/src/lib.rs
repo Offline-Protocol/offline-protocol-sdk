@@ -3691,9 +3691,9 @@ impl OfflineProtocol {
     /// `NeighborDiscovered` events). The real protocol-level sender
     /// is extracted from the deserialized `Message.sender` field.
     ///
-    /// Unlike BLE/Reticulum, the Nostr pubkey is a transport-level routing
-    /// key derived from the device ID — not the protocol user ID. Setting it
-    /// as `transport_peer_id` would cause the security gate to reject every
+    /// Unlike BLE/Reticulum, the Nostr pubkey is the sender's per-install
+    /// transport signing key — not the protocol user ID. Setting it as
+    /// `transport_peer_id` would cause the security gate to reject every
     /// control message (identity mismatch). We therefore enqueue with
     /// `on_data_received` (no transport peer ID) and rely on the protocol-
     /// level signature check instead.
@@ -3714,9 +3714,9 @@ impl OfflineProtocol {
             .flatten();
 
         // Use on_data_received (no transport_peer_id) because the Nostr pubkey
-        // is derived from device_id, not the protocol user_id. Passing the pubkey
-        // as transport_peer_id would cause validate_transport_sender to reject
-        // the message due to the identity mismatch.
+        // is the sender's install signing key, not the protocol user_id. Passing
+        // the pubkey as transport_peer_id would cause validate_transport_sender
+        // to reject the message due to the identity mismatch.
         if let Some(Err(e)) = self.with_nostr_transport_fallible(|nt| nt.on_data_received(data))? {
             return Err(ProtocolError::Other(format!(
                 "Failed to process nostr message: {}",
@@ -3820,18 +3820,23 @@ impl OfflineProtocol {
         });
     }
 
-    /// Returns this device's Nostr x-only public key as a 64-char hex string.
+    /// Returns this install's Nostr signing public key as a 64-char hex string.
     ///
     /// The platform uses this for display and for filtering out self-authored
     /// events. Returns `None` if the Nostr transport is not configured.
+    ///
+    /// The key is ephemeral until `initialize_mls` installs the persisted
+    /// per-install signing secret, so read it after MLS initialization rather
+    /// than caching it across that boundary.
     pub fn nostr_get_public_key(&self) -> Option<String> {
-        self.with_nostr_transport(|nt| nt.public_key_hex().to_string())
+        self.with_nostr_transport(|nt| nt.public_key_hex())
     }
 
-    /// Returns a NIP-01 subscription filter JSON for this device's pubkey.
+    /// Returns a NIP-01 subscription filter JSON for this device's routing tag
+    /// (the public addressing label peers derive from our user ID).
     ///
     /// Send this to each relay after connecting:
-    /// `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4]}]`
+    /// `["REQ", "<sub_id>", {"#p": ["<routing_tag>"], "kinds": [4]}]`
     pub fn nostr_get_subscription_filter(&self, subscription_id: String) -> Option<String> {
         self.with_nostr_transport(|nt| nt.create_subscription(&subscription_id).ok())
             .flatten()

@@ -5,51 +5,153 @@
 //!
 //! The platform side (iOS/Android) no longer handles crypto — it receives
 //! pre-signed event JSON strings ready for relay submission.
+//!
+//! # Key model
+//!
+//! Two independent values are in play, and they must not be conflated:
+//!
+//! - **Routing tag** ([`routing_tag_for_device_id`]): a public rendezvous
+//!   label derived deterministically from a device/user ID. Senders put the
+//!   recipient's tag in the event's `#p` tag; the recipient subscribes on its
+//!   own tag. It carries no secret — anyone who knows a device ID can (and
+//!   must be able to) compute it, exactly like an email address.
+//! - **Signing key** ([`NostrKeypair`]): the secp256k1 private key that signs
+//!   outgoing events. It is derived via HKDF-SHA256 from a per-install random
+//!   secret ([`NostrKeypair::from_install_secret`]) and is never derivable
+//!   from any public identifier.
+//!
+//! Historically both roles were served by `SHA-256(device_id)`, which let
+//! anyone who knew a device ID reconstruct that device's private key and sign
+//! events as it. Only the routing-tag role legitimately needs to be publicly
+//! derivable, so only it retains the deterministic derivation (unchanged on
+//! the wire for interoperability with older peers).
 
 use crate::{Error, Result};
+use hkdf::Hkdf;
 use k256::schnorr::SigningKey;
+use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
-/// A Nostr keypair derived deterministically from a device/user ID.
+/// Domain-separation prefix for deriving the Nostr signing key from the
+/// per-install secret. A trailing counter byte is appended per attempt so an
+/// (astronomically unlikely) invalid scalar can be retried deterministically.
+const SIGNING_KEY_HKDF_INFO: &[u8] = b"offline-protocol/nostr/v1/signing-key/";
+
+/// Upper bound on HKDF derivation attempts. Each attempt fails with
+/// probability ~2^-128 (scalar of zero or above the curve order), so more
+/// than one iteration is never expected in practice.
+const MAX_DERIVE_ATTEMPTS: u8 = 8;
+
+/// Minimum accepted install-secret length in bytes (128-bit security floor).
+const MIN_INSTALL_SECRET_LEN: usize = 16;
+
+/// A Nostr signing keypair for this install.
 ///
-/// Key derivation: `SHA-256(device_id)` → 32-byte scalar → secp256k1 signing key.
-/// The public key is the x-only coordinate (32 bytes, 64 hex chars) per BIP-340.
+/// The private key is derived from a per-install random secret via
+/// HKDF-SHA256 with domain separation (see [`Self::from_install_secret`]),
+/// or freshly generated ([`Self::generate_ephemeral`]) when no persisted
+/// secret is available yet. The public key is the x-only coordinate
+/// (32 bytes, 64 hex chars) per BIP-340.
 ///
-/// **Security note:** Anyone who knows the device_id can derive the keypair.
-/// This is acceptable because Nostr is used only as a transport layer; real
-/// identity and integrity come from the protocol-layer MLS encryption.
+/// The keypair authenticates this install to Nostr relays (event signatures,
+/// NIP-42 style auth). It is intentionally *not* derivable from the device
+/// ID; message addressing uses the separate [`routing_tag_for_device_id`]
+/// label instead.
 pub struct NostrKeypair {
     signing_key: SigningKey,
     public_key_hex: String,
 }
 
 impl NostrKeypair {
-    /// Derives a keypair deterministically from a device/user ID string.
-    pub fn from_device_id(device_id: &str) -> Result<Self> {
-        let secret_bytes = Sha256::digest(device_id.as_bytes());
-        let signing_key = SigningKey::from_bytes(secret_bytes.as_slice()).map_err(|e| {
-            Error::CryptoError(format!("Invalid private key from device_id: {}", e))
-        })?;
-        let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
-        Ok(Self {
-            signing_key,
-            public_key_hex,
-        })
+    /// Derives the signing keypair from a per-install random secret.
+    ///
+    /// Derivation: `HKDF-SHA256(ikm = secret, salt = none,
+    /// info = "offline-protocol/nostr/v1/signing-key/" || counter)` → 32-byte
+    /// scalar → secp256k1 signing key. Deterministic: the same secret always
+    /// yields the same keypair, so the install's Nostr identity is stable
+    /// across restarts as long as the secret persists.
+    ///
+    /// Rejects secrets shorter than 16 bytes.
+    pub fn from_install_secret(secret: &[u8]) -> Result<Self> {
+        if secret.len() < MIN_INSTALL_SECRET_LEN {
+            return Err(Error::CryptoError(format!(
+                "Install secret too short: {} bytes (minimum {})",
+                secret.len(),
+                MIN_INSTALL_SECRET_LEN
+            )));
+        }
+
+        let hkdf = Hkdf::<Sha256>::new(None, secret);
+        let mut info = Vec::with_capacity(SIGNING_KEY_HKDF_INFO.len() + 1);
+        for counter in 0..MAX_DERIVE_ATTEMPTS {
+            info.clear();
+            info.extend_from_slice(SIGNING_KEY_HKDF_INFO);
+            info.push(counter);
+
+            let mut candidate = Zeroizing::new([0u8; 32]);
+            hkdf.expand(&info, &mut *candidate)
+                .map_err(|e| Error::CryptoError(format!("HKDF expand failed: {}", e)))?;
+
+            if let Ok(signing_key) = SigningKey::from_bytes(&*candidate) {
+                let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
+                return Ok(Self {
+                    signing_key,
+                    public_key_hex,
+                });
+            }
+        }
+
+        Err(Error::CryptoError(
+            "Failed to derive a valid signing key from the install secret".to_string(),
+        ))
+    }
+
+    /// Generates a keypair from a fresh random secret that is not retained.
+    ///
+    /// Used as the construction-time default before a persisted install
+    /// secret is available: the key is unforgeable but changes on every
+    /// process start. Callers that want a stable identity install a
+    /// persisted secret afterwards via [`Self::from_install_secret`].
+    pub fn generate_ephemeral() -> Result<Self> {
+        let secret = Zeroizing::new(Self::generate_install_secret()?);
+        Self::from_install_secret(&*secret)
+    }
+
+    /// Generates a new 32-byte install secret from the OS CSPRNG.
+    ///
+    /// The caller is responsible for persisting it in platform-secure
+    /// storage; this module never stores anything.
+    pub fn generate_install_secret() -> Result<[u8; 32]> {
+        let mut secret = [0u8; 32];
+        OsRng
+            .try_fill_bytes(&mut secret)
+            .map_err(|e| Error::CryptoError(format!("OS RNG failure: {}", e)))?;
+        Ok(secret)
     }
 
     /// Returns the x-only public key as a 64-character lowercase hex string.
     pub fn public_key_hex(&self) -> &str {
         &self.public_key_hex
     }
+}
 
-    /// Computes the Nostr public key hex for an arbitrary device_id.
-    ///
-    /// Both sender and recipient use this to derive each other's pubkeys
-    /// without exchanging keys out-of-band.
-    pub fn pubkey_hex_for_device_id(device_id: &str) -> Result<String> {
-        let kp = Self::from_device_id(device_id)?;
-        Ok(kp.public_key_hex)
-    }
+/// Computes the public routing tag for a device/user ID.
+///
+/// Derivation: `SHA-256(device_id)` → scalar → x-only secp256k1 public key
+/// hex — byte-identical to the legacy shared derivation, so old and new
+/// versions address each other without a migration.
+///
+/// Senders place the recipient's tag in the `#p` tag of outgoing events and
+/// recipients subscribe on their own tag. It is a rendezvous label only:
+/// nothing signs with the corresponding scalar, and incoming events are never
+/// authenticated against it (sender authenticity comes from the
+/// protocol-layer MLS signatures).
+pub fn routing_tag_for_device_id(device_id: &str) -> Result<String> {
+    let tag_scalar = Sha256::digest(device_id.as_bytes());
+    let tag_key = SigningKey::from_bytes(tag_scalar.as_slice())
+        .map_err(|e| Error::CryptoError(format!("Invalid routing tag for device_id: {}", e)))?;
+    Ok(hex::encode(tag_key.verifying_key().to_bytes()))
 }
 
 /// A fully signed NIP-01 Nostr event ready for relay submission.
@@ -74,8 +176,9 @@ pub struct NostrEvent {
 impl NostrEvent {
     /// Creates and signs a NIP-04 direct message event.
     ///
-    /// - `keypair`: Sender's keypair (derived from their device_id).
-    /// - `recipient_pubkey_hex`: Recipient's x-only pubkey (64-char hex).
+    /// - `keypair`: Sender's signing keypair (per-install secret key).
+    /// - `recipient_pubkey_hex`: Recipient's routing tag (64-char hex, from
+    ///   [`routing_tag_for_device_id`]).
     /// - `content_base64`: Base64-encoded protocol message bytes.
     pub fn create_dm(
         keypair: &NostrKeypair,
@@ -142,7 +245,8 @@ impl NostrEvent {
     }
 }
 
-/// Creates a NIP-01 REQ subscription message for kind-4 DMs addressed to `pubkey_hex`.
+/// Creates a NIP-01 REQ subscription message for kind-4 DMs addressed to `pubkey_hex`
+/// (this device's own routing tag, from [`routing_tag_for_device_id`]).
 ///
 /// Returns `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4]}]`.
 pub fn create_subscription_message(pubkey_hex: &str, subscription_id: &str) -> Result<String> {
@@ -168,32 +272,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_keypair_from_device_id() {
-        let kp = NostrKeypair::from_device_id("alice").unwrap();
+    fn test_from_install_secret_deterministic() {
+        let secret = [7u8; 32];
+        let kp = NostrKeypair::from_install_secret(&secret).unwrap();
         assert_eq!(kp.public_key_hex().len(), 64);
-        // Deterministic: same input → same output
-        let kp2 = NostrKeypair::from_device_id("alice").unwrap();
+        // Deterministic: same secret → same key across "restarts"
+        let kp2 = NostrKeypair::from_install_secret(&secret).unwrap();
         assert_eq!(kp.public_key_hex(), kp2.public_key_hex());
     }
 
     #[test]
-    fn test_different_device_ids_different_keys() {
-        let kp1 = NostrKeypair::from_device_id("alice").unwrap();
-        let kp2 = NostrKeypair::from_device_id("bob").unwrap();
+    fn test_different_secrets_different_keys() {
+        let kp1 = NostrKeypair::from_install_secret(&[1u8; 32]).unwrap();
+        let kp2 = NostrKeypair::from_install_secret(&[2u8; 32]).unwrap();
         assert_ne!(kp1.public_key_hex(), kp2.public_key_hex());
     }
 
     #[test]
-    fn test_pubkey_hex_for_device_id() {
-        let kp = NostrKeypair::from_device_id("alice").unwrap();
-        let pubkey = NostrKeypair::pubkey_hex_for_device_id("alice").unwrap();
-        assert_eq!(kp.public_key_hex(), pubkey);
+    fn test_from_install_secret_rejects_short_secret() {
+        assert!(NostrKeypair::from_install_secret(&[0u8; 15]).is_err());
+        assert!(NostrKeypair::from_install_secret(b"").is_err());
+    }
+
+    #[test]
+    fn test_signing_key_not_derivable_from_device_id() {
+        // The signing key must NOT equal the legacy SHA-256(device_id) key:
+        // the routing tag stays publicly derivable, the signing key does not.
+        let secret = Sha256::digest("alice".as_bytes());
+        let kp = NostrKeypair::from_install_secret(secret.as_slice()).unwrap();
+        let tag = routing_tag_for_device_id("alice").unwrap();
+        assert_ne!(kp.public_key_hex(), tag);
+    }
+
+    #[test]
+    fn test_generate_ephemeral_is_random() {
+        let kp1 = NostrKeypair::generate_ephemeral().unwrap();
+        let kp2 = NostrKeypair::generate_ephemeral().unwrap();
+        assert_ne!(kp1.public_key_hex(), kp2.public_key_hex());
+    }
+
+    #[test]
+    fn test_generate_install_secret_is_random() {
+        let s1 = NostrKeypair::generate_install_secret().unwrap();
+        let s2 = NostrKeypair::generate_install_secret().unwrap();
+        assert_ne!(s1, s2);
+        assert_ne!(s1, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_routing_tag_wire_compat_golden_values() {
+        // The routing tag is a cross-version wire contract: peers on older
+        // SDK versions derive our tag as SHA-256(device_id) → x-only pubkey.
+        // These golden values were computed from the pre-split derivation and
+        // must never change, or addressing breaks against deployed peers.
+        assert_eq!(
+            routing_tag_for_device_id("alice").unwrap(),
+            "9997a497d964fc1a62885b05a51166a65a90df00492c8d7cf61d6accf54803be"
+        );
+        assert_eq!(
+            routing_tag_for_device_id("bob").unwrap(),
+            "4edfcf9dfe6c0b5c83d1ab3f78d1b39a46ebac6798e08e19761f5ed89ec83c10"
+        );
+        assert_eq!(
+            routing_tag_for_device_id("device1").unwrap(),
+            "01194098eb3146ae142447c78a1fcf8df55b72b6d54f9eaa4b5b1c2a11826295"
+        );
     }
 
     #[test]
     fn test_create_dm_event() {
-        let sender = NostrKeypair::from_device_id("alice").unwrap();
-        let recipient_pubkey = NostrKeypair::pubkey_hex_for_device_id("bob").unwrap();
+        let sender = NostrKeypair::generate_ephemeral().unwrap();
+        let recipient_pubkey = routing_tag_for_device_id("bob").unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
 
@@ -209,8 +358,8 @@ mod tests {
 
     #[test]
     fn test_event_id_is_sha256_of_serialization() {
-        let sender = NostrKeypair::from_device_id("alice").unwrap();
-        let recipient_pubkey = NostrKeypair::pubkey_hex_for_device_id("bob").unwrap();
+        let sender = NostrKeypair::generate_ephemeral().unwrap();
+        let recipient_pubkey = routing_tag_for_device_id("bob").unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
 
@@ -227,8 +376,8 @@ mod tests {
 
     #[test]
     fn test_signature_verification() {
-        let sender = NostrKeypair::from_device_id("alice").unwrap();
-        let recipient_pubkey = NostrKeypair::pubkey_hex_for_device_id("bob").unwrap();
+        let sender = NostrKeypair::generate_ephemeral().unwrap();
+        let recipient_pubkey = routing_tag_for_device_id("bob").unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
 
@@ -246,8 +395,8 @@ mod tests {
 
     #[test]
     fn test_to_relay_message() {
-        let sender = NostrKeypair::from_device_id("alice").unwrap();
-        let recipient_pubkey = NostrKeypair::pubkey_hex_for_device_id("bob").unwrap();
+        let sender = NostrKeypair::generate_ephemeral().unwrap();
+        let recipient_pubkey = routing_tag_for_device_id("bob").unwrap();
 
         let event = NostrEvent::create_dm(&sender, &recipient_pubkey, "dGVzdCBtZXNzYWdl").unwrap();
         let relay_msg = event.to_relay_message().unwrap();
@@ -260,7 +409,7 @@ mod tests {
 
     #[test]
     fn test_create_subscription_message() {
-        let pubkey = NostrKeypair::pubkey_hex_for_device_id("alice").unwrap();
+        let pubkey = routing_tag_for_device_id("alice").unwrap();
         let msg = create_subscription_message(&pubkey, "sub123").unwrap();
 
         assert!(msg.starts_with("[\"REQ\",\"sub123\",{"));

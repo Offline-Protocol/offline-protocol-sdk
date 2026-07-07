@@ -28,7 +28,7 @@ pub use constants::DEFAULT_MAX_MESSAGE_SIZE;
 pub use error::{Error, Result};
 pub use internet::{InternetConfig, InternetTransport};
 pub use nostr::{NostrConfig, NostrTransport, NostrTransportBuilder, SignedNostrEvent};
-pub use nostr_crypto::{NostrEvent, NostrKeypair};
+pub use nostr_crypto::{routing_tag_for_device_id, NostrEvent, NostrKeypair};
 pub use reticulum::{ReticulumConfig, ReticulumTransport};
 pub use traits::{Transport, TransportStatus};
 pub use types::{LinkQuality, SharedCallback, TransportMetrics, TransportType};

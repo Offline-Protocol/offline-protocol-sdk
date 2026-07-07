@@ -12335,6 +12335,129 @@ fn scrub_secret_without_storage_keeps_random_per_instance_fallback() {
     assert_ne!(a.telemetry_fallback_secret, b.telemetry_fallback_secret);
 }
 
+// ============================================================================
+// PERSISTENT NOSTR SIGNING SECRET (SEC-M4)
+// ============================================================================
+
+fn protocol_with_nostr_transport() -> OfflineProtocol {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let nostr = offline_protocol_transport::NostrTransport::new("test_user").unwrap();
+    protocol
+        .transport_manager
+        .add_transport(TransportType::Nostr, Box::new(nostr));
+    protocol
+}
+
+fn nostr_signing_pubkey(protocol: &OfflineProtocol) -> String {
+    let arc = protocol
+        .transport_manager
+        .get_transport(TransportType::Nostr)
+        .expect("nostr transport registered");
+    let guard = arc.lock().unwrap();
+    guard
+        .as_any()
+        .downcast_ref::<offline_protocol_transport::NostrTransport>()
+        .expect("registered transport should be a NostrTransport")
+        .public_key_hex()
+}
+
+#[test]
+fn nostr_signing_secret_is_persisted_and_stable_across_instances() {
+    // Shared storage stands in for an app's secure store across two launches.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+    let mut first = protocol_with_nostr_transport();
+    let ephemeral_pubkey = nostr_signing_pubkey(&first);
+    first.enable_message_persistence(storage.clone()).unwrap();
+    assert!(first.nostr_secret_persisted);
+
+    // The persisted secret replaced the construction-time ephemeral key.
+    let first_pubkey = nostr_signing_pubkey(&first);
+    assert_ne!(first_pubkey, ephemeral_pubkey);
+
+    // A 32-byte secret was written under the documented key.
+    let stored = storage
+        .load(
+            storage_keys::NOSTR_SIGNING_SECRET,
+            storage_keys::NOSTR_SIGNING_SECRET_ID,
+        )
+        .unwrap()
+        .expect("nostr signing secret should be persisted");
+    assert_eq!(stored.len(), 32);
+
+    // A second instance backed by the same storage derives the same signing
+    // identity — the install's Nostr pubkey is stable across restarts.
+    let mut second = protocol_with_nostr_transport();
+    assert_ne!(nostr_signing_pubkey(&second), first_pubkey);
+    second.enable_message_persistence(storage.clone()).unwrap();
+    assert_eq!(nostr_signing_pubkey(&second), first_pubkey);
+}
+
+#[test]
+fn nostr_signing_secret_load_is_idempotent_across_entry_paths() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+    // initialize_mls also enables persistence; a later explicit
+    // enable_message_persistence must not rotate the signing identity.
+    let mut protocol = protocol_with_nostr_transport();
+    protocol.initialize_mls(storage.clone()).unwrap();
+    assert!(protocol.nostr_secret_persisted);
+    let pubkey_after_init = nostr_signing_pubkey(&protocol);
+
+    protocol.enable_message_persistence(storage).unwrap();
+    assert_eq!(nostr_signing_pubkey(&protocol), pubkey_after_init);
+}
+
+#[test]
+fn corrupt_persisted_nostr_secret_is_regenerated() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    // Pre-seed a wrong-length blob to simulate corruption.
+    storage
+        .store(
+            storage_keys::NOSTR_SIGNING_SECRET,
+            storage_keys::NOSTR_SIGNING_SECRET_ID,
+            &[1, 2, 3],
+        )
+        .unwrap();
+
+    let mut protocol = protocol_with_nostr_transport();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    // A fresh 32-byte secret replaces the corrupt entry rather than pinning
+    // every future session to the ephemeral key.
+    let stored = storage
+        .load(
+            storage_keys::NOSTR_SIGNING_SECRET,
+            storage_keys::NOSTR_SIGNING_SECRET_ID,
+        )
+        .unwrap()
+        .expect("corrupt secret should be overwritten");
+    assert_eq!(stored.len(), 32);
+    assert!(protocol.nostr_secret_persisted);
+}
+
+#[test]
+fn nostr_secret_restore_without_nostr_transport_is_a_noop() {
+    // Storage-backed protocols without a Nostr transport must not persist a
+    // secret they cannot install (and must not fail initialization).
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    assert!(!protocol.nostr_secret_persisted);
+    assert!(storage
+        .load(
+            storage_keys::NOSTR_SIGNING_SECRET,
+            storage_keys::NOSTR_SIGNING_SECRET_ID,
+        )
+        .unwrap()
+        .is_none());
+}
+
 #[test]
 fn telemetry_install_id_is_none_without_storage() {
     // The per-instance fallback secret is random, so an id derived from it
