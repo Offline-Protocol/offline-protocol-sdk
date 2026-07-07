@@ -147,12 +147,12 @@ See [DORS Deep Dive](dors.md) for the full scoring system and [DORS Configuratio
 
 ### Promotion Logic
 
-A device is promoted to relay when it has sufficient connections, battery, and relay priority. Relay scoring considers connection count, battery level, charging state, link quality, congestion, and queue depth.
+A device is promoted to relay when it has sufficient connections, battery, and relay priority — and only if its configuration allows relaying at all (`allowRelay` must be true and the relay priority must not be `never`; a device whose config forbids relaying is also demoted if it somehow holds the role). Relay scoring considers connection count, battery level, charging state, link quality, congestion, and queue depth.
 
 ### Load Balancing
 
 Distributes messages across top K relays (default 3):
-1. Filter out overloaded relays (congestion > 0.7)
+1. Filter out overloaded relays (congestion above the configured `maxCongestionLevel`, default 0.7)
 2. Score all remaining relays
 3. Select top K by score
 4. Forward to all selected relays
