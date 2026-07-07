@@ -576,7 +576,10 @@ fn test_group_mls_message_with_spoofed_sender_not_surfaced() {
 
     let bob_message = make_message("carol", "bob", &content);
     let result = bob.process_internal_message(&bob_message);
-    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    assert!(
+        matches!(result, Some(InternalMessageResult::SecurityRejected)),
+        "a spoofed group message must be security-rejected (no delivery ACK)"
+    );
 
     let events = bob_events.lock().unwrap();
     let received = events
@@ -585,6 +588,57 @@ fn test_group_mls_message_with_spoofed_sender_not_surfaced() {
     assert!(
         received.is_none(),
         "a group message whose MLS-authenticated sender does not match the wire sender must not be surfaced"
+    );
+}
+
+#[test]
+fn test_group_mls_commit_with_spoofed_sender_rejected_not_buffered() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Spoof Commit Group");
+
+    // Alice issues a legitimate key-update commit; the wire envelope claims
+    // it came from "carol" (SEC-M1). The mismatch is a permanent failure:
+    // the forged commit must be rejected without advancing bob's epoch AND
+    // without entering the out-of-order retry buffer.
+    let commit = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        alice_mls.update_keys(&gid).unwrap()
+    };
+    let epoch_before = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls.get_group_info(&gid).unwrap().unwrap().epoch
+    };
+
+    let commit_payload = GroupMlsCommitPayload {
+        group_id: group_id.clone(),
+        commit_type: GroupCommitType::KeyUpdate,
+        ciphertext: base64_encode(&commit.ciphertext),
+        epoch: commit.epoch,
+        affected_member: None,
+        role: None,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_COMMIT,
+        serde_json::to_string(&commit_payload).unwrap()
+    );
+
+    let bob_message = make_message("carol", "bob", &content);
+    bob.process_internal_message(&bob_message);
+
+    let epoch_after = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls.get_group_info(&gid).unwrap().unwrap().epoch
+    };
+    assert_eq!(
+        epoch_before, epoch_after,
+        "spoofed commit must not advance group state"
+    );
+    assert!(
+        !bob.group_mesh.pending_commits.contains_key(&group_id),
+        "spoofed commit is a permanent failure and must not be buffered for retry"
     );
 }
 

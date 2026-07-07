@@ -10,7 +10,8 @@
 //! broadcast instead of O(N) per-member fan-out.
 
 use crate::protocol::{
-    base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload, OfflineProtocol,
+    base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload,
+    InternalMessageResult, OfflineProtocol,
 };
 use crate::{Error, Event, Result};
 use chrono::Utc;
@@ -300,12 +301,22 @@ pub(crate) struct EpochForkState {
 
 impl OfflineProtocol {
     /// Handles an incoming MLS-encrypted group message.
-    pub(crate) fn handle_group_mls_msg(&mut self, message: &Message, sender: &str, data: &str) {
+    ///
+    /// Returns [`InternalMessageResult::SecurityRejected`] when the wire
+    /// sender does not match the MLS-authenticated sender (SEC-M1), so the
+    /// caller suppresses the delivery ACK exactly like the `__MLS_ENC__`
+    /// path; all other outcomes consume the message.
+    pub(crate) fn handle_group_mls_msg(
+        &mut self,
+        message: &Message,
+        sender: &str,
+        data: &str,
+    ) -> InternalMessageResult {
         let payload = match serde_json::from_str::<GroupMlsMessagePayload>(data) {
             Ok(p) => p,
             Err(_) => {
                 warn!(sender = %sender, "Failed to parse GroupMlsMessage payload");
-                return;
+                return InternalMessageResult::Consumed;
             }
         };
 
@@ -317,7 +328,7 @@ impl OfflineProtocol {
                 msg_id = %dedup_key,
                 "Duplicate group message, skipping"
             );
-            return;
+            return InternalMessageResult::Consumed;
         }
 
         // Mark as seen BEFORE attempting decode/decrypt to prevent replay
@@ -335,7 +346,7 @@ impl OfflineProtocol {
             Ok(bytes) => bytes,
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "Failed to decode group message ciphertext");
-                return;
+                return InternalMessageResult::Consumed;
             }
         };
 
@@ -344,14 +355,14 @@ impl OfflineProtocol {
             Ok(guard) => guard,
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "MLS unavailable, dropping group message");
-                return;
+                return InternalMessageResult::Consumed;
             }
         };
         let gid = match offline_protocol_mls::GroupId::new(&payload.group_id) {
             Ok(gid) => gid,
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "Dropping group message with invalid group id");
-                return;
+                return InternalMessageResult::Consumed;
             }
         };
         let encrypted = offline_protocol_mls::EncryptedMessage {
@@ -373,6 +384,18 @@ impl OfflineProtocol {
                     "MLS returned no plaintext (commit/proposal consumed), not an application message"
                 );
                 None
+            }
+            Err(offline_protocol_mls::MlsError::SenderIdentityMismatch {
+                claimed,
+                authenticated,
+            }) => {
+                error!(
+                    group_id = %payload.group_id,
+                    claimed = %claimed,
+                    authenticated = %authenticated,
+                    "SECURITY: wire sender does not match MLS-authenticated sender, rejecting group message"
+                );
+                return InternalMessageResult::SecurityRejected;
             }
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "Failed to decrypt group message");
@@ -400,6 +423,7 @@ impl OfflineProtocol {
                 forward_info_event,
             ));
         }
+        InternalMessageResult::Consumed
     }
 
     /// Handles an incoming MLS Welcome message (group invite).

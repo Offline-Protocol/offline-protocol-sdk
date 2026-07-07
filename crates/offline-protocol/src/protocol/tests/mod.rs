@@ -9415,6 +9415,76 @@ fn test_security_rejected_does_not_send_ack() {
     );
 }
 
+#[test]
+fn test_mls_enc_spoofed_sender_security_rejected() {
+    // SEC-M1 on the __MLS_ENC__ path: a valid 1:1 ciphertext delivered under
+    // a spoofed wire sender must map to SecurityRejected — the MLS credential
+    // authenticates "bob", so an envelope claiming "mallory" must not be
+    // surfaced. (SecurityRejected → no delivery ACK is covered by
+    // test_security_rejected_does_not_send_ack.)
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    alice.initialize_mls(storage).unwrap();
+
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_kp = bob_manager.generate_key_package().unwrap();
+
+    // Establish a converged alice <-> bob session.
+    let welcome = {
+        let mls = alice.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap()
+    };
+    bob_manager.join_session(&welcome).unwrap();
+
+    // Bob encrypts a legitimate message for alice...
+    let encrypted = bob_manager.encrypt_for_user("alice", b"hi alice").unwrap();
+    let content = format!(
+        "{}{}",
+        internal_prefixes::ENCRYPTED,
+        serde_json::to_string(&encrypted).unwrap()
+    );
+
+    // ...but the wire envelope claims it came from "mallory".
+    let message = Message::new(
+        UserId::new("mallory").unwrap(),
+        UserId::new("alice").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+
+    let result = alice.process_internal_message(&message);
+    assert!(
+        matches!(result, Some(InternalMessageResult::SecurityRejected)),
+        "spoofed __MLS_ENC__ message must be SecurityRejected"
+    );
+
+    // The same ciphertext under the true sender still decrypts: the spoofed
+    // attempt must not have destroyed alice's ability to attribute honestly
+    // delivered messages.
+    let encrypted2 = bob_manager.encrypt_for_user("alice", b"hi again").unwrap();
+    let content2 = format!(
+        "{}{}",
+        internal_prefixes::ENCRYPTED,
+        serde_json::to_string(&encrypted2).unwrap()
+    );
+    let honest = Message::new(
+        UserId::new("bob").unwrap(),
+        UserId::new("alice").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content2,
+    );
+    let result2 = alice.process_internal_message(&honest);
+    assert!(
+        matches!(result2, Some(InternalMessageResult::Decrypted(_))),
+        "honest message after a spoofed attempt must still decrypt"
+    );
+}
+
 // ========================================================================
 // TOFU PERSISTENCE
 // ========================================================================
