@@ -54,20 +54,13 @@ impl GroupId {
         &self.0
     }
 
-    /// Builds the deterministic group ID for a 1:1 session.
-    ///
-    /// # Precondition
-    ///
-    /// `user_a` and `user_b` must be validated user ids (see
-    /// `offline_protocol_core::UserId`); this constructor does not re-validate
-    /// and hostile characters in either input would produce a storage-hostile
-    /// group id. All production callers pass ids that were validated at the
-    /// wire or config boundary.
-    pub fn for_session(user_a: &str, user_b: &str) -> Self {
+    /// Builds the deterministic group ID for a 1:1 session, rejecting
+    /// storage-hostile user ids (the id becomes a raw storage key).
+    pub fn for_session(user_a: &str, user_b: &str) -> crate::error::Result<Self> {
         // Create deterministic session ID by sorting user IDs
         let mut users = [user_a, user_b];
         users.sort();
-        Self(format!("session:{}:{}", users[0], users[1]))
+        Self::new(format!("session:{}:{}", users[0], users[1]))
     }
 }
 
@@ -659,7 +652,7 @@ mod tests {
 
     fn sample_encrypted_message() -> EncryptedMessage {
         EncryptedMessage {
-            group_id: GroupId::for_session("alice", "bob"),
+            group_id: GroupId::for_session("alice", "bob").unwrap(),
             message_type: MlsMessageType::Application,
             epoch: 42,
             ciphertext: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],

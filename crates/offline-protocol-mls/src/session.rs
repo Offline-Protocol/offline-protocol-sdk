@@ -40,13 +40,17 @@ impl SessionManager {
     }
 
     /// Gets the session ID for a 1:1 conversation with another user.
-    pub fn get_session_id(&self, other_user_id: &str) -> GroupId {
+    ///
+    /// Fails with [`crate::MlsError::InvalidGroupId`] if `other_user_id`
+    /// contains storage-hostile characters (the session id is a raw storage
+    /// key).
+    pub fn get_session_id(&self, other_user_id: &str) -> Result<GroupId> {
         GroupId::for_session(&self.user_id, other_user_id)
     }
 
     /// Checks if a session exists with another user.
     pub fn has_session(&self, other_user_id: &str) -> Result<bool> {
-        let session_id = self.get_session_id(other_user_id);
+        let session_id = self.get_session_id(other_user_id)?;
         let group = self.group_manager.load_group(&session_id)?;
         Ok(group.is_some())
     }
@@ -59,7 +63,7 @@ impl SessionManager {
         credential_with_key: &CredentialWithKey,
         signer: &impl Signer,
     ) -> Result<WelcomeMessage> {
-        let session_id = self.get_session_id(other_user_id);
+        let session_id = self.get_session_id(other_user_id)?;
 
         if self.group_manager.load_group(&session_id)?.is_some() {
             return Err(MlsError::GroupCreation(format!(
@@ -146,7 +150,7 @@ impl SessionManager {
         plaintext: &[u8],
         signer: &impl Signer,
     ) -> Result<EncryptedMessage> {
-        let session_id = self.get_session_id(other_user_id);
+        let session_id = self.get_session_id(other_user_id)?;
 
         let mut group = self
             .group_manager
@@ -225,7 +229,7 @@ impl SessionManager {
 
     /// Deletes a session.
     pub fn delete_session(&self, other_user_id: &str) -> Result<()> {
-        let session_id = self.get_session_id(other_user_id);
+        let session_id = self.get_session_id(other_user_id)?;
         self.group_manager.delete_group(&session_id)?;
         debug!(session_id = %session_id, "Deleted session");
         Ok(())
@@ -233,7 +237,7 @@ impl SessionManager {
 
     /// Gets information about a session.
     pub fn get_session_info(&self, other_user_id: &str) -> Result<Option<GroupInfo>> {
-        let session_id = self.get_session_id(other_user_id);
+        let session_id = self.get_session_id(other_user_id)?;
         let group = self.group_manager.load_group(&session_id)?;
         Ok(group.map(|g| self.group_manager.get_group_info(&g, &session_id)))
     }
@@ -255,8 +259,8 @@ mod tests {
     #[test]
     fn test_session_id_generation() {
         let manager = create_test_session_manager("alice");
-        let id1 = manager.get_session_id("bob");
-        let id2 = GroupId::for_session("bob", "alice");
+        let id1 = manager.get_session_id("bob").unwrap();
+        let id2 = GroupId::for_session("bob", "alice").unwrap();
         assert_eq!(id1, id2);
         assert!(id1.as_str().starts_with("session:"));
     }
@@ -274,8 +278,8 @@ mod tests {
         let alice_manager = create_test_session_manager("alice");
         let bob_manager = create_test_session_manager("bob");
 
-        let alice_to_bob = alice_manager.get_session_id("bob");
-        let bob_to_alice = bob_manager.get_session_id("alice");
+        let alice_to_bob = alice_manager.get_session_id("bob").unwrap();
+        let bob_to_alice = bob_manager.get_session_id("alice").unwrap();
 
         // Both should produce the same session ID
         assert_eq!(alice_to_bob, bob_to_alice);
