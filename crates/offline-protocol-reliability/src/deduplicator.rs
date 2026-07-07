@@ -77,8 +77,11 @@ impl BloomFilter {
 
         // First hash using FNV-1a
         let h1 = fnv1a_hash(item.as_bytes());
-        // Second hash using a different seed
-        let h2 = fnv1a_hash_seeded(item.as_bytes(), 0x5f356495);
+        // Second hash using a different seed, forced odd: with a
+        // power-of-two bit_count an even h2 collapses the probe indices
+        // onto few bits (all onto one when h2 ≡ 0 mod bit_count), inflating
+        // the false-positive rate; an odd step keeps all probes distinct.
+        let h2 = fnv1a_hash_seeded(item.as_bytes(), 0x5f356495) | 1;
 
         for i in 0..self.hash_count {
             // Kirsch-Mitzenmacher optimization: h(i) = h1 + i * h2
@@ -776,13 +779,24 @@ mod tests {
         };
         let mut dedup = Deduplicator::with_config(config);
 
-        // Insert 10,000 messages - should work with O(1) memory
+        // Insert 10,000 messages - should work with O(1) memory. The filter
+        // is probabilistic: a fresh id can (rarely) be reported as already
+        // seen, so tolerate a handful of false positives rather than
+        // asserting on every insert.
+        let mut inserted = 0usize;
         for _ in 0..10_000 {
             let msg = MessageId::new();
-            assert!(dedup.mark_seen(msg));
+            if dedup.mark_seen(msg) {
+                inserted += 1;
+            }
         }
 
-        assert_eq!(dedup.tracked_count(), 10_000);
+        assert!(
+            inserted >= 9_990,
+            "too many bloom false positives: {}",
+            10_000 - inserted
+        );
+        assert_eq!(dedup.tracked_count(), inserted);
 
         let stats = dedup.stats();
         // False positive rate should still be low
