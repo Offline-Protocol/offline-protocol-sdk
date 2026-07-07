@@ -104,4 +104,21 @@ pub enum MlsError {
     /// containing path-traversal / storage-hostile characters).
     #[error("Invalid group id: {0}")]
     InvalidGroupId(String),
+
+    /// User id failed storage-key validation (empty, or containing
+    /// path-traversal / storage-hostile characters).
+    #[error("Invalid user id: {0}")]
+    InvalidUserId(String),
+
+    /// A key package's embedded credential identity does not match the
+    /// user id it was claimed to belong to.
+    #[error(
+        "Credential identity mismatch: expected '{expected}', key package credential is '{found}'"
+    )]
+    CredentialIdentityMismatch {
+        /// The user id the key package was claimed to belong to.
+        expected: String,
+        /// The identity actually embedded in the key package credential.
+        found: String,
+    },
 }
