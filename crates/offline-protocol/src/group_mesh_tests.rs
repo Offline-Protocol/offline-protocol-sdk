@@ -61,7 +61,7 @@ fn setup_alice_bob_group(group_name: &str) -> (OfflineProtocol, OfflineProtocol,
     };
     let (welcome, _commit) = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
             .add_group_member(&gid, &bob_kp.key_package_data)
             .unwrap()
@@ -506,7 +506,7 @@ fn test_group_mls_full_lifecycle_create_invite_send_decrypt() {
     // Alice encrypts a message via MLS and constructs the wire payload
     let encrypted = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls.encrypt_for_group(&gid, b"Hello group!").unwrap()
     };
 
@@ -725,7 +725,7 @@ fn test_group_mls_duplicate_message_rejected() {
     // Alice encrypts a message
     let encrypted = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls.encrypt_for_group(&gid, b"Hello dedup!").unwrap()
     };
     let msg_payload = GroupMlsMessagePayload {
@@ -1156,7 +1156,7 @@ fn test_group_mls_leave_preserves_state_on_total_send_failure() {
     // Promote bob to admin so the last-admin guard doesn't block the leave
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         mls.set_member_role(&gid, "bob", GroupRole::Admin).unwrap();
     }
 
@@ -1910,7 +1910,7 @@ fn test_group_mls_invite_sends_commit_to_existing_members() {
     };
     {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
             .add_group_member(&gid, &bob_kp.key_package_data)
             .unwrap();
@@ -2352,12 +2352,12 @@ fn test_group_mls_dedup_independent_per_message_id() {
     // Alice sends two distinct messages
     let enc1 = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls.encrypt_for_group(&gid, b"First message").unwrap()
     };
     let enc2 = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
             .encrypt_for_group(&gid, b"Second message")
             .unwrap()
@@ -2726,7 +2726,7 @@ fn test_handle_relay_group_message_mls_decrypt() {
     // Alice encrypts a message
     let encrypted = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
             .encrypt_for_group(&gid, b"Relay decrypted!")
             .unwrap()
@@ -3105,7 +3105,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
     // → process_commit_core) which clears fork state on Success.
     let alice_update = {
         let mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         mls.update_keys(&gid).unwrap()
     };
 
@@ -3113,7 +3113,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
     {
         let mls = bob.mls_manager_for_testing().read().unwrap();
         let encrypted = offline_protocol_mls::EncryptedMessage {
-            group_id: offline_protocol_mls::GroupId::new(&group_id),
+            group_id: offline_protocol_mls::GroupId::new(&group_id).unwrap(),
             message_type: offline_protocol_mls::MlsMessageType::Commit,
             epoch: alice_update.epoch,
             ciphertext: alice_update.ciphertext.clone(),
@@ -3126,7 +3126,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
     // Bob creates a commit that alice will process through the protocol layer
     let bob_commit = {
         let mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         mls.update_keys(&gid).unwrap()
     };
 
@@ -3581,7 +3581,7 @@ fn test_epoch_fork_resolution_includes_failed_members() {
     };
     {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
             .add_group_member(&gid, &bob_kp.key_package_data)
             .unwrap();
@@ -4095,7 +4095,7 @@ fn test_non_key_update_commit_does_not_clear_fork_state() {
     // to simulate a successful non-KeyUpdate commit going through process_commit_core.
     let bob_update = {
         let mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         mls.update_keys(&gid).unwrap()
     };
 
@@ -4138,7 +4138,7 @@ fn test_key_update_commit_clears_fork_state() {
 
     let bob_update = {
         let mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         mls.update_keys(&gid).unwrap()
     };
 
@@ -4811,7 +4811,7 @@ fn test_epoch_fork_cancelled_when_epoch_advanced_since_detection() {
     // Advance the epoch by issuing a key update — epoch goes from 0 to 1.
     {
         let guard = protocol.read_mls_guard().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         guard.update_keys(&gid).expect("key update should succeed");
         let info = guard.get_group_info(&gid).unwrap().unwrap();
         assert!(
@@ -4868,7 +4868,7 @@ fn test_relay_group_message_dedup() {
     // Encrypt a message from Alice for the group
     let ciphertext = {
         let mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let enc = mls.encrypt_for_group(&gid, b"hello relay dedup").unwrap();
         base64_encode(&enc.ciphertext)
     };
@@ -5222,7 +5222,7 @@ fn test_handle_group_role_change_non_admin_rejected() {
     // Set up role state on Bob's side: Alice is admin, Bob is member
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
             .set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
@@ -5261,7 +5261,7 @@ fn test_handle_group_role_change_uses_transport_sender_not_payload() {
     // Set up Alice's admin role in Bob's local metadata so check_is_admin works
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
             .set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
@@ -5475,7 +5475,7 @@ fn test_fallback_admin_uses_created_by() {
     // Clear the roles map but leave created_by intact
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id).unwrap();
         mls.remove_member_role(&gid, "charlie").unwrap();
     }
 
@@ -5518,7 +5518,7 @@ fn test_fallback_admin_denies_non_creator() {
     };
     let (welcome, _commit) = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
             .add_group_member(&gid, &bob_kp.key_package_data)
             .unwrap()
@@ -5536,7 +5536,7 @@ fn test_fallback_admin_denies_non_creator() {
     // Bob's metadata was set by join_group, which doesn't set created_by
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls.remove_member_role(&gid, "bob").unwrap();
         bob_mls.remove_member_role(&gid, "alice").unwrap();
     }
@@ -5583,7 +5583,7 @@ fn test_legacy_roles_in_custom_map_are_migrated() {
     // Manually write legacy-style role keys into the custom map and clear the roles map
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id).unwrap();
         // Set custom metadata with legacy role keys
         mls.set_group_custom_metadata(&gid, "role:alice", "admin")
             .unwrap();
@@ -5645,7 +5645,7 @@ fn test_handle_role_change_dedup() {
     // Set up Alice as admin on Bob's side
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
             .set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
@@ -5728,7 +5728,7 @@ fn test_last_admin_demotion_blocked_when_targeting_other() {
     // and bob is still admin too — making 2 admins
     {
         let mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         mls.set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
     }
@@ -5761,7 +5761,7 @@ fn test_last_admin_demotion_blocked_when_targeting_other() {
     // Re-grant alice admin so she passes auth, but keep bob as sole "other" admin
     {
         let mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         mls.set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
     }
@@ -5806,7 +5806,7 @@ fn test_auto_promote_after_last_admin_removed() {
     // Re-promote alice for auth
     {
         let mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         mls.set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
     }
@@ -5858,7 +5858,7 @@ fn test_remove_group_custom_metadata() {
 
     // Set and then remove custom metadata
     let mls = alice.mls_manager_for_testing().read().unwrap();
-    let gid = offline_protocol_mls::GroupId::new(group_id);
+    let gid = offline_protocol_mls::GroupId::new(group_id).unwrap();
     mls.set_group_custom_metadata(&gid, "test_key", "test_value")
         .unwrap();
 
@@ -5900,7 +5900,7 @@ fn test_welcome_payload_roles_stored_on_join() {
     };
     let (welcome, _commit) = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
             .add_group_member(&gid, &bob_kp.key_package_data)
             .unwrap()
@@ -5944,7 +5944,7 @@ fn test_welcome_payload_roles_stored_on_join() {
     // Simulate the role storage step from the welcome handler:
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         for (user_id, role) in &roles {
             bob_mls.set_member_role(&gid, user_id, *role).unwrap();
         }
@@ -5952,7 +5952,7 @@ fn test_welcome_payload_roles_stored_on_join() {
 
     // Verify Bob's local metadata has the roles from the welcome
     let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-    let gid = offline_protocol_mls::GroupId::new(&group_id);
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
     let metadata = bob_mls.get_group_metadata(&gid).unwrap().unwrap();
     assert_eq!(
         metadata.get_role("alice"),
@@ -5985,7 +5985,7 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
     );
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         mls.set_member_role(&gid, "admin_alice", GroupRole::Admin)
             .unwrap();
     }
@@ -6087,7 +6087,7 @@ fn test_plaintext_removal_notification_from_admin_cleans_up() {
     // Ensure Bob's MLS state knows Alice is admin
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
             .set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
@@ -6353,7 +6353,7 @@ fn test_handle_group_rename_from_admin() {
     // Set up Alice's admin role in Bob's local metadata
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
             .set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
@@ -6399,7 +6399,7 @@ fn test_handle_group_rename_from_non_admin_rejected() {
     // Set up Alice as admin, Bob as member in Bob's metadata
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
             .set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
@@ -6441,7 +6441,7 @@ fn test_handle_group_rename_dedup() {
     // Set up Alice's admin role
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
             .set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();
@@ -6480,7 +6480,7 @@ fn test_handle_group_rename_uses_transport_sender() {
     // Set up Alice's admin role
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
             .set_member_role(&gid, "alice", GroupRole::Admin)
             .unwrap();

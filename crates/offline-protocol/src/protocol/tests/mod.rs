@@ -599,7 +599,7 @@ fn test_mls_observability_emits_decryption_failed_not_initialized() {
     protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
 
     let encrypted = EncryptedMessage {
-        group_id: offline_protocol_mls::GroupId::new("session:alice:bob"),
+        group_id: offline_protocol_mls::GroupId::new("session:alice:bob").unwrap(),
         message_type: offline_protocol_mls::MlsMessageType::Application,
         epoch: 1,
         ciphertext: vec![1, 2, 3],

@@ -171,10 +171,23 @@ impl GroupManager {
     }
 
     /// Lists all groups.
+    ///
+    /// Stored keys that fail group-id validation (possible only for state
+    /// written before validation was enforced) are skipped with a warning
+    /// rather than resurrected as live group ids.
     pub fn list_groups(&self) -> Result<Vec<GroupId>> {
         let key_type = StorageKeyType::GroupState.as_str();
         let keys = self.storage.list_keys(key_type)?;
-        Ok(keys.into_iter().map(GroupId::new).collect())
+        Ok(keys
+            .into_iter()
+            .filter_map(|key| match GroupId::new(key) {
+                Ok(group_id) => Some(group_id),
+                Err(e) => {
+                    warn!(error = %e, "Skipping stored group with invalid id");
+                    None
+                }
+            })
+            .collect())
     }
 
     /// Adds a member to a group using their key package.

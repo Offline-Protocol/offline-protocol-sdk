@@ -441,7 +441,7 @@ impl MlsManager {
 
     /// Creates a new group.
     pub fn create_group(&self, group_name: &str) -> Result<GroupInfo> {
-        let group_id = GroupId::new(format!("group:{}", Uuid::new_v4()));
+        let group_id = GroupId::new(format!("group:{}", Uuid::new_v4()))?;
         let credential = self.get_credential()?;
         let signature_keys = self.get_signer()?;
 

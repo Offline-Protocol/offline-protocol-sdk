@@ -1364,6 +1364,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "hex",
+ "offline-protocol-core",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
