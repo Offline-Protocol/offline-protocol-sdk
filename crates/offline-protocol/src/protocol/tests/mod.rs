@@ -9485,6 +9485,49 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
     );
 }
 
+#[test]
+fn test_welcome_with_mismatched_inviter_id_rejected() {
+    // Honest peers set `inviter_id` to their own id (see
+    // SessionManager::create_session). A Welcome whose payload inviter_id
+    // disagrees with the transport sender is forged or tampered and must be
+    // dropped before any session state changes — inviter_id is used
+    // downstream as a raw storage key.
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+
+    let zoe_manager = MlsManager::new("zoe", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    zoe_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let mut welcome = zoe_manager.create_session("bob").unwrap();
+    // Tamper: the payload claims a different inviter than the wire sender.
+    welcome.inviter_id = "mallory".to_string();
+
+    let content = format!(
+        "{}{}",
+        internal_prefixes::WELCOME,
+        serde_json::to_string(&welcome).unwrap()
+    );
+    let message = Message::new(
+        UserId::new("zoe").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+    bob.process_internal_message(&message);
+
+    let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+    assert!(
+        !manager.has_session("zoe").unwrap(),
+        "a Welcome with mismatched inviter_id must not create a session"
+    );
+}
+
 // ========================================================================
 // TOFU PERSISTENCE
 // ========================================================================
