@@ -1,9 +1,18 @@
-//! Nostr relay transport implementation.
+//! Nostr relay transport queue engine.
 //!
-//! This module provides connectivity via Nostr relays for censorship-resistant,
-//! decentralized messaging over WebSockets. The platform side manages actual
-//! relay connections and subscriptions; the Rust side manages queues, metrics,
-//! event signing, and the confirmation loop.
+//! Censorship-resistant, decentralized messaging over Nostr relays
+//! (WebSockets). No relay connection is opened here: the platform side
+//! manages the actual WebSocket connections and subscriptions; the Rust
+//! side manages queues, metrics, event signing, and the confirmation loop.
+//!
+//! The bridge contract: the platform reports relay connectivity via
+//! [`NostrTransport::on_status_changed`], drains signed events with
+//! [`NostrTransport::get_next_signed_event`] (woken by the
+//! [`NostrTransport::set_on_messages_available`] callback) and submits them
+//! to the relays, correlates relay `OK` responses back via
+//! [`NostrTransport::confirm_sent`] /
+//! [`NostrTransport::report_send_failure`], and injects inbound event
+//! payloads via [`NostrTransport::on_data_received`].
 //!
 //! Addressing uses public routing tags derived from device IDs
 //! ([`nostr_crypto::routing_tag_for_device_id`]); event signing uses a

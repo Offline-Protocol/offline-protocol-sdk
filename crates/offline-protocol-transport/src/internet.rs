@@ -1,7 +1,18 @@
-//! Internet transport implementation (TCP/WebSocket).
+//! Internet transport (TCP/WebSocket relay) queue engine.
 //!
-//! This module provides connectivity via standard internet protocols.
-//! It supports both direct TCP connections and WebSocket for web compatibility.
+//! No sockets are opened here. The platform side owns the actual TCP or
+//! WebSocket connection to the relay server; the Rust side manages the
+//! send/receive queues, metrics, heartbeat bookkeeping, and the
+//! confirmation loop.
+//!
+//! The bridge contract: the platform reports connectivity via
+//! [`InternetTransport::on_status_changed`] (nothing else makes this
+//! transport `Available`), polls [`InternetTransport::get_next_message`]
+//! for outbound wire bytes — unlike the other transports there is no
+//! messages-available callback — reports outcomes via
+//! [`InternetTransport::confirm_sent`] /
+//! [`InternetTransport::report_send_failure`], and injects inbound bytes
+//! via [`InternetTransport::on_data_received`].
 
 use crate::constants::{
     INTERNET_CONNECTION_TIMEOUT_SECS, INTERNET_DEFAULT_SERVER_ADDRESS,
@@ -44,8 +55,8 @@ impl Default for InternetConfig {
 
 /// Internet transport implementation.
 ///
-/// This provides connectivity via TCP/WebSocket to a central relay server.
-/// Useful for hybrid online/offline scenarios.
+/// Queue engine for a platform-managed TCP/WebSocket connection to a
+/// central relay server. Useful for hybrid online/offline scenarios.
 ///
 /// ## Lock ordering
 ///

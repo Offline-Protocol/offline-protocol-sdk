@@ -1,7 +1,34 @@
 //! Transport abstraction layer for the Offline Protocol SDK.
 //!
-//! This crate defines the transport trait and types for different
-//! transport mechanisms (BLE, Wi-Fi Direct, Internet).
+//! This crate defines the [`Transport`] trait and the transport state
+//! machines for BLE, Wi-Fi Direct, Internet, Nostr, and Reticulum.
+//!
+//! # This crate performs no network or radio I/O
+//!
+//! No sockets are opened and no radios are touched here. Each transport is
+//! a thread-safe protocol/queue engine — status, send/receive queues,
+//! metrics, and (for BLE) fragmentation state — driven from two sides:
+//!
+//! - **The protocol engine** talks to the [`Transport`] trait: `send()`
+//!   enqueues an outbound message, `receive()` dequeues an inbound one.
+//! - **A platform bridge** (Swift/Kotlin via the UniFFI bindings, or any
+//!   host program) owns the actual sockets, relays, and radios. It drains
+//!   the outbound queue (`get_next_message()` / `get_next_signed_event()` /
+//!   `get_next_fragment()`), performs the real I/O, reports the outcome
+//!   (`confirm_sent()` / `report_send_failure()`), injects inbound bytes
+//!   (`on_data_received()` / `on_fragment_received()`), and drives
+//!   availability (`on_status_changed()`).
+//!
+//! Without a platform bridge attached, `send()` queues messages that never
+//! go anywhere — and, BLE excepted, `start()` never makes a transport
+//! `Available` in the first place, so `send()` returns
+//! `TransportNotAvailable`. A pure-Rust consumer must play the bridge role
+//! itself: mark the transport available, drain the queues, and do its own
+//! I/O.
+//!
+//! Most transports signal pending outbound work through a
+//! `set_on_messages_available` callback instead of requiring a poll timer;
+//! [`InternetTransport`] is the exception and must be polled.
 //!
 //! All code in this crate is 100% safe Rust with no unsafe blocks.
 

@@ -1,9 +1,18 @@
-//! Reticulum mesh transport implementation.
+//! Reticulum mesh transport queue engine.
 //!
-//! This module provides connectivity via the Reticulum network stack,
-//! supporting LoRa, TCP, UDP, serial, I2P, and other mediums.
-//! The platform side bridges to a running Reticulum daemon; the Rust
+//! Long-range, low-bandwidth, resilient mesh networking via the Reticulum
+//! network stack (LoRa, TCP, UDP, serial, I2P, and other mediums). No
+//! Reticulum link is opened here: the platform side bridges to a running
+//! Reticulum daemon (sidecar, TCP gateway, or embedded Python); the Rust
 //! side manages queues, metrics, and the confirmation loop.
+//!
+//! The bridge contract: the platform reports daemon connectivity via
+//! [`ReticulumTransport::on_status_changed`], drains outbound wire bytes
+//! with [`ReticulumTransport::get_next_message`] (woken by the
+//! [`ReticulumTransport::set_on_messages_available`] callback), reports
+//! outcomes via [`ReticulumTransport::confirm_sent`] /
+//! [`ReticulumTransport::report_send_failure`], and injects inbound bytes
+//! via [`ReticulumTransport::on_data_received`].
 
 use crate::constants::{
     RETICULUM_CONNECTION_TIMEOUT_SECS, RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS,

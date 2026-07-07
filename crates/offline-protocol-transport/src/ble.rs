@@ -1,11 +1,25 @@
-//! Bluetooth Low Energy (BLE) transport implementation.
+//! Bluetooth Low Energy (BLE) transport queue engine.
 //!
-//! This module provides the BLE transport layer for peer-to-peer communication.
-//! It handles:
-//! - Device discovery (advertising and scanning)
-//! - GATT server/client operations
-//! - Message transmission over BLE characteristics
-//! - Message fragmentation for large payloads
+//! No BLE radio is touched here. Advertising, scanning, GATT operations,
+//! and characteristic writes are all owned by the platform side
+//! (CoreBluetooth on iOS, `android.bluetooth` on Android). The Rust side
+//! handles:
+//! - Send/receive queues, metrics, and the peer registry
+//! - Message fragmentation for MTU-limited links, and reassembly of
+//!   incoming fragments with capacity-based eviction
+//! - Per-peer MTU accounting ([`BleTransport::set_peer_mtu`])
+//!
+//! The bridge contract: the platform reports adapter state via
+//! [`BleTransport::on_status_changed`] and peers via
+//! [`BleTransport::on_peer_discovered`] / [`BleTransport::on_peer_lost`],
+//! drains outbound fragments with [`BleTransport::get_next_fragment`]
+//! (woken by the [`BleTransport::set_on_fragments_available`] callback) and
+//! writes them to GATT characteristics, and injects received bytes via
+//! [`BleTransport::on_fragment_received`].
+//!
+//! Unlike the other transports, BLE's `start()` optimistically sets the
+//! status to `Available`; the platform overrides it via
+//! `on_status_changed()` if BLE is actually unavailable.
 
 use crate::constants::{
     BLE_FRAGMENT_TIMEOUT_SECS, BLE_MAX_FRAGMENT_ASSEMBLIES, BLE_MAX_FRAGMENT_COUNT,
