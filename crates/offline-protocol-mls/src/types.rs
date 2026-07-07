@@ -5,13 +5,48 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Unique identifier for an MLS group.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GroupId(pub String);
+///
+/// Group ids flow from the wire into [`crate::storage::MlsStorage`] as raw
+/// `key_id` storage keys, so they are validated at construction: one or more
+/// non-empty colon-separated segments (`:` is the namespace separator used by
+/// `session:<a>:<b>` and `group:<uuid>` ids), each segment subject to the
+/// same storage-key policy as `UserId`/`AppId` (no path-traversal components,
+/// control characters, `/`, or `\`), with a total length cap of
+/// [`GroupId::MAX_LEN`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct GroupId(String);
 
 impl GroupId {
-    /// Creates a new group ID.
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+    /// Maximum accepted group id length in bytes.
+    ///
+    /// Matches the `EncryptedMessage` compact wire format's string-field cap.
+    pub const MAX_LEN: usize = 4096;
+
+    /// Creates a new group ID, rejecting storage-hostile values.
+    pub fn new(id: impl Into<String>) -> crate::error::Result<Self> {
+        let id = id.into();
+        Self::validate(&id)?;
+        Ok(Self(id))
+    }
+
+    fn validate(id: &str) -> crate::error::Result<()> {
+        if id.is_empty() {
+            return Err(crate::MlsError::InvalidGroupId(
+                "Group ID cannot be empty".to_string(),
+            ));
+        }
+        if id.len() > Self::MAX_LEN {
+            return Err(crate::MlsError::InvalidGroupId(format!(
+                "Group ID length {} exceeds maximum {}",
+                id.len(),
+                Self::MAX_LEN
+            )));
+        }
+        for segment in id.split(':') {
+            offline_protocol_core::validate_id_chars(segment, "Group ID segment")
+                .map_err(crate::MlsError::InvalidGroupId)?;
+        }
+        Ok(())
     }
 
     /// Returns the group ID as a string slice.
@@ -19,7 +54,15 @@ impl GroupId {
         &self.0
     }
 
-    /// Generates a new random group ID for 1:1 sessions.
+    /// Builds the deterministic group ID for a 1:1 session.
+    ///
+    /// # Precondition
+    ///
+    /// `user_a` and `user_b` must be validated user ids (see
+    /// `offline_protocol_core::UserId`); this constructor does not re-validate
+    /// and hostile characters in either input would produce a storage-hostile
+    /// group id. All production callers pass ids that were validated at the
+    /// wire or config boundary.
     pub fn for_session(user_a: &str, user_b: &str) -> Self {
         // Create deterministic session ID by sorting user IDs
         let mut users = [user_a, user_b];
@@ -34,15 +77,12 @@ impl std::fmt::Display for GroupId {
     }
 }
 
-impl From<String> for GroupId {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for GroupId {
-    fn from(s: &str) -> Self {
-        Self(s.to_string())
+impl<'de> Deserialize<'de> for GroupId {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        GroupId::new(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -408,7 +448,7 @@ impl EncryptedMessage {
         let ciphertext = read_bytes(&mut pos, ciphertext_len)?;
 
         Ok(Self {
-            group_id: GroupId::new(group_id),
+            group_id: GroupId::new(group_id)?,
             message_type,
             epoch,
             ciphertext,
@@ -692,6 +732,64 @@ mod tests {
         bytes[tag_offset] = 0xFF;
         let err = EncryptedMessage::from_bytes(&bytes).unwrap_err();
         assert!(err.to_string().contains("message_type"));
+    }
+
+    #[test]
+    fn test_group_id_accepts_legitimate_formats() {
+        assert!(GroupId::new("group:0bd6e5f2-3a70-4a4e-9c3f-1c1f2a3b4c5d").is_ok());
+        assert!(GroupId::new("session:alice:bob").is_ok());
+        assert!(GroupId::new("plain-segment_1.x@y").is_ok());
+    }
+
+    #[test]
+    fn test_group_id_rejects_storage_hostile_chars() {
+        assert!(GroupId::new("").is_err());
+        assert!(GroupId::new("group/evil").is_err());
+        assert!(GroupId::new("group\\evil").is_err());
+        assert!(GroupId::new("group\0evil").is_err());
+        assert!(GroupId::new("group\nevil").is_err());
+        assert!(GroupId::new("group\x7Fevil").is_err()); // DEL
+        assert!(GroupId::new(".").is_err());
+        assert!(GroupId::new("..").is_err());
+        // Path traversal hidden inside a segment
+        assert!(GroupId::new("session:..:bob").is_err());
+        assert!(GroupId::new("group:../../etc").is_err());
+        // Empty segments (leading/trailing/doubled colons)
+        assert!(GroupId::new("session:").is_err());
+        assert!(GroupId::new(":session").is_err());
+        assert!(GroupId::new("a::b").is_err());
+    }
+
+    #[test]
+    fn test_group_id_length_cap() {
+        assert!(GroupId::new("a".repeat(GroupId::MAX_LEN)).is_ok());
+        assert!(GroupId::new("a".repeat(GroupId::MAX_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn test_group_id_deserialize_rejects_hostile() {
+        assert!(serde_json::from_str::<GroupId>(r#""evil/path""#).is_err());
+        assert!(serde_json::from_str::<GroupId>(r#""..""#).is_err());
+        assert!(serde_json::from_str::<GroupId>(r#""session:alice:bob""#).is_ok());
+    }
+
+    #[test]
+    fn test_encrypted_message_from_bytes_rejects_hostile_group_id() {
+        // Hand-craft wire bytes: the typed constructor can no longer produce
+        // an invalid group id, but a malicious peer can still send one.
+        let mut bytes = Vec::new();
+        let hostile = b"evil/../path";
+        bytes.extend_from_slice(&(hostile.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(hostile);
+        let sender = b"alice";
+        bytes.extend_from_slice(&(sender.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(sender);
+        bytes.push(0); // Application
+        bytes.extend_from_slice(&42u64.to_le_bytes()); // epoch
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // timestamp_ms
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // empty ciphertext
+        let err = EncryptedMessage::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, crate::MlsError::InvalidGroupId(_)));
     }
 
     #[test]

@@ -939,8 +939,10 @@ impl OfflineProtocol {
                         "We were removed from the group — cleaning up local state"
                     );
                     if let Some(mls) = self.mls_manager.clone() {
-                        if let Ok(mls_guard) = mls.read() {
-                            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                        if let (Ok(mls_guard), Ok(gid)) = (
+                            mls.read(),
+                            offline_protocol_mls::GroupId::new(&payload.group_id),
+                        ) {
                             if let Err(e) = mls_guard.leave_group(&gid) {
                                 debug!(
                                     group_id = %payload.group_id,

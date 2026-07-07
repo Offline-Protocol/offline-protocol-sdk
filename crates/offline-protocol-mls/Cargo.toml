@@ -9,6 +9,9 @@ rust-version.workspace = true
 description = "MLS (Message Layer Security) integration for end-to-end encryption in the Offline Protocol SDK"
 
 [dependencies]
+# Shared id-validation policy (storage-key safety)
+offline-protocol-core = { workspace = true }
+
 # MLS implementation
 openmls = { workspace = true }
 openmls_rust_crypto = { workspace = true }

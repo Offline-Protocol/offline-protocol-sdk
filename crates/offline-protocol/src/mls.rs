@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip() {
         let encrypted = EncryptedMessage {
-            group_id: GroupId::new("test-group"),
+            group_id: GroupId::new("test-group").unwrap(),
             message_type: MlsMessageType::Application,
             epoch: 1,
             ciphertext: vec![1, 2, 3, 4],

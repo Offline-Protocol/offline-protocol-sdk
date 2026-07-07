@@ -99,4 +99,9 @@ pub enum MlsError {
     /// Invalid public key format.
     #[error("Invalid public key: {0}")]
     InvalidPublicKey(String),
+
+    /// Group id failed storage-key validation (empty, oversized, or
+    /// containing path-traversal / storage-hostile characters).
+    #[error("Invalid group id: {0}")]
+    InvalidGroupId(String),
 }

@@ -1333,15 +1333,17 @@ impl From<CoreWelcomeMessage> for MlsWelcomeMessage {
     }
 }
 
-impl From<MlsWelcomeMessage> for CoreWelcomeMessage {
-    fn from(msg: MlsWelcomeMessage) -> Self {
-        Self {
-            group_id: CoreGroupId::new(msg.group_id),
+impl TryFrom<MlsWelcomeMessage> for CoreWelcomeMessage {
+    type Error = offline_protocol_mls::MlsError;
+
+    fn try_from(msg: MlsWelcomeMessage) -> Result<Self, Self::Error> {
+        Ok(Self {
+            group_id: CoreGroupId::new(msg.group_id)?,
             welcome_data: msg.welcome_data,
             inviter_id: msg.inviter_id,
             group_name: msg.group_name,
             timestamp_ms: msg.timestamp_ms,
-        }
+        })
     }
 }
 
@@ -1369,19 +1371,21 @@ impl From<CoreEncryptedMessage> for MlsEncryptedMessage {
     }
 }
 
-impl From<MlsEncryptedMessage> for CoreEncryptedMessage {
-    fn from(msg: MlsEncryptedMessage) -> Self {
+impl TryFrom<MlsEncryptedMessage> for CoreEncryptedMessage {
+    type Error = offline_protocol_mls::MlsError;
+
+    fn try_from(msg: MlsEncryptedMessage) -> Result<Self, Self::Error> {
         use offline_protocol_mls::MlsMessageType;
         let message_type =
             MlsMessageType::from_str_opt(&msg.message_type).unwrap_or(MlsMessageType::Application);
-        Self {
-            group_id: CoreGroupId::new(msg.group_id),
+        Ok(Self {
+            group_id: CoreGroupId::new(msg.group_id)?,
             message_type,
             epoch: msg.epoch,
             ciphertext: msg.ciphertext,
             sender_id: msg.sender_id,
             timestamp_ms: msg.timestamp_ms,
-        }
+        })
     }
 }
 
@@ -4620,7 +4624,9 @@ impl OfflineProtocol {
         &self,
         welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
-        let core_welcome: CoreWelcomeMessage = welcome.into();
+        let core_welcome: CoreWelcomeMessage = welcome
+            .try_into()
+            .map_err(|e: offline_protocol_mls::MlsError| ProtocolError::MlsError(e.to_string()))?;
         let mut guard = self.lock_inner()?;
         guard
             .manual_mls_join_session(&core_welcome)
@@ -4649,7 +4655,9 @@ impl OfflineProtocol {
         &self,
         encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let core_encrypted: CoreEncryptedMessage = encrypted.into();
+        let core_encrypted: CoreEncryptedMessage = encrypted
+            .try_into()
+            .map_err(|e: offline_protocol_mls::MlsError| ProtocolError::MlsError(e.to_string()))?;
         let mut guard = self.lock_inner()?;
         guard
             .manual_mls_decrypt_from_user(&core_encrypted)
@@ -4704,7 +4712,9 @@ impl OfflineProtocol {
         &self,
         encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let core_encrypted: CoreEncryptedMessage = encrypted.into();
+        let core_encrypted: CoreEncryptedMessage = encrypted
+            .try_into()
+            .map_err(|e: offline_protocol_mls::MlsError| ProtocolError::MlsError(e.to_string()))?;
         let mut guard = self.lock_inner()?;
         guard
             .manual_mls_decrypt(&core_encrypted)
@@ -4716,7 +4726,9 @@ impl OfflineProtocol {
         &self,
         welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
-        let core_welcome: CoreWelcomeMessage = welcome.into();
+        let core_welcome: CoreWelcomeMessage = welcome
+            .try_into()
+            .map_err(|e: offline_protocol_mls::MlsError| ProtocolError::MlsError(e.to_string()))?;
         let mut guard = self.lock_inner()?;
         guard
             .manual_mls_process_welcome(&core_welcome)

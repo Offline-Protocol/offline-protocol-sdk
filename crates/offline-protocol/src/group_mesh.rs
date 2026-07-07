@@ -347,7 +347,13 @@ impl OfflineProtocol {
                 return;
             }
         };
-        let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+        let gid = match offline_protocol_mls::GroupId::new(&payload.group_id) {
+            Ok(gid) => gid,
+            Err(e) => {
+                warn!(group_id = %payload.group_id, error = %e, "Dropping group message with invalid group id");
+                return;
+            }
+        };
         let encrypted = offline_protocol_mls::EncryptedMessage {
             group_id: gid,
             message_type: offline_protocol_mls::MlsMessageType::Application,
@@ -444,8 +450,15 @@ impl OfflineProtocol {
                 return;
             }
         };
+        let gid = match offline_protocol_mls::GroupId::new(&payload.group_id) {
+            Ok(gid) => gid,
+            Err(e) => {
+                warn!(group_id = %payload.group_id, error = %e, "Dropping group welcome with invalid group id");
+                return;
+            }
+        };
         let welcome = offline_protocol_mls::WelcomeMessage {
-            group_id: offline_protocol_mls::GroupId::new(&payload.group_id),
+            group_id: gid.clone(),
             welcome_data: welcome_bytes,
             inviter_id: sender.to_string(),
             group_name: payload.group_name.clone(),
@@ -467,7 +480,6 @@ impl OfflineProtocol {
             // Store member roles from welcome payload
             if !payload.member_roles.is_empty() {
                 if let Ok(mls_guard) = self.read_mls_guard() {
-                    let gid = offline_protocol_mls::GroupId::new(&group_id);
                     for (user_id, role) in &payload.member_roles {
                         if let Err(e) = mls_guard.set_member_role(&gid, user_id, *role) {
                             warn!(user_id = %user_id, error = %e, "Failed to store member role from welcome");
@@ -578,7 +590,13 @@ impl OfflineProtocol {
             }
         };
 
-        let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+        let gid = match offline_protocol_mls::GroupId::new(&payload.group_id) {
+            Ok(gid) => gid,
+            Err(e) => {
+                warn!(group_id = %payload.group_id, error = %e, "Rejecting group commit with invalid group id");
+                return CommitOutcome::Rejected;
+            }
+        };
 
         // Capture members before commit for delta validation
         let members_before: HashSet<String> = mls_guard
@@ -590,7 +608,7 @@ impl OfflineProtocol {
 
         // Process Commit via MLS to advance epoch (single lock acquisition)
         let encrypted = offline_protocol_mls::EncryptedMessage {
-            group_id: gid,
+            group_id: gid.clone(),
             message_type: offline_protocol_mls::MlsMessageType::Commit,
             epoch: payload.epoch,
             ciphertext: ciphertext_bytes,
@@ -626,7 +644,6 @@ impl OfflineProtocol {
                     );
                     // Clean up local MLS state
                     if let Ok(mls_guard) = self.read_mls_guard() {
-                        let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
                         let _ = mls_guard.leave_group(&gid);
                     }
                     self.group_mesh.members.remove(&payload.group_id);
@@ -710,7 +727,6 @@ impl OfflineProtocol {
                         .unwrap_or(false);
                     if sender_is_admin {
                         if let Ok(mls_guard) = self.read_mls_guard() {
-                            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
                             if let Err(e) = mls_guard.set_member_role(&gid, member, *role) {
                                 warn!(user_id = %member, error = %e, "Failed to store member role from commit");
                             }
@@ -734,7 +750,6 @@ impl OfflineProtocol {
         for member in &actual_removed {
             // Clean up role metadata for removed members
             if let Ok(mls_guard) = self.read_mls_guard() {
-                let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
                 if let Err(e) = mls_guard.remove_member_role(&gid, member) {
                     warn!(user_id = %member, error = %e, "Failed to clean up role metadata for removed member");
                 }
@@ -909,7 +924,7 @@ impl OfflineProtocol {
 
         let local_epoch = self.refresh_group_members(group_id).ok().and_then(|_| {
             let mls_guard = self.read_mls_guard().ok()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let gid = offline_protocol_mls::GroupId::new(group_id).ok()?;
             mls_guard
                 .get_group_info(&gid)
                 .ok()
@@ -1104,7 +1119,7 @@ impl OfflineProtocol {
     /// Refreshes the cached member list for a group from MlsManager.
     pub(crate) fn refresh_group_members(&mut self, group_id: &str) -> Result<Vec<String>> {
         let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let info = mls_guard
             .get_group_info(&gid)?
             .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
@@ -1168,7 +1183,7 @@ impl OfflineProtocol {
             .map(|m| m.len())
             .or_else(|| {
                 self.read_mls_guard().ok().and_then(|g| {
-                    g.get_group_info(&offline_protocol_mls::GroupId::new(group_id))
+                    g.get_group_info(&offline_protocol_mls::GroupId::new(group_id).ok()?)
                         .ok()
                         .flatten()
                         .map(|info| info.members.len())
@@ -1206,7 +1221,7 @@ impl OfflineProtocol {
 
         // Add member via MLS — returns both Welcome (for invitee) and Commit (for existing members)
         let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let (welcome, commit) = mls_guard.add_group_member(&gid, &key_pkg)?;
         let group_name = welcome.group_name.clone();
         drop(mls_guard);
@@ -1240,7 +1255,7 @@ impl OfflineProtocol {
         // Store invitee as member role and load all roles for the welcome payload
         let member_roles = {
             let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
             if let Err(e) = mls_guard.set_member_role(&gid, invitee_user_id, GroupRole::Member) {
                 warn!(invitee = %invitee_user_id, error = %e, "Failed to store invitee role");
             }
@@ -1330,7 +1345,7 @@ impl OfflineProtocol {
         // Admin check + last-admin guard (single metadata load)
         {
             let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
             let metadata = mls_guard.get_group_metadata(&gid)?;
 
             let is_admin = if let Some(ref meta) = metadata {
@@ -1376,7 +1391,7 @@ impl OfflineProtocol {
         }
 
         let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let commit_msg = mls_guard.remove_group_member(&gid, member_id)?;
         drop(mls_guard);
 
@@ -1384,9 +1399,10 @@ impl OfflineProtocol {
         let members = self.refresh_group_members(group_id)?;
         // Clean up removed member's role metadata
         if let Ok(mls_guard) = self.read_mls_guard() {
-            let gid = offline_protocol_mls::GroupId::new(group_id);
-            if let Err(e) = mls_guard.remove_member_role(&gid, member_id) {
-                warn!(member = %member_id, error = %e, "Failed to clean up role metadata for removed member");
+            if let Ok(gid) = offline_protocol_mls::GroupId::new(group_id) {
+                if let Err(e) = mls_guard.remove_member_role(&gid, member_id) {
+                    warn!(member = %member_id, error = %e, "Failed to clean up role metadata for removed member");
+                }
             }
         }
         // Auto-promote if removal left zero admins
@@ -1496,7 +1512,7 @@ impl OfflineProtocol {
         let other_members_exist = members.iter().any(|m| m != &self_id);
         if other_members_exist {
             let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
             if let Some(metadata) = mls_guard.get_group_metadata(&gid)? {
                 let is_admin = metadata.get_role(&self_id) == GroupRole::Admin;
                 if is_admin {
@@ -1561,7 +1577,7 @@ impl OfflineProtocol {
 
         // Now safe to delete local MLS state — at least one peer was notified
         let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id)?;
         mls_guard.leave_group(&gid)?;
         drop(mls_guard);
 
@@ -1650,7 +1666,7 @@ impl OfflineProtocol {
         // to minimize lock contention during the fan-out phase.
         let encrypted = {
             let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
             mls_guard.encrypt_for_group(&gid, content_bytes)?
         };
 
@@ -1659,7 +1675,7 @@ impl OfflineProtocol {
             Some(m) => m.clone(),
             None => {
                 let mls_guard = self.read_mls_guard()?;
-                let gid = offline_protocol_mls::GroupId::new(group_id);
+                let gid = offline_protocol_mls::GroupId::new(group_id)?;
                 let info = mls_guard
                     .get_group_info(&gid)?
                     .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
@@ -1788,7 +1804,7 @@ impl OfflineProtocol {
         group_id: &str,
     ) -> Result<Option<offline_protocol_mls::GroupInfo>> {
         let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id)?;
         Ok(mls_guard.get_group_info(&gid)?)
     }
 
@@ -1804,7 +1820,9 @@ impl OfflineProtocol {
             return;
         }
         if let Ok(mls_guard) = self.read_mls_guard() {
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let Ok(gid) = offline_protocol_mls::GroupId::new(group_id) else {
+                return;
+            };
             if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
                 if metadata.has_any_admin() {
                     return;
@@ -1827,7 +1845,7 @@ impl OfflineProtocol {
     /// (handles groups created before role tracking was introduced).
     pub(crate) fn check_is_admin(&self, group_id: &str, user_id: &str) -> Result<bool> {
         let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let metadata = mls_guard.get_group_metadata(&gid)?;
         drop(mls_guard);
 
@@ -1876,7 +1894,7 @@ impl OfflineProtocol {
         // Single guard acquisition for both last-admin validation and role write
         {
             let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
 
             // Prevent demoting the last admin (whether self or another admin)
             if role == GroupRole::Member {
@@ -1936,7 +1954,7 @@ impl OfflineProtocol {
     /// Gets a member's role in a group.
     pub fn get_member_role(&self, group_id: &str, user_id: &str) -> Result<GroupRole> {
         let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let metadata = mls_guard
             .get_group_metadata(&gid)?
             .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
@@ -1946,7 +1964,7 @@ impl OfflineProtocol {
     /// Gets all member roles in a group.
     pub fn get_group_roles(&self, group_id: &str) -> Result<HashMap<String, GroupRole>> {
         let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let metadata = mls_guard
             .get_group_metadata(&gid)?
             .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
@@ -1995,8 +2013,11 @@ impl OfflineProtocol {
         }
 
         // Store role locally
+        let Ok(gid) = offline_protocol_mls::GroupId::new(&payload.group_id) else {
+            warn!(group_id = %payload.group_id, "Dropping role change with invalid group id");
+            return;
+        };
         if let Ok(mls_guard) = self.read_mls_guard() {
-            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
             if let Err(e) =
                 mls_guard.set_member_role(&gid, &payload.target_user_id, payload.new_role)
             {
@@ -2036,7 +2057,7 @@ impl OfflineProtocol {
         // Load old name before updating
         let old_name = {
             let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
             mls_guard
                 .get_group_metadata(&gid)?
                 .and_then(|m| m.name.clone())
@@ -2045,7 +2066,7 @@ impl OfflineProtocol {
         // Update locally
         {
             let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
             mls_guard.set_group_name(&gid, new_name)?;
         }
 
@@ -2135,9 +2156,13 @@ impl OfflineProtocol {
             }
         }
 
+        let Ok(gid) = offline_protocol_mls::GroupId::new(&payload.group_id) else {
+            warn!(group_id = %payload.group_id, "Dropping group rename with invalid group id");
+            return;
+        };
+
         // Load old name before updating
         let old_name = if let Ok(mls_guard) = self.read_mls_guard() {
-            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
             mls_guard
                 .get_group_metadata(&gid)
                 .ok()
@@ -2149,7 +2174,6 @@ impl OfflineProtocol {
 
         // Store new name locally
         if let Ok(mls_guard) = self.read_mls_guard() {
-            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
             if let Err(e) = mls_guard.set_group_name(&gid, &payload.new_name) {
                 warn!(
                     group_id = %payload.group_id,
@@ -2309,7 +2333,7 @@ impl OfflineProtocol {
     /// Reads the current MLS epoch for a group, if available.
     fn read_current_epoch(&self, group_id: &str) -> Option<u64> {
         let guard = self.read_mls_guard().ok()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let gid = offline_protocol_mls::GroupId::new(group_id).ok()?;
         let info = guard.get_group_info(&gid).ok()??;
         Some(info.epoch)
     }
@@ -2413,8 +2437,8 @@ impl OfflineProtocol {
             // guard before touching any other &mut self state.
             let update_result = {
                 if let Ok(guard) = self.read_mls_guard() {
-                    let gid = offline_protocol_mls::GroupId::new(&fork.group_id);
-                    let r = guard.update_keys(&gid);
+                    let r = offline_protocol_mls::GroupId::new(&fork.group_id)
+                        .and_then(|gid| guard.update_keys(&gid));
                     drop(guard);
                     Some(r)
                 } else {
@@ -2755,7 +2779,13 @@ impl OfflineProtocol {
                     return;
                 }
             };
-            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let gid = match offline_protocol_mls::GroupId::new(group_id) {
+                Ok(gid) => gid,
+                Err(e) => {
+                    warn!(group_id = %group_id, error = %e, "Dropping relay group message with invalid group id");
+                    return;
+                }
+            };
             // The epoch field is not used by MLS for decryption — OpenMLS
             // determines the epoch from the ciphertext header itself. We pass
             // 0 here because the relay protocol does not carry epoch metadata.
