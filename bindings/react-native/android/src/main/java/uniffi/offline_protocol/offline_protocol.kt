@@ -5792,7 +5792,7 @@ data class EncryptionConfig (
     , 
     var `storePending`: kotlin.Boolean
     , 
-    var `requireEncryption`: kotlin.Boolean
+    var `requireEncryption`: kotlin.Boolean = true 
     , 
     var `pendingQueue`: PendingQueueConfig
     
@@ -6729,7 +6729,7 @@ data class ProtocolConfig (
     , 
     var `storePending`: kotlin.Boolean
     , 
-    var `requireEncryption`: kotlin.Boolean
+    var `requireEncryption`: kotlin.Boolean = true 
     , 
     var `maxPendingPerPeer`: kotlin.ULong
     , 

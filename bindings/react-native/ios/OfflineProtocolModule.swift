@@ -136,8 +136,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                               ?? encryptionDict["auto_key_exchange"] as? Bool ?? true
         let storePending = encryptionDict["storePending"] as? Bool 
                            ?? encryptionDict["store_pending"] as? Bool ?? true
+        // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
         let requireEncryption = encryptionDict["requireEncryption"] as? Bool
-                                ?? encryptionDict["require_encryption"] as? Bool ?? false
+                                ?? encryptionDict["require_encryption"] as? Bool ?? true
         let pendingQueueDict = encryptionDict["pendingQueue"] as? [String: Any]
             ?? encryptionDict["pending_queue"] as? [String: Any]
         let maxPendingPerPeer = UInt64(

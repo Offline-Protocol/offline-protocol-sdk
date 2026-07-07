@@ -263,8 +263,12 @@ export interface EncryptionConfig {
    */
   storePending?: boolean;
   /**
-   * Require encrypted delivery (default: false).
-   * When true, send fails if encryption cannot be applied.
+   * Require encrypted delivery (default: true).
+   * When true, sends fail closed if encryption cannot be applied — a node
+   * that never initialized MLS errors instead of silently sending plaintext,
+   * and inbound legacy plaintext media is rejected. Set to false only to
+   * deliberately operate in plaintext; each plaintext send then emits a
+   * `PLAINTEXT_SEND` security warning (once per peer).
    */
   requireEncryption?: boolean;
   /**
@@ -1182,7 +1186,8 @@ export type SecurityWarningCode =
   | 'TRANSPORT_IDENTITY_MISMATCH'
   | 'SIGNATURE_DOWNGRADE'
   | 'CONTROL_SIGNATURE_INVALID'
-  | 'MEDIA_SENDER_GROUP_MISMATCH';
+  | 'MEDIA_SENDER_GROUP_MISMATCH'
+  | 'PLAINTEXT_SEND';
 
 /**
  * A security-relevant anomaly was detected for a peer. `TOFU_KEY_MISMATCH`

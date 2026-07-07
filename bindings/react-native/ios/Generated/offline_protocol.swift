@@ -2920,7 +2920,7 @@ public struct EncryptionConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(enabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, pendingQueue: PendingQueueConfig) {
+    public init(enabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, pendingQueue: PendingQueueConfig) {
         self.enabled = enabled
         self.autoKeyExchange = autoKeyExchange
         self.storePending = storePending
@@ -4111,7 +4111,7 @@ public struct ProtocolConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled

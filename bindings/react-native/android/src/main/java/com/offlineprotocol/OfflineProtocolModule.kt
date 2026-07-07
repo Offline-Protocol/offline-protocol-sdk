@@ -113,9 +113,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         val storePending = encryptionJson?.let {
             it.optBooleanCompat("storePending", "store_pending") ?: true
         } ?: true
+        // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
         val requireEncryption = encryptionJson?.let {
-            it.optBooleanCompat("requireEncryption", "require_encryption") ?: false
-        } ?: false
+            it.optBooleanCompat("requireEncryption", "require_encryption") ?: true
+        } ?: true
         val pendingQueueJson = encryptionJson?.optJSONObject("pendingQueue")
             ?: encryptionJson?.optJSONObject("pending_queue")
         val maxPendingPerPeer = pendingQueueJson?.optLongCompat(

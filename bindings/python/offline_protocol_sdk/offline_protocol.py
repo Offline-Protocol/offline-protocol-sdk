@@ -3410,7 +3410,7 @@ class _UniffiFfiConverterTypePendingQueueConfig(_UniffiConverterRustBuffer):
 
 @dataclass
 class EncryptionConfig:
-    def __init__(self, *, enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool, pending_queue:PendingQueueConfig):
+    def __init__(self, *, enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, pending_queue:PendingQueueConfig):
         self.enabled = enabled
         self.auto_key_exchange = auto_key_exchange
         self.store_pending = store_pending
@@ -4910,7 +4910,7 @@ class _UniffiFfiConverterTypePeerDevice(_UniffiConverterRustBuffer):
 
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, user_id:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, require_transport_identity:bool = False):
+    def __init__(self, *, app_id:str, user_id:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, require_transport_identity:bool = False):
         self.app_id = app_id
         self.user_id = user_id
         self.ble_enabled = ble_enabled

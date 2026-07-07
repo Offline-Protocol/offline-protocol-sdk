@@ -359,7 +359,8 @@ dictionary EncryptionConfig {
     boolean enabled;
     boolean auto_key_exchange;
     boolean store_pending;
-    boolean require_encryption;
+    // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
+    boolean require_encryption = true;
     PendingQueueConfig pending_queue;
 };
 
@@ -377,7 +378,8 @@ dictionary ProtocolConfig {
     boolean encryption_enabled;
     boolean auto_key_exchange;
     boolean store_pending;
-    boolean require_encryption;
+    // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
+    boolean require_encryption = true;
     u64 max_pending_per_peer;
     u64 max_pending_global;
     u64 pending_ttl_ms;

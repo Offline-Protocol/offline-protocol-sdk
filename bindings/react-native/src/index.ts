@@ -300,7 +300,8 @@ export class OfflineProtocol {
       encryptionEnabled: this.config.encryption?.enabled ?? true,
       autoKeyExchange: this.config.encryption?.autoKeyExchange ?? true,
       storePending: this.config.encryption?.storePending ?? true,
-      requireEncryption: this.config.encryption?.requireEncryption ?? false,
+      // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
+      requireEncryption: this.config.encryption?.requireEncryption ?? true,
       maxPendingPerPeer: this.config.encryption?.pendingQueue?.maxPendingPerPeer ?? 64,
       maxPendingGlobal: this.config.encryption?.pendingQueue?.maxPendingGlobal ?? 4096,
       pendingTtlMs: this.config.encryption?.pendingQueue?.pendingTtlMs ?? 120000,
