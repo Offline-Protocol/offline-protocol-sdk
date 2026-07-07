@@ -458,12 +458,13 @@ impl OfflineProtocol {
                     group_id: String,
                     kind: DecryptionFailureKind,
                 },
+                SecurityRejected,
                 MlsNotInitialized,
             }
 
             let result = if let Some(mls) = self.mls_manager.clone() {
                 if let Ok(manager) = mls.read() {
-                    match manager.decrypt(&encrypted) {
+                    match manager.decrypt(&encrypted, sender) {
                         Ok(Some(plaintext)) => {
                             let text = String::from_utf8_lossy(&plaintext).to_string();
                             debug!(sender = %sender, "Decrypted message successfully");
@@ -476,6 +477,18 @@ impl OfflineProtocol {
                         Ok(None) => {
                             warn!(sender = %sender, "Decryption returned empty");
                             DecryptResult::Empty
+                        }
+                        Err(offline_protocol_mls::MlsError::SenderIdentityMismatch {
+                            claimed,
+                            authenticated,
+                        }) => {
+                            error!(
+                                sender = %sender,
+                                claimed = %claimed,
+                                authenticated = %authenticated,
+                                "SECURITY: wire sender does not match MLS-authenticated sender, rejecting message"
+                            );
+                            DecryptResult::SecurityRejected
                         }
                         Err(e) => {
                             let session_state_error = SessionStateError::from(&e);
@@ -607,6 +620,12 @@ impl OfflineProtocol {
                         ));
                     }
                     Some(InternalMessageResult::Consumed)
+                }
+                DecryptResult::SecurityRejected => {
+                    // Spoofed sender: the MLS credential proves the message came
+                    // from a different member than the wire envelope claims. Do
+                    // not surface, do not ACK (handled by SecurityRejected).
+                    Some(InternalMessageResult::SecurityRejected)
                 }
                 DecryptResult::MlsNotInitialized => {
                     self.emit_mls_decryption_failed(

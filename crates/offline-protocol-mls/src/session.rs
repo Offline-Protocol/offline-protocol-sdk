@@ -174,7 +174,14 @@ impl SessionManager {
     }
 
     /// Decrypts a message from a session.
-    pub fn decrypt_message(&self, encrypted: &EncryptedMessage) -> Result<Option<Vec<u8>>> {
+    ///
+    /// `claimed_sender` is the transport-level sender this message will be
+    /// attributed to; it must match the MLS-authenticated credential.
+    pub fn decrypt_message(
+        &self,
+        encrypted: &EncryptedMessage,
+        claimed_sender: &str,
+    ) -> Result<Option<Vec<u8>>> {
         let mut group = self
             .group_manager
             .load_group(&encrypted.group_id)?
@@ -185,7 +192,7 @@ impl SessionManager {
 
         let result = self
             .group_manager
-            .decrypt_message(&mut group, mls_message)?;
+            .decrypt_message(&mut group, mls_message, claimed_sender)?;
 
         self.group_manager.save_group(&encrypted.group_id, &group)?;
 

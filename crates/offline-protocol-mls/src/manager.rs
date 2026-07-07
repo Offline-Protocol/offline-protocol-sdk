@@ -457,8 +457,18 @@ impl MlsManager {
     }
 
     /// Decrypts a message from a 1:1 session.
-    pub fn decrypt_from_user(&self, encrypted: &EncryptedMessage) -> Result<Option<Vec<u8>>> {
-        self.session_manager.decrypt_message(encrypted)
+    ///
+    /// `claimed_sender` is the transport-level sender this message will be
+    /// attributed to; decryption fails with
+    /// [`MlsError::SenderIdentityMismatch`] if it does not match the
+    /// MLS-authenticated credential (SEC-M1).
+    pub fn decrypt_from_user(
+        &self,
+        encrypted: &EncryptedMessage,
+        claimed_sender: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        self.session_manager
+            .decrypt_message(encrypted, claimed_sender)
     }
 
     /// Lists all active 1:1 sessions.
@@ -643,7 +653,17 @@ impl MlsManager {
     }
 
     /// Decrypts a message from a group.
-    pub fn decrypt_from_group(&self, encrypted: &EncryptedMessage) -> Result<Option<Vec<u8>>> {
+    ///
+    /// `claimed_sender` is the transport-level sender this message will be
+    /// attributed to; decryption fails with
+    /// [`MlsError::SenderIdentityMismatch`] if it does not match the
+    /// MLS-authenticated credential (SEC-M1). The check runs before any
+    /// commit is merged, so a spoofed commit cannot advance group state.
+    pub fn decrypt_from_group(
+        &self,
+        encrypted: &EncryptedMessage,
+        claimed_sender: &str,
+    ) -> Result<Option<Vec<u8>>> {
         let mut group = self
             .group_manager
             .load_group(&encrypted.group_id)?
@@ -654,7 +674,7 @@ impl MlsManager {
 
         let result = self
             .group_manager
-            .decrypt_message(&mut group, mls_message)?;
+            .decrypt_message(&mut group, mls_message, claimed_sender)?;
 
         self.group_manager.save_group(&encrypted.group_id, &group)?;
 
@@ -783,11 +803,19 @@ impl MlsManager {
     // ========================================================================
 
     /// Decrypts any incoming encrypted message.
-    pub fn decrypt(&self, encrypted: &EncryptedMessage) -> Result<Option<Vec<u8>>> {
+    ///
+    /// `claimed_sender` is the transport-level sender this message will be
+    /// attributed to; it must match the MLS-authenticated credential
+    /// (SEC-M1).
+    pub fn decrypt(
+        &self,
+        encrypted: &EncryptedMessage,
+        claimed_sender: &str,
+    ) -> Result<Option<Vec<u8>>> {
         if encrypted.group_id.as_str().starts_with("session:") {
-            self.decrypt_from_user(encrypted)
+            self.decrypt_from_user(encrypted, claimed_sender)
         } else {
-            self.decrypt_from_group(encrypted)
+            self.decrypt_from_group(encrypted, claimed_sender)
         }
     }
 
@@ -1215,6 +1243,88 @@ mod tests {
         assert!(matches!(err, MlsError::CredentialIdentityMismatch { .. }));
     }
 
+    /// Builds a converged alice/bob 1:1 session for sender-binding tests.
+    fn create_test_session() -> (MlsManager, MlsManager) {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        let welcome = alice.create_session("bob").unwrap();
+        bob.join_session(&welcome).unwrap();
+        (alice, bob)
+    }
+
+    #[test]
+    fn test_session_decrypt_rejects_spoofed_sender() {
+        let (alice, bob) = create_test_session();
+
+        // A message authenticated as alice must not be attributable to a
+        // different wire sender (SEC-M1).
+        let ct = alice.encrypt_for_user("bob", b"hello").unwrap();
+        let err = bob.decrypt_from_user(&ct, "mallory").unwrap_err();
+        assert!(matches!(err, MlsError::SenderIdentityMismatch { .. }));
+
+        // With the correct claimed sender, a fresh message decrypts. (The
+        // spoofed attempt above consumed its ratchet generation — that
+        // message is burned, which is fine for a forgery.)
+        let ct2 = alice.encrypt_for_user("bob", b"hello again").unwrap();
+        let pt = bob.decrypt_from_user(&ct2, "alice").unwrap();
+        assert_eq!(pt.as_deref(), Some(&b"hello again"[..]));
+    }
+
+    /// Builds a two-member group (alice admin, bob member) for group
+    /// sender-binding tests. Returns (alice, bob, group_id).
+    fn create_test_group_with_bob() -> (MlsManager, MlsManager, GroupId) {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        let info = alice.create_group("Test Group").unwrap();
+        let gid = info.group_id.clone();
+        let (welcome, _commit) = alice
+            .add_group_member(&gid, &bob_kp.key_package_data)
+            .unwrap();
+        bob.join_group(&welcome).unwrap();
+        (alice, bob, gid)
+    }
+
+    #[test]
+    fn test_group_decrypt_rejects_spoofed_sender() {
+        let (alice, bob, gid) = create_test_group_with_bob();
+
+        let ct = alice.encrypt_for_group(&gid, b"group message").unwrap();
+        let err = bob.decrypt_from_group(&ct, "mallory").unwrap_err();
+        assert!(matches!(err, MlsError::SenderIdentityMismatch { .. }));
+
+        let ct2 = alice.encrypt_for_group(&gid, b"another one").unwrap();
+        let pt = bob.decrypt_from_group(&ct2, "alice").unwrap();
+        assert_eq!(pt.as_deref(), Some(&b"another one"[..]));
+    }
+
+    #[test]
+    fn test_group_commit_with_spoofed_sender_rejected_before_merge() {
+        let (alice, bob, gid) = create_test_group_with_bob();
+
+        // Alice issues a key-update commit; bob receives it with a spoofed
+        // wire sender. The mismatch must be detected BEFORE the staged
+        // commit is merged — bob's epoch must not advance.
+        let commit = alice.update_keys(&gid).unwrap();
+        let epoch_before = bob.get_group_info(&gid).unwrap().unwrap().epoch;
+
+        let err = bob.decrypt_from_group(&commit, "mallory").unwrap_err();
+        assert!(matches!(err, MlsError::SenderIdentityMismatch { .. }));
+
+        let epoch_after = bob.get_group_info(&gid).unwrap().unwrap().epoch;
+        assert_eq!(
+            epoch_before, epoch_after,
+            "spoofed commit must not advance group state"
+        );
+    }
+
     #[test]
     fn test_no_session_initially() {
         let manager = create_test_manager("alice");
@@ -1280,7 +1390,7 @@ mod tests {
         let ct = alice
             .encrypt_for_user("bob", b"hello over the converged group")
             .unwrap();
-        let pt = bob.decrypt_from_user(&ct).unwrap();
+        let pt = bob.decrypt_from_user(&ct, "alice").unwrap();
         assert_eq!(pt.as_deref(), Some(&b"hello over the converged group"[..]));
 
         // Owner retransmits the SAME Welcome (its periodic retry). Re-staging
@@ -1302,7 +1412,7 @@ mod tests {
         let ct2 = alice
             .encrypt_for_user("bob", b"still converged after retransmit")
             .unwrap();
-        let pt2 = bob.decrypt_from_user(&ct2).unwrap();
+        let pt2 = bob.decrypt_from_user(&ct2, "alice").unwrap();
         assert_eq!(
             pt2.as_deref(),
             Some(&b"still converged after retransmit"[..])
@@ -1336,17 +1446,17 @@ mod tests {
 
         // Decrypt the newest message first, ratcheting bob's receive state far
         // ahead of every earlier generation.
-        let pt = bob.decrypt_from_user(&ciphertexts[39]).unwrap();
+        let pt = bob.decrypt_from_user(&ciphertexts[39], "alice").unwrap();
         assert_eq!(pt.as_deref(), Some(&b"chunk 39"[..]));
 
         // 29 generations behind: far beyond the OpenMLS default of 5, but
         // within our tolerance of 32 — must still decrypt.
-        let pt = bob.decrypt_from_user(&ciphertexts[10]).unwrap();
+        let pt = bob.decrypt_from_user(&ciphertexts[10], "alice").unwrap();
         assert_eq!(pt.as_deref(), Some(&b"chunk 10"[..]));
 
         // 39 generations behind: beyond the tolerance, the key is deleted and
         // the message must NOT decrypt (proves the configured bound applies).
-        let res = bob.decrypt_from_user(&ciphertexts[0]);
+        let res = bob.decrypt_from_user(&ciphertexts[0], "alice");
         assert!(
             !matches!(res, Ok(Some(_))),
             "generation beyond the tolerance must not decrypt"
