@@ -61,6 +61,10 @@ pub enum RelayDemotionReason {
         /// Minimum battery level required to remain a relay.
         min_required: u8,
     },
+    /// The configuration forbids relaying (`allow_relay` is `false` or the
+    /// priority is [`RelayPriority::Never`]), so the role is surrendered
+    /// regardless of connections or battery.
+    RelayDisallowed,
 }
 
 /// A relay-role transition produced by [`RelayManager::evaluate_transition`].
@@ -142,11 +146,10 @@ impl RelayManager {
         battery_level: u8,
         is_charging: bool,
     ) -> bool {
-        // Check relay priority
-        match self.config.relay_priority {
-            RelayPriority::Never => return false,
-            RelayPriority::Always if !self.config.allow_relay => return false,
-            _ => {}
+        // Config-level opt-outs apply regardless of priority mode — the
+        // charging shortcut below must not override an explicit "don't relay".
+        if self.relaying_disallowed() {
+            return false;
         }
 
         // Must have enough connections
@@ -194,6 +197,12 @@ impl RelayManager {
         battery_level: u8,
         is_charging: bool,
     ) -> bool {
+        // A device whose config forbids relaying must surrender the role,
+        // however it acquired it (external `set_role`, config change).
+        if self.relaying_disallowed() {
+            return true;
+        }
+
         // If priority is Always, stay as relay unless critical battery
         if matches!(self.config.relay_priority, RelayPriority::Always) {
             return battery_level < 15;
@@ -214,6 +223,14 @@ impl RelayManager {
         }
 
         false
+    }
+
+    /// Whether the configuration forbids acting as a relay at all.
+    ///
+    /// Mirrors the message-forwarding gate in the protocol crate: relaying is
+    /// off when `allow_relay` is `false` or the priority is `Never`.
+    fn relaying_disallowed(&self) -> bool {
+        !self.config.allow_relay || matches!(self.config.relay_priority, RelayPriority::Never)
     }
 
     /// Battery level below which a relay must demote, given charging state.
@@ -256,12 +273,17 @@ impl RelayManager {
             RelayRole::Relay => {
                 if self.should_demote_from_relay(connection_count, battery_level, is_charging) {
                     self.set_role(RelayRole::Regular);
-                    // Battery takes precedence: a relay that is both
-                    // connection-starved and battery-starved is reported as a
-                    // battery demotion, which is the signal the analytics
-                    // panel tracks distinctly.
+                    // A config-level opt-out outranks resource state: without
+                    // it a healthy-but-disallowed relay would be misreported
+                    // as connection-starved. Below that, battery takes
+                    // precedence: a relay that is both connection-starved and
+                    // battery-starved is reported as a battery demotion,
+                    // which is the signal the analytics panel tracks
+                    // distinctly.
                     let floor = self.demotion_battery_floor(is_charging);
-                    let reason = if battery_level < floor {
+                    let reason = if self.relaying_disallowed() {
+                        RelayDemotionReason::RelayDisallowed
+                    } else if battery_level < floor {
                         RelayDemotionReason::LowBattery {
                             min_required: floor,
                         }
@@ -316,6 +338,9 @@ impl RelayManager {
     ///
     /// * `candidates` - List of potential relays
     /// * `count` - Number of relays to select
+    /// * `max_congestion_level` - Congestion level (0.0-1.0) at or above
+    ///   which a candidate is considered overloaded and excluded; pass the
+    ///   caller's path policy (e.g. `PathConfig::max_congestion_level`)
     ///
     /// # Returns
     ///
@@ -324,9 +349,10 @@ impl RelayManager {
         &self,
         mut candidates: Vec<RelayInfo>,
         count: usize,
+        max_congestion_level: f32,
     ) -> Vec<RelayInfo> {
-        // Filter out overloaded relays (congestion > 0.7)
-        candidates.retain(|relay| relay.congestion_level < 0.7);
+        // Filter out overloaded relays
+        candidates.retain(|relay| relay.congestion_level < max_congestion_level);
 
         // Calculate scores and sort
         candidates.sort_by(|a, b| {
@@ -586,11 +612,33 @@ mod tests {
             },
         ];
 
-        let best = manager.select_best_relays(relays, 2);
+        let best = manager.select_best_relays(relays, 2, 0.7);
         assert_eq!(best.len(), 2);
 
         // First relay should be the best one
         assert_eq!(best[0].connection_count, 8);
+    }
+
+    #[test]
+    fn test_select_best_relays_honors_congestion_threshold() {
+        let manager = RelayManager::new();
+        let candidate = |congestion_level: f32| RelayInfo {
+            connection_count: 5,
+            battery_level: 60,
+            is_charging: false,
+            role: RelayRole::Relay,
+            link_quality: 70,
+            queue_depth: 10,
+            congestion_level,
+        };
+
+        // A 0.6-congestion candidate passes the default-style 0.7 threshold
+        // but must be excluded under a stricter 0.5 policy.
+        let best = manager.select_best_relays(vec![candidate(0.6)], 1, 0.7);
+        assert_eq!(best.len(), 1);
+
+        let best = manager.select_best_relays(vec![candidate(0.6)], 1, 0.5);
+        assert!(best.is_empty());
     }
 
     #[test]
@@ -603,6 +651,68 @@ mod tests {
 
         // Should never promote, even with perfect conditions
         assert!(!manager.should_promote_to_relay(10, 100, true));
+
+        // And must surrender the role if it somehow holds it.
+        assert!(manager.should_demote_from_relay(10, 100, true));
+    }
+
+    #[test]
+    fn test_allow_relay_false_blocks_auto_promotion() {
+        let config = RelayConfig {
+            allow_relay: false,
+            ..Default::default() // Auto priority
+        };
+        let manager = RelayManager::with_config(config);
+
+        // Perfect conditions, including the charging shortcut that used to
+        // bypass the opt-out entirely in Auto mode.
+        assert!(!manager.should_promote_to_relay(10, 100, true));
+        assert!(!manager.should_promote_to_relay(10, 100, false));
+    }
+
+    #[test]
+    fn test_allow_relay_false_forces_demotion() {
+        let config = RelayConfig {
+            allow_relay: false,
+            ..Default::default()
+        };
+        let manager = RelayManager::with_config(config);
+
+        // Healthy connections and battery are irrelevant: the config says no.
+        assert!(manager.should_demote_from_relay(10, 100, false));
+    }
+
+    #[test]
+    fn test_allow_relay_false_blocks_always_priority() {
+        let config = RelayConfig {
+            allow_relay: false,
+            relay_priority: RelayPriority::Always,
+            ..Default::default()
+        };
+        let manager = RelayManager::with_config(config);
+
+        assert!(!manager.should_promote_to_relay(10, 100, true));
+        assert!(manager.should_demote_from_relay(10, 100, true));
+    }
+
+    #[test]
+    fn test_evaluate_transition_demote_relay_disallowed() {
+        let config = RelayConfig {
+            allow_relay: false,
+            ..Default::default()
+        };
+        let mut manager = RelayManager::with_config(config);
+        manager.set_role(RelayRole::Relay);
+
+        // Healthy stats: the demotion must be classified as disallowed, not
+        // misreported as connection- or battery-starvation.
+        assert_eq!(
+            manager.evaluate_transition(10, 100, false),
+            Some(RelayTransition::Demoted(
+                RelayDemotionReason::RelayDisallowed
+            ))
+        );
+        assert_eq!(manager.current_role(), RelayRole::Regular);
     }
 
     #[test]

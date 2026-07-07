@@ -1460,6 +1460,9 @@ impl OfflineProtocol {
             RelayTransition::Demoted(RelayDemotionReason::LowBattery { min_required }) => {
                 Event::relay_demoted_battery(battery_level, min_required)
             }
+            RelayTransition::Demoted(RelayDemotionReason::RelayDisallowed) => {
+                Event::relay_demoted("relaying disabled by configuration".to_string())
+            }
         };
         self.emit_event(event);
     }
