@@ -5,9 +5,18 @@ use std::fmt;
 
 /// Validates that an identifier string is safe for use as a storage key.
 ///
-/// Rejects empty strings, path-traversal components (`.`, `..`), and
-/// characters hostile to storage backends (NUL, `/`, `\`, `:`).
-fn validate_id_chars(id: &str, type_name: &str) -> Result<(), String> {
+/// Rejects empty strings, path-traversal components (`.`, `..`), ASCII
+/// control characters (including NUL), and characters hostile to storage
+/// backends (`/`, `\`, `:` — filesystem path separators and key-separator
+/// collisions in KV stores).
+///
+/// This is the shared policy behind [`UserId`] and [`AppId`]. Other crates
+/// that persist wire-derived identifiers as storage keys (e.g. MLS group
+/// ids) apply the same policy, per colon-separated segment where the
+/// identifier format itself uses `:` as a namespace separator.
+///
+/// `type_name` is used only to label the error message.
+pub fn validate_id_chars(id: &str, type_name: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err(format!("{} cannot be empty", type_name));
     }

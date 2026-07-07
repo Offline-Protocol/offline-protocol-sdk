@@ -19,5 +19,6 @@ pub use error::{Error, Result};
 pub use message::{ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority};
 pub use service::{ServiceDescriptor, ServiceId};
 pub use types::{
-    AppId, HopCount, LamportClock, LocalInstant, Timestamp, UserId, WallClockTimestamp, TTL,
+    validate_id_chars, AppId, HopCount, LamportClock, LocalInstant, Timestamp, UserId,
+    WallClockTimestamp, TTL,
 };
