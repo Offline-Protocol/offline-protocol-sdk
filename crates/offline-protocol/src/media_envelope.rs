@@ -212,7 +212,7 @@ mod tests {
 
     fn sample_encrypted() -> EncryptedMessage {
         EncryptedMessage {
-            group_id: GroupId::for_session("alice", "bob"),
+            group_id: GroupId::for_session("alice", "bob").unwrap(),
             message_type: MlsMessageType::Application,
             epoch: 3,
             ciphertext: vec![1, 2, 3, 4, 5],

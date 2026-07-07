@@ -502,7 +502,13 @@ impl OfflineProtocol {
         // claim, so without this check any peer holding a valid session with
         // us could deliver its own ciphertext under an arbitrary
         // `message.sender` and have the file attributed to that identity.
-        let expected_group = GroupId::for_session(&self.config.user_id, sender);
+        let Ok(expected_group) = GroupId::for_session(&self.config.user_id, sender) else {
+            warn!(
+                sender = %sender,
+                "Cannot derive 1:1 session id for media chunk sender, dropping"
+            );
+            return None;
+        };
         if encrypted.group_id != expected_group {
             warn!(
                 sender = %sender,
