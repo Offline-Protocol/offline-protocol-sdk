@@ -8,7 +8,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-pub mod congestion;
 pub mod constants;
 pub mod dors;
 pub mod error;
@@ -16,7 +15,6 @@ pub mod relay;
 pub mod router;
 pub mod ttl;
 
-pub use congestion::{CongestionConfig, CongestionController, DeliveryOutcome, SendDecision};
 pub use dors::{
     display_routing_score, DorsConfig, EscalationTriggerReason, TransportScore,
     TransportScoreFactors, TransportSelector,
