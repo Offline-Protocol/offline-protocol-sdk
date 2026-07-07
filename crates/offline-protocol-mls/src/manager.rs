@@ -384,6 +384,12 @@ impl MlsManager {
     pub fn replace_session_with_welcome(&self, welcome: &WelcomeMessage) -> Result<GroupInfo> {
         let other_user_id = &welcome.inviter_id;
 
+        // Security: `inviter_id` arrives on the wire and is used below as a
+        // raw storage key for deletes — reject storage-hostile values just
+        // like `import_key_package` does for its user id.
+        offline_protocol_core::validate_id_chars(other_user_id, "User ID")
+            .map_err(MlsError::InvalidUserId)?;
+
         // Clear any pending welcome we were about to send
         let _ = self.clear_pending_welcome(other_user_id);
 
@@ -1241,6 +1247,23 @@ mod tests {
         // create_session("bob") loads the poisoned package and must refuse.
         let err = alice.create_session("bob").unwrap_err();
         assert!(matches!(err, MlsError::CredentialIdentityMismatch { .. }));
+    }
+
+    #[test]
+    fn test_replace_session_with_welcome_rejects_hostile_inviter_id() {
+        // `inviter_id` arrives on the wire and is used as a raw storage key
+        // for deletes — hostile values must be rejected before any storage
+        // operation runs.
+        let alice = create_test_manager("alice");
+        let welcome = WelcomeMessage {
+            group_id: GroupId::new("session:alice:bob").unwrap(),
+            welcome_data: vec![],
+            inviter_id: "../../etc".to_string(),
+            group_name: None,
+            timestamp_ms: 0,
+        };
+        let err = alice.replace_session_with_welcome(&welcome).unwrap_err();
+        assert!(matches!(err, MlsError::InvalidUserId(_)));
     }
 
     /// Builds a converged alice/bob 1:1 session for sender-binding tests.

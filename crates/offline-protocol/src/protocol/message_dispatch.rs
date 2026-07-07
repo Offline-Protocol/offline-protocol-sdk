@@ -189,6 +189,18 @@ impl OfflineProtocol {
     /// Handles an MLS welcome message (session invitation).
     pub(crate) fn handle_welcome_message(&mut self, sender: &str, data: &str) {
         if let Ok(welcome) = serde_json::from_str::<WelcomeMessage>(data) {
+            // Security: honest peers always set `inviter_id` to their own id
+            // (see `SessionManager::create_session`), and the payload field is
+            // used downstream as a storage key. Reject Welcomes whose claimed
+            // inviter disagrees with the transport-level sender.
+            if welcome.inviter_id != sender {
+                error!(
+                    sender = %sender,
+                    inviter_id = %welcome.inviter_id,
+                    "SECURITY: Welcome inviter_id does not match transport sender, dropping"
+                );
+                return;
+            }
             debug!(sender = %sender, group_id = %welcome.group_id, "Received welcome message");
 
             // Track if we need to flush pending messages and process pending decryption
