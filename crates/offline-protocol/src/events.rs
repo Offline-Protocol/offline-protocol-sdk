@@ -79,6 +79,11 @@ pub enum SecurityWarningCode {
     /// session) delivered under a different sender's name is a media
     /// forgery/misattribution attempt.
     MediaSenderGroupMismatch,
+    /// An outbound message left this node as plaintext because encryption is
+    /// disabled or MLS is uninitialized while `require_encryption` is `false`
+    /// (an explicit opt-out — the default fails closed). Emitted at most once
+    /// per peer per protocol instance.
+    PlaintextSend,
 }
 
 impl SecurityWarningCode {
@@ -91,6 +96,7 @@ impl SecurityWarningCode {
             Self::SignatureDowngrade => "SIGNATURE_DOWNGRADE",
             Self::ControlSignatureInvalid => "CONTROL_SIGNATURE_INVALID",
             Self::MediaSenderGroupMismatch => "MEDIA_SENDER_GROUP_MISMATCH",
+            Self::PlaintextSend => "PLAINTEXT_SEND",
         }
     }
 }
@@ -2638,6 +2644,7 @@ mod tests {
             SecurityWarningCode::SignatureDowngrade,
             SecurityWarningCode::ControlSignatureInvalid,
             SecurityWarningCode::MediaSenderGroupMismatch,
+            SecurityWarningCode::PlaintextSend,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -2656,7 +2663,8 @@ mod tests {
                 | SecurityWarningCode::TransportIdentityMismatch
                 | SecurityWarningCode::SignatureDowngrade
                 | SecurityWarningCode::ControlSignatureInvalid
-                | SecurityWarningCode::MediaSenderGroupMismatch => {}
+                | SecurityWarningCode::MediaSenderGroupMismatch
+                | SecurityWarningCode::PlaintextSend => {}
             }
         }
     }

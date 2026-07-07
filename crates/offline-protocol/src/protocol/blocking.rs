@@ -182,7 +182,11 @@ mod tests {
     use std::sync::Arc;
 
     fn make_protocol(user_id: &str) -> crate::OfflineProtocol {
-        let config = ProtocolConfig::new("test-app", user_id);
+        let mut config = ProtocolConfig::new("test-app", user_id);
+        // These tests exercise blocking and inbound file-transfer machinery
+        // over legacy plaintext chunks; opt out of the fail-closed default
+        // (SEC-M3) so the receive gate accepts them.
+        config.encryption.require_encryption = false;
         crate::OfflineProtocol::new(config).unwrap()
     }
 

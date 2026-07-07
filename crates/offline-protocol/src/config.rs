@@ -80,8 +80,23 @@ pub struct EncryptionConfig {
     /// Messages will be sent automatically after the session is established.
     pub store_pending: bool,
 
-    /// Require encryption for outbound messages.
-    /// When enabled, sends fail if encryption cannot be applied.
+    /// Require encryption for outbound messages (default: `true`).
+    ///
+    /// When enabled, sends fail closed if encryption cannot be applied:
+    /// with MLS uninitialized every send returns [`crate::Error::EncryptFailed`],
+    /// and with no confirmed session messages are queued (when
+    /// `store_pending` is set) or fail with
+    /// [`crate::Error::SessionNotReady`] instead of ever leaving as
+    /// plaintext. Inbound legacy plaintext media is also rejected.
+    ///
+    /// Disable only for deployments that deliberately send cleartext
+    /// (e.g. open broadcast/mesh bootstrap without provisioned MLS
+    /// storage) — set this to `false` explicitly, or use
+    /// [`EncryptionConfig::disabled`] to turn encryption off entirely.
+    /// Every plaintext send then emits a
+    /// [`crate::events::SecurityWarningCode::PlaintextSend`] warning
+    /// (once per peer). Internal control messages (key exchange, ACKs,
+    /// service discovery) are exempt and unaffected.
     pub require_encryption: bool,
 
     /// Bounds and eviction policy for pending inbound encrypted messages.
@@ -94,7 +109,9 @@ impl Default for EncryptionConfig {
             enabled: true,
             auto_key_exchange: true,
             store_pending: true,
-            require_encryption: false,
+            // Fail closed by default (SEC-M3): a stock-config node must never
+            // silently degrade to plaintext because MLS was left uninitialized.
+            require_encryption: true,
             pending_queue: PendingQueueConfig::default(),
         }
     }
@@ -644,7 +661,9 @@ mod tests {
         assert!(encryption.enabled);
         assert!(encryption.auto_key_exchange);
         assert!(encryption.store_pending);
-        assert!(!encryption.require_encryption);
+        // SEC-M3: encryption is required by default; plaintext is an
+        // explicit opt-out, never a silent fallback.
+        assert!(encryption.require_encryption);
         assert_eq!(encryption.pending_queue.max_pending_per_peer, 64);
         assert_eq!(encryption.pending_queue.max_pending_global, 4096);
         assert_eq!(encryption.pending_queue.pending_ttl_ms, 120_000);

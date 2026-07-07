@@ -395,6 +395,27 @@ impl OfflineProtocol {
         ));
     }
 
+    /// Emits a [`SecurityWarningCode::PlaintextSend`] warning for `peer_id`,
+    /// at most once per peer per protocol instance. Called from the outbound
+    /// plaintext fall-throughs, which are reachable only under the explicit
+    /// `require_encryption = false` opt-out — the warning keeps cleartext
+    /// flows visible without emitting per message.
+    pub(super) fn warn_plaintext_send(&mut self, peer_id: &str) {
+        if self.plaintext_send_warned.insert(peer_id.to_string()) {
+            warn!(
+                recipient = %peer_id,
+                "Outbound message sent as plaintext (encryption disabled or MLS \
+                 uninitialized, require_encryption=false)"
+            );
+            self.emit_security_warning(
+                peer_id,
+                SecurityWarningCode::PlaintextSend,
+                "Outbound message sent as plaintext: encryption is disabled or MLS \
+                 is not initialized, and require_encryption is false",
+            );
+        }
+    }
+
     /// Returns `true` if the message content starts with any internal prefix.
     /// Used for injection prevention on the public send APIs.
     pub(crate) fn is_internal_prefix(content: &str) -> bool {

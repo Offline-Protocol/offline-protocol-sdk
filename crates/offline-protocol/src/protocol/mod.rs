@@ -99,6 +99,11 @@ pub struct OfflineProtocol {
     /// Only encrypt messages when the session is confirmed to avoid race conditions.
     confirmed_sessions: std::collections::HashSet<String>,
 
+    /// Peers already flagged with a `PlaintextSend` security warning, so the
+    /// explicit-opt-out plaintext path warns once per peer instead of once
+    /// per message.
+    pub(crate) plaintext_send_warned: std::collections::HashSet<String>,
+
     /// Bounded pending decryption queue for encrypted messages received before
     /// the MLS session is ready.
     pub(crate) pending_queue: PendingDecryptionQueue,
@@ -294,6 +299,7 @@ impl OfflineProtocol {
             key_package_sent_to: std::collections::HashSet::new(),
             known_peers: std::collections::HashSet::new(),
             confirmed_sessions: std::collections::HashSet::new(),
+            plaintext_send_warned: std::collections::HashSet::new(),
             pending_queue: PendingDecryptionQueue::default(),
             message_storage: None,
             lamport_clock: LamportClock::new(),
