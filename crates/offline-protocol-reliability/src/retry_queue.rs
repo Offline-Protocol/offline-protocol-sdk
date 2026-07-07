@@ -40,6 +40,23 @@ impl Default for RetryConfig {
     }
 }
 
+impl RetryConfig {
+    /// Calculates the backoff delay for the given retry count:
+    /// `initial_delay_ms * backoff_multiplier^retry_count`, clamped to
+    /// `max_delay_ms`.
+    ///
+    /// Computed in f64 and clamped before the integer cast, so it is total
+    /// over all configs: `f64::min` returns the other operand when one side
+    /// is NaN (NaN/infinity collapse to `max_delay_ms`), and float-to-int
+    /// `as` casts saturate.
+    pub fn delay_for_retry(&self, retry_count: u32) -> u64 {
+        let exponent = i32::try_from(retry_count).unwrap_or(i32::MAX);
+        let factor = f64::from(self.backoff_multiplier).powi(exponent);
+        let delay_ms = self.initial_delay_ms as f64 * factor;
+        delay_ms.min(self.max_delay_ms as f64) as u64
+    }
+}
+
 /// A message scheduled for retry.
 #[derive(Debug, Clone)]
 pub struct RetryEntry {
@@ -54,9 +71,6 @@ pub struct RetryEntry {
 
     /// When this message should be retried next.
     pub retry_at: DateTime<Utc>,
-
-    /// Current backoff delay in milliseconds.
-    pub current_delay_ms: u64,
 }
 
 impl RetryEntry {
@@ -69,18 +83,6 @@ impl RetryEntry {
     pub fn is_expired(&self, max_lifetime_ms: u64) -> bool {
         let elapsed = Utc::now().signed_duration_since(self.added_at);
         elapsed.num_milliseconds() >= max_lifetime_ms as i64
-    }
-
-    /// Calculates the next retry time with exponential backoff.
-    pub fn calculate_next_retry_time(
-        current_delay_ms: u64,
-        backoff_multiplier: f32,
-        max_delay_ms: u64,
-    ) -> (DateTime<Utc>, u64) {
-        let next_delay = ((current_delay_ms as f32 * backoff_multiplier) as u64).min(max_delay_ms);
-
-        let next_retry = Utc::now() + chrono::Duration::milliseconds(next_delay as i64);
-        (next_retry, next_delay)
     }
 }
 
@@ -150,18 +152,7 @@ impl RetryQueue {
             return;
         }
 
-        // Calculate retry delay with exponential backoff
-        // Cap exponent at 20 to prevent overflow with large retry counts
-        let delay_ms = if retry_count == 0 {
-            self.config.initial_delay_ms
-        } else {
-            let base_delay = self.config.initial_delay_ms
-                * (self
-                    .config
-                    .backoff_multiplier
-                    .powi(retry_count.min(20) as i32) as u64);
-            base_delay.min(self.config.max_delay_ms)
-        };
+        let delay_ms = self.config.delay_for_retry(retry_count);
 
         let retry_at = Utc::now() + chrono::Duration::milliseconds(delay_ms as i64);
 
@@ -170,7 +161,6 @@ impl RetryQueue {
             retry_count,
             added_at: Utc::now(),
             retry_at,
-            current_delay_ms: delay_ms,
         };
 
         self.index.insert(message.id.as_str(), ());
@@ -384,28 +374,99 @@ mod tests {
 
     #[test]
     fn test_exponential_backoff() {
-        let _config = RetryConfig {
+        let config = RetryConfig {
             initial_delay_ms: 100,
             backoff_multiplier: 2.0,
             max_delay_ms: 1000,
             ..Default::default()
         };
 
-        // First retry: 100ms
-        let (_, delay1) = RetryEntry::calculate_next_retry_time(100, 2.0, 1000);
-        assert_eq!(delay1, 200);
+        assert_eq!(config.delay_for_retry(0), 100);
+        assert_eq!(config.delay_for_retry(1), 200);
+        assert_eq!(config.delay_for_retry(2), 400);
+        assert_eq!(config.delay_for_retry(3), 800);
+        // 100 * 2^4 = 1600ms, capped at 1000ms
+        assert_eq!(config.delay_for_retry(4), 1000);
+        assert_eq!(config.delay_for_retry(100), 1000);
+    }
 
-        // Second retry: 200ms * 2 = 400ms
-        let (_, delay2) = RetryEntry::calculate_next_retry_time(200, 2.0, 1000);
-        assert_eq!(delay2, 400);
+    #[test]
+    fn test_backoff_extreme_multiplier_clamps_not_overflows() {
+        // Regression: the old formula multiplied in u64 before clamping, so a
+        // large multiplier overflowed (debug panic / release garbage delay).
+        for multiplier in [7.0, 1000.0, f32::MAX] {
+            let config = RetryConfig {
+                initial_delay_ms: 1000,
+                backoff_multiplier: multiplier,
+                max_delay_ms: 30_000,
+                ..Default::default()
+            };
 
-        // Third retry: 400ms * 2 = 800ms
-        let (_, delay3) = RetryEntry::calculate_next_retry_time(400, 2.0, 1000);
-        assert_eq!(delay3, 800);
+            for retry_count in [1, 20, 1000, u32::MAX] {
+                let delay = config.delay_for_retry(retry_count);
+                assert!(
+                    delay <= 30_000,
+                    "multiplier {multiplier} retry {retry_count} gave delay {delay}"
+                );
+            }
+        }
+    }
 
-        // Fourth retry: 800ms * 2 = 1600ms, capped at 1000ms
-        let (_, delay4) = RetryEntry::calculate_next_retry_time(800, 2.0, 1000);
-        assert_eq!(delay4, 1000);
+    #[test]
+    fn test_backoff_non_finite_multiplier_collapses_to_max_delay() {
+        // Locks down the totality claim on delay_for_retry: NaN and infinity
+        // collapse to exactly max_delay_ms, not merely something <= it.
+        for multiplier in [f32::NAN, f32::INFINITY] {
+            let config = RetryConfig {
+                initial_delay_ms: 1000,
+                backoff_multiplier: multiplier,
+                max_delay_ms: 30_000,
+                ..Default::default()
+            };
+
+            for retry_count in [1, 20, u32::MAX] {
+                assert_eq!(
+                    config.delay_for_retry(retry_count),
+                    30_000,
+                    "multiplier {multiplier} retry {retry_count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_backoff_retry_zero_clamped_to_max_delay() {
+        // retry 0 no longer bypasses the max_delay_ms clamp: a misconfigured
+        // initial_delay_ms > max_delay_ms yields max_delay_ms, not the raw
+        // initial delay.
+        let config = RetryConfig {
+            initial_delay_ms: 60_000,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 30_000,
+            ..Default::default()
+        };
+
+        assert_eq!(config.delay_for_retry(0), 30_000);
+    }
+
+    #[test]
+    fn test_enqueue_backoff_clamped_to_max_delay() {
+        // Exercise the real enqueue path with a multiplier that overflowed
+        // the old inline formula.
+        let config = RetryConfig {
+            initial_delay_ms: 1000,
+            backoff_multiplier: 10.0,
+            max_delay_ms: 30_000,
+            ..Default::default()
+        };
+        let mut queue = RetryQueue::with_config(config);
+
+        let msg = create_test_message(MessagePriority::Medium);
+        queue.enqueue(msg, 20);
+
+        let until_retry = queue.time_until_next_retry().unwrap();
+        assert!(until_retry <= chrono::Duration::milliseconds(30_000));
+        assert!(until_retry > chrono::Duration::zero());
     }
 
     #[test]
@@ -505,7 +566,6 @@ mod tests {
                 retry_count: 0,
                 added_at: now,
                 retry_at: now,
-                current_delay_ms: 1000,
             }
         };
 
