@@ -61,6 +61,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Hard decryption failures on media chunks emit `MessageDecryptionFailed`.** A media chunk whose ciphertext cannot be decrypted (e.g. its ratchet key was deleted after 32+ newer messages decrypted first) was already ACKed on receipt, so the loss is permanent; it now surfaces to the app with the mapped failure code instead of only MLS telemetry.
 - **`Error::MediaTransferLimit` is a typed FFI error.** Previously it crossed UniFFI as the opaque `Other`; Swift/Kotlin now receive `ProtocolError::MediaTransferLimit` and the React Native bridge maps it to the `MediaTransferLimit` rejection code for programmatic retry.
 
+### Bug Fixes
+
+- **Adaptive TTL no longer collapses at ~25,650 estimated devices (CQ-M1).** The size-based TTL boost computed "extra hundreds of devices" in a `usize` and narrowed it with a bare `as u8` cast, which wraps modulo 256: at an estimated 25,650+ devices the boost silently vanished — TTL fell back to the small-network base instead of the configured maximum, exactly when reach matters most — and oscillated as the network grew further. The count now saturates at the cast boundary; the existing max-TTL clamp bounds the result as before.
+
 ## [0.11.0] — 2026-07-01
 
 ### Licensing

@@ -147,11 +147,15 @@ impl AdaptiveTtlCalculator {
         // Start with base TTL
         let mut ttl = self.config.base_ttl;
 
-        // Add TTL based on network size
+        // Add TTL based on network size. `extra_hundreds` is clamped before
+        // the narrowing cast: at ~25,650 devices it reaches 256, and an
+        // unclamped `as u8` would wrap to 0, silently dropping the entire
+        // size-based boost.
         if estimated_size > self.config.small_network_threshold {
             let extra_hundreds = (estimated_size - self.config.small_network_threshold) / 100;
-            let additional_ttl =
-                (extra_hundreds as u8).saturating_mul(self.config.ttl_per_100_devices);
+            let additional_ttl = u8::try_from(extra_hundreds)
+                .unwrap_or(u8::MAX)
+                .saturating_mul(self.config.ttl_per_100_devices);
             ttl = ttl.saturating_add(additional_ttl);
         }
 
@@ -293,6 +297,21 @@ mod tests {
 
         let ttl = calc.compute_ttl(&huge_estimate, true, true);
         assert!(ttl <= 24); // Max TTL
+    }
+
+    #[test]
+    fn test_ttl_no_wrap_at_u8_boundary() {
+        let calc = AdaptiveTtlCalculator::new();
+
+        // 25,650 devices: (25650 - 50) / 100 = 256, which wraps to 0 under a
+        // bare `as u8` cast — the size boost would vanish and TTL would fall
+        // back to base instead of max.
+        let boundary = NetworkSizeEstimate::new(4, 100).with_estimated_total(25_650);
+        assert_eq!(calc.compute_ttl(&boundary, false, false), 24);
+
+        // Far past the boundary the boost must stay saturated, not oscillate.
+        let huge = NetworkSizeEstimate::new(4, 100).with_estimated_total(10_000_000);
+        assert_eq!(calc.compute_ttl(&huge, false, false), 24);
     }
 
     #[test]
