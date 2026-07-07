@@ -277,13 +277,18 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 | `enabled` | boolean | true | Enable automatic encryption/decryption |
 | `autoKeyExchange` | boolean | true | Auto-exchange key packages on peer discovery |
 | `storePending` | boolean | true | Queue messages when no session exists |
-| `requireEncryption` | boolean | false | Fail send unless encryption is applied |
+| `requireEncryption` | boolean | true | Fail send unless encryption is applied (fail-closed) |
 | `pendingQueue.maxPendingPerPeer` | number | 64 | Max queued encrypted pre-session messages per peer |
 | `pendingQueue.maxPendingGlobal` | number | 4096 | Max queued encrypted pre-session messages across all peers |
 | `pendingQueue.pendingTtlMs` | number | 120000 | TTL for queued encrypted pre-session messages |
 | `pendingQueue.overflowPolicy` | string | `drop_oldest` | Overflow action: `drop_oldest` or `drop_newest` |
 
-By default, encryption is best-effort. Set `requireEncryption: true` to guarantee encrypted delivery or fail the send.
+Encryption is **required by default** (fail-closed): sends fail with a typed error
+instead of ever silently degrading to plaintext — including when MLS was never
+initialized. To deliberately operate in plaintext, set `requireEncryption: false`
+explicitly; every plaintext send then emits a `PLAINTEXT_SEND` security warning
+event (once per peer). Internal control messages (key exchange, connection
+requests, service discovery) are exempt and unaffected.
 
 Pending encrypted-message queue behavior (before MLS session readiness):
 - Queueing is bounded by both per-peer and global limits.
@@ -291,13 +296,15 @@ Pending encrypted-message queue behavior (before MLS session readiness):
 - Overflow behavior is explicit and deterministic (`drop_oldest` / `drop_newest`).
 - Every overflow/TTL drop emits structured warning logs with reason and triggered limit.
 
-When strict mode is enabled:
-- `sendMessage` / `sendMessageViaTransport` fail fast with typed errors (`SessionNotReady`, `EncryptFailed`) and do not send transport payloads on failure.
+Under the default strict mode:
+- `sendMessage` / `sendMessageViaTransport` fail fast with typed errors (`SessionNotReady`, `EncryptFailed`) and do not send transport payloads on failure. With `storePending: true` (default), messages for peers whose session is not yet confirmed are queued and sent encrypted once it is.
 - `SessionNotReady` carries establishment progress (`NoKeyPackage`, `HaveKeyPackage`, `SessionPending`, `SessionConfirmed`) for retry/UI decisions.
-- plaintext connection-control APIs (`sendConnectionRequest`, `acceptConnectionRequest`, `rejectConnectionRequest`) are rejected to prevent accidental plaintext fallback.
+- Internal control messages (`sendConnectionRequest`, `acceptConnectionRequest`, `rejectConnectionRequest`, key packages, service discovery) are exempt — they are plaintext bootstrap messages and continue to work.
+- Inbound legacy plaintext media chunks are rejected.
 
 Rust migration note:
-- `EncryptionConfig` now includes `require_encryption` (default `false`).
+- `EncryptionConfig::default()` sets `require_encryption: true` (fail-closed). Nodes that never call `initialize_mls` now fail sends with `EncryptFailed` instead of silently sending plaintext.
+- Disabling encryption (`enabled: false`) requires also setting `require_encryption: false` — config validation rejects the combination otherwise.
 - If you construct `EncryptionConfig` with a struct literal, include `require_encryption` explicitly or use `..Default::default()`.
 
 **Example: Disable auto-encryption (use manual MLS APIs)**:
@@ -305,6 +312,8 @@ Rust migration note:
 {
   encryption: {
     enabled: false,
+    // Explicit opt-out required: plaintext operation is never implicit.
+    requireEncryption: false,
   }
 }
 ```
@@ -316,7 +325,7 @@ Rust migration note:
     enabled: true,
     autoKeyExchange: false,  // Must manually exchange key packages
     storePending: true,
-    requireEncryption: true, // Strict mode: encrypted delivery or error
+    // requireEncryption defaults to true (strict, fail-closed)
   }
 }
 ```
