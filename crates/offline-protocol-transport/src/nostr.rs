@@ -165,6 +165,18 @@ impl NostrTransport {
         *self.on_messages_available.lock().unwrap() = Some(callback);
     }
 
+    /// Notifies the platform that messages are ready to send.
+    ///
+    /// The callback Arc is cloned out of the mutex and the guard dropped
+    /// before the call, so a callback that re-enters the transport (e.g.
+    /// another `send()`) cannot self-deadlock on the callback mutex.
+    fn notify_messages_available(&self) {
+        let callback = self.on_messages_available.lock().unwrap().clone();
+        if let Some(cb) = callback {
+            cb();
+        }
+    }
+
     /// Called when connection status changes.
     ///
     /// Resets reconnect counter on successful connection.
@@ -530,9 +542,7 @@ impl Transport for NostrTransport {
         metrics.congestion = ((queue_len as f32) / 50.0).clamp(0.0, 1.0);
         drop(metrics);
 
-        if let Some(callback) = self.on_messages_available.lock().unwrap().as_ref() {
-            callback();
-        }
+        self.notify_messages_available();
 
         Ok(())
     }
@@ -809,6 +819,31 @@ mod tests {
         let msg = create_test_message();
         transport.send(&msg).unwrap();
         assert!(*called.lock().unwrap());
+    }
+
+    #[test]
+    fn test_messages_available_callback_reentrant_send() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let transport = Arc::new(NostrTransport::new("device1").unwrap());
+        transport.on_status_changed(TransportStatus::Available);
+
+        let reentered = Arc::new(AtomicBool::new(false));
+        let reentered_clone = Arc::clone(&reentered);
+        let transport_clone = Arc::clone(&transport);
+        transport.set_on_messages_available(Arc::new(move || {
+            // Re-enters send() from inside the callback. If send() held the
+            // callback mutex across this call, the inner send would
+            // self-deadlock re-locking it.
+            if !reentered_clone.swap(true, Ordering::SeqCst) {
+                transport_clone.send(&create_test_message()).unwrap();
+            }
+        }));
+
+        transport.send(&create_test_message()).unwrap();
+
+        assert!(reentered.load(Ordering::SeqCst));
+        assert_eq!(transport.send_queue.lock().unwrap().len(), 2);
     }
 
     #[test]
