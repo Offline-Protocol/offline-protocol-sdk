@@ -160,8 +160,8 @@ class NostrManager(
 
         // Get the Nostr signing pubkey from the Rust core. This is a
         // per-install key that settles when MLS initialization installs the
-        // persisted signing secret, so configure() should run after
-        // initializeMls for a stable value.
+        // persisted signing secret; sendSubscription() refreshes it on every
+        // relay (re)connect in case that happens after configure().
         this.publicKeyHex = protocol.nostrGetPublicKey() ?: ""
 
         isConfigured.set(true)
@@ -472,6 +472,12 @@ class NostrManager(
     // MARK: - Nostr Protocol (NIP-01 / NIP-04)
 
     private fun sendSubscription(relayUrl: String, webSocket: WebSocket) {
+        // Re-read the signing pubkey used for self-event filtering: it
+        // rotates when MLS initialization installs the persisted signing
+        // secret, and this runs on every relay (re)connect — before any
+        // event can arrive on this subscription.
+        protocol.nostrGetPublicKey()?.takeIf { it.isNotEmpty() }?.let { publicKeyHex = it }
+
         val subId = UUID.randomUUID().toString().replace("-", "").take(16)
 
         synchronized(relayLock) {

@@ -44,6 +44,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
+use zeroize::Zeroizing;
 
 /// Main entry point for the Offline Protocol SDK.
 ///
@@ -176,6 +177,13 @@ pub struct OfflineProtocol {
     /// storage-entry paths as `telemetry_secret_persisted`; see
     /// `restore_or_init_nostr_signing_secret`.
     nostr_secret_persisted: bool,
+
+    /// A Nostr signing secret that was installed into the transport but
+    /// could not be persisted (storage `store` failed). Kept so the next
+    /// `restore_or_init_nostr_signing_secret` attempt retries persisting
+    /// this same secret instead of rotating the install's relay-visible
+    /// identity again mid-session.
+    nostr_unpersisted_secret: Option<Zeroizing<[u8; 32]>>,
 
     /// Installed telemetry context (sink + config + scrubber). `None` until
     /// `install_telemetry_sink` is called; thereafter shared with
@@ -331,6 +339,7 @@ impl OfflineProtocol {
             telemetry_fallback_secret,
             telemetry_secret_persisted: false,
             nostr_secret_persisted: false,
+            nostr_unpersisted_secret: None,
             telemetry: None,
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),

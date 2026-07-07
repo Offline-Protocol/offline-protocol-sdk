@@ -11,6 +11,7 @@ use offline_protocol_mls::MlsManager;
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 impl OfflineProtocol {
     // ========================================================================
@@ -654,12 +655,15 @@ impl OfflineProtocol {
     /// `enable_message_persistence`) via `nostr_secret_persisted`. All
     /// failures degrade gracefully to the construction-time ephemeral key,
     /// which is equally unforgeable but rotates per process — transport
-    /// keying must never block protocol initialization.
+    /// keying must never block protocol initialization. A secret that was
+    /// installed but could not be persisted is kept in
+    /// `nostr_unpersisted_secret` so a later attempt retries persisting the
+    /// same identity instead of rotating it.
     pub(crate) fn restore_or_init_nostr_signing_secret(&mut self) {
         if self.nostr_secret_persisted {
             return;
         }
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = self.message_storage.clone() else {
             return;
         };
         let Some(nostr_arc) = self.transport_manager.get_transport(TransportType::Nostr) else {
@@ -667,35 +671,44 @@ impl OfflineProtocol {
             return;
         };
 
-        let (secret, persisted): ([u8; 32], bool) = match storage.load(
+        let (secret, persisted): (Zeroizing<[u8; 32]>, bool) = match storage.load(
             storage_keys::NOSTR_SIGNING_SECRET,
             storage_keys::NOSTR_SIGNING_SECRET_ID,
         ) {
             Ok(Some(bytes)) if bytes.len() == 32 => {
-                let mut secret = [0u8; 32];
+                let bytes = Zeroizing::new(bytes);
+                let mut secret = Zeroizing::new([0u8; 32]);
                 secret.copy_from_slice(&bytes);
+                // A stored secret supersedes anything a previous attempt
+                // failed to persist.
+                self.nostr_unpersisted_secret = None;
                 debug!("Restored persistent Nostr signing secret from storage");
                 (secret, true)
             }
             Ok(other) => {
-                // Absent, or present but corrupt/wrong-length: generate a
-                // fresh secret and persist it (a wrong-length blob is
-                // overwritten so a single corrupt write does not pin every
-                // future session to the ephemeral key).
+                // Absent, or present but corrupt/wrong-length: persist a
+                // fresh secret (a wrong-length blob is overwritten so a
+                // single corrupt write does not pin every future session to
+                // the ephemeral key). Prefer a secret a previous attempt
+                // installed but failed to persist, so the retry keeps the
+                // identity already in use instead of rotating it again.
                 if other.is_some() {
                     warn!("Persisted Nostr signing secret had unexpected length; regenerating");
                 }
-                let fresh = match NostrKeypair::generate_install_secret() {
-                    Ok(fresh) => fresh,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to generate Nostr signing secret; keeping ephemeral key");
-                        return;
-                    }
+                let fresh = match self.nostr_unpersisted_secret.take() {
+                    Some(unpersisted) => unpersisted,
+                    None => match NostrKeypair::generate_install_secret() {
+                        Ok(fresh) => fresh,
+                        Err(e) => {
+                            warn!(error = %e, "Failed to generate Nostr signing secret; keeping ephemeral key");
+                            return;
+                        }
+                    },
                 };
                 match storage.store(
                     storage_keys::NOSTR_SIGNING_SECRET,
                     storage_keys::NOSTR_SIGNING_SECRET_ID,
-                    &fresh,
+                    &*fresh,
                 ) {
                     Ok(()) => {
                         info!("Generated and persisted per-install Nostr signing secret");
@@ -719,7 +732,7 @@ impl OfflineProtocol {
 
         let installed = match nostr_arc.lock() {
             Ok(guard) => match guard.as_any().downcast_ref::<NostrTransport>() {
-                Some(nostr) => match nostr.install_signing_secret(&secret) {
+                Some(nostr) => match nostr.install_signing_secret(&*secret) {
                     Ok(()) => true,
                     Err(e) => {
                         warn!(error = %e, "Failed to install Nostr signing key; keeping ephemeral key");
@@ -737,6 +750,11 @@ impl OfflineProtocol {
             }
         };
 
+        if !persisted {
+            // Keep the secret so the next entry path retries persisting this
+            // same identity rather than generating a new one.
+            self.nostr_unpersisted_secret = Some(secret);
+        }
         self.nostr_secret_persisted = installed && persisted;
     }
 

@@ -230,6 +230,55 @@ impl MlsStorage for FailingScrubSecretStorage {
     }
 }
 
+/// Fails `store` for the Nostr signing secret while `fail_store` is set,
+/// delegating everything else to the in-memory storage.
+#[derive(Default)]
+struct FailingNostrSecretStorage {
+    inner: crate::mls::InMemoryStorage,
+    fail_store: std::sync::atomic::AtomicBool,
+}
+
+impl MlsStorage for FailingNostrSecretStorage {
+    fn store(
+        &self,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        if key_type == storage_keys::NOSTR_SIGNING_SECRET
+            && self.fail_store.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(offline_protocol_mls::StorageError::StoreFailed(
+                "forced nostr-secret persist failure".to_string(),
+            ));
+        }
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.inner.delete(key_type, key_id)
+    }
+
+    fn list_keys(
+        &self,
+        key_type: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        self.inner.list_keys(key_type)
+    }
+}
+
 #[test]
 fn test_protocol_creation() {
     let protocol = OfflineProtocol::new(create_test_config());
@@ -12436,6 +12485,51 @@ fn corrupt_persisted_nostr_secret_is_regenerated() {
         .expect("corrupt secret should be overwritten");
     assert_eq!(stored.len(), 32);
     assert!(protocol.nostr_secret_persisted);
+}
+
+#[test]
+fn nostr_secret_store_failure_retries_the_same_secret() {
+    let storage = Arc::new(FailingNostrSecretStorage::default());
+    storage
+        .fail_store
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let mut protocol = protocol_with_nostr_transport();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    // Store failed: the fresh secret was installed (stable identity for this
+    // session) but not persisted, and is kept for a retry.
+    assert!(!protocol.nostr_secret_persisted);
+    assert!(protocol.nostr_unpersisted_secret.is_some());
+    let session_pubkey = nostr_signing_pubkey(&protocol);
+    assert!(storage
+        .load(
+            storage_keys::NOSTR_SIGNING_SECRET,
+            storage_keys::NOSTR_SIGNING_SECRET_ID,
+        )
+        .unwrap()
+        .is_none());
+
+    // Once storage recovers, the next entry path persists the *same* secret
+    // instead of rotating the identity mid-session.
+    storage
+        .fail_store
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    protocol.initialize_mls(storage.clone()).unwrap();
+
+    assert!(protocol.nostr_secret_persisted);
+    assert!(protocol.nostr_unpersisted_secret.is_none());
+    assert_eq!(nostr_signing_pubkey(&protocol), session_pubkey);
+    let stored = storage
+        .load(
+            storage_keys::NOSTR_SIGNING_SECRET,
+            storage_keys::NOSTR_SIGNING_SECRET_ID,
+        )
+        .unwrap()
+        .expect("secret should be persisted after retry");
+    assert_eq!(stored.len(), 32);
 }
 
 #[test]
