@@ -21,8 +21,11 @@ pub enum TransportStatus {
 
 /// Trait for transport implementations.
 ///
-/// This trait defines the interface that all transport implementations must follow.
-/// Implementations handle the platform-specific details of sending and receiving messages.
+/// This is the engine-facing side of a transport: enqueue outbound
+/// messages, dequeue inbound ones, and report status and metrics. The
+/// implementations in this crate are I/O-free queue engines — the
+/// platform-specific delivery details live in the platform bridge (see the
+/// crate-level docs).
 pub trait Transport: Send + Sync + Any {
     /// Returns this transport as `&dyn Any` for safe downcasting.
     fn as_any(&self) -> &dyn Any;
@@ -35,7 +38,10 @@ pub trait Transport: Send + Sync + Any {
     /// Gets current metrics for this transport.
     fn metrics(&self) -> TransportMetrics;
 
-    /// Sends a message through this transport.
+    /// Queues a message for delivery through this transport.
+    ///
+    /// Implementations in this crate perform no I/O here: the message is
+    /// enqueued for the platform bridge to drain and put on the wire.
     ///
     /// # Arguments
     ///
@@ -43,10 +49,17 @@ pub trait Transport: Send + Sync + Any {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` if the message was sent successfully, `Err` otherwise.
+    /// Returns `Ok(())` if the transport accepted the message, `Err`
+    /// otherwise (e.g. the transport is not `Available`). `Ok` means
+    /// enqueued, not delivered — the platform bridge confirms or fails
+    /// delivery asynchronously.
     fn send(&self, message: &Message) -> Result<()>;
 
     /// Attempts to receive a message from this transport.
+    ///
+    /// Messages arrive in this queue after the platform bridge injects
+    /// inbound bytes via the transport's `on_data_received` /
+    /// `on_fragment_received` methods.
     ///
     /// # Returns
     ///
@@ -55,8 +68,14 @@ pub trait Transport: Send + Sync + Any {
     fn receive(&self) -> Result<Option<Message>>;
 
     /// Starts the transport.
+    ///
+    /// This performs no I/O. Most implementations stay `Unavailable` until
+    /// the platform bridge reports connectivity via their
+    /// `on_status_changed()` method; BLE is the exception and optimistically
+    /// sets `Available` (the platform can still override it).
     fn start(&mut self) -> Result<()>;
 
-    /// Stops the transport.
+    /// Stops the transport, marking it `Disconnected` and clearing queued
+    /// state.
     fn stop(&mut self) -> Result<()>;
 }

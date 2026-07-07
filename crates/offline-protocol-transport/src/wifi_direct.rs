@@ -1,7 +1,18 @@
-//! Wi-Fi Direct transport implementation (Android P2P).
+//! Wi-Fi Direct transport (Android P2P) queue engine.
 //!
-//! This module provides high-bandwidth peer-to-peer connectivity via Wi-Fi Direct.
-//! This is primarily for Android devices and offers faster data transfer than BLE.
+//! High-bandwidth peer-to-peer transport, primarily for Android, with much
+//! higher throughput than BLE. No Wi-Fi radio is touched here: the platform
+//! side (Android `WifiP2pManager`) owns group negotiation, discovery, and
+//! the sockets; the Rust side manages the send/receive queues, the peer
+//! registry, and metrics.
+//!
+//! The bridge contract: the platform reports connectivity via
+//! [`WifiDirectTransport::on_status_changed`] and peers via
+//! [`WifiDirectTransport::on_peer_discovered`] /
+//! [`WifiDirectTransport::on_peer_lost`], drains outbound wire bytes with
+//! [`WifiDirectTransport::get_next_message`] (woken by the
+//! [`WifiDirectTransport::set_on_messages_available`] callback), and
+//! injects inbound bytes via [`WifiDirectTransport::on_data_received`].
 
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
@@ -47,7 +58,7 @@ impl Default for WifiDirectConfig {
 
 /// Wi-Fi Direct transport implementation.
 ///
-/// This provides high-bandwidth P2P connectivity via Wi-Fi Direct (Android).
+/// Queue engine for platform-managed Wi-Fi Direct (Android) P2P links.
 /// Offers much higher throughput than BLE for large data transfers.
 pub struct WifiDirectTransport {
     /// Local device ID
