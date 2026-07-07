@@ -851,9 +851,13 @@ impl BleTransport {
         }
 
         // Fire eviction callback outside the fragment_buffers lock to avoid
-        // lock ordering issues (callback may acquire shared_state).
+        // lock ordering issues (callback may acquire shared_state). The
+        // callback Arc is cloned out of its own mutex too, so a callback
+        // that re-enters the transport (e.g. set_fragment_eviction_callback)
+        // cannot self-deadlock.
         if let Some(info) = eviction_info {
-            if let Some(cb) = self.eviction_callback.lock().unwrap().as_ref() {
+            let cb = self.eviction_callback.lock().unwrap().clone();
+            if let Some(cb) = cb {
                 cb(info);
             }
         }
@@ -2235,6 +2239,39 @@ mod tests {
         assert!(
             captured[0].message_id.starts_with("msg-"),
             "evicted entry should be one of the pre-filled assemblies"
+        );
+    }
+
+    #[test]
+    fn test_fragment_eviction_callback_can_reenter_transport() {
+        let transport = Arc::new(BleTransport::new("test-device"));
+
+        let fired = Arc::new(Mutex::new(false));
+        let fired_clone = Arc::clone(&fired);
+        let transport_clone = Arc::clone(&transport);
+        transport.set_fragment_eviction_callback(Some(Arc::new(move |_info| {
+            // Re-enters the transport from inside the callback. If the
+            // eviction fired with the callback mutex held, re-locking it
+            // here would self-deadlock. Clearing the callback while it is
+            // executing is safe because the caller holds its own Arc clone.
+            transport_clone.set_fragment_eviction_callback(None);
+            *fired_clone.lock().unwrap() = true;
+        })));
+
+        // Fill the reassembly buffer to capacity, then push one more
+        // assembly to trigger an eviction (same setup as
+        // test_fragment_eviction_fires_callback).
+        for i in 0..BLE_MAX_FRAGMENT_ASSEMBLIES {
+            let msg_id = format!("msg-{i}");
+            let frag = encode_fragment(msg_id.as_bytes(), 0, 4, b"payload-data").unwrap();
+            assert!(transport.process_fragment(&frag).unwrap().is_none());
+        }
+        let trigger_frag = encode_fragment(b"new-msg", 0, 4, b"payload-data").unwrap();
+        assert!(transport.process_fragment(&trigger_frag).unwrap().is_none());
+
+        assert!(
+            *fired.lock().unwrap(),
+            "eviction callback should have fired"
         );
     }
 }
