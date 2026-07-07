@@ -64,6 +64,9 @@ hex = "0.4"
 # Crypto
 k256 = { version = "0.13", features = ["schnorr"] }
 sha2 = "0.10"
+hkdf = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
 
 # Internal dependencies
 offline-protocol-core = { path = "crates/offline-protocol-core" }

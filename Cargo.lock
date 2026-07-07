@@ -1418,13 +1418,16 @@ version = "0.2.0"
 dependencies = [
  "base64",
  "hex",
+ "hkdf",
  "k256",
  "offline-protocol-core",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

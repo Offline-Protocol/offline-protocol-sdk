@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Nostr transport routes messages over [Nostr](https://nostr.com/) relays via WebSockets, providing a censorship-resistant, decentralized fallback when direct mesh and ordinary Internet endpoints are unreachable. Each device signs events with a deterministic BIP-340 Schnorr keypair derived from its `userId`; relays simply rebroadcast the signed events to subscribers.
+The Nostr transport routes messages over [Nostr](https://nostr.com/) relays via WebSockets, providing a censorship-resistant, decentralized fallback when direct mesh and ordinary Internet endpoints are unreachable. Each install signs events with a BIP-340 Schnorr keypair derived from a random per-install secret (persisted via the app's `MlsStorage`); addressing uses a public *routing tag* deterministically derived from the `userId`, so peers can compute where to send without exchanging keys. Relays simply rebroadcast the signed events to subscribers.
 
 Nostr is the fifth transport in the Offline Protocol SDK, alongside BLE, WiFi Direct, Internet, and Reticulum. It is disabled by default because it requires at least one relay URL.
 
@@ -53,7 +53,7 @@ The Rust `NostrTransport` owns the queue, signing, and confirmation loop. The pl
 └──────────────────────┘
 ```
 
-The Rust side derives a stable Schnorr keypair from `userId`, builds canonical Nostr event JSON, signs it, and hands the platform a `NostrMessage` with `{message_id, event_id, event_json}`. The platform never touches secret material.
+The Rust side signs with the per-install Schnorr keypair (stable once `initialize_mls` persists the install secret), addresses the event to the recipient's routing tag (derived from their `userId`), builds canonical Nostr event JSON, and hands the platform a `NostrMessage` with `{message_id, event_id, event_json}`. The platform never touches secret material.
 
 ## Configuration
 
@@ -140,7 +140,7 @@ The platform bridge interacts with `NostrTransport` through these UniFFI calls:
 
 ### Subscription Filters
 
-The Rust core builds NIP-01 filters scoped to the local pubkey (events addressed to this device). Use `nostrGetSubscriptionFilter(subscriptionId)` to fetch the JSON filter to send via `["REQ", subscriptionId, filter]`. Use `nostrGetPublicKey()` to retrieve the device's hex-encoded public key for diagnostics.
+The Rust core builds NIP-01 filters scoped to the local routing tag (events addressed to this device); the tag is derived from the `userId`, so senders can compute it without a key exchange. Use `nostrGetSubscriptionFilter(subscriptionId)` to fetch the JSON filter to send via `["REQ", subscriptionId, filter]`. Use `nostrGetPublicKey()` to retrieve the install's hex-encoded signing public key (for diagnostics and self-event filtering); read it after MLS initialization, since that is when the persisted signing key is installed.
 
 ### Send Confirmation Loop
 
@@ -234,8 +234,9 @@ Nostr will **not** be selected when:
 
 ## Identity & Privacy
 
-- **Pubkey is derived from `userId`** — running the same `userId` on two devices means they share a Nostr identity. Use distinct user IDs per device for separate identities.
-- **Relays see metadata** — sender pubkey, recipient pubkey, event size, and timing are visible to every relay you publish through.
+- **The signing key is a per-install secret** — derived via HKDF from a random 32-byte secret persisted through the app's `MlsStorage` on first `initialize_mls`, never from any public identifier. Before storage is available the transport signs with an ephemeral key that rotates per process. Wiping app storage rotates the install's Nostr identity.
+- **The routing tag is derived from `userId`** — running the same `userId` on two devices means they share an inbox (both receive events tagged to that ID), but each install still signs with its own key. Use distinct user IDs per device for separate inboxes.
+- **Relays see metadata** — sender pubkey, recipient routing tag, event size, and timing are visible to every relay you publish through.
 - **Payload is end-to-end encrypted by MLS** before reaching this transport. The Nostr layer does not add or replace encryption.
 - **Telemetry scrubbing** — when telemetry `scrub_ids` is on (default), pubkeys flowing through the SDK's telemetry sink are SHA-256 hashed before emission.
 
@@ -250,13 +251,13 @@ Nostr will **not** be selected when:
 
 ### Messages Sent But Not Delivered
 
-1. Verify both devices subscribe to filters matching their own pubkeys (built automatically by the SDK)
+1. Verify both devices subscribe to filters matching their own routing tags (built automatically by the SDK)
 2. Confirm at least one relay is shared between sender and recipient — relays do not federate
 3. Check pending confirmation timeouts (30 s) — relays sometimes accept events without sending `["OK"]`
 
 ### "Signing failed" Errors After Retries
 
-The signing path retries up to 3 times per message before permanently failing. Sustained failure usually means the device's keypair could not be derived (corrupt `userId` or platform crypto unavailable) — surface the failure reason from `nostrSendFailedWithReason`.
+The signing path retries up to 3 times per message before permanently failing. Sustained failure usually means the recipient's routing tag could not be derived (corrupt recipient ID) or platform crypto is unavailable — surface the failure reason from `nostrSendFailedWithReason`.
 
 ### DORS Not Selecting Nostr
 

@@ -158,7 +158,10 @@ public class NostrManager: NSObject, TransportManager {
         self.autoReconnect = autoReconnect
         self.maxReconnectAttempts = maxReconnectAttempts
 
-        // Get the Nostr pubkey from the Rust core (deterministic from user_id)
+        // Get the Nostr signing pubkey from the Rust core. This is a
+        // per-install key that settles when MLS initialization installs the
+        // persisted signing secret, so configure() should run after
+        // initializeMls for a stable value.
         self.publicKeyHex = protocolInstance.nostrGetPublicKey() ?? ""
 
         isConfigured = true

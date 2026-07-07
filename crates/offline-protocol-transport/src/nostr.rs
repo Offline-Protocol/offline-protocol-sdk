@@ -2,8 +2,13 @@
 //!
 //! This module provides connectivity via Nostr relays for censorship-resistant,
 //! decentralized messaging over WebSockets. The platform side manages actual
-//! relay connections, event signing, and subscriptions; the Rust side manages
-//! queues, metrics, and the confirmation loop.
+//! relay connections and subscriptions; the Rust side manages queues, metrics,
+//! event signing, and the confirmation loop.
+//!
+//! Addressing uses public routing tags derived from device IDs
+//! ([`nostr_crypto::routing_tag_for_device_id`]); event signing uses a
+//! per-install secret key that starts out ephemeral and is upgraded to a
+//! persisted identity via [`NostrTransport::install_signing_secret`].
 
 use crate::constants::{NOSTR_CONNECTION_TIMEOUT_SECS, NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS};
 use crate::nostr_crypto::{self, NostrKeypair};
@@ -11,7 +16,7 @@ use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus
 use base64::Engine;
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::common::recalculate_delivery_ratios;
@@ -76,9 +81,18 @@ impl Default for NostrConfig {
 /// 4. `metrics`
 /// 5. `receive_queue`
 /// 6. `reconnect_attempts` / `platform_handle`
+///
+/// `keypair` is a leaf lock: it is only ever held in a narrow scope with no
+/// other lock acquisition inside.
 pub struct NostrTransport {
     device_id: String,
-    keypair: NostrKeypair,
+    /// Per-install signing keypair. Ephemeral (random per process) until the
+    /// engine installs the persisted secret via
+    /// [`Self::install_signing_secret`].
+    keypair: RwLock<NostrKeypair>,
+    /// This device's public routing tag (derived from `device_id`); peers
+    /// address us by putting it in the `#p` tag, we subscribe on it.
+    routing_tag: String,
     config: NostrConfig,
     status: Arc<Mutex<TransportStatus>>,
     receive_queue: Arc<Mutex<VecDeque<Message>>>,
@@ -101,12 +115,18 @@ impl NostrTransport {
     }
 
     /// Creates a new Nostr transport with custom configuration.
+    ///
+    /// The signing keypair starts out ephemeral (random for this process);
+    /// call [`Self::install_signing_secret`] once persisted storage is
+    /// available to give the install a stable Nostr identity.
     pub fn with_config(device_id: impl Into<String>, config: NostrConfig) -> Result<Self> {
         let device_id = device_id.into();
-        let keypair = NostrKeypair::from_device_id(&device_id)?;
+        let routing_tag = nostr_crypto::routing_tag_for_device_id(&device_id)?;
+        let keypair = RwLock::new(NostrKeypair::generate_ephemeral()?);
         Ok(Self {
             device_id,
             keypair,
+            routing_tag,
             config,
             status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -309,9 +329,40 @@ impl NostrTransport {
     // Nostr crypto methods
     // ========================================================================
 
-    /// Returns this device's Nostr x-only public key as a 64-char hex string.
-    pub fn public_key_hex(&self) -> &str {
-        self.keypair.public_key_hex()
+    /// Returns this install's Nostr signing public key as a 64-char hex string.
+    ///
+    /// This is the key outgoing events are signed with (their `pubkey`
+    /// field), used by platforms to filter self-published events. It changes
+    /// when [`Self::install_signing_secret`] swaps the ephemeral key for the
+    /// persisted one, so platforms should read it after protocol
+    /// initialization, not cache it across that boundary.
+    pub fn public_key_hex(&self) -> String {
+        self.keypair.read().unwrap().public_key_hex().to_string()
+    }
+
+    /// Returns this device's public routing tag (the `#p` value peers use to
+    /// address us, and the value our relay subscription filters on).
+    pub fn routing_tag(&self) -> &str {
+        &self.routing_tag
+    }
+
+    /// Replaces the ephemeral signing keypair with one derived from the
+    /// persisted per-install secret.
+    ///
+    /// Idempotent for a given secret: deriving from the same secret yields
+    /// the same keypair. Events signed before this call used the ephemeral
+    /// key, which peers accept because inbound events are never
+    /// authenticated by their Nostr pubkey (sender authenticity comes from
+    /// the protocol-layer MLS signatures).
+    pub fn install_signing_secret(&self, secret: &[u8]) -> Result<()> {
+        let keypair = NostrKeypair::from_install_secret(secret)?;
+        let pubkey = keypair.public_key_hex().to_string();
+        *self.keypair.write().unwrap() = keypair;
+        tracing::debug!(
+            pubkey = %pubkey,
+            "Installed persisted Nostr signing key"
+        );
+        Ok(())
     }
 
     /// Pops the next outgoing message, creates a signed Nostr event, and returns
@@ -338,12 +389,11 @@ impl NostrTransport {
             let data = self.serialize_message(&message)?;
             let content_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
 
-            let recipient_pubkey = NostrKeypair::pubkey_hex_for_device_id(&recipient_device_id)?;
-            let event = crate::nostr_crypto::NostrEvent::create_dm(
-                &self.keypair,
-                &recipient_pubkey,
-                &content_base64,
-            )?;
+            let recipient_tag = nostr_crypto::routing_tag_for_device_id(&recipient_device_id)?;
+            let keypair = self.keypair.read().unwrap();
+            let event =
+                nostr_crypto::NostrEvent::create_dm(&keypair, &recipient_tag, &content_base64)?;
+            drop(keypair);
             let event_id = event.id.clone();
             let event_json = event.to_relay_message()?;
             Ok((event_id, event_json))
@@ -391,12 +441,15 @@ impl NostrTransport {
         }
     }
 
-    /// Returns a NIP-01 subscription filter JSON for this device's pubkey.
+    /// Returns a NIP-01 subscription filter JSON for this device's routing tag.
     ///
     /// The platform should send this to each relay after connecting:
-    /// `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4]}]`
+    /// `["REQ", "<sub_id>", {"#p": ["<routing_tag>"], "kinds": [4]}]`
+    ///
+    /// The filter is on the routing tag — not the signing pubkey — so it is
+    /// stable across signing-key changes and derivable by peers.
     pub fn create_subscription(&self, subscription_id: &str) -> Result<String> {
-        nostr_crypto::create_subscription_message(self.keypair.public_key_hex(), subscription_id)
+        nostr_crypto::create_subscription_message(&self.routing_tag, subscription_id)
     }
 
     /// Fails all pending confirmations and records them as failures.
@@ -909,5 +962,66 @@ mod tests {
         assert_eq!(metrics.success_count, 1);
         assert_eq!(metrics.failure_count, 0);
         assert_eq!(transport.pending_confirmation_count(), 0);
+    }
+
+    #[test]
+    fn test_subscription_filters_on_routing_tag_not_signing_key() {
+        let transport = NostrTransport::new("device1").unwrap();
+        let expected_tag = nostr_crypto::routing_tag_for_device_id("device1").unwrap();
+
+        assert_eq!(transport.routing_tag(), expected_tag);
+        // The signing key is random per install and must never leak into the
+        // subscription filter, which peers derive from our device_id.
+        assert_ne!(transport.public_key_hex(), expected_tag);
+
+        let filter = transport.create_subscription("sub1").unwrap();
+        assert!(filter.contains(&expected_tag));
+        assert!(!filter.contains(&transport.public_key_hex()));
+    }
+
+    #[test]
+    fn test_install_signing_secret_gives_stable_identity() {
+        let transport_a = NostrTransport::new("device1").unwrap();
+        let transport_b = NostrTransport::new("device1").unwrap();
+
+        // Ephemeral keys are random: two instances differ.
+        assert_ne!(transport_a.public_key_hex(), transport_b.public_key_hex());
+
+        // Installing the same persisted secret (a simulated restart)
+        // converges both on the same identity.
+        let secret = [42u8; 32];
+        transport_a.install_signing_secret(&secret).unwrap();
+        transport_b.install_signing_secret(&secret).unwrap();
+        assert_eq!(transport_a.public_key_hex(), transport_b.public_key_hex());
+
+        // Addressing is untouched by the key swap.
+        assert_eq!(
+            transport_a.routing_tag(),
+            nostr_crypto::routing_tag_for_device_id("device1").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_signed_event_uses_recipient_routing_tag_and_own_signing_key() {
+        let mut transport = NostrTransport::new("device1").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        // create_test_message is addressed to "bob".
+        let msg = create_test_message();
+        transport.send(&msg).unwrap();
+
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_device_id("bob").unwrap();
+        assert!(
+            signed.event_json.contains(&bob_tag),
+            "event must be addressed to the recipient's routing tag"
+        );
+        assert!(
+            signed
+                .event_json
+                .contains(&format!("\"pubkey\":\"{}\"", transport.public_key_hex())),
+            "event must be signed by this install's signing key"
+        );
     }
 }

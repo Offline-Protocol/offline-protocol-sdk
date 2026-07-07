@@ -8,6 +8,7 @@ use crate::{Error, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::LamportClock;
 use offline_protocol_mls::MlsManager;
+use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 
@@ -633,6 +634,110 @@ impl OfflineProtocol {
 
         self.telemetry_secret_persisted = true;
         self.adopt_fallback_secret(secret);
+    }
+
+    // ========================================================================
+    // NOSTR SIGNING-SECRET PERSISTENCE
+    // ========================================================================
+
+    /// Loads (or, on first run, generates and persists) the per-install Nostr
+    /// signing secret and installs the derived signing key into the Nostr
+    /// transport, replacing the ephemeral key it was constructed with.
+    ///
+    /// This gives the install a stable Nostr identity (event signatures,
+    /// relay-visible pubkey) across restarts. The signing key is intentionally
+    /// not derivable from any public identifier (SEC-M4); message addressing
+    /// is unaffected because it uses the separate routing tag, which remains
+    /// derived from the device ID.
+    ///
+    /// Idempotent across the two storage-entry paths (`initialize_mls` and
+    /// `enable_message_persistence`) via `nostr_secret_persisted`. All
+    /// failures degrade gracefully to the construction-time ephemeral key,
+    /// which is equally unforgeable but rotates per process — transport
+    /// keying must never block protocol initialization.
+    pub(crate) fn restore_or_init_nostr_signing_secret(&mut self) {
+        if self.nostr_secret_persisted {
+            return;
+        }
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        let Some(nostr_arc) = self.transport_manager.get_transport(TransportType::Nostr) else {
+            // Nostr transport not registered — nothing to key.
+            return;
+        };
+
+        let (secret, persisted): ([u8; 32], bool) = match storage.load(
+            storage_keys::NOSTR_SIGNING_SECRET,
+            storage_keys::NOSTR_SIGNING_SECRET_ID,
+        ) {
+            Ok(Some(bytes)) if bytes.len() == 32 => {
+                let mut secret = [0u8; 32];
+                secret.copy_from_slice(&bytes);
+                debug!("Restored persistent Nostr signing secret from storage");
+                (secret, true)
+            }
+            Ok(other) => {
+                // Absent, or present but corrupt/wrong-length: generate a
+                // fresh secret and persist it (a wrong-length blob is
+                // overwritten so a single corrupt write does not pin every
+                // future session to the ephemeral key).
+                if other.is_some() {
+                    warn!("Persisted Nostr signing secret had unexpected length; regenerating");
+                }
+                let fresh = match NostrKeypair::generate_install_secret() {
+                    Ok(fresh) => fresh,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to generate Nostr signing secret; keeping ephemeral key");
+                        return;
+                    }
+                };
+                match storage.store(
+                    storage_keys::NOSTR_SIGNING_SECRET,
+                    storage_keys::NOSTR_SIGNING_SECRET_ID,
+                    &fresh,
+                ) {
+                    Ok(()) => {
+                        info!("Generated and persisted per-install Nostr signing secret");
+                        (fresh, true)
+                    }
+                    Err(e) => {
+                        // Install the unpersisted secret anyway: the identity
+                        // is stable for this session and the next entry path
+                        // or launch retries persistence — strictly no worse
+                        // than the ephemeral key.
+                        warn!(error = %e, "Failed to persist Nostr signing secret; Nostr identity is session-local");
+                        (fresh, false)
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load Nostr signing secret; keeping ephemeral key");
+                return;
+            }
+        };
+
+        let installed = match nostr_arc.lock() {
+            Ok(guard) => match guard.as_any().downcast_ref::<NostrTransport>() {
+                Some(nostr) => match nostr.install_signing_secret(&secret) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to install Nostr signing key; keeping ephemeral key");
+                        false
+                    }
+                },
+                None => {
+                    warn!("Transport registered as Nostr is not a NostrTransport; cannot install signing key");
+                    false
+                }
+            },
+            Err(_) => {
+                warn!("Nostr transport lock poisoned; keeping ephemeral signing key");
+                false
+            }
+        };
+
+        self.nostr_secret_persisted = installed && persisted;
     }
 
     /// Installs `secret` as the telemetry fallback secret and rebuilds the

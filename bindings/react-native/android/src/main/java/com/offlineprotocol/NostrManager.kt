@@ -158,7 +158,10 @@ class NostrManager(
         this.autoReconnect = autoReconnect
         this.maxReconnectAttempts = maxReconnectAttempts
 
-        // Get the Nostr pubkey from the Rust core (deterministic from user_id)
+        // Get the Nostr signing pubkey from the Rust core. This is a
+        // per-install key that settles when MLS initialization installs the
+        // persisted signing secret, so configure() should run after
+        // initializeMls for a stable value.
         this.publicKeyHex = protocol.nostrGetPublicKey() ?: ""
 
         isConfigured.set(true)

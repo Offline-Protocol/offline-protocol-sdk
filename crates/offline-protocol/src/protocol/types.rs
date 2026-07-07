@@ -381,6 +381,10 @@ pub(crate) mod storage_keys {
     pub const SCRUB_SECRET: &str = "scrub_secret";
     /// Key ID for the single scrub-secret entry.
     pub const SCRUB_SECRET_ID: &str = "current";
+    /// Key type for the persistent per-install Nostr transport signing secret.
+    pub const NOSTR_SIGNING_SECRET: &str = "nostr_signing_secret";
+    /// Key ID for the single Nostr signing-secret entry.
+    pub const NOSTR_SIGNING_SECRET_ID: &str = "current";
     /// Key type for peers we are the both-create "owner" of and are awaiting a
     /// group-aware decrypt from before confirming (see
     /// [`crate::protocol::OfflineProtocol`]'s `both_create_awaiting_decrypt`).
