@@ -1126,7 +1126,7 @@ impl OfflineProtocol {
             let manager = mls
                 .read()
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-            manager.decrypt_from_user(encrypted)?
+            manager.decrypt_from_user(encrypted, &encrypted.sender_id)?
         };
         if plaintext.is_some() {
             self.handle_manual_decrypt_confirmation(&encrypted.sender_id);
@@ -1141,7 +1141,7 @@ impl OfflineProtocol {
             let manager = mls
                 .read()
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-            manager.decrypt(encrypted)?
+            manager.decrypt(encrypted, &encrypted.sender_id)?
         };
         if plaintext.is_some() && Self::is_session_group_id(encrypted.group_id.as_str()) {
             self.handle_manual_decrypt_confirmation(&encrypted.sender_id);

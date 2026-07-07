@@ -541,6 +541,54 @@ fn test_group_mls_full_lifecycle_create_invite_send_decrypt() {
 }
 
 #[test]
+fn test_group_mls_message_with_spoofed_sender_not_surfaced() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Spoof Test Group");
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    // Alice encrypts a legitimate group message, but the wire envelope
+    // claims it came from "carol" (SEC-M1: the envelope sender is
+    // attacker-settable; only the MLS credential is authenticated).
+    let encrypted = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        alice_mls
+            .encrypt_for_group(&gid, b"Forged attribution")
+            .unwrap()
+    };
+
+    let msg_payload = GroupMlsMessagePayload {
+        group_id: group_id.clone(),
+        ciphertext: base64_encode(&encrypted.ciphertext),
+        epoch: encrypted.epoch,
+        reply_to: None,
+        forward_info: None,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_MSG,
+        serde_json::to_string(&msg_payload).unwrap()
+    );
+
+    let bob_message = make_message("carol", "bob", &content);
+    let result = bob.process_internal_message(&bob_message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+    let events = bob_events.lock().unwrap();
+    let received = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMessageReceived { .. }));
+    assert!(
+        received.is_none(),
+        "a group message whose MLS-authenticated sender does not match the wire sender must not be surfaced"
+    );
+}
+
+#[test]
 fn test_group_mls_send_message_multiple_members() {
     let (mut protocol, events) = setup_started_with_events();
 
@@ -3120,7 +3168,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
             sender_id: "alice".to_string(),
             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
         };
-        mls.decrypt_from_group(&encrypted).unwrap();
+        mls.decrypt_from_group(&encrypted, "alice").unwrap();
     }
 
     // Bob creates a commit that alice will process through the protocol layer

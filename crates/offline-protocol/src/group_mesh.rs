@@ -362,7 +362,7 @@ impl OfflineProtocol {
             sender_id: sender.to_string(),
             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
         };
-        let decrypt_result = match mls_guard.decrypt_from_group(&encrypted) {
+        let decrypt_result = match mls_guard.decrypt_from_group(&encrypted, sender) {
             Ok(Some(plaintext)) => Some(plaintext),
             Ok(None) => {
                 // Ok(None) means MLS consumed a Commit or Proposal — not application
@@ -615,7 +615,7 @@ impl OfflineProtocol {
             sender_id: sender.to_string(),
             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
         };
-        let mls_result = mls_guard.decrypt_from_group(&encrypted);
+        let mls_result = mls_guard.decrypt_from_group(&encrypted, sender);
         drop(mls_guard);
 
         match mls_result {
@@ -658,12 +658,15 @@ impl OfflineProtocol {
 
                 // Classify MLS errors: permanent failures should not be retried,
                 // only epoch-related decryption failures are worth buffering.
+                // A spoofed sender (SEC-M1) is permanent — retrying the same
+                // forged commit can never succeed.
                 let is_permanent = matches!(
                     e,
                     offline_protocol_mls::MlsError::GroupNotFound(_)
                         | offline_protocol_mls::MlsError::Deserialization(_)
                         | offline_protocol_mls::MlsError::InvalidMessage(_)
                         | offline_protocol_mls::MlsError::Storage(_)
+                        | offline_protocol_mls::MlsError::SenderIdentityMismatch { .. }
                 );
                 if is_permanent {
                     error!(
@@ -2797,7 +2800,7 @@ impl OfflineProtocol {
                 sender_id: sender.to_string(),
                 timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
             };
-            match mls_guard.decrypt_from_group(&encrypted) {
+            match mls_guard.decrypt_from_group(&encrypted, sender) {
                 Ok(Some(pt)) => Some(pt),
                 _ => None,
             }

@@ -242,10 +242,18 @@ impl GroupManager {
     }
 
     /// Decrypts an incoming MLS message.
+    ///
+    /// Security (SEC-M1): `claimed_sender` is the identity the caller will
+    /// attribute this message to (the transport-level sender). It is
+    /// cross-checked against the MLS-authenticated credential of the
+    /// processed message *before* any plaintext is surfaced or any commit
+    /// is merged, so a group member cannot impersonate another member by
+    /// lying in the wire envelope.
     pub fn decrypt_message(
         &self,
         group: &mut MlsGroup,
         message: MlsMessageIn,
+        claimed_sender: &str,
     ) -> Result<Option<Vec<u8>>> {
         let protocol_message = message
             .try_into_protocol_message()
@@ -254,6 +262,16 @@ impl GroupManager {
         let processed = group
             .process_message(&self.provider, protocol_message)
             .map_err(|e| MlsError::Decryption(e.to_string()))?;
+
+        // Credentials in this SDK are basic credentials carrying the user id
+        // as raw bytes (see `MlsManager::create_identity`).
+        let authenticated = processed.credential().serialized_content();
+        if authenticated != claimed_sender.as_bytes() {
+            return Err(MlsError::SenderIdentityMismatch {
+                claimed: claimed_sender.to_string(),
+                authenticated: String::from_utf8_lossy(authenticated).into_owned(),
+            });
+        }
 
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(app_msg) => Ok(Some(app_msg.into_bytes())),

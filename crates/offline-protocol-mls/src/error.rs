@@ -121,4 +121,16 @@ pub enum MlsError {
         /// The identity actually embedded in the key package credential.
         found: String,
     },
+
+    /// The MLS-authenticated sender of a decrypted message does not match
+    /// the sender the transport layer attributed the message to.
+    #[error(
+        "Sender identity mismatch: claimed '{claimed}', MLS-authenticated sender is '{authenticated}'"
+    )]
+    SenderIdentityMismatch {
+        /// The sender the wire envelope claimed.
+        claimed: String,
+        /// The identity authenticated by the MLS credential.
+        authenticated: String,
+    },
 }

@@ -539,7 +539,7 @@ impl OfflineProtocol {
                     return None;
                 }
             };
-            manager.decrypt(encrypted)
+            manager.decrypt(encrypted, sender)
         };
 
         match decrypt_result {
