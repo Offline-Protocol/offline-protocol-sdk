@@ -858,6 +858,27 @@ impl OfflineProtocol {
                         // Session not ready but store_pending is enabled — queue
                         // the message so it gets encrypted and sent once the
                         // session is confirmed, rather than dropping it.
+                        //
+                        // Kick establishment first (import a stored key package,
+                        // create the session, send the Welcome), matching the
+                        // non-strict and media paths: without this a peer whose
+                        // key package arrived but whose arrival-time
+                        // auto-establish failed would stall until the peer
+                        // initiates. SessionNotReady from the kick is the
+                        // expected "created, awaiting confirmation" outcome;
+                        // the message queues regardless.
+                        if let Some(mls) = self.mls_manager.clone() {
+                            match self.ensure_session_establishment(&mls, recipient) {
+                                Ok(()) | Err(Error::SessionNotReady(_)) => {}
+                                Err(err) => {
+                                    warn!(
+                                        recipient = %recipient,
+                                        error = %err,
+                                        "Session establishment kick failed; message queued anyway"
+                                    );
+                                }
+                            }
+                        }
                         let queued_id = self.queue_message_for_session_establishment(
                             recipient,
                             content,
@@ -897,9 +918,16 @@ impl OfflineProtocol {
             }
         } else if self.config.encryption.require_encryption {
             Err(Error::EncryptFailed(
-                "MLS encryption is required but MLS is not initialized".to_string(),
+                "MLS encryption is required (the default) but MLS is not initialized — \
+                 call initialize_mls() with an MlsStorage, or explicitly opt out with \
+                 require_encryption=false to send plaintext"
+                    .to_string(),
             ))
         } else {
+            // Explicit opt-out: require_encryption=false with encryption
+            // disabled or MLS uninitialized. The message leaves as plaintext;
+            // surface that loudly (once per peer) instead of a debug log.
+            self.warn_plaintext_send(recipient);
             Ok(OutboundSendPreparation::Ready(content.to_string()))
         }
     }
@@ -1109,9 +1137,13 @@ impl OfflineProtocol {
     /// establishment if a key package is available); retry after the
     /// `secure_session_established` event. When encryption is required but MLS
     /// is not initialized this returns [`Error::EncryptFailed`]. Plaintext
-    /// chunks are sent only when auto-encryption is inactive: the explicit
-    /// encryption opt-out, or encryption enabled but MLS never initialized
-    /// while `require_encryption` is unset (matching the text path).
+    /// chunks are sent only when auto-encryption is inactive AND
+    /// `require_encryption` was explicitly set to `false` (it defaults to
+    /// `true`): the explicit encryption opt-out, or encryption enabled but
+    /// MLS never initialized (matching the text path). Every plaintext
+    /// transfer emits a
+    /// [`crate::events::SecurityWarningCode::PlaintextSend`] warning, once
+    /// per peer.
     ///
     /// Returns a `file_id` that can be used to track progress or cancel.
     pub fn send_media(
@@ -1174,8 +1206,15 @@ impl OfflineProtocol {
             }
         } else if self.config.encryption.require_encryption {
             return Err(Error::EncryptFailed(
-                "MLS encryption is required but MLS is not initialized".to_string(),
+                "MLS encryption is required (the default) but MLS is not initialized — \
+                 call initialize_mls() with an MlsStorage, or explicitly opt out with \
+                 require_encryption=false to send plaintext media"
+                    .to_string(),
             ));
+        } else {
+            // Explicit opt-out: the whole transfer leaves as legacy plaintext
+            // chunks. Warn once per peer, not per chunk.
+            self.warn_plaintext_send(&recipient_str);
         }
 
         let file_id = format!("file_{}", MessageId::new().as_str());

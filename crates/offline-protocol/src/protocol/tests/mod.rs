@@ -17,11 +17,17 @@ use std::thread;
 use std::time::Duration;
 
 pub(crate) fn create_test_config() -> ProtocolConfig {
-    ProtocolConfig::new("test-app", "user123")
+    create_test_config_for_user("user123")
 }
 
 pub(crate) fn create_test_config_for_user(user_id: &str) -> ProtocolConfig {
-    ProtocolConfig::new("test-app", user_id)
+    let mut config = ProtocolConfig::new("test-app", user_id);
+    // Most tests exercise transport/reliability/routing machinery without
+    // initializing MLS; opt out of the fail-closed default (SEC-M3) so their
+    // sends take the legacy plaintext path. Tests asserting the strict
+    // default behavior construct `ProtocolConfig::new` directly.
+    config.encryption.require_encryption = false;
+    config
 }
 
 #[derive(Default, Clone)]
@@ -2275,14 +2281,24 @@ fn test_pending_message_queue() {
 
 #[test]
 fn test_encryption_builder_methods() {
+    // Disabling encryption without also opting out of require_encryption
+    // (true by default since SEC-M3) must fail validation — plaintext
+    // operation requires an explicit double opt-out.
+    let result = ProtocolConfig::builder("test-app", "user123")
+        .encryption_enabled(false)
+        .build();
+    assert!(result.is_err());
+
     let config = ProtocolConfig::builder("test-app", "user123")
         .encryption_enabled(false)
+        .require_encryption(false)
         .auto_key_exchange(true)
         .store_pending_messages(false)
         .build()
         .unwrap();
 
     assert!(!config.encryption.enabled);
+    assert!(!config.encryption.require_encryption);
     assert!(config.encryption.auto_key_exchange);
     assert!(!config.encryption.store_pending);
 }
@@ -2305,6 +2321,79 @@ fn test_require_encryption_blocks_plaintext_when_mls_uninitialized() {
     let result = protocol.send_message("bob", "Hello", None::<MessagePriority>, None::<String>);
     assert!(matches!(result, Err(Error::EncryptFailed(_))));
     assert_eq!(transport_handle.sent_messages().len(), 0);
+}
+
+#[test]
+fn test_default_config_fails_closed_when_mls_uninitialized() {
+    // Stock config, no explicit require_encryption: SEC-M3 flipped the
+    // default to fail closed, so a node that never initialized MLS must
+    // error instead of silently sending plaintext.
+    let config = ProtocolConfig::new("test-app", "user123");
+    assert!(config.encryption.require_encryption);
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let result = protocol.send_message("bob", "Hello", None::<MessagePriority>, None::<String>);
+    assert!(matches!(result, Err(Error::EncryptFailed(_))));
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+}
+
+#[test]
+fn test_plaintext_opt_out_emits_security_warning_once_per_peer() {
+    // Explicit opt-out (require_encryption=false via the test helper) with
+    // MLS uninitialized: sends still leave as plaintext, and each peer gets
+    // exactly one PLAINTEXT_SEND security warning regardless of message count.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let warnings: Arc<Mutex<Vec<(String, SecurityWarningCode)>>> = Arc::new(Mutex::new(Vec::new()));
+    let warnings_clone = warnings.clone();
+    protocol.on_event(move |event| {
+        if let Event::SecurityWarning {
+            peer_id,
+            reason_code,
+            ..
+        } = event
+        {
+            warnings_clone.lock().unwrap().push((peer_id, reason_code));
+        }
+    });
+
+    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    protocol
+        .send_message("bob", "one", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .send_message("bob", "two", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .send_message("carol", "three", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // The opt-out path still delivers — all three reached the transport.
+    assert_eq!(transport_handle.sent_messages().len(), 3);
+    let warnings = warnings.lock().unwrap();
+    let count_for = |peer: &str| {
+        warnings
+            .iter()
+            .filter(|(p, c)| p == peer && *c == SecurityWarningCode::PlaintextSend)
+            .count()
+    };
+    assert_eq!(count_for("bob"), 1);
+    assert_eq!(count_for("carol"), 1);
 }
 
 #[test]
@@ -2488,7 +2577,26 @@ fn test_require_encryption_queues_message_when_session_pending_with_key_package(
     // With store_pending=true, the message should be queued for later
     // delivery rather than returning an error.
     assert!(result.is_ok());
-    assert_eq!(transport_handle.sent_messages().len(), 0);
+    // Queuing kicks establishment: the session is created from the pending
+    // key package and the Welcome goes out immediately, so confirmation does
+    // not depend on the peer contacting us first.
+    assert!(protocol
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .has_session("bob")
+        .unwrap());
+    // Two control messages hit the wire: the Welcome from the establishment
+    // kick, then the confirmation probe from the post-queue reconciliation.
+    let sent = transport_handle.sent_messages();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0].content.starts_with(internal_prefixes::WELCOME));
+    assert!(sent[1]
+        .content
+        .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE));
+    // The user message itself is queued, never on the wire.
     assert!(protocol.pending_encrypted_messages.contains_key("bob"));
     assert_eq!(
         protocol
