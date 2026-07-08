@@ -119,6 +119,13 @@ impl OfflineProtocol {
         self.retry_queue.len()
     }
 
+    /// Returns whether `peer_id` is currently tracked as a discovered
+    /// neighbor. Populated by [`Self::on_neighbor_discovered`] and cleared
+    /// by [`Self::on_neighbor_lost`]; blocked users are never tracked.
+    pub fn is_known_peer(&self, peer_id: &str) -> bool {
+        self.known_peers.contains(peer_id)
+    }
+
     /// Returns a mutable reference to the retry queue (test-only).
     #[cfg(test)]
     pub(crate) fn retry_queue_mut(&mut self) -> &mut offline_protocol_reliability::RetryQueue {
