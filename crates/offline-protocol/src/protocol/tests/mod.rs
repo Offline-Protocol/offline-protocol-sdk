@@ -8167,7 +8167,7 @@ fn test_require_encryption_allows_service_control_messages() {
 }
 
 #[test]
-fn test_known_peers_capacity_limit() {
+fn test_known_peers_capacity_evicts_least_recently_seen() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     // Fill to capacity
@@ -8176,24 +8176,71 @@ fn test_known_peers_capacity_limit() {
     }
     assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
 
-    // One more should be rejected
-    protocol.on_neighbor_discovered("peer-overflow");
-    assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
-    assert!(!protocol.known_peers.contains("peer-overflow"));
-
-    // Existing peer should still be updatable (no-op insert, not rejected)
+    // Re-discovering an existing peer at capacity refreshes it, no eviction
     protocol.on_neighbor_discovered("peer-0");
     assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
-    assert!(protocol.known_peers.contains("peer-0"));
+    assert!(protocol.known_peers.contains_key("peer-0"));
 
-    // Removing a peer frees capacity
-    protocol.on_neighbor_lost("peer-0");
-    assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS - 1);
+    // Backdate one entry so the eviction victim is deterministic
+    *protocol.known_peers.get_mut("peer-7").unwrap() -= Duration::from_secs(60);
+    protocol.key_package_sent_to.insert("peer-7".to_string());
 
-    // Now the new peer can be added
+    // A new peer discovered at capacity is tracked; the least-recently-seen
+    // entry is evicted (issue #140: a local BLE neighbor must never be
+    // locked out by stale message-path senders).
     protocol.on_neighbor_discovered("peer-overflow");
     assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
-    assert!(protocol.known_peers.contains("peer-overflow"));
+    assert!(protocol.known_peers.contains_key("peer-overflow"));
+    assert!(!protocol.known_peers.contains_key("peer-7"));
+    // Eviction mirrors on_neighbor_lost: the key-package marker is cleared
+    // so the peer receives a fresh key package if it re-appears.
+    assert!(!protocol.key_package_sent_to.contains("peer-7"));
+
+    // Explicit loss still frees capacity
+    protocol.on_neighbor_lost("peer-overflow");
+    assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS - 1);
+    assert!(!protocol.known_peers.contains_key("peer-overflow"));
+}
+
+#[test]
+fn test_known_peers_ttl_eviction() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    protocol.on_neighbor_discovered("alice");
+    protocol.on_neighbor_discovered("bob");
+    protocol.key_package_sent_to.insert("alice".to_string());
+
+    // Fresh entries survive a sweep at the current instant
+    protocol.prune_stale_known_peers(std::time::Instant::now());
+    assert_eq!(protocol.known_peers.len(), 2);
+
+    // Beyond the TTL, unseen entries are evicted together with their
+    // key-package markers
+    let past_ttl = std::time::Instant::now() + Duration::from_secs(KNOWN_PEER_TTL_SECS + 1);
+    protocol.prune_stale_known_peers(past_ttl);
+    assert!(protocol.known_peers.is_empty());
+    assert!(!protocol.is_known_peer("alice"));
+    assert!(!protocol.key_package_sent_to.contains("alice"));
+}
+
+#[test]
+fn test_known_peers_rediscovery_refreshes_last_seen() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    protocol.on_neighbor_discovered("alice");
+    protocol.on_neighbor_discovered("bob");
+    for seen in protocol.known_peers.values_mut() {
+        *seen -= Duration::from_secs(60);
+    }
+
+    // Re-discovering alice refreshes her last-seen; bob stays backdated
+    protocol.on_neighbor_discovered("alice");
+
+    // At this sweep point bob's age exceeds the TTL but alice's does not
+    let sweep_at = std::time::Instant::now() + Duration::from_secs(KNOWN_PEER_TTL_SECS - 30);
+    protocol.prune_stale_known_peers(sweep_at);
+    assert!(protocol.known_peers.contains_key("alice"));
+    assert!(!protocol.known_peers.contains_key("bob"));
 }
 
 #[test]
@@ -8211,10 +8258,10 @@ fn test_on_neighbor_lost_removes_from_known_peers() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     protocol.on_neighbor_discovered("alice");
-    assert!(protocol.known_peers.contains("alice"));
+    assert!(protocol.known_peers.contains_key("alice"));
 
     protocol.on_neighbor_lost("alice");
-    assert!(!protocol.known_peers.contains("alice"));
+    assert!(!protocol.known_peers.contains_key("alice"));
 }
 
 #[test]
