@@ -17,12 +17,13 @@ pub struct AckEvictionInfo {
 }
 
 /// Status of an ACK.
+///
+/// There is no `Received` state: an acknowledged message is removed from
+/// tracking entirely via [`AckManager::remove_ack`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AckStatus {
     /// Waiting for ACK.
     Pending,
-    /// ACK received.
-    Received,
     /// ACK timed out.
     TimedOut,
 }
@@ -216,29 +217,11 @@ impl AckManager {
         }
     }
 
-    /// Records that an ACK was received for a message.
-    ///
-    /// # Arguments
-    ///
-    /// * `message_id` - ID of the message that was acknowledged
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the ACK was expected and recorded, `false` if not found.
-    pub fn record_ack_received(&mut self, message_id: &MessageId) -> bool {
-        if let Some(pending) = self.pending_acks.get_mut(message_id) {
-            pending.status = AckStatus::Received;
-            true
-        } else {
-            false
-        }
-    }
-
     /// Returns all ACKs that have timed out and marks them as `TimedOut`.
     ///
     /// Note: This does NOT remove entries from the map. Entries are kept so that:
     /// - `increment_retry_count()` can reset them when the message is retried
-    /// - Late ACKs can still be matched via `record_ack_received()`
+    /// - Late ACKs can still be matched via `remove_ack()`
     ///
     /// Entries are eventually removed by:
     /// - `remove_ack()` when ACK is received or max retries exceeded
@@ -335,11 +318,11 @@ mod tests {
         assert!(manager.is_waiting_for_ack(&msg_id));
         assert_eq!(manager.pending_count(), 1);
 
-        // Receive ACK
-        assert!(manager.record_ack_received(&msg_id));
-
-        let pending = manager.get_pending_ack(&msg_id).unwrap();
-        assert_eq!(pending.status, AckStatus::Received);
+        // Receive ACK: the entry is removed from tracking entirely
+        let removed = manager.remove_ack(&msg_id).unwrap();
+        assert_eq!(removed.message_id, msg_id);
+        assert!(!manager.is_waiting_for_ack(&msg_id));
+        assert_eq!(manager.pending_count(), 0);
     }
 
     #[test]
@@ -510,8 +493,8 @@ mod tests {
         let mut manager = AckManager::new();
         let msg_id = MessageId::new();
 
-        // Recording ACK for non-existent message should return false
-        assert!(!manager.record_ack_received(&msg_id));
+        // Removing an ACK for a non-existent message should return None
+        assert!(manager.remove_ack(&msg_id).is_none());
     }
 
     #[test]
