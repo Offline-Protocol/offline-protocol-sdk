@@ -1007,14 +1007,14 @@ impl Transport for BleTransport {
         Ok(queue.pop_front())
     }
 
-    fn start(&mut self) -> Result<()> {
+    fn start(&self) -> Result<()> {
         // Set status to Available when starting
         // Platform can still override this via on_status_changed() if BLE is not available
         *self.status.lock_or_recover() = TransportStatus::Available;
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&self) -> Result<()> {
         // **Caller contract:** the platform callback pump must already
         // be quiesced before `stop()` returns. Every `set_peer_mtu` /
         // `on_peer_discovered` / `on_fragment_received` entry takes
@@ -1295,7 +1295,7 @@ mod tests {
 
     #[test]
     fn test_ble_start_stop() {
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
         transport.start().unwrap();
         assert_eq!(transport.status(), TransportStatus::Available);
         transport.stop().unwrap();
@@ -1304,7 +1304,7 @@ mod tests {
 
     #[test]
     fn test_ble_recipient_not_among_peers_count_signals_keying_mismatch() {
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
         transport.start().unwrap();
 
         // No BLE peers at all: PeerNotReachable, but this is the ordinary offline
@@ -1479,7 +1479,7 @@ mod tests {
     fn test_ble_stop_drains_peer_mtus() {
         // stop() must clear per-peer MTUs so a subsequent start() cannot
         // observe stale values from the prior session.
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
         transport.set_peer_mtu("alice", 400);
         transport.set_peer_mtu("bob", 300);
         assert_eq!(transport.peer_mtu("alice"), 400);
@@ -1499,7 +1499,7 @@ mod tests {
         // the fragmenter silently falls back to the 185-byte floor, or
         // would let stale reassembly state outlive the peer it came
         // from.
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
         transport.start().unwrap();
         transport.on_peer_discovered(peer_device("bob"));
         transport.set_peer_mtu("bob", 400);
@@ -1669,7 +1669,7 @@ mod tests {
         // test to match the real send-path invariant (recipient ==
         // device_id) catches any regression where stop/start leaks a
         // ghost peer under a different key.
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
 
         transport.start().unwrap();
         transport.on_peer_discovered(peer_device("bob"));
@@ -1977,7 +1977,7 @@ mod tests {
 
     #[test]
     fn test_ble_has_pending_sends_dequeue_send_get_queue_depth() {
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
         transport.start().unwrap();
         transport.on_peer_discovered(peer_device("bob"));
         let msg = small_message();
@@ -2115,7 +2115,7 @@ mod tests {
 
     #[test]
     fn test_ble_get_next_fragment_requeue() {
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
         transport.start().unwrap();
         transport.on_peer_discovered(peer_device("bob"));
         let msg = small_message();
@@ -2147,7 +2147,7 @@ mod tests {
 
     #[test]
     fn test_ble_send_rejects_unknown_peer() {
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
         transport.start().unwrap();
         let msg = small_message();
         let result = transport.send(&msg);
@@ -2160,7 +2160,7 @@ mod tests {
 
     #[test]
     fn test_ble_send_allows_known_peer() {
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
         transport.start().unwrap();
         transport.on_peer_discovered(peer_device("bob"));
         let msg = small_message();
@@ -2169,7 +2169,7 @@ mod tests {
 
     #[test]
     fn test_ble_send_after_peer_lost() {
-        let mut transport = BleTransport::new("test-device");
+        let transport = BleTransport::new("test-device");
         transport.start().unwrap();
         transport.on_peer_discovered(peer_device("bob"));
         assert!(transport.send(&small_message()).is_ok());

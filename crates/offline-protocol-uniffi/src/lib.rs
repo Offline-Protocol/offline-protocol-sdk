@@ -2020,8 +2020,7 @@ impl OfflineProtocol {
     {
         let protocol = recover_mutex(&self.inner, "inner");
         let transport_arc = protocol.transport_manager().get_transport(transport_type)?;
-        let transport = recover_mutex(&transport_arc, "transport");
-        Some(f(&**transport))
+        Some(f(&*transport_arc))
     }
 
     /// Like `with_transport` but uses fallible lock acquisition
@@ -2039,10 +2038,7 @@ impl OfflineProtocol {
             Some(arc) => arc,
             None => return Ok(None),
         };
-        let transport = transport_arc
-            .lock()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-        Ok(Some(f(&**transport)))
+        Ok(Some(f(&*transport_arc)))
     }
 
     /// Acquire the inner + transport locks, downcast to `BleTransport`, and
@@ -2058,8 +2054,7 @@ impl OfflineProtocol {
         let transport_arc = protocol
             .transport_manager()
             .get_transport(CoreTransportType::BLE)?;
-        let transport = recover_mutex(&transport_arc, "transport");
-        let ble_transport = transport.as_any().downcast_ref::<BleTransport>()?;
+        let ble_transport = transport_arc.as_any().downcast_ref::<BleTransport>()?;
         Some(f(ble_transport))
     }
 
@@ -2077,10 +2072,7 @@ impl OfflineProtocol {
             Some(arc) => arc,
             None => return Ok(None),
         };
-        let transport = transport_arc
-            .lock()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-        let ble_transport = match transport.as_any().downcast_ref::<BleTransport>() {
+        let ble_transport = match transport_arc.as_any().downcast_ref::<BleTransport>() {
             Some(bt) => bt,
             None => return Ok(None),
         };
@@ -2100,8 +2092,7 @@ impl OfflineProtocol {
         let transport_arc = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Nostr)?;
-        let transport = recover_mutex(&transport_arc, "transport");
-        let nostr_transport = transport
+        let nostr_transport = transport_arc
             .as_any()
             .downcast_ref::<offline_protocol_transport::nostr::NostrTransport>(
         )?;
@@ -2843,10 +2834,7 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::BLE)
         {
-            let transport = transport_arc
-                .lock()
-                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            transport
+            transport_arc
                 .on_fragment_received(fragment)
                 .map_err(|e| ProtocolError::Other(format!("Fragment processing failed: {}", e)))?;
         }
@@ -2976,10 +2964,7 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
         {
-            let transport = transport_arc
-                .lock()
-                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Err(e) = transport.on_data_received(data) {
+            if let Err(e) = transport_arc.on_data_received(data) {
                 return Err(ProtocolError::Other(format!(
                     "Failed to process internet message: {}",
                     e
@@ -3022,9 +3007,8 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
         {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Ok(Some((message_id, data))) = transport.get_next_message() {
-                if let Ok(message) = transport.deserialize_message(&data) {
+            if let Ok(Some((message_id, data))) = transport_arc.get_next_message() {
+                if let Ok(message) = transport_arc.deserialize_message(&data) {
                     return Some(InternetMessage {
                         message_id,
                         recipient_id: message.recipient.as_str().to_string(),
@@ -3047,8 +3031,7 @@ impl OfflineProtocol {
                 .transport_manager()
                 .get_transport(CoreTransportType::Internet)
             {
-                let transport = recover_mutex(&transport_arc, "transport");
-                transport.deserialize_message(&data).ok()
+                transport_arc.deserialize_message(&data).ok()
             } else {
                 None
             };
@@ -3104,8 +3087,7 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
         {
-            let transport = recover_mutex(&transport_arc, "transport");
-            transport.confirm_sent(&message_id);
+            transport_arc.confirm_sent(&message_id);
         }
     }
 
@@ -3136,8 +3118,7 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
         {
-            let transport = recover_mutex(&transport_arc, "transport");
-            transport.report_send_failure(&message_id);
+            transport_arc.report_send_failure(&message_id);
         }
     }
 
@@ -3196,10 +3177,7 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::WiFiDirect)
         {
-            let transport = transport_arc
-                .lock()
-                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Err(e) = transport.on_data_received(data) {
+            if let Err(e) = transport_arc.on_data_received(data) {
                 return Err(ProtocolError::Other(format!(
                     "Failed to process WiFi Direct message: {}",
                     e
@@ -4027,10 +4005,7 @@ impl OfflineProtocol {
         let protocol = self.lock_inner().ok()?;
         let core_type: CoreTransportType = transport_type.into();
         let transport_arc = protocol.transport_manager().get_transport(core_type)?;
-        let metrics = {
-            let transport = recover_mutex(&transport_arc, "transport");
-            transport.metrics()
-        };
+        let metrics = transport_arc.metrics();
         Some(TransportMetrics::from(&metrics))
     }
 

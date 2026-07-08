@@ -17,14 +17,18 @@ use offline_protocol_transport::{
     Error as TransportError, Transport, TransportMetrics, TransportStatus, TransportType,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, warn};
 
 /// Manages multiple transports and handles transport selection.
 pub struct TransportManager {
     /// Available transports mapped by type.
-    transports: HashMap<TransportType, Arc<Mutex<Box<dyn Transport>>>>,
+    ///
+    /// Transports are fully interior-mutable (every `Transport` method takes
+    /// `&self`), so they are shared as plain `Arc`s — no outer mutex
+    /// serializing sends against status/metrics reads.
+    transports: HashMap<TransportType, Arc<dyn Transport>>,
 
     /// Current active transport.
     current_transport: Option<TransportType>,
@@ -340,8 +344,7 @@ impl TransportManager {
     /// * `transport_type` - Type of transport to add
     /// * `transport` - The transport implementation
     pub fn add_transport(&mut self, transport_type: TransportType, transport: Box<dyn Transport>) {
-        self.transports
-            .insert(transport_type, Arc::new(Mutex::new(transport)));
+        self.transports.insert(transport_type, Arc::from(transport));
     }
 
     /// Sends a message through the best available transport, with fallback.
@@ -461,10 +464,7 @@ impl TransportManager {
                 .transports
                 .get(&primary)
                 .ok_or_else(|| Error::Other(format!("Transport {:?} not found", primary)))?;
-            let transport_lock = transport
-                .lock()
-                .map_err(|_| Error::Other(format!("Transport mutex poisoned for {:?}", primary)))?;
-            transport_lock.send(message)
+            transport.send(message)
         };
 
         match primary_result {
@@ -546,17 +546,9 @@ impl TransportManager {
                 None => continue,
             };
 
-            let transport_lock = match transport.lock() {
-                Ok(lock) => lock,
-                Err(_) => {
-                    warn!(transport = ?transport_type, "Transport mutex poisoned, skipping");
-                    continue;
-                }
-            };
-
             attempted.push(*transport_type);
 
-            match transport_lock.send(message) {
+            match transport.send(message) {
                 Ok(()) => {
                     self.current_transport = Some(*transport_type);
                     self.selector.set_current_transport(*transport_type);
@@ -655,18 +647,14 @@ impl TransportManager {
             .get(&transport_type)
             .ok_or_else(|| Error::Other(format!("Transport {:?} not found", transport_type)))?;
 
-        let transport_lock = transport.lock().map_err(|_| {
-            Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
-        })?;
-
-        if transport_lock.status() != TransportStatus::Available {
+        if transport.status() != TransportStatus::Available {
             return Err(Error::Other(format!(
                 "Transport {:?} is not available",
                 transport_type
             )));
         }
 
-        transport_lock
+        transport
             .send(message)
             .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
 
@@ -684,14 +672,7 @@ impl TransportManager {
     pub fn receive(&self) -> Result<Option<(TransportType, Message)>> {
         // Check all transports for messages
         for (transport_type, transport) in &self.transports {
-            let transport_lock = match transport.lock() {
-                Ok(lock) => lock,
-                Err(_) => {
-                    warn!(transport = ?transport_type, "Transport mutex poisoned, skipping");
-                    continue;
-                }
-            };
-            match transport_lock.receive() {
+            match transport.receive() {
                 Ok(Some(message)) => {
                     debug!(
                         transport = ?transport_type,
@@ -726,16 +707,9 @@ impl TransportManager {
 
         for (transport_type, transport) in &self.transports {
             let maybe_metrics = {
-                let transport_lock = match transport.lock() {
-                    Ok(lock) => lock,
-                    Err(_) => {
-                        warn!(transport = ?transport_type, "Transport mutex poisoned, skipping metrics");
-                        continue;
-                    }
-                };
-                let status = transport_lock.status();
+                let status = transport.status();
                 if status == TransportStatus::Available {
-                    Some(transport_lock.metrics())
+                    Some(transport.metrics())
                 } else {
                     debug!(
                         transport = ?transport_type,
@@ -766,30 +740,22 @@ impl TransportManager {
     /// those not currently [`TransportStatus::Available`].
     ///
     /// Used by the telemetry aggregator to detect state transitions; unlike
-    /// [`TransportManager::get_available_transports`], this does not take
-    /// per-transport metrics and therefore does a single lock per transport
-    /// with no downstream work under the guard.
+    /// [`TransportManager::get_available_transports`], this only reads each
+    /// transport's status with no metrics work.
     pub fn get_all_transport_statuses(&self) -> HashMap<TransportType, TransportStatus> {
         let mut out = HashMap::with_capacity(self.transports.len());
         for (transport_type, transport) in &self.transports {
-            let status = match transport.lock() {
-                Ok(lock) => lock.status(),
-                Err(_) => {
-                    warn!(transport = ?transport_type, "Transport mutex poisoned, reporting Error");
-                    TransportStatus::Error
-                }
-            };
-            out.insert(*transport_type, status);
+            out.insert(*transport_type, transport.status());
         }
         out
     }
 
     /// Returns the per-transport status map AND the available-only metrics
-    /// map in a single lock-per-transport pass.
+    /// map in a single pass.
     ///
     /// Equivalent to calling [`Self::get_all_transport_statuses`] and
-    /// [`Self::get_available_transports`] back-to-back, but takes each
-    /// transport's mutex once instead of twice. Used by the per-tick
+    /// [`Self::get_available_transports`] back-to-back, but reads each
+    /// transport's status once instead of twice. Used by the per-tick
     /// telemetry aggregator.
     pub fn snapshot_status_and_available(
         &self,
@@ -801,20 +767,11 @@ impl TransportManager {
         let mut available = HashMap::new();
 
         for (transport_type, transport) in &self.transports {
-            let (status, metrics) = match transport.lock() {
-                Ok(lock) => {
-                    let status = lock.status();
-                    let metrics = if status == TransportStatus::Available {
-                        Some(lock.metrics())
-                    } else {
-                        None
-                    };
-                    (status, metrics)
-                }
-                Err(_) => {
-                    warn!(transport = ?transport_type, "Transport mutex poisoned, reporting Error");
-                    (TransportStatus::Error, None)
-                }
+            let status = transport.status();
+            let metrics = if status == TransportStatus::Available {
+                Some(transport.metrics())
+            } else {
+                None
             };
             statuses.insert(*transport_type, status);
             if let Some(mut metrics) = metrics {
@@ -831,10 +788,7 @@ impl TransportManager {
     /// Starts all transports.
     pub fn start(&mut self) -> Result<()> {
         for (transport_type, transport) in &self.transports {
-            let mut transport_lock = transport.lock().map_err(|_| {
-                Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
-            })?;
-            transport_lock.start().map_err(|e| {
+            transport.start().map_err(|e| {
                 Error::Other(format!(
                     "Failed to start transport {:?}: {}",
                     transport_type, e
@@ -847,10 +801,7 @@ impl TransportManager {
     /// Stops all transports.
     pub fn stop(&mut self) -> Result<()> {
         for (transport_type, transport) in &self.transports {
-            let mut transport_lock = transport.lock().map_err(|_| {
-                Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
-            })?;
-            transport_lock.stop().map_err(|e| {
+            transport.stop().map_err(|e| {
                 Error::Other(format!(
                     "Failed to stop transport {:?}: {}",
                     transport_type, e
@@ -860,11 +811,8 @@ impl TransportManager {
         Ok(())
     }
 
-    /// Gets a reference to a specific transport.
-    pub fn get_transport(
-        &self,
-        transport_type: TransportType,
-    ) -> Option<Arc<Mutex<Box<dyn Transport>>>> {
+    /// Gets a shared handle to a specific transport.
+    pub fn get_transport(&self, transport_type: TransportType) -> Option<Arc<dyn Transport>> {
         self.transports.get(&transport_type).cloned()
     }
 
@@ -969,11 +917,34 @@ mod tests {
     }
 
     #[test]
+    fn test_start_stop_through_shared_transport_handle() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+        manager.add_transport(
+            TransportType::BLE,
+            Box::new(MockTransport::new(TransportType::BLE)),
+        );
+
+        // The handle shares the same transport the manager drives: start()
+        // and stop() go through &self, no per-transport mutex involved.
+        let handle = manager
+            .get_transport(TransportType::BLE)
+            .expect("transport registered");
+        assert_eq!(handle.status(), TransportStatus::Unavailable);
+
+        manager.start().unwrap();
+        assert_eq!(handle.status(), TransportStatus::Available);
+
+        manager.stop().unwrap();
+        assert_eq!(handle.status(), TransportStatus::Disconnected);
+    }
+
+    #[test]
     fn test_send_message() {
         let selector = TransportSelector::with_config(DorsConfig::default());
         let mut manager = TransportManager::new(selector);
 
-        let mut transport = MockTransport::new(TransportType::BLE);
+        let transport = MockTransport::new(TransportType::BLE);
         transport.start().unwrap();
         manager.add_transport(TransportType::BLE, Box::new(transport));
 
@@ -987,7 +958,7 @@ mod tests {
         let selector = TransportSelector::with_config(DorsConfig::default());
         let mut manager = TransportManager::new(selector);
 
-        let mut transport = MockTransport::new(TransportType::BLE);
+        let transport = MockTransport::new(TransportType::BLE);
         transport.start().unwrap();
         manager.add_transport(TransportType::BLE, Box::new(transport));
 
@@ -1020,7 +991,7 @@ mod tests {
         let selector = TransportSelector::with_config(DorsConfig::default());
         let mut manager = TransportManager::new(selector);
 
-        let mut transport = MockTransport::new(TransportType::BLE);
+        let transport = MockTransport::new(TransportType::BLE);
         transport.start().unwrap();
         let message = create_test_message();
         transport.queue_message(message.clone());
@@ -1036,7 +1007,7 @@ mod tests {
         let selector = TransportSelector::with_config(DorsConfig::default());
         let mut manager = TransportManager::new(selector);
 
-        let mut transport = MockTransport::new(TransportType::BLE);
+        let transport = MockTransport::new(TransportType::BLE);
         transport.start().unwrap();
         manager.add_transport(TransportType::BLE, Box::new(transport));
 
@@ -1057,7 +1028,7 @@ mod tests {
         let selector = TransportSelector::with_config(DorsConfig::default());
         let mut manager = TransportManager::new(selector);
 
-        let mut transport = MockTransport::new(TransportType::BLE);
+        let transport = MockTransport::new(TransportType::BLE);
         transport.start().unwrap();
         manager.add_transport(TransportType::BLE, Box::new(transport));
 

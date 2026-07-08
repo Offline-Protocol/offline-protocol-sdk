@@ -86,10 +86,10 @@ impl Transport for HoldMock {
     fn receive(&self) -> offline_protocol_transport::Result<Option<Message>> {
         self.0.lock().unwrap().receive()
     }
-    fn start(&mut self) -> offline_protocol_transport::Result<()> {
+    fn start(&self) -> offline_protocol_transport::Result<()> {
         self.0.lock().unwrap().start()
     }
-    fn stop(&mut self) -> offline_protocol_transport::Result<()> {
+    fn stop(&self) -> offline_protocol_transport::Result<()> {
         self.0.lock().unwrap().stop()
     }
     fn on_status_changed(&self, status: TransportStatus) {
@@ -102,7 +102,7 @@ fn add_started_mock(
     transport_type: TransportType,
     metrics: TransportMetrics,
 ) -> Arc<Mutex<MockTransport>> {
-    let mut mock = MockTransport::new(transport_type);
+    let mock = MockTransport::new(transport_type);
     mock.set_metrics(metrics);
     mock.start().unwrap();
     let arc = Arc::new(Mutex::new(mock));

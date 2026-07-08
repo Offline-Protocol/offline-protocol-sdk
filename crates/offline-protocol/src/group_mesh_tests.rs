@@ -2597,7 +2597,7 @@ fn test_relay_sync_on_internet_available_transition() {
     assert!(!protocol.group_mesh.internet_was_available);
 
     // Add Internet transport
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2625,7 +2625,7 @@ fn test_relay_sync_cleared_on_internet_lost() {
     protocol.initialize_mls(storage).unwrap();
 
     // Add Internet transport and start
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2666,7 +2666,7 @@ fn test_relay_sync_disabled_config() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2695,7 +2695,7 @@ fn test_relay_broadcast_used_when_synced() {
     protocol.initialize_mls(storage).unwrap();
 
     // Add Internet transport
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2755,7 +2755,7 @@ fn test_relay_broadcast_fallback_to_fanout() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2909,7 +2909,7 @@ fn test_relay_register_group_on_create() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2936,7 +2936,7 @@ fn test_is_internet_available() {
     assert!(!protocol.is_internet_available());
 
     // Add Internet transport
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -5720,7 +5720,7 @@ fn test_legacy_roles_in_custom_map_are_migrated() {
 fn test_fallback_admin_not_used_when_roles_exist() {
     // When role metadata exists with an admin, the fallback should NOT be used
     // even if the first-sorted member differs from the stored admin.
-    let (mut alice, _bob, group_id) = setup_alice_bob_group("Fallback Override");
+    let (alice, _bob, group_id) = setup_alice_bob_group("Fallback Override");
 
     // Alice is admin (stored). Even if members list sorts differently,
     // the stored role takes precedence.
@@ -6184,7 +6184,7 @@ fn test_self_removal_commit_from_non_admin_is_rejected() {
 
 #[test]
 fn test_plaintext_removal_notification_from_admin_cleans_up() {
-    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Notify Test");
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Notify Test");
 
     // Ensure Bob's MLS state knows Alice is admin
     {
@@ -6377,7 +6377,7 @@ fn test_key_package_sent_to_cleared_after_invite_consumption() {
 
 #[test]
 fn test_welcome_handler_clears_key_package_sent_to() {
-    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Welcome KP Test");
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Welcome KP Test");
 
     // Bob should have cleared key_package_sent_to for alice after
     // processing the Welcome (so he can send a fresh key package).

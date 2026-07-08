@@ -238,12 +238,12 @@ impl Transport for WifiDirectTransport {
         Ok(queue.pop_front())
     }
 
-    fn start(&mut self) -> Result<()> {
+    fn start(&self) -> Result<()> {
         // Status will be updated by platform implementation via on_status_changed()
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&self) -> Result<()> {
         *self.status.lock_or_recover() = TransportStatus::Disconnected;
         self.peers.lock_or_recover().clear();
         self.send_queue.lock_or_recover().clear();
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn test_stop_sets_disconnected() {
-        let mut transport = WifiDirectTransport::new("test-device");
+        let transport = WifiDirectTransport::new("test-device");
         transport.on_status_changed(TransportStatus::Available);
         transport.stop().unwrap();
         assert_eq!(transport.status(), TransportStatus::Disconnected);
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_stop_clears_session_state() {
-        let mut transport = WifiDirectTransport::new("test-device");
+        let transport = WifiDirectTransport::new("test-device");
         transport.on_status_changed(TransportStatus::Available);
 
         let peer = WifiDirectPeer {

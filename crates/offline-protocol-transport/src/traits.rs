@@ -72,13 +72,18 @@ pub trait Transport: Send + Sync + Any {
     ///
     /// This performs no I/O. Most implementations stay `Unavailable` until
     /// the platform bridge reports connectivity via their
-    /// `on_status_changed()` method; BLE is the exception and optimistically
-    /// sets `Available` (the platform can still override it).
-    fn start(&mut self) -> Result<()>;
+    /// [`Transport::on_status_changed`] method; BLE is the exception and
+    /// optimistically sets `Available` (the platform can still override it).
+    fn start(&self) -> Result<()>;
 
     /// Stops the transport, marking it `Disconnected` and clearing queued
     /// state.
-    fn stop(&mut self) -> Result<()>;
+    ///
+    /// Callers must quiesce the platform bridge (callbacks *and* engine
+    /// sends) before stopping: every entry point takes `&self`, so a
+    /// racing `send()` or platform callback landing after the drain can
+    /// re-seed state into what is supposed to be an at-rest transport.
+    fn stop(&self) -> Result<()>;
 
     // ------------------------------------------------------------------
     // Platform-bridge ingress (platform → Rust)
@@ -241,5 +246,87 @@ pub trait Transport: Send + Sync + Any {
     /// the provided implementation is normally correct as-is.
     fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
         crate::common::deserialize_message(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use offline_protocol_core::{AppId, UserId};
+
+    /// Implements only the required Transport methods, so every provided
+    /// default is exercised as-is.
+    struct MinimalTransport;
+
+    impl Transport for MinimalTransport {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn transport_type(&self) -> TransportType {
+            TransportType::Internet
+        }
+        fn status(&self) -> TransportStatus {
+            TransportStatus::Unavailable
+        }
+        fn metrics(&self) -> TransportMetrics {
+            TransportMetrics::default()
+        }
+        fn send(&self, _message: &Message) -> Result<()> {
+            Ok(())
+        }
+        fn receive(&self) -> Result<Option<Message>> {
+            Ok(None)
+        }
+        fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+        fn on_status_changed(&self, _status: TransportStatus) {}
+    }
+
+    #[test]
+    fn default_polls_return_none() {
+        let t = MinimalTransport;
+        assert!(t.get_next_message().unwrap().is_none());
+        assert!(t.get_next_fragment().unwrap().is_none());
+    }
+
+    #[test]
+    fn default_ingress_rejects_data() {
+        // Dropping inbound bytes must be loud: a transport that does not
+        // override an ingress method reports an error instead of silently
+        // discarding the payload.
+        let t = MinimalTransport;
+        assert!(t.on_data_received(vec![1, 2, 3]).is_err());
+        assert!(t
+            .on_data_received_from(vec![1, 2, 3], "peer".to_string())
+            .is_err());
+        assert!(t.on_fragment_received(vec![1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn default_confirmation_and_mtu_hooks_are_noops() {
+        let t = MinimalTransport;
+        t.confirm_sent("msg-1");
+        t.report_send_failure("msg-1");
+        t.set_peer_mtu("peer", 500);
+        t.clear_peer_mtu("peer");
+        t.set_on_messages_available(Arc::new(|| {}));
+    }
+
+    #[test]
+    fn default_deserialize_reads_shared_wire_format() {
+        let t = MinimalTransport;
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "hello",
+        );
+        let bytes = crate::common::serialize_message(&message).unwrap();
+        let roundtripped = t.deserialize_message(&bytes).unwrap();
+        assert_eq!(roundtripped.id, message.id);
     }
 }

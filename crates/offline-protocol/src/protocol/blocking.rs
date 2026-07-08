@@ -261,7 +261,7 @@ mod tests {
         let mut proto = make_protocol("alice");
         proto.block_user("mallory").unwrap();
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
 
         // Queue a message from the blocked user addressed to us
@@ -300,7 +300,7 @@ mod tests {
             }
         });
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
 
         // Message from blocked user but addressed to a THIRD party — should NOT be blocked.
@@ -398,7 +398,7 @@ mod tests {
         proto.block_user("bob").unwrap();
         proto.unblock_user("bob").unwrap();
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
 
         let msg = Message::new(
@@ -430,7 +430,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
         proto
             .transport_manager_mut()
@@ -452,7 +452,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
         proto
             .transport_manager_mut()
@@ -481,7 +481,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
         proto
             .transport_manager_mut()
@@ -539,7 +539,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
 
         // First, receive a normal message from mallory (before blocking)
@@ -566,7 +566,7 @@ mod tests {
 
         // Re-send the same message (duplicate) — should be silently discarded.
         // The dedup path should NOT send a re-ACK because the sender is blocked.
-        let mut mock2 = MockTransport::new(TransportType::BLE);
+        let mock2 = MockTransport::new(TransportType::BLE);
         mock2.start().unwrap();
         mock2.queue_message(msg_clone);
         proto
@@ -595,7 +595,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
         proto
             .transport_manager_mut()
@@ -617,7 +617,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
         proto
             .transport_manager_mut()
@@ -639,7 +639,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
         proto
             .transport_manager_mut()
@@ -1201,7 +1201,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
         proto
             .transport_manager_mut()
@@ -1223,7 +1223,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
         proto
             .transport_manager_mut()
@@ -1245,7 +1245,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
 
-        let mut mock = MockTransport::new(TransportType::BLE);
+        let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
         proto
             .transport_manager_mut()

@@ -141,12 +141,12 @@ impl Transport for MockTransport {
         Ok(queue.pop_front())
     }
 
-    fn start(&mut self) -> Result<()> {
+    fn start(&self) -> Result<()> {
         *self.status.lock().unwrap() = TransportStatus::Available;
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&self) -> Result<()> {
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
         Ok(())
     }
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_mock_transport_send_receive() {
-        let mut transport = MockTransport::new(TransportType::BLE);
+        let transport = MockTransport::new(TransportType::BLE);
         transport.start().unwrap();
 
         assert_eq!(transport.status(), TransportStatus::Available);

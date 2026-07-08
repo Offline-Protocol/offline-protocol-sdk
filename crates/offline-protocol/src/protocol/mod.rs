@@ -633,8 +633,7 @@ impl OfflineProtocol {
         // Wire BLE fragment eviction callback so app receives FragmentAssemblyEvicted.
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
             let shared = self.shared_state.clone();
-            let transport = ble_arc.lock_or_recover();
-            if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
+            if let Some(ble) = ble_arc.as_any().downcast_ref::<BleTransport>() {
                 ble.set_fragment_eviction_callback(Some(Arc::new(move |info| {
                     shared
                         .lock_or_recover()
@@ -683,8 +682,7 @@ impl OfflineProtocol {
         // preserves the wiring without requiring the app to re-install.
         self.transport_manager.set_dors_event_callback(None);
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
-            let transport = ble_arc.lock_or_recover();
-            if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
+            if let Some(ble) = ble_arc.as_any().downcast_ref::<BleTransport>() {
                 ble.set_fragment_eviction_callback(None);
             }
         }
