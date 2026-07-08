@@ -9643,6 +9643,71 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
 }
 
 #[test]
+fn test_mls_enc_non_utf8_plaintext_rejected() {
+    // SEC-L6: a decrypted payload that is not valid UTF-8 must be dropped
+    // with a MessageDecryptionFailed event instead of surfacing a lossily
+    // mangled string. Compliant senders always encrypt UTF-8 on the text
+    // path (media chunks decrypt separately as bytes), so only a buggy or
+    // malicious peer can produce this.
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    alice.initialize_mls(storage).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    alice.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_kp = bob_manager.generate_key_package().unwrap();
+
+    // Establish a converged alice <-> bob session.
+    let welcome = {
+        let mls = alice.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap()
+    };
+    bob_manager.join_session(&welcome).unwrap();
+
+    // Bob encrypts bytes that are not valid UTF-8.
+    let encrypted = bob_manager
+        .encrypt_for_user("alice", &[0xFF, 0xFE, 0xFD])
+        .unwrap();
+    let content = format!(
+        "{}{}",
+        internal_prefixes::ENCRYPTED,
+        serde_json::to_string(&encrypted).unwrap()
+    );
+    let message = Message::new(
+        UserId::new("bob").unwrap(),
+        UserId::new("alice").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+
+    let result = alice.process_internal_message(&message);
+    assert!(
+        matches!(result, Some(InternalMessageResult::Consumed)),
+        "non-UTF-8 plaintext must be consumed, not surfaced as Decrypted"
+    );
+
+    let captured = events.lock().unwrap();
+    assert!(
+        captured.iter().any(|e| matches!(
+            e,
+            Event::MessageDecryptionFailed { code, .. }
+                if *code == DecryptionFailureCode::InvalidPayload
+        )),
+        "non-UTF-8 plaintext must emit MessageDecryptionFailed with InvalidPayload"
+    );
+}
+
+#[test]
 fn test_welcome_with_mismatched_inviter_id_rejected() {
     // Honest peers set `inviter_id` to their own id (see
     // SessionManager::create_session). A Welcome whose payload inviter_id

@@ -462,6 +462,7 @@ impl OfflineProtocol {
                     group_id: String,
                 },
                 Empty,
+                NonUtf8Plaintext,
                 SessionNotReady {
                     sender: String,
                 },
@@ -477,15 +478,23 @@ impl OfflineProtocol {
             let result = if let Some(mls) = self.mls_manager.clone() {
                 if let Ok(manager) = mls.read() {
                     match manager.decrypt(&encrypted, sender) {
-                        Ok(Some(plaintext)) => {
-                            let text = String::from_utf8_lossy(&plaintext).to_string();
-                            debug!(sender = %sender, "Decrypted message successfully");
-                            DecryptResult::Success {
-                                text,
-                                sender: sender.to_string(),
-                                group_id: encrypted.group_id.as_str().to_string(),
+                        Ok(Some(plaintext)) => match String::from_utf8(plaintext) {
+                            Ok(text) => {
+                                debug!(sender = %sender, "Decrypted message successfully");
+                                DecryptResult::Success {
+                                    text,
+                                    sender: sender.to_string(),
+                                    group_id: encrypted.group_id.as_str().to_string(),
+                                }
                             }
-                        }
+                            Err(_) => {
+                                warn!(
+                                    sender = %sender,
+                                    "Decrypted payload is not valid UTF-8, rejecting"
+                                );
+                                DecryptResult::NonUtf8Plaintext
+                            }
+                        },
                         Ok(None) => {
                             warn!(sender = %sender, "Decryption returned empty");
                             DecryptResult::Empty
@@ -596,6 +605,17 @@ impl OfflineProtocol {
                             sender.to_string(),
                             DecryptionFailureCode::InvalidCiphertext,
                             "Failed to decrypt MLS message (empty plaintext)".to_string(),
+                        ));
+                    }
+                    Some(InternalMessageResult::Consumed)
+                }
+                DecryptResult::NonUtf8Plaintext => {
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::message_decryption_failed(
+                            message.id.clone(),
+                            sender.to_string(),
+                            DecryptionFailureCode::InvalidPayload,
+                            "Decrypted payload is not valid UTF-8".to_string(),
                         ));
                     }
                     Some(InternalMessageResult::Consumed)
