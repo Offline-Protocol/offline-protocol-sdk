@@ -449,13 +449,13 @@ impl Transport for NostrTransport {
         Ok(queue.pop_front())
     }
 
-    fn start(&mut self) -> Result<()> {
+    fn start(&self) -> Result<()> {
         // Actual connection is managed by the platform.
         // Status is updated via on_status_changed().
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&self) -> Result<()> {
         *self.status.lock_or_recover() = TransportStatus::Disconnected;
         self.fail_all_pending();
         self.send_queue.lock_or_recover().clear();
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_send_receive() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -710,7 +710,7 @@ mod tests {
 
     #[test]
     fn test_confirmation_loop() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_send_failure_reporting() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn test_fail_all_pending_on_disconnect() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_stop_fails_pending() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -816,7 +816,7 @@ mod tests {
 
     #[test]
     fn test_on_messages_available_callback() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -858,7 +858,7 @@ mod tests {
 
     #[test]
     fn test_update_metrics_preserves_confirmation_counts() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -886,7 +886,7 @@ mod tests {
 
     #[test]
     fn test_drain_expired_pending_expires_old_entries() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn test_has_pending_sends() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn test_pending_confirmation_count() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     fn test_get_next_signed_event() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn test_get_next_signed_event_confirm_flow() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     fn test_signed_event_uses_recipient_routing_tag_and_own_signing_key() {
-        let mut transport = NostrTransport::new("device1").unwrap();
+        let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 

@@ -330,13 +330,13 @@ impl Transport for InternetTransport {
         Ok(queue.pop_front())
     }
 
-    fn start(&mut self) -> Result<()> {
+    fn start(&self) -> Result<()> {
         // Status will be updated by platform implementation via on_status_changed()
         // Platform code should establish connection and call on_status_changed()
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&self) -> Result<()> {
         self.fail_all_pending();
         *self.status.lock_or_recover() = TransportStatus::Disconnected;
         Ok(())
@@ -740,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_stop_fails_pending() {
-        let mut transport = InternetTransport::new("test-device");
+        let transport = InternetTransport::new("test-device");
         transport.on_status_changed(TransportStatus::Available);
 
         let msg = create_test_message();
@@ -883,7 +883,7 @@ mod tests {
 
     #[test]
     fn test_start_does_not_require_connection() {
-        let mut transport = InternetTransport::new("test-device");
+        let transport = InternetTransport::new("test-device");
         assert!(transport.start().is_ok());
         assert_eq!(transport.status(), TransportStatus::Unavailable);
     }

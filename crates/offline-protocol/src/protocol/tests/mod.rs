@@ -131,12 +131,12 @@ impl Transport for FlakyTransport {
         Ok(None)
     }
 
-    fn start(&mut self) -> offline_protocol_transport::Result<()> {
+    fn start(&self) -> offline_protocol_transport::Result<()> {
         *self.status.lock().unwrap() = TransportStatus::Available;
         Ok(())
     }
 
-    fn stop(&mut self) -> offline_protocol_transport::Result<()> {
+    fn stop(&self) -> offline_protocol_transport::Result<()> {
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
         Ok(())
     }
@@ -330,7 +330,7 @@ fn test_send_message() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     // Add a mock transport
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -354,7 +354,7 @@ fn test_send_message_not_started() {
 fn test_receive_message() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     // Add a mock transport for testing
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     // Queue a message in the mock transport
@@ -392,7 +392,7 @@ fn test_event_handler() {
 
     // Add a mock transport
     use offline_protocol_transport::{mock::MockTransport, TransportType};
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -411,7 +411,7 @@ fn test_deduplication() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     // Add a mock transport
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -446,7 +446,7 @@ fn test_ack_timeout_requeues_message() {
     config.reliability.retry.max_retries = 2;
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -491,7 +491,7 @@ fn test_ble_only_transport_works() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Add only BLE transport (simulating BLE-only configuration)
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1196,7 +1196,7 @@ fn test_on_neighbor_discovered_without_mls() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Add a mock transport
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1475,7 +1475,7 @@ fn test_process_internal_message_connection_rejected_event() {
 fn test_send_connection_request_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1499,7 +1499,7 @@ fn test_send_connection_request_not_started() {
 fn test_send_connection_request_with_key_package() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1516,7 +1516,7 @@ fn test_send_connection_request_with_key_package() {
 fn test_accept_connection_request_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1540,7 +1540,7 @@ fn test_accept_connection_request_not_started() {
 fn test_accept_connection_request_with_key_package() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1557,7 +1557,7 @@ fn test_accept_connection_request_with_key_package() {
 fn test_reject_connection_request_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1581,7 +1581,7 @@ fn test_reject_connection_request_not_started() {
 fn test_cancel_connection_request_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1636,7 +1636,7 @@ fn test_process_internal_message_connection_cancelled_event() {
 fn test_send_connection_request_returns_unique_ids() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1854,7 +1854,7 @@ fn test_process_internal_message_read_receipt_event() {
 fn test_send_presence_update_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1877,7 +1877,7 @@ fn test_send_presence_update_not_started() {
 fn test_send_typing_indicator_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1900,7 +1900,7 @@ fn test_send_typing_indicator_not_started() {
 fn test_send_read_receipt_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1923,7 +1923,7 @@ fn test_send_read_receipt_not_started() {
 fn test_send_read_receipt_empty_message_ids() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1939,7 +1939,7 @@ fn test_send_read_receipt_empty_message_ids() {
 fn test_send_read_receipt_exceeds_max_ids() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -1956,7 +1956,7 @@ fn test_send_read_receipt_exceeds_max_ids() {
 fn test_send_typing_indicator_empty_conversation_id() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2121,7 +2121,7 @@ fn test_process_internal_message_read_receipt_exceeds_max_ids() {
 fn test_send_presence_update_empty_recipient() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2137,7 +2137,7 @@ fn test_send_presence_update_empty_recipient() {
 fn test_send_typing_indicator_empty_recipient() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2153,7 +2153,7 @@ fn test_send_typing_indicator_empty_recipient() {
 fn test_send_read_receipt_empty_recipient() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2169,7 +2169,7 @@ fn test_send_read_receipt_empty_recipient() {
 fn test_send_presence_update_away_status() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2185,7 +2185,7 @@ fn test_send_presence_update_away_status() {
 fn test_send_presence_update_offline_status() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -2363,7 +2363,7 @@ fn test_require_encryption_blocks_plaintext_when_mls_uninitialized() {
     config.encryption.require_encryption = true;
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2385,7 +2385,7 @@ fn test_default_config_fails_closed_when_mls_uninitialized() {
     assert!(config.encryption.require_encryption);
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2418,7 +2418,7 @@ fn test_plaintext_opt_out_emits_security_warning_once_per_peer() {
         }
     });
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2457,7 +2457,7 @@ fn test_require_encryption_returns_typed_failures() {
     no_key_config.encryption.require_encryption = true;
     no_key_config.encryption.store_pending = false;
     let mut no_key_protocol = OfflineProtocol::new(no_key_config).unwrap();
-    let mut no_key_transport = MockTransport::new(TransportType::BLE);
+    let no_key_transport = MockTransport::new(TransportType::BLE);
     no_key_transport.start().unwrap();
     no_key_protocol
         .transport_manager_mut()
@@ -2478,7 +2478,7 @@ fn test_require_encryption_returns_typed_failures() {
     pending_config.encryption.require_encryption = true;
     pending_config.encryption.store_pending = false;
     let mut pending_protocol = OfflineProtocol::new(pending_config).unwrap();
-    let mut pending_transport = MockTransport::new(TransportType::BLE);
+    let pending_transport = MockTransport::new(TransportType::BLE);
     pending_transport.start().unwrap();
     pending_protocol
         .transport_manager_mut()
@@ -2513,7 +2513,7 @@ fn test_require_encryption_returns_typed_failures() {
     let mut encrypt_fail_config = create_test_config();
     encrypt_fail_config.encryption.require_encryption = true;
     let mut encrypt_fail_protocol = OfflineProtocol::new(encrypt_fail_config).unwrap();
-    let mut encrypt_fail_transport = MockTransport::new(TransportType::BLE);
+    let encrypt_fail_transport = MockTransport::new(TransportType::BLE);
     encrypt_fail_transport.start().unwrap();
     encrypt_fail_protocol
         .transport_manager_mut()
@@ -2540,7 +2540,7 @@ fn test_require_encryption_queues_when_store_pending_enabled() {
         .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2571,7 +2571,7 @@ fn test_require_encryption_encrypt_failed_emits_send_error_without_transport_out
 
     // Keep MLS uninitialized to force strict-mode EncryptFailed path.
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2601,7 +2601,7 @@ fn test_require_encryption_queues_message_when_session_pending_with_key_package(
         .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2672,7 +2672,7 @@ fn test_require_encryption_queues_for_send_message_via_transport() {
         .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2714,7 +2714,7 @@ fn test_require_encryption_pending_flush_encrypts_and_delivers() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls(storage).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2779,7 +2779,7 @@ fn test_require_encryption_allows_connection_control_messages() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2816,7 +2816,7 @@ fn test_non_strict_mode_preserves_pending_queue_behavior() {
         .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -2873,7 +2873,7 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
     alice.initialize_mls(alice_storage.clone()).unwrap();
     bob.initialize_mls(bob_storage.clone()).unwrap();
 
-    let mut alice_transport = MockTransport::new(TransportType::BLE);
+    let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
     let alice_transport_handle = alice_transport.clone();
     alice
@@ -2881,7 +2881,7 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
         .add_transport(TransportType::BLE, Box::new(alice_transport));
     alice.start().unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob.transport_manager_mut()
@@ -2932,7 +2932,7 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
     alice2.config.encryption.enabled = true;
     alice2.config.encryption.store_pending = true;
     alice2.initialize_mls(alice_storage.clone()).unwrap();
-    let mut alice2_transport = MockTransport::new(TransportType::BLE);
+    let alice2_transport = MockTransport::new(TransportType::BLE);
     alice2_transport.start().unwrap();
     let alice2_transport_handle = alice2_transport.clone();
     alice2
@@ -2944,7 +2944,7 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
     bob2.config.encryption.enabled = true;
     bob2.config.encryption.store_pending = true;
     bob2.initialize_mls(bob_storage.clone()).unwrap();
-    let mut bob2_transport = MockTransport::new(TransportType::BLE);
+    let bob2_transport = MockTransport::new(TransportType::BLE);
     bob2_transport.start().unwrap();
     let bob2_transport_handle = bob2_transport.clone();
     bob2.transport_manager_mut()
@@ -3012,7 +3012,7 @@ fn test_auto_send_and_manual_mls_share_single_state_under_concurrency() {
         .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     let transport_handle = transport.clone();
     protocol
@@ -3110,7 +3110,7 @@ fn test_manual_welcome_processing_confirms_session_for_auto_encrypt_flow() {
         .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     let transport_handle = transport.clone();
     protocol
@@ -3324,7 +3324,7 @@ fn test_externally_deleted_confirmed_session_queues_message() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls(storage).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
     protocol
@@ -3416,7 +3416,7 @@ fn test_confirmation_crash_recovery_before_first_send() {
     restarted.config.encryption.enabled = true;
     restarted.config.encryption.store_pending = true;
     restarted.initialize_mls(storage).unwrap();
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     let transport_handle = transport.clone();
     restarted
@@ -3476,7 +3476,7 @@ fn test_pending_session_state_blocks_send_until_confirmed() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -3527,7 +3527,7 @@ fn test_welcome_send_failure_keeps_session_pending_and_emits_reason_code() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
     flaky.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -3597,7 +3597,7 @@ fn test_welcome_retry_exhaustion_expires_and_aborts_pending_queue() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 10);
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, 10);
     flaky.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -3661,7 +3661,7 @@ fn test_welcome_partial_success_after_retry_reaches_sent() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
     flaky.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -3725,7 +3725,7 @@ fn test_welcome_internet_requires_async_confirmation_before_sent() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -3790,7 +3790,7 @@ fn test_on_transport_send_confirmed_sends_immediate_probe() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     let transport_handle = internet.clone();
     protocol
@@ -3869,7 +3869,7 @@ fn test_mesh_welcome_sender_probes_for_confirmation() {
     protocol.initialize_mls(storage).unwrap();
 
     // Mesh transport only — no Internet path to confirm the send for us.
-    let mut ble = MockTransport::new(TransportType::BLE);
+    let ble = MockTransport::new(TransportType::BLE);
     ble.start().unwrap();
     let transport_handle = ble.clone();
     protocol
@@ -3936,7 +3936,7 @@ fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
     bob.initialize_mls(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob.transport_manager_mut()
@@ -4073,7 +4073,7 @@ fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -4134,7 +4134,7 @@ fn test_welcome_restart_recovery_restores_failed_lifecycle() {
     let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
     protocol.initialize_mls(storage.clone()).unwrap();
 
-    let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
     flaky.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -4680,7 +4680,7 @@ fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -4757,7 +4757,7 @@ fn test_welcome_dropped_confirmation_expires_with_explicit_failure_events() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -4837,7 +4837,7 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     let transport_handle = transport.clone();
     protocol
@@ -5018,7 +5018,7 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
     alice.initialize_mls(alice_storage).unwrap();
     bob.initialize_mls(bob_storage).unwrap();
 
-    let mut alice_transport = MockTransport::new(TransportType::BLE);
+    let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
     let alice_transport_handle = alice_transport.clone();
     alice
@@ -5033,7 +5033,7 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
     });
     alice.start().unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob.transport_manager_mut()
@@ -5119,7 +5119,7 @@ fn test_welcome_delayed_confirmation_after_timeout_converges_to_sent() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut internet = MockTransport::new(TransportType::Internet);
+    let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -5270,7 +5270,7 @@ fn test_welcome_duplicate_delivery_emits_single_established_event() {
     bob.initialize_mls(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob.transport_manager_mut()
@@ -5448,7 +5448,7 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
     restarted.config.encryption.store_pending = true;
     restarted.initialize_mls(storage).unwrap();
 
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     let transport_handle = transport.clone();
     restarted
@@ -5518,7 +5518,7 @@ fn test_pending_sessions_reconcile_via_probe_after_restart() {
     bob2.config.encryption.store_pending = true;
     bob2.initialize_mls(bob_storage).unwrap();
 
-    let mut alice_transport = MockTransport::new(TransportType::BLE);
+    let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
     let alice_transport_handle = alice_transport.clone();
     alice2
@@ -5526,7 +5526,7 @@ fn test_pending_sessions_reconcile_via_probe_after_restart() {
         .add_transport(TransportType::BLE, Box::new(alice_transport));
     alice2.start().unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob2.transport_manager_mut()
@@ -5651,7 +5651,7 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
     bob2.config.encryption.store_pending = true;
     bob2.initialize_mls(bob_storage).unwrap();
 
-    let mut alice_transport = MockTransport::new(TransportType::BLE);
+    let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
     let alice_transport_handle = alice_transport.clone();
     alice2
@@ -5659,7 +5659,7 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
         .add_transport(TransportType::BLE, Box::new(alice_transport));
     alice2.start().unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob2.transport_manager_mut()
@@ -5800,7 +5800,7 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
     bob2.config.encryption.store_pending = true;
     bob2.initialize_mls(bob_storage).unwrap();
 
-    let mut alice_transport = MockTransport::new(TransportType::BLE);
+    let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
     let alice_transport_handle = alice_transport.clone();
     alice2
@@ -5808,7 +5808,7 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
         .add_transport(TransportType::BLE, Box::new(alice_transport));
     alice2.start().unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob2.transport_manager_mut()
@@ -5971,7 +5971,7 @@ fn test_send_message_via_transport_respects_session_confirmation_gating() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage).unwrap();
 
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     let transport_handle = transport.clone();
     protocol
@@ -6028,7 +6028,7 @@ fn test_send_message_fails_closed_when_confirmation_state_is_corrupted() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls(storage.clone()).unwrap();
 
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     let transport_handle = transport.clone();
     protocol
@@ -6132,7 +6132,7 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
     bob2.config.encryption.store_pending = true;
     bob2.initialize_mls(bob_storage).unwrap();
 
-    let mut alice_transport = MockTransport::new(TransportType::BLE);
+    let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
     let alice_transport_handle = alice_transport.clone();
     alice2
@@ -6140,7 +6140,7 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
         .add_transport(TransportType::BLE, Box::new(alice_transport));
     alice2.start().unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob2.transport_manager_mut()
@@ -6380,7 +6380,7 @@ fn test_mls_pipeline_happy_path_init_send_encrypted_receive_decrypted() {
     bob.initialize_mls(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let mut alice_transport = MockTransport::new(TransportType::BLE);
+    let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
     let alice_transport_handle = alice_transport.clone();
     alice
@@ -6388,7 +6388,7 @@ fn test_mls_pipeline_happy_path_init_send_encrypted_receive_decrypted() {
         .add_transport(TransportType::BLE, Box::new(alice_transport));
     alice.start().unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob.transport_manager_mut()
@@ -6665,7 +6665,7 @@ fn test_receive_message_decrypt_failure_emits_error_without_message_received() {
         events_handle.lock().unwrap().push(event);
     });
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let encrypted_content = format!(
         "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
@@ -7054,7 +7054,7 @@ use crate::mls::InMemoryStorage;
 fn test_lamport_clock_advances_on_send() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -7079,7 +7079,7 @@ fn test_lamport_clock_advances_on_send() {
 fn test_lamport_clock_merges_on_receive() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     // Create a message with a high Lamport clock from a peer
@@ -7110,7 +7110,7 @@ fn test_lamport_clock_merges_on_receive() {
 fn test_lamport_clock_monotonic_across_send_receive() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     // Send a message first (clock -> 1)
@@ -7162,7 +7162,7 @@ fn test_lamport_clock_persists_and_restores() {
     // First session: send messages to advance the clock
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        let mock_transport = MockTransport::new(TransportType::BLE);
         mock_transport.start().unwrap();
         protocol
             .transport_manager_mut()
@@ -7190,7 +7190,7 @@ fn test_lamport_clock_persists_and_restores() {
     // Second session: clock should restore from storage
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        let mock_transport = MockTransport::new(TransportType::BLE);
         mock_transport.start().unwrap();
         protocol
             .transport_manager_mut()
@@ -7246,7 +7246,7 @@ fn test_lamport_clock_debounce_threshold() {
     let storage = Arc::new(InMemoryStorage::new());
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -7326,7 +7326,7 @@ fn test_lamport_clock_restore_never_goes_backward() {
 fn test_lamport_clock_merge_on_internal_message() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     // Create a key package message with a high Lamport clock
@@ -7372,7 +7372,7 @@ fn test_lamport_clock_merge_on_internal_message() {
 fn test_lamport_clock_merge_on_duplicate_message() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     // Create two copies of the same message (simulate duplicate delivery)
@@ -7412,7 +7412,7 @@ fn test_lamport_clock_merge_on_duplicate_message() {
 fn test_receive_internal_connection_request_sends_delivery_ack() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     let payload = ConnectionRequestPayload {
@@ -7458,7 +7458,7 @@ fn test_receive_internal_connection_request_sends_delivery_ack() {
 fn test_receive_duplicate_message_reacks_when_requires_ack() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     let message = Message::new(
@@ -7504,7 +7504,7 @@ fn test_lamport_clock_no_tick_on_pending_message() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -7528,7 +7528,7 @@ fn test_lamport_clock_no_tick_on_pending_message() {
 fn test_lamport_clock_sent_message_carries_clock_value() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -8119,7 +8119,7 @@ fn test_discover_services_no_peers() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     // Start protocol so send_internal_message doesn't fail with NotStarted
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -8143,7 +8143,7 @@ fn test_require_encryption_allows_service_control_messages() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -8237,7 +8237,7 @@ fn test_seen_discovery_queries_cleanup() {
 fn test_send_message_rejects_internal_prefixes() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -8261,7 +8261,7 @@ fn test_send_message_rejects_internal_prefixes() {
 fn test_send_message_via_transport_rejects_internal_prefixes() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -8289,7 +8289,7 @@ fn test_send_message_via_transport_rejects_internal_prefixes() {
 fn test_send_message_allows_normal_content() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -8409,7 +8409,7 @@ fn test_validate_transport_sender_match_with_require_identity() {
 fn test_control_message_with_transport_mismatch_is_dropped() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     // Create a control message claiming to be from "alice" but delivered by "eve"
@@ -8994,7 +8994,7 @@ fn test_integration_signed_control_message_via_mock_transport() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     bob.initialize_mls(storage_b).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     // Alice creates and signs a control message destined for bob.
@@ -9046,7 +9046,7 @@ fn test_integration_spoofed_transport_identity_rejected() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     bob.initialize_mls(storage_b).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     let mut msg = Message::new(
@@ -9082,7 +9082,7 @@ fn test_integration_relay_forwarded_message_no_transport_peer_id() {
     // transport sender check (best-effort).
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
 
     // Simulate a relay-forwarded control message: no transport_peer_id.
@@ -9140,7 +9140,7 @@ fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
         .initialize_mls(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let mut alice_transport = MockTransport::new(TransportType::BLE);
+    let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
     let alice_transport_handle = alice_transport.clone();
     alice
@@ -9156,7 +9156,7 @@ fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
     bob.initialize_mls(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let mut bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
     let bob_transport_handle = bob_transport.clone();
     bob.transport_manager_mut()
@@ -9542,7 +9542,7 @@ fn test_security_rejected_does_not_send_ack() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     bob.initialize_mls(storage_b).unwrap();
 
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
 
@@ -10246,7 +10246,7 @@ fn test_relay_forwards_third_party_message() {
         }
     });
 
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
 
     // Create a message from alice to bob (not for us = user123)
@@ -10308,7 +10308,7 @@ fn test_relay_drops_exhausted_ttl() {
         }
     });
 
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
 
     // Create a message from alice to bob, then exhaust its TTL
@@ -10359,7 +10359,7 @@ fn test_relay_disabled_does_not_forward() {
         }
     });
 
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
 
     let msg = Message::new(
@@ -10400,7 +10400,7 @@ fn test_relay_preserves_original_sender() {
         }
     });
 
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
 
     let msg = Message::new(
@@ -10448,7 +10448,7 @@ fn test_local_message_not_relayed() {
         }
     });
 
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
 
     // Message addressed to us (user123)
@@ -10523,7 +10523,7 @@ fn test_forward_message_rejects_internal_prefix_content() {
 
     let config = create_test_config();
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -10556,7 +10556,7 @@ fn test_forward_message_rejects_excessive_forward_count() {
 
     let config = create_test_config();
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -10596,7 +10596,7 @@ fn test_forward_message_rejects_overflow_forward_count() {
 
     let config = create_test_config();
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -10637,7 +10637,7 @@ fn test_forward_message_to_group_rejects_overflow_forward_count() {
 
     let config = create_test_config();
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let mut transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -10679,7 +10679,7 @@ fn test_send_message_returns_ok_and_emits_deferred_when_transport_fails() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Use a FlakyTransport that always fails
-    let mut flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
     flaky.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -10738,7 +10738,7 @@ fn test_flush_outbox_for_peer_on_discovery() {
     assert!(protocol.retry_queue_size() > 0);
 
     // Now replace with a working transport
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -10789,7 +10789,7 @@ fn test_flush_batch_limit_caps_sends() {
     assert_eq!(protocol.retry_queue_size(), total);
 
     // Replace with a working transport
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -10829,7 +10829,7 @@ fn test_flush_outbox_all_on_internet_reconnect() {
     assert_eq!(protocol.retry_queue_size(), 3);
 
     // Replace with a working transport
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -10882,7 +10882,7 @@ fn test_flush_outbox_all_collects_stranded_outbox_entries() {
     assert!(protocol.outbox_entry_count() > 0);
 
     // Replace with a working transport
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     let mock_clone = mock.clone();
     protocol
@@ -10907,7 +10907,7 @@ fn test_ack_receipt_cleans_up_retry_queue() {
     config.reliability.retry.max_delay_ms = 60_000;
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -11002,7 +11002,7 @@ fn test_flush_outbox_all_re_enqueues_overflow_beyond_batch_limit() {
     assert_eq!(protocol.retry_queue_size(), total);
 
     // Replace with a working transport
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -11074,7 +11074,7 @@ fn test_flush_outbox_all_skips_messages_awaiting_ack() {
     config.reliability.retry.max_delay_ms = 60_000;
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     let mock_clone = mock.clone();
     protocol
@@ -11161,7 +11161,7 @@ fn test_flush_outbox_for_peer_includes_media_outbox() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Start with a working transport
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     let mock_clone = mock.clone();
     protocol
@@ -11227,7 +11227,7 @@ fn test_flush_outbox_all_includes_media_outbox() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Start with a working transport
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     let mock_clone = mock.clone();
     protocol
@@ -11280,7 +11280,7 @@ fn test_flush_outbox_for_peer_skips_messages_awaiting_ack() {
     config.reliability.retry.max_delay_ms = 60_000;
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     let mock_clone = mock.clone();
     protocol
@@ -11535,7 +11535,7 @@ fn test_process_skips_telemetry_tick_without_sink() {
     // then verifying the three state fields the aggregator would mutate
     // remain at their pre-tick defaults across multiple ticks.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let mut mock = MockTransport::new(TransportType::BLE);
+    let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -12471,9 +12471,7 @@ fn nostr_signing_pubkey(protocol: &OfflineProtocol) -> String {
         .transport_manager
         .get_transport(TransportType::Nostr)
         .expect("nostr transport registered");
-    let guard = arc.lock().unwrap();
-    guard
-        .as_any()
+    arc.as_any()
         .downcast_ref::<offline_protocol_transport::NostrTransport>()
         .expect("registered transport should be a NostrTransport")
         .public_key_hex()
@@ -12757,7 +12755,7 @@ fn media_test_protocol(user_id: &str) -> (OfflineProtocol, MockTransport) {
     protocol
         .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let handle = mock_transport.clone();
     protocol
@@ -12887,7 +12885,7 @@ fn test_send_media_fails_closed_when_encryption_required_but_uninitialized() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     // MLS deliberately NOT initialized.
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     protocol
         .transport_manager_mut()
@@ -13040,7 +13038,7 @@ fn test_plaintext_media_rejected_when_encryption_required() {
     let mut bob = OfflineProtocol::new(config).unwrap();
     bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let bob_handle = mock_transport.clone();
     bob.transport_manager_mut()
@@ -13063,7 +13061,7 @@ fn test_send_media_plaintext_when_encryption_disabled() {
     config.encryption = crate::EncryptionConfig::disabled();
 
     let mut alice = OfflineProtocol::new(config).unwrap();
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let alice_handle = mock_transport.clone();
     alice
@@ -13317,7 +13315,7 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
     let mut bob = OfflineProtocol::new(config).unwrap();
     bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
-    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let bob_handle = mock_transport.clone();
     bob.transport_manager_mut()

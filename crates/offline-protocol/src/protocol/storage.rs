@@ -730,22 +730,16 @@ impl OfflineProtocol {
             }
         };
 
-        let installed = match nostr_arc.lock() {
-            Ok(guard) => match guard.as_any().downcast_ref::<NostrTransport>() {
-                Some(nostr) => match nostr.install_signing_secret(&*secret) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        warn!(error = %e, "Failed to install Nostr signing key; keeping ephemeral key");
-                        false
-                    }
-                },
-                None => {
-                    warn!("Transport registered as Nostr is not a NostrTransport; cannot install signing key");
+        let installed = match nostr_arc.as_any().downcast_ref::<NostrTransport>() {
+            Some(nostr) => match nostr.install_signing_secret(&*secret) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(error = %e, "Failed to install Nostr signing key; keeping ephemeral key");
                     false
                 }
             },
-            Err(_) => {
-                warn!("Nostr transport lock poisoned; keeping ephemeral signing key");
+            None => {
+                warn!("Transport registered as Nostr is not a NostrTransport; cannot install signing key");
                 false
             }
         };
