@@ -2258,7 +2258,9 @@ impl OfflineProtocol {
     ///
     /// Message-path callers must drain `receive_message()` first so a
     /// handshake confirmation in the same inbound batch lands in
-    /// `confirmed_sessions` before the Welcome re-arm decision.
+    /// `confirmed_sessions` before the Welcome re-arm decision. This
+    /// ordering is regression-tested by
+    /// `test_internet_confirm_in_same_batch_suppresses_redundant_welcome`.
     fn notify_neighbor_reachable(
         &self,
         peer_id: &str,
@@ -6063,6 +6065,138 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("neighbor_discovered")),
             "an empty sender id must not produce a NeighborDiscovered event"
+        );
+    }
+
+    /// Drains and returns everything queued on `protocol`'s internet outbound path.
+    fn drain_internet_outbox(protocol: &OfflineProtocol) -> Vec<InternetMessage> {
+        let mut items = Vec::new();
+        while let Some(msg) = protocol.internet_get_next_message() {
+            items.push(msg);
+        }
+        items
+    }
+
+    fn is_welcome_wire_message(data: &[u8]) -> bool {
+        String::from_utf8_lossy(data).contains("__MLS_WELCOME__")
+    }
+
+    /// Regression test for the drain-before-notify ordering documented on
+    /// `notify_neighbor_reachable`: message-path callers must drain
+    /// `receive_message()` before the reachability notification so a handshake
+    /// confirmation in the same inbound batch lands in `confirmed_sessions`
+    /// before the Welcome re-arm decision. If the order is ever flipped,
+    /// `rearm_welcome_for_peer` sees a re-armable (Failed/Expired) lifecycle
+    /// for a peer whose confirmation is still sitting undrained in the batch,
+    /// and re-sends a redundant Welcome to an already-confirmed peer.
+    #[test]
+    fn test_internet_confirm_in_same_batch_suppresses_redundant_welcome() {
+        let owner = OfflineProtocol::new(ProtocolConfig {
+            user_id: "owner-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        owner
+            .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+            .unwrap();
+        owner.start().unwrap();
+        owner.internet_status_changed(true).unwrap();
+        owner.force_transport(TransportType::Internet).unwrap();
+
+        let peer = OfflineProtocol::new(ProtocolConfig {
+            user_id: "peer-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        peer.initialize_mls(Box::new(TestMlsStorageProvider::default()))
+            .unwrap();
+        peer.start().unwrap();
+        peer.internet_status_changed(true).unwrap();
+        peer.force_transport(TransportType::Internet).unwrap();
+
+        // Discovery seed: an inbound message from the owner makes the peer
+        // auto-send its key package.
+        peer.internet_message_received(
+            "owner-user".to_string(),
+            serialized_message_from("owner-user", "peer-user"),
+        )
+        .unwrap();
+
+        // Pump peer -> owner so the owner holds the peer's key package.
+        // (Auto-establish may create the session and queue the Welcome
+        // during this drain already.)
+        for msg in drain_internet_outbox(&peer) {
+            owner
+                .internet_message_received("peer-user".to_string(), msg.data)
+                .unwrap();
+        }
+
+        // Ensure the session exists; `Ok(None)` if auto-establish beat us.
+        owner
+            .establish_secure_session("peer-user".to_string())
+            .unwrap();
+
+        // Exactly one Welcome must be queued. The owner's other outbound
+        // items (its own key package) are deliberately NOT forwarded to the
+        // peer — that would start the both-create flow and change the
+        // scenario.
+        let outbox = drain_internet_outbox(&owner);
+        let welcomes: Vec<&InternetMessage> = outbox
+            .iter()
+            .filter(|m| is_welcome_wire_message(&m.data))
+            .collect();
+        assert_eq!(welcomes.len(), 1, "expected exactly one queued Welcome");
+        let welcome = welcomes[0];
+
+        // The wire send fails: the Welcome lifecycle leaves SendAttempted for
+        // a re-armable state (Failed with a backoff retry pending, or Expired
+        // once the budget is exhausted).
+        owner.internet_send_failed(welcome.message_id.clone());
+        assert!(
+            drained_events(&owner)
+                .iter()
+                .any(|e| e.contains("welcome_send_failed")),
+            "the reported send failure must reach the welcome lifecycle"
+        );
+
+        // The peer got the Welcome anyway (an earlier attempt landed, or it
+        // arrived over another carrier): it adopts the session and queues its
+        // proactive encrypted session-confirm.
+        peer.internet_message_received("owner-user".to_string(), welcome.data.clone())
+            .unwrap();
+
+        // After adopting, the peer queues its proactive encrypted
+        // session-confirm alongside other control traffic (e.g. reliability
+        // ACKs). Each `internet_message_received` call is its own inbound
+        // batch, and a non-confirm batch may legitimately re-arm — the
+        // invariant under test is only that the batch CARRYING the
+        // confirmation must not. So deliver exactly the encrypted confirm.
+        let confirm = drain_internet_outbox(&peer)
+            .into_iter()
+            .find(|m| String::from_utf8_lossy(&m.data).contains("__MLS_ENC__"))
+            .expect("peer must queue its proactive encrypted session-confirm");
+
+        // The moment under test: the encrypted confirm arrives in the same
+        // inbound batch that marks the peer reachable again.
+        owner
+            .internet_message_received("peer-user".to_string(), confirm.data)
+            .unwrap();
+
+        assert!(
+            drained_events(&owner)
+                .iter()
+                .any(|e| e.contains("secure_session_established")),
+            "the encrypted confirm must confirm the session during the drain"
+        );
+        assert!(
+            !drain_internet_outbox(&owner)
+                .iter()
+                .any(|m| is_welcome_wire_message(&m.data)),
+            "no Welcome may be re-sent to a peer whose confirmation arrived in the same batch"
+        );
+        assert!(
+            owner.lock_inner().unwrap().is_known_peer("peer-user"),
+            "the reachability notification must still run after the drain"
         );
     }
 
