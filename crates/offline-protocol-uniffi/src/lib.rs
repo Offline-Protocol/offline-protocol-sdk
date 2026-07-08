@@ -3262,6 +3262,14 @@ impl OfflineProtocol {
             }
         }
 
+        // Notify the core protocol of neighbor loss, matching ble_peer_lost —
+        // WiFi Direct is the only other carrier with an explicit disconnect
+        // signal, so core discovery tracking must not outlive the connection.
+        {
+            let mut protocol = self.lock_inner()?;
+            protocol.on_neighbor_lost(&peer_id);
+        }
+
         // Emit NeighborLost event
         let event = CoreEvent::NeighborLost { peer_id };
         self.emit_event(event);
@@ -5944,6 +5952,30 @@ mod tests {
         assert!(
             protocol.lock_inner().unwrap().is_known_peer("wifi-peer"),
             "WiFi Direct connection must notify the core protocol of the reachable peer"
+        );
+    }
+
+    #[test]
+    fn test_wifi_direct_peer_disconnected_marks_neighbor_lost() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+
+        protocol
+            .wifi_direct_peer_connected("wifi-peer".to_string())
+            .unwrap();
+        protocol
+            .wifi_direct_peer_disconnected("wifi-peer".to_string())
+            .unwrap();
+
+        assert!(
+            !protocol.lock_inner().unwrap().is_known_peer("wifi-peer"),
+            "WiFi Direct disconnect must clear core discovery tracking, matching ble_peer_lost"
+        );
+        assert!(
+            drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost") && e.contains("wifi-peer")),
+            "WiFi Direct disconnect must still emit NeighborLost"
         );
     }
 
