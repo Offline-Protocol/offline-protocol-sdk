@@ -145,53 +145,6 @@ impl InternetTransport {
         crate::common::platform_handle(&self.platform_handle)
     }
 
-    /// Called when connection status changes.
-    ///
-    /// EDGE CASE HANDLING:
-    /// - Messages in send_queue are preserved during disconnection
-    /// - They will be sent when transport becomes available again
-    /// - Reconnect counter is reset on successful connection
-    pub fn on_status_changed(&self, status: TransportStatus) {
-        let previous_status = {
-            let mut guard = self.status.lock_or_recover();
-            let prev = *guard;
-            *guard = status;
-            prev
-        };
-
-        // Reset reconnect counter on successful connection
-        if status == TransportStatus::Available {
-            // Acquire send_queue before reconnect_attempts to respect lock
-            // ordering (send_queue is #3, reconnect_attempts is #6).
-            let queue_len = self.send_queue.lock_or_recover().len();
-            *self.reconnect_attempts.lock_or_recover() = 0;
-
-            if queue_len > 0 {
-                tracing::info!(
-                    pending_messages = queue_len,
-                    "Internet transport available, {} messages pending in queue",
-                    queue_len
-                );
-            }
-        } else if previous_status == TransportStatus::Available
-            && status != TransportStatus::Available
-        {
-            // Fail all pending confirmations — the connection is gone so the
-            // platform can no longer report outcomes for in-flight messages.
-            self.fail_all_pending();
-
-            let queue_len = self.send_queue.lock_or_recover().len();
-            if queue_len > 0 {
-                tracing::warn!(
-                    pending_messages = queue_len,
-                    new_status = ?status,
-                    "Internet transport disconnected with {} messages in queue (will retry)",
-                    queue_len
-                );
-            }
-        }
-    }
-
     /// Called when a message is received from the server.
     pub fn on_message_received(&self, message: Message) {
         crate::common::on_message_received(&self.receive_queue, message);
@@ -215,128 +168,6 @@ impl InternetTransport {
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
         crate::common::serialize_message(message)
-    }
-
-    /// Deserializes a message from JSON bytes.
-    pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
-        crate::common::deserialize_message(data)
-    }
-
-    /// Called when raw data is received (platform callback).
-    ///
-    /// This deserializes the message and queues it.
-    pub fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
-        crate::common::on_data_received(&self.receive_queue, data)
-    }
-
-    /// Like [`on_data_received`](Self::on_data_received), but attaches a
-    /// transport-verified `peer_id` to the deserialized message.
-    ///
-    /// # Parameters
-    ///
-    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
-    ///   `UserId` string) that the relay server has authenticated for this
-    ///   connection. This is **not** the raw transport address (IP, session
-    ///   token, etc.). The protocol layer uses this value to verify that
-    ///   `message.sender` matches the authenticated peer.
-    pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
-        crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
-    }
-
-    /// Gets the next message to send (for platform implementation).
-    ///
-    /// Returns the message_id and serialized bytes, or None if no messages to send.
-    /// The message enters the pending-confirmation state until the platform calls
-    /// `confirm_sent()` or `report_send_failure()`.
-    ///
-    /// Also drains any pending confirmations that have exceeded the timeout,
-    /// recording them as failures to keep DORS metrics accurate.
-    pub fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
-        // Expire stale pending confirmations before processing the next message.
-        // This is the only call site — it runs each time the platform polls, which
-        // is frequent enough to bound the pending map and keep metrics fresh.
-        self.drain_expired_pending();
-
-        let (message, queue_depth) = {
-            let mut queue = self.send_queue.lock_or_recover();
-            match queue.pop_front() {
-                Some(m) => {
-                    let depth = queue.len();
-                    (m, depth)
-                }
-                None => return Ok(None),
-            }
-        };
-
-        let message_id = message.id.as_str().to_string();
-
-        // Serialize before inserting into pending_confirmation so a
-        // serialization failure does not orphan an entry that the platform
-        // can never confirm or fail.
-        let data = self.serialize_message(&message)?;
-
-        {
-            let mut pending = self.pending_confirmation.lock_or_recover();
-            pending.insert(message_id.clone(), Instant::now());
-        }
-
-        {
-            let mut metrics = self.metrics.lock_or_recover();
-            metrics.queue_depth = queue_depth;
-        }
-
-        Ok(Some((message_id, data)))
-    }
-
-    /// Platform confirms that a message was successfully sent over the wire (e.g., WebSocket).
-    ///
-    /// This updates transport metrics to reflect real delivery outcomes,
-    /// enabling DORS to make accurate routing decisions.
-    pub fn confirm_sent(&self, message_id: &str) {
-        let was_pending = {
-            let mut pending = self.pending_confirmation.lock_or_recover();
-            pending.remove(message_id).is_some()
-        };
-
-        if was_pending {
-            let mut metrics = self.metrics.lock_or_recover();
-            metrics.success_count = metrics.success_count.saturating_add(1);
-            recalculate_delivery_ratios(&mut metrics);
-            tracing::trace!(
-                message_id = message_id,
-                success_count = metrics.success_count,
-                "confirm_sent: recorded success"
-            );
-        } else {
-            tracing::debug!(
-                message_id = message_id,
-                "confirm_sent: unknown or already-resolved message"
-            );
-        }
-    }
-
-    /// Platform reports that a message failed to send (e.g., WebSocket error).
-    pub fn report_send_failure(&self, message_id: &str) {
-        let was_pending = {
-            let mut pending = self.pending_confirmation.lock_or_recover();
-            pending.remove(message_id).is_some()
-        };
-
-        if was_pending {
-            let mut metrics = self.metrics.lock_or_recover();
-            metrics.failure_count = metrics.failure_count.saturating_add(1);
-            recalculate_delivery_ratios(&mut metrics);
-            tracing::trace!(
-                message_id = message_id,
-                failure_count = metrics.failure_count,
-                "report_send_failure: recorded failure"
-            );
-        } else {
-            tracing::debug!(
-                message_id = message_id,
-                "report_send_failure: unknown or already-resolved message"
-            );
-        }
     }
 
     /// Drains messages that have been pending confirmation longer than the timeout,
@@ -509,6 +340,170 @@ impl Transport for InternetTransport {
         self.fail_all_pending();
         *self.status.lock_or_recover() = TransportStatus::Disconnected;
         Ok(())
+    }
+
+    /// Called when connection status changes.
+    ///
+    /// EDGE CASE HANDLING:
+    /// - Messages in send_queue are preserved during disconnection
+    /// - They will be sent when transport becomes available again
+    /// - Reconnect counter is reset on successful connection
+    fn on_status_changed(&self, status: TransportStatus) {
+        let previous_status = {
+            let mut guard = self.status.lock_or_recover();
+            let prev = *guard;
+            *guard = status;
+            prev
+        };
+
+        // Reset reconnect counter on successful connection
+        if status == TransportStatus::Available {
+            // Acquire send_queue before reconnect_attempts to respect lock
+            // ordering (send_queue is #3, reconnect_attempts is #6).
+            let queue_len = self.send_queue.lock_or_recover().len();
+            *self.reconnect_attempts.lock_or_recover() = 0;
+
+            if queue_len > 0 {
+                tracing::info!(
+                    pending_messages = queue_len,
+                    "Internet transport available, {} messages pending in queue",
+                    queue_len
+                );
+            }
+        } else if previous_status == TransportStatus::Available
+            && status != TransportStatus::Available
+        {
+            // Fail all pending confirmations — the connection is gone so the
+            // platform can no longer report outcomes for in-flight messages.
+            self.fail_all_pending();
+
+            let queue_len = self.send_queue.lock_or_recover().len();
+            if queue_len > 0 {
+                tracing::warn!(
+                    pending_messages = queue_len,
+                    new_status = ?status,
+                    "Internet transport disconnected with {} messages in queue (will retry)",
+                    queue_len
+                );
+            }
+        }
+    }
+
+    /// Called when raw data is received (platform callback).
+    ///
+    /// This deserializes the message and queues it.
+    fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
+        crate::common::on_data_received(&self.receive_queue, data)
+    }
+
+    /// Like [`Transport::on_data_received`], but attaches a
+    /// transport-verified `peer_id` to the deserialized message.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the relay server has authenticated for this
+    ///   connection. This is **not** the raw transport address (IP, session
+    ///   token, etc.). The protocol layer uses this value to verify that
+    ///   `message.sender` matches the authenticated peer.
+    fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
+        crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
+    }
+
+    /// Gets the next message to send (for platform implementation).
+    ///
+    /// Returns the message_id and serialized bytes, or None if no messages to send.
+    /// The message enters the pending-confirmation state until the platform calls
+    /// `confirm_sent()` or `report_send_failure()`.
+    ///
+    /// Also drains any pending confirmations that have exceeded the timeout,
+    /// recording them as failures to keep DORS metrics accurate.
+    fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
+        // Expire stale pending confirmations before processing the next message.
+        // This is the only call site — it runs each time the platform polls, which
+        // is frequent enough to bound the pending map and keep metrics fresh.
+        self.drain_expired_pending();
+
+        let (message, queue_depth) = {
+            let mut queue = self.send_queue.lock_or_recover();
+            match queue.pop_front() {
+                Some(m) => {
+                    let depth = queue.len();
+                    (m, depth)
+                }
+                None => return Ok(None),
+            }
+        };
+
+        let message_id = message.id.as_str().to_string();
+
+        // Serialize before inserting into pending_confirmation so a
+        // serialization failure does not orphan an entry that the platform
+        // can never confirm or fail.
+        let data = self.serialize_message(&message)?;
+
+        {
+            let mut pending = self.pending_confirmation.lock_or_recover();
+            pending.insert(message_id.clone(), Instant::now());
+        }
+
+        {
+            let mut metrics = self.metrics.lock_or_recover();
+            metrics.queue_depth = queue_depth;
+        }
+
+        Ok(Some((message_id, data)))
+    }
+
+    /// Platform confirms that a message was successfully sent over the wire (e.g., WebSocket).
+    ///
+    /// This updates transport metrics to reflect real delivery outcomes,
+    /// enabling DORS to make accurate routing decisions.
+    fn confirm_sent(&self, message_id: &str) {
+        let was_pending = {
+            let mut pending = self.pending_confirmation.lock_or_recover();
+            pending.remove(message_id).is_some()
+        };
+
+        if was_pending {
+            let mut metrics = self.metrics.lock_or_recover();
+            metrics.success_count = metrics.success_count.saturating_add(1);
+            recalculate_delivery_ratios(&mut metrics);
+            tracing::trace!(
+                message_id = message_id,
+                success_count = metrics.success_count,
+                "confirm_sent: recorded success"
+            );
+        } else {
+            tracing::debug!(
+                message_id = message_id,
+                "confirm_sent: unknown or already-resolved message"
+            );
+        }
+    }
+
+    /// Platform reports that a message failed to send (e.g., WebSocket error).
+    fn report_send_failure(&self, message_id: &str) {
+        let was_pending = {
+            let mut pending = self.pending_confirmation.lock_or_recover();
+            pending.remove(message_id).is_some()
+        };
+
+        if was_pending {
+            let mut metrics = self.metrics.lock_or_recover();
+            metrics.failure_count = metrics.failure_count.saturating_add(1);
+            recalculate_delivery_ratios(&mut metrics);
+            tracing::trace!(
+                message_id = message_id,
+                failure_count = metrics.failure_count,
+                "report_send_failure: recorded failure"
+            );
+        } else {
+            tracing::debug!(
+                message_id = message_id,
+                "report_send_failure: unknown or already-resolved message"
+            );
+        }
     }
 }
 

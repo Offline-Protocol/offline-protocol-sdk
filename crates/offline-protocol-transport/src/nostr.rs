@@ -169,11 +169,6 @@ impl NostrTransport {
         crate::common::platform_handle(&self.platform_handle)
     }
 
-    /// Sets the callback invoked when outgoing messages are queued.
-    pub fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_messages_available.lock_or_recover() = Some(callback);
-    }
-
     /// Notifies the platform that messages are ready to send.
     ///
     /// The callback Arc is cloned out of the mutex and the guard dropped
@@ -183,46 +178,6 @@ impl NostrTransport {
         let callback = self.on_messages_available.lock_or_recover().clone();
         if let Some(cb) = callback {
             cb();
-        }
-    }
-
-    /// Called when connection status changes.
-    ///
-    /// Resets reconnect counter on successful connection.
-    /// Fails all pending confirmations on disconnect.
-    pub fn on_status_changed(&self, status: TransportStatus) {
-        let previous_status = {
-            let mut guard = self.status.lock_or_recover();
-            let prev = *guard;
-            *guard = status;
-            prev
-        };
-
-        if status == TransportStatus::Available {
-            let queue_len = self.send_queue.lock_or_recover().len();
-            *self.reconnect_attempts.lock_or_recover() = 0;
-
-            if queue_len > 0 {
-                tracing::info!(
-                    pending_messages = queue_len,
-                    "Nostr transport available, {} messages pending in queue",
-                    queue_len
-                );
-            }
-        } else if previous_status == TransportStatus::Available
-            && status != TransportStatus::Available
-        {
-            self.fail_all_pending();
-
-            let queue_len = self.send_queue.lock_or_recover().len();
-            if queue_len > 0 {
-                tracing::warn!(
-                    pending_messages = queue_len,
-                    new_status = ?status,
-                    "Nostr transport disconnected with {} messages in queue (will retry)",
-                    queue_len
-                );
-            }
         }
     }
 
@@ -240,77 +195,6 @@ impl NostrTransport {
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
         crate::common::serialize_message(message)
-    }
-
-    /// Deserializes a message from JSON bytes.
-    pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
-        crate::common::deserialize_message(data)
-    }
-
-    /// Called when raw data is received (platform callback).
-    pub fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
-        crate::common::on_data_received(&self.receive_queue, data)
-    }
-
-    /// Like [`on_data_received`](Self::on_data_received), but attaches a
-    /// transport-verified `peer_id` to the deserialized message.
-    pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
-        crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
-    }
-
-    /// Gets the next message to send (for platform implementation).
-    ///
-    /// Returns `(message_id, serialized_bytes)` or `None` if no messages.
-    /// The message enters the pending-confirmation state until the platform
-    /// calls [`confirm_sent`](Self::confirm_sent) or
-    /// [`report_send_failure`](Self::report_send_failure).
-    pub fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
-        self.drain_expired_pending();
-
-        let message = {
-            let mut queue = self.send_queue.lock_or_recover();
-            match queue.pop_front() {
-                Some(m) => m,
-                None => return Ok(None),
-            }
-        };
-
-        let message_id = message.id.to_string();
-        let data = self.serialize_message(&message)?;
-
-        self.pending_confirmation
-            .lock_or_recover()
-            .insert(message_id.clone(), Instant::now());
-
-        Ok(Some((message_id, data)))
-    }
-
-    /// Platform confirms a message was sent successfully.
-    pub fn confirm_sent(&self, message_id: &str) {
-        let removed = self
-            .pending_confirmation
-            .lock_or_recover()
-            .remove(message_id);
-
-        if removed.is_some() {
-            let mut metrics = self.metrics.lock_or_recover();
-            metrics.success_count = metrics.success_count.saturating_add(1);
-            recalculate_delivery_ratios(&mut metrics);
-        }
-    }
-
-    /// Platform reports a send failure.
-    pub fn report_send_failure(&self, message_id: &str) {
-        let removed = self
-            .pending_confirmation
-            .lock_or_recover()
-            .remove(message_id);
-
-        if removed.is_some() {
-            let mut metrics = self.metrics.lock_or_recover();
-            metrics.failure_count = metrics.failure_count.saturating_add(1);
-            recalculate_delivery_ratios(&mut metrics);
-        }
     }
 
     /// Whether the transport should attempt reconnection.
@@ -577,6 +461,119 @@ impl Transport for NostrTransport {
         self.send_queue.lock_or_recover().clear();
         self.receive_queue.lock_or_recover().clear();
         Ok(())
+    }
+
+    /// Called when connection status changes.
+    ///
+    /// Resets reconnect counter on successful connection.
+    /// Fails all pending confirmations on disconnect.
+    fn on_status_changed(&self, status: TransportStatus) {
+        let previous_status = {
+            let mut guard = self.status.lock_or_recover();
+            let prev = *guard;
+            *guard = status;
+            prev
+        };
+
+        if status == TransportStatus::Available {
+            let queue_len = self.send_queue.lock_or_recover().len();
+            *self.reconnect_attempts.lock_or_recover() = 0;
+
+            if queue_len > 0 {
+                tracing::info!(
+                    pending_messages = queue_len,
+                    "Nostr transport available, {} messages pending in queue",
+                    queue_len
+                );
+            }
+        } else if previous_status == TransportStatus::Available
+            && status != TransportStatus::Available
+        {
+            self.fail_all_pending();
+
+            let queue_len = self.send_queue.lock_or_recover().len();
+            if queue_len > 0 {
+                tracing::warn!(
+                    pending_messages = queue_len,
+                    new_status = ?status,
+                    "Nostr transport disconnected with {} messages in queue (will retry)",
+                    queue_len
+                );
+            }
+        }
+    }
+
+    fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
+        crate::common::on_data_received(&self.receive_queue, data)
+    }
+
+    /// Like [`Transport::on_data_received`], but attaches a
+    /// transport-verified `peer_id` to the deserialized message.
+    fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
+        crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
+    }
+
+    /// Gets the next message to send (for platform implementation).
+    ///
+    /// Returns `(message_id, serialized_bytes)` or `None` if no messages.
+    /// The message enters the pending-confirmation state until the platform
+    /// calls [`Transport::confirm_sent`] or [`Transport::report_send_failure`].
+    ///
+    /// Most Nostr platforms should poll
+    /// [`NostrTransport::get_next_signed_event`] instead, which wraps and
+    /// signs the payload as a Nostr event.
+    fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
+        self.drain_expired_pending();
+
+        let message = {
+            let mut queue = self.send_queue.lock_or_recover();
+            match queue.pop_front() {
+                Some(m) => m,
+                None => return Ok(None),
+            }
+        };
+
+        let message_id = message.id.to_string();
+        let data = self.serialize_message(&message)?;
+
+        self.pending_confirmation
+            .lock_or_recover()
+            .insert(message_id.clone(), Instant::now());
+
+        Ok(Some((message_id, data)))
+    }
+
+    /// Sets the callback invoked when outgoing messages are queued.
+    fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_messages_available.lock_or_recover() = Some(callback);
+    }
+
+    /// Platform confirms a message was sent successfully.
+    fn confirm_sent(&self, message_id: &str) {
+        let removed = self
+            .pending_confirmation
+            .lock_or_recover()
+            .remove(message_id);
+
+        if removed.is_some() {
+            let mut metrics = self.metrics.lock_or_recover();
+            metrics.success_count = metrics.success_count.saturating_add(1);
+            recalculate_delivery_ratios(&mut metrics);
+        }
+    }
+
+    /// Platform reports a send failure.
+    fn report_send_failure(&self, message_id: &str) {
+        let removed = self
+            .pending_confirmation
+            .lock_or_recover()
+            .remove(message_id);
+
+        if removed.is_some() {
+            let mut metrics = self.metrics.lock_or_recover();
+            metrics.failure_count = metrics.failure_count.saturating_add(1);
+            recalculate_delivery_ratios(&mut metrics);
+        }
     }
 }
 

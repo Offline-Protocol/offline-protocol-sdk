@@ -150,6 +150,10 @@ impl Transport for MockTransport {
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
         Ok(())
     }
+
+    fn on_status_changed(&self, status: TransportStatus) {
+        self.set_status(status);
+    }
 }
 
 #[cfg(test)]

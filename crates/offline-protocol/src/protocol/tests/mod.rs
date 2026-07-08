@@ -140,6 +140,10 @@ impl Transport for FlakyTransport {
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
         Ok(())
     }
+
+    fn on_status_changed(&self, status: TransportStatus) {
+        *self.status.lock().unwrap() = status;
+    }
 }
 
 #[derive(Default)]
