@@ -94,7 +94,11 @@ pub struct OfflineProtocol {
 
     /// All discovered/connected peers, tracked independently of encryption.
     /// Used by service discovery to know who to broadcast queries to.
-    known_peers: std::collections::HashSet<String>,
+    /// Values are last-seen instants: refreshed on every discovery signal,
+    /// swept by [`Self::prune_stale_known_peers`] after `KNOWN_PEER_TTL_SECS`,
+    /// and used to pick the least-recently-seen victim when an insert hits
+    /// `MAX_KNOWN_PEERS`.
+    known_peers: HashMap<String, Instant>,
 
     /// Sessions confirmed established (received Welcome or successful decrypt).
     /// Only encrypt messages when the session is confirmed to avoid race conditions.
@@ -312,7 +316,7 @@ impl OfflineProtocol {
             pending_encrypted_messages: HashMap::new(),
             pending_key_packages: HashMap::new(),
             key_package_sent_to: std::collections::HashSet::new(),
-            known_peers: std::collections::HashSet::new(),
+            known_peers: HashMap::new(),
             confirmed_sessions: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             pending_queue: PendingDecryptionQueue::default(),
@@ -742,11 +746,25 @@ impl OfflineProtocol {
             return;
         }
 
-        // Track discovered peers for service discovery and routing, with capacity limit
-        if self.known_peers.len() < MAX_KNOWN_PEERS || self.known_peers.contains(peer_id) {
-            self.known_peers.insert(peer_id.to_string());
+        // Track discovered peers for service discovery and routing. Existing
+        // peers get their last-seen refreshed; a new peer at capacity evicts
+        // the least-recently-seen entry so a genuinely present neighbor is
+        // never locked out by stale message-path senders (issue #140).
+        if let Some(last_seen) = self.known_peers.get_mut(peer_id) {
+            *last_seen = Instant::now();
         } else {
-            debug!(peer_id = %peer_id, cap = MAX_KNOWN_PEERS, "Known peers at capacity, not tracking new peer");
+            if self.known_peers.len() >= MAX_KNOWN_PEERS {
+                if let Some(victim) = self
+                    .known_peers
+                    .iter()
+                    .min_by_key(|(_, seen)| **seen)
+                    .map(|(id, _)| id.clone())
+                {
+                    debug!(peer_id = %peer_id, evicted = %victim, cap = MAX_KNOWN_PEERS, "Known peers at capacity, evicting least-recently-seen");
+                    self.evict_known_peer(&victim);
+                }
+            }
+            self.known_peers.insert(peer_id.to_string(), Instant::now());
         }
 
         // Flush any pending outbox messages destined for this peer
@@ -926,7 +944,15 @@ impl OfflineProtocol {
     ///
     /// * `peer_id` - The ID of the lost peer
     pub fn on_neighbor_lost(&mut self, peer_id: &str) {
-        // Remove from key package sent tracking so we can re-send if they reconnect
+        self.evict_known_peer(peer_id);
+    }
+
+    /// Drops a peer from discovery tracking. Shared by explicit neighbor
+    /// loss, the TTL sweep, and least-recently-seen eviction at capacity —
+    /// all three mean "treat this peer as gone until re-seen", so all three
+    /// also clear the key-package marker, letting a re-appearing peer
+    /// receive a fresh key package exactly as on a BLE reconnect.
+    fn evict_known_peer(&mut self, peer_id: &str) {
         self.key_package_sent_to.remove(peer_id);
         self.known_peers.remove(peer_id);
     }

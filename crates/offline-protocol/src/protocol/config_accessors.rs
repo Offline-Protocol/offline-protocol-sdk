@@ -1,7 +1,7 @@
 //! Configuration accessors, diagnostics, and service registration.
 
 use super::{
-    lock_shared_state, OfflineProtocol, PendingQueueMetrics, ProtocolState,
+    lock_shared_state, OfflineProtocol, PendingQueueMetrics, ProtocolState, KNOWN_PEER_TTL_SECS,
     MEDIA_TRANSFER_STALE_TIMEOUT_SECS,
 };
 use crate::events::Event;
@@ -121,9 +121,13 @@ impl OfflineProtocol {
 
     /// Returns whether `peer_id` is currently tracked as a discovered
     /// neighbor. Populated by [`Self::on_neighbor_discovered`] and cleared
-    /// by [`Self::on_neighbor_lost`]; blocked users are never tracked.
+    /// by [`Self::on_neighbor_lost`], by the periodic TTL sweep when the
+    /// peer has not been re-seen for `KNOWN_PEER_TTL_SECS`, or by
+    /// least-recently-seen eviction when tracking is at capacity — so this
+    /// can flip to false without any explicit loss signal. Blocked users
+    /// are never tracked.
     pub fn is_known_peer(&self, peer_id: &str) -> bool {
-        self.known_peers.contains(peer_id)
+        self.known_peers.contains_key(peer_id)
     }
 
     /// Returns a mutable reference to the retry queue (test-only).
@@ -137,6 +141,7 @@ impl OfflineProtocol {
     pub(crate) fn cleanup_expired_entries(&mut self) {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
+        self.prune_stale_known_peers(std::time::Instant::now());
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
         self.cleanup_group_message_dedup();
@@ -162,6 +167,32 @@ impl OfflineProtocol {
         // Prune old timed-out ACKs that weren't cleaned up by normal retry flow
         self.ack_manager
             .prune_old_timeouts(std::time::Duration::from_secs(300)); // 5 minutes
+    }
+
+    /// Evicts known peers not re-seen within `KNOWN_PEER_TTL_SECS`.
+    ///
+    /// This is the only removal path for peers on carriers without a
+    /// disconnect signal (Internet, Reticulum, Nostr, WiFi Direct
+    /// message-path senders). `now` is injected for test determinism.
+    pub(crate) fn prune_stale_known_peers(&mut self, now: std::time::Instant) {
+        let ttl = StdDuration::from_secs(KNOWN_PEER_TTL_SECS);
+        let stale: Vec<String> = self
+            .known_peers
+            .iter()
+            .filter(|(_, seen)| now.saturating_duration_since(**seen) > ttl)
+            .map(|(id, _)| id.clone())
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            count = stale.len(),
+            ttl_secs = KNOWN_PEER_TTL_SECS,
+            "Evicting stale known peers"
+        );
+        for peer_id in &stale {
+            self.evict_known_peer(peer_id);
+        }
     }
 
     // ========================================================================
@@ -193,7 +224,7 @@ impl OfflineProtocol {
         // Service discovery messages are internal control messages (not user
         // content), so they are exempt from require_encryption.
 
-        let peers: Vec<String> = self.known_peers.iter().cloned().collect();
+        let peers: Vec<String> = self.known_peers.keys().cloned().collect();
         let result = self
             .mesh_services
             .discover_services(&self.config.user_id, &peers, service_id)

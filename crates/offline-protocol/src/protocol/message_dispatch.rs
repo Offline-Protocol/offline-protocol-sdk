@@ -1094,7 +1094,7 @@ impl OfflineProtocol {
     ) {
         let peers: Vec<String> = self
             .known_peers
-            .iter()
+            .keys()
             .filter(|p| p.as_str() != sender)
             .cloned()
             .collect();

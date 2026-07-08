@@ -56,6 +56,21 @@ pub(crate) const LAMPORT_PERSIST_INTERVAL: u64 = 64;
 pub(crate) const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 pub(crate) const MAX_KNOWN_PEERS: usize = 1000;
+/// How long a known peer stays tracked without being re-seen.
+///
+/// Peers on carriers with no disconnect signal (Internet, Reticulum, Nostr,
+/// and WiFi Direct message-path senders) are only ever *added* to
+/// `known_peers`; this TTL is their eviction path, swept from the periodic
+/// `cleanup_expired_entries` tick. A second layer — least-recently-seen
+/// eviction when an insert hits `MAX_KNOWN_PEERS` — guarantees a newly
+/// discovered peer is always tracked even between sweeps.
+///
+/// Deliberately generous: a connected-but-quiet BLE peer refreshes only via
+/// platform advertisement sightings (BLE inbound messages do not route
+/// through the discovery hook), so a short TTL would evict it while still
+/// connected. Eviction is self-healing (the peer is re-tracked on its next
+/// advertisement or message), so erring long only delays hygiene.
+pub(crate) const KNOWN_PEER_TTL_SECS: u64 = 1800;
 
 /// Metadata key for the Ed25519 signature over the control message content (base64).
 pub(crate) const CTRL_SIG_META_KEY: &str = "__ctrl_sig";

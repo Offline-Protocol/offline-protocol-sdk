@@ -75,7 +75,7 @@ impl OfflineProtocol {
         // If the peer is currently nearby and MLS is active, proactively send a
         // fresh key package so both sides can re-establish the session without
         // waiting for a new neighbor discovery cycle.
-        if self.known_peers.contains(user_id)
+        if self.known_peers.contains_key(user_id)
             && self.config.encryption.enabled
             && self.config.encryption.auto_key_exchange
             && self.mls_manager.is_some()
@@ -686,7 +686,7 @@ mod tests {
         // add them to known_peers or trigger key exchange tracking.
         proto.on_neighbor_discovered("mallory");
         assert!(
-            !proto.known_peers.contains("mallory"),
+            !proto.known_peers.contains_key("mallory"),
             "Blocked user should not be added to known_peers"
         );
         assert!(
@@ -697,7 +697,7 @@ mod tests {
         // Non-blocked peer should be tracked normally
         proto.on_neighbor_discovered("bob");
         assert!(
-            proto.known_peers.contains("bob"),
+            proto.known_peers.contains_key("bob"),
             "Non-blocked peer should be tracked"
         );
     }
