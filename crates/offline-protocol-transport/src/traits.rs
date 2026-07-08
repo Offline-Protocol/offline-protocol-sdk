@@ -3,6 +3,7 @@
 use crate::{Result, TransportMetrics, TransportType};
 use offline_protocol_core::Message;
 use std::any::Any;
+use std::sync::Arc;
 
 /// Status of a transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,4 +79,167 @@ pub trait Transport: Send + Sync + Any {
     /// Stops the transport, marking it `Disconnected` and clearing queued
     /// state.
     fn stop(&mut self) -> Result<()>;
+
+    // ------------------------------------------------------------------
+    // Platform-bridge ingress (platform → Rust)
+    // ------------------------------------------------------------------
+
+    /// Reports a connectivity change observed by the platform bridge.
+    ///
+    /// This is how transports leave (and re-enter) `Available`: the platform
+    /// owns the radio/socket and pushes status transitions here.
+    /// Implementations drain per-session state when leaving `Available` so a
+    /// reconnect starts clean.
+    fn on_status_changed(&self, status: TransportStatus);
+
+    /// Injects inbound wire bytes from the platform bridge.
+    ///
+    /// The default rejects the data: transports that receive whole serialized
+    /// messages (WiFi Direct, Internet, Nostr, Reticulum) override this.
+    /// BLE receives fragments instead — see [`Transport::on_fragment_received`].
+    fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
+        let _ = data;
+        Err(crate::Error::Other(format!(
+            "{} transport does not accept whole-message data; \
+             use the transport's fragment/event ingress instead",
+            self.transport_type()
+        )))
+    }
+
+    /// Like [`Transport::on_data_received`], but attaches a
+    /// transport-verified `peer_id` (the remote peer's user-level identifier,
+    /// not a raw transport address) to the deserialized message.
+    fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
+        let _ = (data, peer_id);
+        Err(crate::Error::Other(format!(
+            "{} transport does not accept whole-message data; \
+             use the transport's fragment/event ingress instead",
+            self.transport_type()
+        )))
+    }
+
+    /// Injects an inbound fragment from the platform bridge (BLE).
+    ///
+    /// The default rejects the data: only fragmenting transports (BLE)
+    /// override this. Whole-message transports use
+    /// [`Transport::on_data_received`].
+    fn on_fragment_received(&self, fragment_data: Vec<u8>) -> Result<()> {
+        let _ = fragment_data;
+        Err(crate::Error::Other(format!(
+            "{} transport does not reassemble fragments; \
+             use on_data_received instead",
+            self.transport_type()
+        )))
+    }
+
+    // ------------------------------------------------------------------
+    // Platform-bridge egress / poll (Rust → platform)
+    // ------------------------------------------------------------------
+
+    /// Dequeues the next outbound message for the platform bridge to put on
+    /// the wire.
+    ///
+    /// Returns `(key, serialized_bytes)` where the `key` is
+    /// transport-specific: a recipient address for peer-to-peer transports
+    /// (WiFi Direct), or the message id for confirmation-loop transports
+    /// (Internet, Nostr, Reticulum — pair with [`Transport::confirm_sent`] /
+    /// [`Transport::report_send_failure`]). The default returns `Ok(None)`:
+    /// fragmenting transports (BLE) expose
+    /// [`Transport::get_next_fragment`] instead.
+    fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
+        Ok(None)
+    }
+
+    /// Dequeues the next outbound fragment for the platform bridge (BLE).
+    ///
+    /// Returns `(recipient, fragment_bytes)`. The default returns
+    /// `Ok(None)`: whole-message transports expose
+    /// [`Transport::get_next_message`] instead.
+    fn get_next_fragment(&self) -> Result<Option<(String, Vec<u8>)>> {
+        Ok(None)
+    }
+
+    /// Registers the callback that wakes the platform bridge when outbound
+    /// data becomes available to poll, instead of polling on a timer.
+    ///
+    /// The default drops the callback with a warning — a transport that
+    /// supports platform-driven draining must override this.
+    fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        let _ = callback;
+        tracing::warn!(
+            transport = %self.transport_type(),
+            "set_on_messages_available: transport has no outbound-available callback; \
+             callback dropped"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Confirmation loop (platform → Rust delivery outcomes)
+    // ------------------------------------------------------------------
+
+    /// Platform confirms a message previously returned by
+    /// [`Transport::get_next_message`] was sent over the wire.
+    ///
+    /// The default is a no-op: only confirmation-loop transports (Internet,
+    /// Nostr, Reticulum) track pending outcomes.
+    fn confirm_sent(&self, message_id: &str) {
+        tracing::debug!(
+            transport = %self.transport_type(),
+            message_id,
+            "confirm_sent: transport has no confirmation loop; ignoring"
+        );
+    }
+
+    /// Platform reports a message previously returned by
+    /// [`Transport::get_next_message`] failed to send.
+    ///
+    /// The default is a no-op: only confirmation-loop transports (Internet,
+    /// Nostr, Reticulum) track pending outcomes.
+    fn report_send_failure(&self, message_id: &str) {
+        tracing::debug!(
+            transport = %self.transport_type(),
+            message_id,
+            "report_send_failure: transport has no confirmation loop; ignoring"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Link configuration
+    // ------------------------------------------------------------------
+
+    /// Records the maximum usable payload for a peer after link-layer MTU
+    /// negotiation (BLE).
+    ///
+    /// The default warns and ignores the report: only MTU-aware transports
+    /// (BLE) override this.
+    fn set_peer_mtu(&self, peer_id: &str, max_payload: usize) {
+        tracing::warn!(
+            transport = %self.transport_type(),
+            peer = %peer_id,
+            max_payload,
+            "set_peer_mtu: transport is not MTU-aware; ignoring"
+        );
+    }
+
+    /// Removes any stored MTU for a peer (BLE; called on disconnect or
+    /// before renegotiation). The default is a no-op.
+    fn clear_peer_mtu(&self, peer_id: &str) {
+        tracing::debug!(
+            transport = %self.transport_type(),
+            peer = %peer_id,
+            "clear_peer_mtu: transport is not MTU-aware; ignoring"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Serialization
+    // ------------------------------------------------------------------
+
+    /// Deserializes a wire payload into a [`Message`].
+    ///
+    /// Every transport in this crate uses the shared JSON wire format, so
+    /// the provided implementation is normally correct as-is.
+    fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
+        crate::common::deserialize_message(data)
+    }
 }

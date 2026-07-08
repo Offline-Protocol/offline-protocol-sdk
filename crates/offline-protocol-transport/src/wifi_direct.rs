@@ -7,12 +7,12 @@
 //! registry, and metrics.
 //!
 //! The bridge contract: the platform reports connectivity via
-//! [`WifiDirectTransport::on_status_changed`] and peers via
+//! [`Transport::on_status_changed`] and peers via
 //! [`WifiDirectTransport::on_peer_discovered`] /
 //! [`WifiDirectTransport::on_peer_lost`], drains outbound wire bytes with
-//! [`WifiDirectTransport::get_next_message`] (woken by the
-//! [`WifiDirectTransport::set_on_messages_available`] callback), and
-//! injects inbound bytes via [`WifiDirectTransport::on_data_received`].
+//! [`Transport::get_next_message`] (woken by the
+//! [`Transport::set_on_messages_available`] callback), and
+//! injects inbound bytes via [`Transport::on_data_received`].
 
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::{Message, MutexExt};
@@ -102,11 +102,6 @@ impl WifiDirectTransport {
         }
     }
 
-    /// Registers a callback that fires when new outgoing messages become available.
-    pub fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_messages_available.lock_or_recover() = Some(callback);
-    }
-
     /// Notifies the platform that messages are ready to send.
     fn notify_messages_available(&self) {
         let callback = self.on_messages_available.lock_or_recover().clone();
@@ -145,28 +140,6 @@ impl WifiDirectTransport {
     pub fn on_peer_lost(&self, device_address: &str) {
         let mut peers = self.peers.lock_or_recover();
         peers.remove(device_address);
-    }
-
-    /// Called when connection status changes.
-    ///
-    /// When transitioning away from [`TransportStatus::Available`], peers
-    /// and queues are drained so a subsequent reconnect starts clean.
-    pub fn on_status_changed(&self, status: TransportStatus) {
-        let previous = {
-            let mut guard = self.status.lock_or_recover();
-            let prev = *guard;
-            *guard = status;
-            prev
-        };
-
-        if previous == TransportStatus::Available && status != TransportStatus::Available {
-            self.peers.lock_or_recover().clear();
-            self.send_queue.lock_or_recover().clear();
-            self.receive_queue.lock_or_recover().clear();
-            let mut metrics = self.metrics.lock_or_recover();
-            metrics.queue_depth = 0;
-            metrics.congestion = 0.0;
-        }
     }
 
     /// Called when a message is received from a peer.
@@ -208,47 +181,6 @@ impl WifiDirectTransport {
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
         crate::common::serialize_message(message)
-    }
-
-    /// Deserializes a message from JSON bytes.
-    pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
-        crate::common::deserialize_message(data)
-    }
-
-    /// Called when raw data is received (platform callback).
-    pub fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
-        crate::common::on_data_received(&self.receive_queue, data)
-    }
-
-    /// Like [`on_data_received`](Self::on_data_received), but attaches a
-    /// transport-verified `peer_id` to the deserialized message.
-    ///
-    /// # Parameters
-    ///
-    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
-    ///   `UserId` string) that the transport layer has authenticated for this
-    ///   connection. This is **not** the raw transport address (MAC, IP, etc.).
-    ///   The protocol layer uses this value to verify that `message.sender`
-    ///   matches the physical peer that delivered it.
-    pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
-        crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
-    }
-
-    /// Gets the next message to send (for platform implementation).
-    ///
-    /// Returns (recipient, serialized_data) or None if no messages to send.
-    pub fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
-        let (recipient, message) = {
-            let mut queue = self.send_queue.lock_or_recover();
-            match queue.pop_front() {
-                Some((r, m)) => (r, m),
-                None => return Ok(None),
-            }
-        };
-
-        // Serialize the message
-        let data = self.serialize_message(&message)?;
-        Ok(Some((recipient, data)))
     }
 
     /// Checks if there are messages to send.
@@ -320,6 +252,68 @@ impl Transport for WifiDirectTransport {
         metrics.queue_depth = 0;
         metrics.congestion = 0.0;
         Ok(())
+    }
+
+    /// Called when connection status changes.
+    ///
+    /// When transitioning away from [`TransportStatus::Available`], peers
+    /// and queues are drained so a subsequent reconnect starts clean.
+    fn on_status_changed(&self, status: TransportStatus) {
+        let previous = {
+            let mut guard = self.status.lock_or_recover();
+            let prev = *guard;
+            *guard = status;
+            prev
+        };
+
+        if previous == TransportStatus::Available && status != TransportStatus::Available {
+            self.peers.lock_or_recover().clear();
+            self.send_queue.lock_or_recover().clear();
+            self.receive_queue.lock_or_recover().clear();
+            let mut metrics = self.metrics.lock_or_recover();
+            metrics.queue_depth = 0;
+            metrics.congestion = 0.0;
+        }
+    }
+
+    fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
+        crate::common::on_data_received(&self.receive_queue, data)
+    }
+
+    /// Like [`Transport::on_data_received`], but attaches a
+    /// transport-verified `peer_id` to the deserialized message.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the transport layer has authenticated for this
+    ///   connection. This is **not** the raw transport address (MAC, IP, etc.).
+    ///   The protocol layer uses this value to verify that `message.sender`
+    ///   matches the physical peer that delivered it.
+    fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
+        crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
+    }
+
+    /// Gets the next message to send (for platform implementation).
+    ///
+    /// Returns (recipient, serialized_data) or None if no messages to send.
+    fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
+        let (recipient, message) = {
+            let mut queue = self.send_queue.lock_or_recover();
+            match queue.pop_front() {
+                Some((r, m)) => (r, m),
+                None => return Ok(None),
+            }
+        };
+
+        // Serialize the message
+        let data = self.serialize_message(&message)?;
+        Ok(Some((recipient, data)))
+    }
+
+    /// Registers a callback that fires when new outgoing messages become available.
+    fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_messages_available.lock_or_recover() = Some(callback);
     }
 }
 

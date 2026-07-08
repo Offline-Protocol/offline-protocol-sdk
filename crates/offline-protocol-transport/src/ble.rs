@@ -270,79 +270,6 @@ impl BleTransport {
         }
     }
 
-    /// Records the maximum usable fragment payload for a peer after BLE MTU
-    /// negotiation.
-    ///
-    /// The platform layer passes the already-header-adjusted value — iOS via
-    /// `CBPeripheral.maximumWriteValueLength(for:)`, Android via
-    /// `onMtuChanged` followed by `mtu - 3`. Accepted values are clamped to
-    /// [`MAX_REASONABLE_BLE_PAYLOAD`] on the high end to protect the
-    /// fragmenter from native layers reporting nonsensical sizes.
-    ///
-    /// **Undersized values are rejected, not clamped up.** A report below
-    /// [`BLE_MAX_FRAGMENT_SIZE`] means the link's real usable payload is
-    /// smaller than our fallback floor — storing a clamped-up 185 would
-    /// cause the fragmenter to emit chunks the controller cannot transmit
-    /// and every fragment to that peer would be silently dropped. We warn
-    /// and drop any previously stored entry so [`Self::peer_mtu`] falls
-    /// back to [`BLE_MAX_FRAGMENT_SIZE`]. Dropping (rather than leaving
-    /// the prior entry in place) is load-bearing for mid-link
-    /// renegotiation: if a peer had a stored 400 and the controller
-    /// later renegotiates down to 20, silently keeping 400 would still
-    /// produce writes the new link cannot honor. Self-consistent with
-    /// the invariant that we do not operate below that floor on the
-    /// platforms we target (both iOS and Android request the BLE-5
-    /// maximum ATT MTU and every modern controller negotiates well
-    /// above 188).
-    pub fn set_peer_mtu(&self, peer_id: &str, max_payload: usize) {
-        // Symmetric with the debug warn in `fragment_message`: neither
-        // platform ever calls `set_peer_mtu` for a peer it has not
-        // already announced via `blePeerDiscovered`, so a store with
-        // no matching `peers` entry is either a buggy platform layer
-        // or a broken keying contract. Debug-only to keep the hot
-        // path free of an extra mutex acquisition in release builds.
-        #[cfg(debug_assertions)]
-        {
-            if !self.peers.lock_or_recover().contains_key(peer_id) {
-                tracing::warn!(
-                    peer = %peer_id,
-                    max_payload,
-                    "ble: set_peer_mtu for unregistered peer — platform must call \
-                     on_peer_discovered before reporting MTU, otherwise the stored \
-                     entry will not be cleared on peer loss"
-                );
-            }
-        }
-        if max_payload < BLE_MAX_FRAGMENT_SIZE {
-            self.undersized_mtu_reports.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                peer = %peer_id,
-                max_payload,
-                floor = BLE_MAX_FRAGMENT_SIZE,
-                "ble: undersized MTU report; dropping stored entry and falling back"
-            );
-            self.peer_mtus.lock_or_recover().remove(peer_id);
-            return;
-        }
-        let clamped = max_payload.min(MAX_REASONABLE_BLE_PAYLOAD);
-        tracing::debug!(
-            peer = %peer_id,
-            raw = max_payload,
-            clamped,
-            "ble: stored per-peer MTU"
-        );
-        self.peer_mtus
-            .lock_or_recover()
-            .insert(peer_id.to_string(), clamped);
-    }
-
-    /// Removes any stored MTU for a peer (called on disconnect or before
-    /// renegotiation).
-    pub fn clear_peer_mtu(&self, peer_id: &str) {
-        tracing::debug!(peer = %peer_id, "ble: cleared per-peer MTU");
-        self.peer_mtus.lock_or_recover().remove(peer_id);
-    }
-
     /// Returns the maximum fragment payload to use for a given peer, falling
     /// back to [`BLE_MAX_FRAGMENT_SIZE`] when no negotiated value is on file.
     pub fn peer_mtu(&self, peer_id: &str) -> usize {
@@ -440,33 +367,6 @@ impl BleTransport {
     ///   `message.sender` matches the physical peer that delivered it.
     pub fn on_message_received_from(&self, message: Message, peer_id: String) {
         crate::common::on_message_received_from(&self.receive_queue, message, peer_id);
-    }
-
-    /// Called when connection status changes.
-    ///
-    /// When transitioning away from [`TransportStatus::Available`], all
-    /// per-session state is drained so a subsequent reconnect starts clean.
-    /// The drain mirrors [`Transport::stop`] and respects the same lockstep
-    /// ordering (peers → peer_mtus → fragment_buffers → send_queue →
-    /// pending_fragments → receive_queue). Monotonic lifetime counters
-    /// (`undersized_mtu_reports`, `fragment_fallback_count`) are preserved.
-    pub fn on_status_changed(&self, status: TransportStatus) {
-        let previous = {
-            let mut guard = self.status.lock_or_recover();
-            let prev = *guard;
-            *guard = status;
-            prev
-        };
-
-        if previous == TransportStatus::Available && status != TransportStatus::Available {
-            self.peers.lock_or_recover().clear();
-            self.peer_mtus.lock_or_recover().clear();
-            self.fragment_buffers.lock_or_recover().clear();
-            self.send_queue.lock_or_recover().clear();
-            self.pending_fragments.lock_or_recover().clear();
-            self.receive_queue.lock_or_recover().clear();
-            self.update_queue_metric();
-        }
     }
 
     /// Gets all discovered peers.
@@ -589,11 +489,6 @@ impl BleTransport {
     /// Serializes a message to bytes (JSON).
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
         crate::common::serialize_message(message)
-    }
-
-    /// Deserializes a message from bytes (JSON).
-    pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
-        crate::common::deserialize_message(data)
     }
 
     /// Fragments a message into chunks suitable for BLE transmission.
@@ -902,36 +797,7 @@ impl BleTransport {
         Ok(None)
     }
 
-    /// Called when raw fragment data is received from BLE (platform callback).
-    ///
-    /// This handles fragmentation reassembly and queues complete messages.
-    pub fn on_fragment_received(&self, fragment_data: Vec<u8>) -> Result<()> {
-        match self.process_fragment(&fragment_data) {
-            Ok(Some(message)) => {
-                // Message complete - queue it
-                let mut queue = self.receive_queue.lock_or_recover();
-                queue.push_back(message.clone());
-                // Note: sender/recipient are intentionally not logged to protect user privacy
-                tracing::debug!(
-                    message_id = %message.id,
-                    "Complete message assembled from fragments"
-                );
-                Ok(())
-            }
-            Ok(None) => {
-                // More fragments needed
-                tracing::debug!("Fragment received, more needed for complete message");
-                Ok(())
-            }
-            Err(e) => {
-                // Log error but don't fail - just drop bad fragment
-                tracing::warn!(error = %e, "Error processing fragment, dropping bad fragment");
-                Ok(())
-            }
-        }
-    }
-
-    /// Like [`on_fragment_received`](Self::on_fragment_received), but attaches a
+    /// Like [`Transport::on_fragment_received`], but attaches a
     /// transport-verified `peer_id` to the reassembled message.
     ///
     /// # Parameters
@@ -963,56 +829,6 @@ impl BleTransport {
                 Ok(())
             }
         }
-    }
-
-    /// Gets the next fragment to send (for platform implementation).
-    ///
-    /// Returns (recipient, fragment_data) or None if no messages to send.
-    pub fn get_next_fragment(&self) -> Result<Option<(String, Vec<u8>)>> {
-        // Check for pending fragments first
-        if let Some(fragment) = {
-            let mut pending = self.pending_fragments.lock_or_recover();
-            pending.pop_front()
-        } {
-            self.update_queue_metric();
-            return Ok(Some(fragment));
-        }
-
-        // No serialized fragments waiting – pull a fresh message from the queue
-        let maybe_message = {
-            let mut queue = self.send_queue.lock_or_recover();
-            queue.pop_front()
-        };
-
-        let Some((recipient, message)) = maybe_message else {
-            self.update_queue_metric();
-            return Ok(None);
-        };
-
-        let fragments = self.fragment_message(&message)?;
-
-        if fragments.is_empty() {
-            self.update_queue_metric();
-            return Ok(None);
-        }
-
-        {
-            let mut pending = self.pending_fragments.lock_or_recover();
-            for fragment in fragments {
-                pending.push_back((recipient.clone(), fragment));
-            }
-        }
-
-        self.update_queue_metric();
-
-        let result = {
-            let mut pending = self.pending_fragments.lock_or_recover();
-            pending.pop_front()
-        };
-
-        self.update_queue_metric();
-
-        Ok(result)
     }
 
     /// Re-queues a fragment at the front of the pending queue (used when platform send fails).
@@ -1225,6 +1041,193 @@ impl Transport for BleTransport {
         self.receive_queue.lock_or_recover().clear();
         self.update_queue_metric();
         Ok(())
+    }
+
+    /// Called when connection status changes.
+    ///
+    /// When transitioning away from [`TransportStatus::Available`], all
+    /// per-session state is drained so a subsequent reconnect starts clean.
+    /// The drain mirrors [`Transport::stop`] and respects the same lockstep
+    /// ordering (peers → peer_mtus → fragment_buffers → send_queue →
+    /// pending_fragments → receive_queue). Monotonic lifetime counters
+    /// (`undersized_mtu_reports`, `fragment_fallback_count`) are preserved.
+    fn on_status_changed(&self, status: TransportStatus) {
+        let previous = {
+            let mut guard = self.status.lock_or_recover();
+            let prev = *guard;
+            *guard = status;
+            prev
+        };
+
+        if previous == TransportStatus::Available && status != TransportStatus::Available {
+            self.peers.lock_or_recover().clear();
+            self.peer_mtus.lock_or_recover().clear();
+            self.fragment_buffers.lock_or_recover().clear();
+            self.send_queue.lock_or_recover().clear();
+            self.pending_fragments.lock_or_recover().clear();
+            self.receive_queue.lock_or_recover().clear();
+            self.update_queue_metric();
+        }
+    }
+
+    /// Called when raw fragment data is received from BLE (platform callback).
+    ///
+    /// This handles fragmentation reassembly and queues complete messages.
+    fn on_fragment_received(&self, fragment_data: Vec<u8>) -> Result<()> {
+        match self.process_fragment(&fragment_data) {
+            Ok(Some(message)) => {
+                // Message complete - queue it
+                let mut queue = self.receive_queue.lock_or_recover();
+                queue.push_back(message.clone());
+                // Note: sender/recipient are intentionally not logged to protect user privacy
+                tracing::debug!(
+                    message_id = %message.id,
+                    "Complete message assembled from fragments"
+                );
+                Ok(())
+            }
+            Ok(None) => {
+                // More fragments needed
+                tracing::debug!("Fragment received, more needed for complete message");
+                Ok(())
+            }
+            Err(e) => {
+                // Log error but don't fail - just drop bad fragment
+                tracing::warn!(error = %e, "Error processing fragment, dropping bad fragment");
+                Ok(())
+            }
+        }
+    }
+
+    /// Gets the next fragment to send (for platform implementation).
+    ///
+    /// Returns (recipient, fragment_data) or None if no messages to send.
+    fn get_next_fragment(&self) -> Result<Option<(String, Vec<u8>)>> {
+        // Check for pending fragments first
+        if let Some(fragment) = {
+            let mut pending = self.pending_fragments.lock_or_recover();
+            pending.pop_front()
+        } {
+            self.update_queue_metric();
+            return Ok(Some(fragment));
+        }
+
+        // No serialized fragments waiting – pull a fresh message from the queue
+        let maybe_message = {
+            let mut queue = self.send_queue.lock_or_recover();
+            queue.pop_front()
+        };
+
+        let Some((recipient, message)) = maybe_message else {
+            self.update_queue_metric();
+            return Ok(None);
+        };
+
+        let fragments = self.fragment_message(&message)?;
+
+        if fragments.is_empty() {
+            self.update_queue_metric();
+            return Ok(None);
+        }
+
+        {
+            let mut pending = self.pending_fragments.lock_or_recover();
+            for fragment in fragments {
+                pending.push_back((recipient.clone(), fragment));
+            }
+        }
+
+        self.update_queue_metric();
+
+        let result = {
+            let mut pending = self.pending_fragments.lock_or_recover();
+            pending.pop_front()
+        };
+
+        self.update_queue_metric();
+
+        Ok(result)
+    }
+
+    /// Registers the callback that wakes the platform when outbound
+    /// fragments become available. Same slot as
+    /// [`BleTransport::set_on_fragments_available`] — BLE's "messages" are
+    /// its fragments.
+    fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        self.set_on_fragments_available(callback);
+    }
+
+    /// Records the maximum usable fragment payload for a peer after BLE MTU
+    /// negotiation.
+    ///
+    /// The platform layer passes the already-header-adjusted value — iOS via
+    /// `CBPeripheral.maximumWriteValueLength(for:)`, Android via
+    /// `onMtuChanged` followed by `mtu - 3`. Accepted values are clamped to
+    /// [`MAX_REASONABLE_BLE_PAYLOAD`] on the high end to protect the
+    /// fragmenter from native layers reporting nonsensical sizes.
+    ///
+    /// **Undersized values are rejected, not clamped up.** A report below
+    /// [`BLE_MAX_FRAGMENT_SIZE`] means the link's real usable payload is
+    /// smaller than our fallback floor — storing a clamped-up 185 would
+    /// cause the fragmenter to emit chunks the controller cannot transmit
+    /// and every fragment to that peer would be silently dropped. We warn
+    /// and drop any previously stored entry so [`Self::peer_mtu`] falls
+    /// back to [`BLE_MAX_FRAGMENT_SIZE`]. Dropping (rather than leaving
+    /// the prior entry in place) is load-bearing for mid-link
+    /// renegotiation: if a peer had a stored 400 and the controller
+    /// later renegotiates down to 20, silently keeping 400 would still
+    /// produce writes the new link cannot honor. Self-consistent with
+    /// the invariant that we do not operate below that floor on the
+    /// platforms we target (both iOS and Android request the BLE-5
+    /// maximum ATT MTU and every modern controller negotiates well
+    /// above 188).
+    fn set_peer_mtu(&self, peer_id: &str, max_payload: usize) {
+        // Symmetric with the debug warn in `fragment_message`: neither
+        // platform ever calls `set_peer_mtu` for a peer it has not
+        // already announced via `blePeerDiscovered`, so a store with
+        // no matching `peers` entry is either a buggy platform layer
+        // or a broken keying contract. Debug-only to keep the hot
+        // path free of an extra mutex acquisition in release builds.
+        #[cfg(debug_assertions)]
+        {
+            if !self.peers.lock_or_recover().contains_key(peer_id) {
+                tracing::warn!(
+                    peer = %peer_id,
+                    max_payload,
+                    "ble: set_peer_mtu for unregistered peer — platform must call \
+                     on_peer_discovered before reporting MTU, otherwise the stored \
+                     entry will not be cleared on peer loss"
+                );
+            }
+        }
+        if max_payload < BLE_MAX_FRAGMENT_SIZE {
+            self.undersized_mtu_reports.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                peer = %peer_id,
+                max_payload,
+                floor = BLE_MAX_FRAGMENT_SIZE,
+                "ble: undersized MTU report; dropping stored entry and falling back"
+            );
+            self.peer_mtus.lock_or_recover().remove(peer_id);
+            return;
+        }
+        let clamped = max_payload.min(MAX_REASONABLE_BLE_PAYLOAD);
+        tracing::debug!(
+            peer = %peer_id,
+            raw = max_payload,
+            clamped,
+            "ble: stored per-peer MTU"
+        );
+        self.peer_mtus
+            .lock_or_recover()
+            .insert(peer_id.to_string(), clamped);
+    }
+
+    /// Removes any stored MTU for a peer (called on disconnect or before
+    /// renegotiation).
+    fn clear_peer_mtu(&self, peer_id: &str) {
+        tracing::debug!(peer = %peer_id, "ble: cleared per-peer MTU");
+        self.peer_mtus.lock_or_recover().remove(peer_id);
     }
 }
 

@@ -92,6 +92,9 @@ impl Transport for HoldMock {
     fn stop(&mut self) -> offline_protocol_transport::Result<()> {
         self.0.lock().unwrap().stop()
     }
+    fn on_status_changed(&self, status: TransportStatus) {
+        self.0.lock().unwrap().on_status_changed(status)
+    }
 }
 
 fn add_started_mock(
