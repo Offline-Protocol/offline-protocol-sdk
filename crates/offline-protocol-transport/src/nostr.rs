@@ -23,7 +23,7 @@ use crate::constants::{NOSTR_CONNECTION_TIMEOUT_SECS, NOSTR_PENDING_CONFIRMATION
 use crate::nostr_crypto::{self, NostrKeypair};
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use base64::Engine;
-use offline_protocol_core::Message;
+use offline_protocol_core::{Message, MutexExt, RwLockExt};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -171,7 +171,7 @@ impl NostrTransport {
 
     /// Sets the callback invoked when outgoing messages are queued.
     pub fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_messages_available.lock().unwrap() = Some(callback);
+        *self.on_messages_available.lock_or_recover() = Some(callback);
     }
 
     /// Notifies the platform that messages are ready to send.
@@ -180,7 +180,7 @@ impl NostrTransport {
     /// before the call, so a callback that re-enters the transport (e.g.
     /// another `send()`) cannot self-deadlock on the callback mutex.
     fn notify_messages_available(&self) {
-        let callback = self.on_messages_available.lock().unwrap().clone();
+        let callback = self.on_messages_available.lock_or_recover().clone();
         if let Some(cb) = callback {
             cb();
         }
@@ -192,15 +192,15 @@ impl NostrTransport {
     /// Fails all pending confirmations on disconnect.
     pub fn on_status_changed(&self, status: TransportStatus) {
         let previous_status = {
-            let mut guard = self.status.lock().unwrap();
+            let mut guard = self.status.lock_or_recover();
             let prev = *guard;
             *guard = status;
             prev
         };
 
         if status == TransportStatus::Available {
-            let queue_len = self.send_queue.lock().unwrap().len();
-            *self.reconnect_attempts.lock().unwrap() = 0;
+            let queue_len = self.send_queue.lock_or_recover().len();
+            *self.reconnect_attempts.lock_or_recover() = 0;
 
             if queue_len > 0 {
                 tracing::info!(
@@ -214,7 +214,7 @@ impl NostrTransport {
         {
             self.fail_all_pending();
 
-            let queue_len = self.send_queue.lock().unwrap().len();
+            let queue_len = self.send_queue.lock_or_recover().len();
             if queue_len > 0 {
                 tracing::warn!(
                     pending_messages = queue_len,
@@ -268,7 +268,7 @@ impl NostrTransport {
         self.drain_expired_pending();
 
         let message = {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             match queue.pop_front() {
                 Some(m) => m,
                 None => return Ok(None),
@@ -279,8 +279,7 @@ impl NostrTransport {
         let data = self.serialize_message(&message)?;
 
         self.pending_confirmation
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(message_id.clone(), Instant::now());
 
         Ok(Some((message_id, data)))
@@ -288,10 +287,13 @@ impl NostrTransport {
 
     /// Platform confirms a message was sent successfully.
     pub fn confirm_sent(&self, message_id: &str) {
-        let removed = self.pending_confirmation.lock().unwrap().remove(message_id);
+        let removed = self
+            .pending_confirmation
+            .lock_or_recover()
+            .remove(message_id);
 
         if removed.is_some() {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.success_count = metrics.success_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
         }
@@ -299,10 +301,13 @@ impl NostrTransport {
 
     /// Platform reports a send failure.
     pub fn report_send_failure(&self, message_id: &str) {
-        let removed = self.pending_confirmation.lock().unwrap().remove(message_id);
+        let removed = self
+            .pending_confirmation
+            .lock_or_recover()
+            .remove(message_id);
 
         if removed.is_some() {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
         }
@@ -316,18 +321,18 @@ impl NostrTransport {
         if self.config.max_reconnect_attempts == 0 {
             return true;
         }
-        *self.reconnect_attempts.lock().unwrap() < self.config.max_reconnect_attempts
+        *self.reconnect_attempts.lock_or_recover() < self.config.max_reconnect_attempts
     }
 
     /// Increments the reconnection attempt counter.
     pub fn increment_reconnect_attempts(&self) {
-        let mut attempts = self.reconnect_attempts.lock().unwrap();
+        let mut attempts = self.reconnect_attempts.lock_or_recover();
         *attempts = attempts.saturating_add(1);
     }
 
     /// Updates transport metrics, preserving confirmation-loop counts.
     pub fn update_metrics(&self, incoming: TransportMetrics) {
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock_or_recover();
         let prev_success = metrics.success_count;
         let prev_failure = metrics.failure_count;
         *metrics = incoming;
@@ -338,12 +343,12 @@ impl NostrTransport {
 
     /// Checks if there are messages waiting to be sent.
     pub fn has_pending_sends(&self) -> bool {
-        !self.send_queue.lock().unwrap().is_empty()
+        !self.send_queue.lock_or_recover().is_empty()
     }
 
     /// Returns the number of messages awaiting platform confirmation.
     pub fn pending_confirmation_count(&self) -> usize {
-        self.pending_confirmation.lock().unwrap().len()
+        self.pending_confirmation.lock_or_recover().len()
     }
 
     // ========================================================================
@@ -358,7 +363,7 @@ impl NostrTransport {
     /// persisted one, so platforms should read it after protocol
     /// initialization, not cache it across that boundary.
     pub fn public_key_hex(&self) -> String {
-        self.keypair.read().unwrap().public_key_hex().to_string()
+        self.keypair.read_or_recover().public_key_hex().to_string()
     }
 
     /// Returns this device's public routing tag (the `#p` value peers use to
@@ -378,7 +383,7 @@ impl NostrTransport {
     pub fn install_signing_secret(&self, secret: &[u8]) -> Result<()> {
         let keypair = NostrKeypair::from_install_secret(secret)?;
         let pubkey = keypair.public_key_hex().to_string();
-        *self.keypair.write().unwrap() = keypair;
+        *self.keypair.write_or_recover() = keypair;
         tracing::debug!(
             pubkey = %pubkey,
             "Installed persisted Nostr signing key"
@@ -396,7 +401,7 @@ impl NostrTransport {
         self.drain_expired_pending();
 
         let message = {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             match queue.pop_front() {
                 Some(m) => m,
                 None => return Ok(None),
@@ -411,7 +416,7 @@ impl NostrTransport {
             let content_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
 
             let recipient_tag = nostr_crypto::routing_tag_for_device_id(&recipient_device_id)?;
-            let keypair = self.keypair.read().unwrap();
+            let keypair = self.keypair.read_or_recover();
             let event =
                 nostr_crypto::NostrEvent::create_dm(&keypair, &recipient_tag, &content_base64)?;
             drop(keypair);
@@ -422,10 +427,9 @@ impl NostrTransport {
 
         match result {
             Ok((event_id, event_json)) => {
-                self.sign_retry_counts.lock().unwrap().remove(&message_id);
+                self.sign_retry_counts.lock_or_recover().remove(&message_id);
                 self.pending_confirmation
-                    .lock()
-                    .unwrap()
+                    .lock_or_recover()
                     .insert(message_id.clone(), Instant::now());
 
                 Ok(Some(SignedNostrEvent {
@@ -436,7 +440,7 @@ impl NostrTransport {
             }
             Err(e) => {
                 let retry_count = {
-                    let mut counts = self.sign_retry_counts.lock().unwrap();
+                    let mut counts = self.sign_retry_counts.lock_or_recover();
                     let count = counts.entry(message_id.clone()).or_insert(0);
                     *count += 1;
                     *count
@@ -444,11 +448,11 @@ impl NostrTransport {
 
                 if retry_count < MAX_SIGN_RETRIES {
                     // Re-enqueue for another attempt.
-                    self.send_queue.lock().unwrap().push_front(message);
+                    self.send_queue.lock_or_recover().push_front(message);
                 } else {
                     // Permanent failure — report it so metrics are updated and
                     // the queue is not blocked by an undeliverable message.
-                    self.sign_retry_counts.lock().unwrap().remove(&message_id);
+                    self.sign_retry_counts.lock_or_recover().remove(&message_id);
                     self.report_send_failure(&message_id);
                     tracing::error!(
                         message_id = %message_id,
@@ -476,13 +480,13 @@ impl NostrTransport {
     /// Fails all pending confirmations and records them as failures.
     fn fail_all_pending(&self) {
         let pending = {
-            let mut map = self.pending_confirmation.lock().unwrap();
+            let mut map = self.pending_confirmation.lock_or_recover();
             let count = map.len();
             map.clear();
             count
         };
         if pending > 0 {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(pending as u32);
             recalculate_delivery_ratios(&mut metrics);
         }
@@ -495,7 +499,7 @@ impl NostrTransport {
         let mut expired_count = 0u32;
 
         {
-            let mut pending = self.pending_confirmation.lock().unwrap();
+            let mut pending = self.pending_confirmation.lock_or_recover();
             pending.retain(|_, enqueued_at| {
                 if now.duration_since(*enqueued_at) > timeout {
                     expired_count += 1;
@@ -507,7 +511,7 @@ impl NostrTransport {
         }
 
         if expired_count > 0 {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(expired_count);
             recalculate_delivery_ratios(&mut metrics);
         }
@@ -524,15 +528,15 @@ impl Transport for NostrTransport {
     }
 
     fn status(&self) -> TransportStatus {
-        *self.status.lock().unwrap()
+        *self.status.lock_or_recover()
     }
 
     fn metrics(&self) -> TransportMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock_or_recover().clone()
     }
 
     fn send(&self, message: &Message) -> Result<()> {
-        let status = *self.status.lock().unwrap();
+        let status = *self.status.lock_or_recover();
         if status != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(format!(
                 "Nostr transport is {:?}",
@@ -541,12 +545,12 @@ impl Transport for NostrTransport {
         }
 
         let queue_len = {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             queue.push_back(message.clone());
             queue.len()
         };
 
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock_or_recover();
         metrics.queue_depth = queue_len;
         metrics.congestion = ((queue_len as f32) / 50.0).clamp(0.0, 1.0);
         drop(metrics);
@@ -557,7 +561,7 @@ impl Transport for NostrTransport {
     }
 
     fn receive(&self) -> Result<Option<Message>> {
-        let mut queue = self.receive_queue.lock().unwrap();
+        let mut queue = self.receive_queue.lock_or_recover();
         Ok(queue.pop_front())
     }
 
@@ -568,10 +572,10 @@ impl Transport for NostrTransport {
     }
 
     fn stop(&mut self) -> Result<()> {
-        *self.status.lock().unwrap() = TransportStatus::Disconnected;
+        *self.status.lock_or_recover() = TransportStatus::Disconnected;
         self.fail_all_pending();
-        self.send_queue.lock().unwrap().clear();
-        self.receive_queue.lock().unwrap().clear();
+        self.send_queue.lock_or_recover().clear();
+        self.receive_queue.lock_or_recover().clear();
         Ok(())
     }
 }

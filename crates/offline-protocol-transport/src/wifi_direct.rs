@@ -15,7 +15,7 @@
 //! injects inbound bytes via [`WifiDirectTransport::on_data_received`].
 
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
-use offline_protocol_core::Message;
+use offline_protocol_core::{Message, MutexExt};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -104,12 +104,12 @@ impl WifiDirectTransport {
 
     /// Registers a callback that fires when new outgoing messages become available.
     pub fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_messages_available.lock().unwrap() = Some(callback);
+        *self.on_messages_available.lock_or_recover() = Some(callback);
     }
 
     /// Notifies the platform that messages are ready to send.
     fn notify_messages_available(&self) {
-        let callback = self.on_messages_available.lock().unwrap().clone();
+        let callback = self.on_messages_available.lock_or_recover().clone();
         if let Some(cb) = callback {
             cb();
         }
@@ -137,13 +137,13 @@ impl WifiDirectTransport {
 
     /// Called when a peer device is discovered.
     pub fn on_peer_discovered(&self, peer: WifiDirectPeer) {
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock_or_recover();
         peers.insert(peer.device_address.clone(), peer);
     }
 
     /// Called when a peer device is lost.
     pub fn on_peer_lost(&self, device_address: &str) {
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock_or_recover();
         peers.remove(device_address);
     }
 
@@ -153,17 +153,17 @@ impl WifiDirectTransport {
     /// and queues are drained so a subsequent reconnect starts clean.
     pub fn on_status_changed(&self, status: TransportStatus) {
         let previous = {
-            let mut guard = self.status.lock().unwrap();
+            let mut guard = self.status.lock_or_recover();
             let prev = *guard;
             *guard = status;
             prev
         };
 
         if previous == TransportStatus::Available && status != TransportStatus::Available {
-            self.peers.lock().unwrap().clear();
-            self.send_queue.lock().unwrap().clear();
-            self.receive_queue.lock().unwrap().clear();
-            let mut metrics = self.metrics.lock().unwrap();
+            self.peers.lock_or_recover().clear();
+            self.send_queue.lock_or_recover().clear();
+            self.receive_queue.lock_or_recover().clear();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.queue_depth = 0;
             metrics.congestion = 0.0;
         }
@@ -190,19 +190,19 @@ impl WifiDirectTransport {
 
     /// Gets all discovered peers.
     pub fn get_peers(&self) -> Vec<WifiDirectPeer> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers.lock_or_recover();
         peers.values().cloned().collect()
     }
 
     /// Gets a specific peer by device address.
     pub fn get_peer(&self, device_address: &str) -> Option<WifiDirectPeer> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers.lock_or_recover();
         peers.get(device_address).cloned()
     }
 
     /// Updates transport metrics.
     pub fn update_metrics(&self, metrics: TransportMetrics) {
-        *self.metrics.lock().unwrap() = metrics;
+        *self.metrics.lock_or_recover() = metrics;
     }
 
     /// Serializes a message to JSON bytes.
@@ -239,7 +239,7 @@ impl WifiDirectTransport {
     /// Returns (recipient, serialized_data) or None if no messages to send.
     pub fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
         let (recipient, message) = {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             match queue.pop_front() {
                 Some((r, m)) => (r, m),
                 None => return Ok(None),
@@ -253,7 +253,7 @@ impl WifiDirectTransport {
 
     /// Checks if there are messages to send.
     pub fn has_pending_sends(&self) -> bool {
-        let queue = self.send_queue.lock().unwrap();
+        let queue = self.send_queue.lock_or_recover();
         !queue.is_empty()
     }
 }
@@ -268,11 +268,11 @@ impl Transport for WifiDirectTransport {
     }
 
     fn status(&self) -> TransportStatus {
-        *self.status.lock().unwrap()
+        *self.status.lock_or_recover()
     }
 
     fn metrics(&self) -> TransportMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock_or_recover().clone()
     }
 
     fn send(&self, message: &Message) -> Result<()> {
@@ -286,11 +286,11 @@ impl Transport for WifiDirectTransport {
         // Determine recipient and add to send queue
         let recipient = message.recipient.as_str().to_string();
         {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             queue.push_back((recipient, message.clone()));
 
             // Update metrics
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.queue_depth = queue.len();
             metrics.congestion = ((metrics.queue_depth as f32) / 20.0).clamp(0.0, 1.0);
         }
@@ -302,7 +302,7 @@ impl Transport for WifiDirectTransport {
     }
 
     fn receive(&self) -> Result<Option<Message>> {
-        let mut queue = self.receive_queue.lock().unwrap();
+        let mut queue = self.receive_queue.lock_or_recover();
         Ok(queue.pop_front())
     }
 
@@ -312,11 +312,11 @@ impl Transport for WifiDirectTransport {
     }
 
     fn stop(&mut self) -> Result<()> {
-        *self.status.lock().unwrap() = TransportStatus::Disconnected;
-        self.peers.lock().unwrap().clear();
-        self.send_queue.lock().unwrap().clear();
-        self.receive_queue.lock().unwrap().clear();
-        let mut metrics = self.metrics.lock().unwrap();
+        *self.status.lock_or_recover() = TransportStatus::Disconnected;
+        self.peers.lock_or_recover().clear();
+        self.send_queue.lock_or_recover().clear();
+        self.receive_queue.lock_or_recover().clear();
+        let mut metrics = self.metrics.lock_or_recover();
         metrics.queue_depth = 0;
         metrics.congestion = 0.0;
         Ok(())

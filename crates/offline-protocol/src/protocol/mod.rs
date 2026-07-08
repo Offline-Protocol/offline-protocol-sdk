@@ -31,7 +31,7 @@ use crate::telemetry::{
 };
 use crate::{Error, EstablishmentState, Event, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Utc};
-use offline_protocol_core::{LamportClock, Message, MessageId};
+use offline_protocol_core::{LamportClock, Message, MessageId, MutexExt};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{
@@ -569,14 +569,13 @@ impl OfflineProtocol {
         let shared_routing = self.shared_state.clone();
         self.transport_manager
             .set_routing_decision_callback(Some(Arc::new(move |decision| {
-                if let Ok(s) = shared_routing.lock() {
-                    if let Some(ctx) = &s.telemetry {
-                        let record = TelemetryRecord::Routing(Box::new(decision));
-                        // Dispatch is panic-isolated so a sink that panics
-                        // here cannot unwind through the live `MutexGuard`
-                        // and poison `SharedState`.
-                        dispatch_record(&ctx.sink, &record);
-                    }
+                let s = shared_routing.lock_or_recover();
+                if let Some(ctx) = &s.telemetry {
+                    let record = TelemetryRecord::Routing(Box::new(decision));
+                    // Dispatch is panic-isolated so a sink that panics
+                    // here cannot unwind through the live `MutexGuard`
+                    // and poison `SharedState`.
+                    dispatch_record(&ctx.sink, &record);
                 }
             })));
 
@@ -623,9 +622,7 @@ impl OfflineProtocol {
         let shared = self.shared_state.clone();
         self.transport_manager
             .set_dors_event_callback(Some(Arc::new(move |event| {
-                if let Ok(s) = shared.lock() {
-                    s.emit_event(event);
-                }
+                shared.lock_or_recover().emit_event(event);
             })));
 
         // NOTE: the structured routing-decision callback is wired by
@@ -636,18 +633,17 @@ impl OfflineProtocol {
         // Wire BLE fragment eviction callback so app receives FragmentAssemblyEvicted.
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
             let shared = self.shared_state.clone();
-            if let Ok(transport) = ble_arc.lock() {
-                if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
-                    ble.set_fragment_eviction_callback(Some(Arc::new(move |info| {
-                        if let Ok(s) = shared.lock() {
-                            s.emit_event(Event::fragment_assembly_evicted(
-                                info.message_id,
-                                info.completion_percent,
-                                "capacity".to_string(),
-                            ));
-                        }
-                    })));
-                }
+            let transport = ble_arc.lock_or_recover();
+            if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
+                ble.set_fragment_eviction_callback(Some(Arc::new(move |info| {
+                    shared
+                        .lock_or_recover()
+                        .emit_event(Event::fragment_assembly_evicted(
+                            info.message_id,
+                            info.completion_percent,
+                            "capacity".to_string(),
+                        ));
+                })));
             }
         }
 
@@ -687,10 +683,9 @@ impl OfflineProtocol {
         // preserves the wiring without requiring the app to re-install.
         self.transport_manager.set_dors_event_callback(None);
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
-            if let Ok(transport) = ble_arc.lock() {
-                if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
-                    ble.set_fragment_eviction_callback(None);
-                }
+            let transport = ble_arc.lock_or_recover();
+            if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
+                ble.set_fragment_eviction_callback(None);
             }
         }
 

@@ -18,7 +18,7 @@ use crate::constants::{
     RETICULUM_CONNECTION_TIMEOUT_SECS, RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
-use offline_protocol_core::Message;
+use offline_protocol_core::{Message, MutexExt};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -123,7 +123,7 @@ impl ReticulumTransport {
 
     /// Sets the callback invoked when outgoing messages are queued.
     pub fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_messages_available.lock().unwrap() = Some(callback);
+        *self.on_messages_available.lock_or_recover() = Some(callback);
     }
 
     /// Notifies the platform that messages are ready to send.
@@ -132,7 +132,7 @@ impl ReticulumTransport {
     /// before the call, so a callback that re-enters the transport (e.g.
     /// another `send()`) cannot self-deadlock on the callback mutex.
     fn notify_messages_available(&self) {
-        let callback = self.on_messages_available.lock().unwrap().clone();
+        let callback = self.on_messages_available.lock_or_recover().clone();
         if let Some(cb) = callback {
             cb();
         }
@@ -144,15 +144,15 @@ impl ReticulumTransport {
     /// Fails all pending confirmations on disconnect.
     pub fn on_status_changed(&self, status: TransportStatus) {
         let previous_status = {
-            let mut guard = self.status.lock().unwrap();
+            let mut guard = self.status.lock_or_recover();
             let prev = *guard;
             *guard = status;
             prev
         };
 
         if status == TransportStatus::Available {
-            let queue_len = self.send_queue.lock().unwrap().len();
-            *self.reconnect_attempts.lock().unwrap() = 0;
+            let queue_len = self.send_queue.lock_or_recover().len();
+            *self.reconnect_attempts.lock_or_recover() = 0;
 
             if queue_len > 0 {
                 tracing::info!(
@@ -166,7 +166,7 @@ impl ReticulumTransport {
         {
             self.fail_all_pending();
 
-            let queue_len = self.send_queue.lock().unwrap().len();
+            let queue_len = self.send_queue.lock_or_recover().len();
             if queue_len > 0 {
                 tracing::warn!(
                     pending_messages = queue_len,
@@ -220,7 +220,7 @@ impl ReticulumTransport {
         self.drain_expired_pending();
 
         let message = {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             match queue.pop_front() {
                 Some(m) => m,
                 None => return Ok(None),
@@ -231,8 +231,7 @@ impl ReticulumTransport {
         let data = self.serialize_message(&message)?;
 
         self.pending_confirmation
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(message_id.clone(), Instant::now());
 
         Ok(Some((message_id, data)))
@@ -240,10 +239,13 @@ impl ReticulumTransport {
 
     /// Platform confirms a message was sent successfully.
     pub fn confirm_sent(&self, message_id: &str) {
-        let removed = self.pending_confirmation.lock().unwrap().remove(message_id);
+        let removed = self
+            .pending_confirmation
+            .lock_or_recover()
+            .remove(message_id);
 
         if removed.is_some() {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.success_count = metrics.success_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
         }
@@ -251,10 +253,13 @@ impl ReticulumTransport {
 
     /// Platform reports a send failure.
     pub fn report_send_failure(&self, message_id: &str) {
-        let removed = self.pending_confirmation.lock().unwrap().remove(message_id);
+        let removed = self
+            .pending_confirmation
+            .lock_or_recover()
+            .remove(message_id);
 
         if removed.is_some() {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
         }
@@ -268,18 +273,18 @@ impl ReticulumTransport {
         if self.config.max_reconnect_attempts == 0 {
             return true;
         }
-        *self.reconnect_attempts.lock().unwrap() < self.config.max_reconnect_attempts
+        *self.reconnect_attempts.lock_or_recover() < self.config.max_reconnect_attempts
     }
 
     /// Increments the reconnection attempt counter.
     pub fn increment_reconnect_attempts(&self) {
-        let mut attempts = self.reconnect_attempts.lock().unwrap();
+        let mut attempts = self.reconnect_attempts.lock_or_recover();
         *attempts = attempts.saturating_add(1);
     }
 
     /// Updates transport metrics, preserving confirmation-loop counts.
     pub fn update_metrics(&self, incoming: TransportMetrics) {
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock_or_recover();
         let prev_success = metrics.success_count;
         let prev_failure = metrics.failure_count;
         *metrics = incoming;
@@ -290,19 +295,19 @@ impl ReticulumTransport {
 
     /// Checks if there are messages waiting to be sent.
     pub fn has_pending_sends(&self) -> bool {
-        !self.send_queue.lock().unwrap().is_empty()
+        !self.send_queue.lock_or_recover().is_empty()
     }
 
     /// Fails all pending confirmations and records them as failures.
     fn fail_all_pending(&self) {
         let pending = {
-            let mut map = self.pending_confirmation.lock().unwrap();
+            let mut map = self.pending_confirmation.lock_or_recover();
             let count = map.len();
             map.clear();
             count
         };
         if pending > 0 {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(pending as u32);
             recalculate_delivery_ratios(&mut metrics);
         }
@@ -315,7 +320,7 @@ impl ReticulumTransport {
         let mut expired_count = 0u32;
 
         {
-            let mut pending = self.pending_confirmation.lock().unwrap();
+            let mut pending = self.pending_confirmation.lock_or_recover();
             pending.retain(|_, enqueued_at| {
                 if now.duration_since(*enqueued_at) > timeout {
                     expired_count += 1;
@@ -327,7 +332,7 @@ impl ReticulumTransport {
         }
 
         if expired_count > 0 {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(expired_count);
             recalculate_delivery_ratios(&mut metrics);
         }
@@ -344,15 +349,15 @@ impl Transport for ReticulumTransport {
     }
 
     fn status(&self) -> TransportStatus {
-        *self.status.lock().unwrap()
+        *self.status.lock_or_recover()
     }
 
     fn metrics(&self) -> TransportMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock_or_recover().clone()
     }
 
     fn send(&self, message: &Message) -> Result<()> {
-        let status = *self.status.lock().unwrap();
+        let status = *self.status.lock_or_recover();
         if status != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(format!(
                 "Reticulum transport is {:?}",
@@ -361,12 +366,12 @@ impl Transport for ReticulumTransport {
         }
 
         let queue_len = {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             queue.push_back(message.clone());
             queue.len()
         };
 
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock_or_recover();
         metrics.queue_depth = queue_len;
         metrics.congestion = ((queue_len as f32) / 50.0).clamp(0.0, 1.0);
         drop(metrics);
@@ -377,7 +382,7 @@ impl Transport for ReticulumTransport {
     }
 
     fn receive(&self) -> Result<Option<Message>> {
-        let mut queue = self.receive_queue.lock().unwrap();
+        let mut queue = self.receive_queue.lock_or_recover();
         Ok(queue.pop_front())
     }
 
@@ -388,10 +393,10 @@ impl Transport for ReticulumTransport {
     }
 
     fn stop(&mut self) -> Result<()> {
-        *self.status.lock().unwrap() = TransportStatus::Disconnected;
+        *self.status.lock_or_recover() = TransportStatus::Disconnected;
         self.fail_all_pending();
-        self.send_queue.lock().unwrap().clear();
-        self.receive_queue.lock().unwrap().clear();
+        self.send_queue.lock_or_recover().clear();
+        self.receive_queue.lock_or_recover().clear();
         Ok(())
     }
 }

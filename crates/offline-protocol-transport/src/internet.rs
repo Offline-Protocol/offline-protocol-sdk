@@ -19,7 +19,7 @@ use crate::constants::{
     INTERNET_HEARTBEAT_INTERVAL_SECS, INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
-use offline_protocol_core::Message;
+use offline_protocol_core::{Message, MutexExt};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -153,7 +153,7 @@ impl InternetTransport {
     /// - Reconnect counter is reset on successful connection
     pub fn on_status_changed(&self, status: TransportStatus) {
         let previous_status = {
-            let mut guard = self.status.lock().unwrap();
+            let mut guard = self.status.lock_or_recover();
             let prev = *guard;
             *guard = status;
             prev
@@ -163,8 +163,8 @@ impl InternetTransport {
         if status == TransportStatus::Available {
             // Acquire send_queue before reconnect_attempts to respect lock
             // ordering (send_queue is #3, reconnect_attempts is #6).
-            let queue_len = self.send_queue.lock().unwrap().len();
-            *self.reconnect_attempts.lock().unwrap() = 0;
+            let queue_len = self.send_queue.lock_or_recover().len();
+            *self.reconnect_attempts.lock_or_recover() = 0;
 
             if queue_len > 0 {
                 tracing::info!(
@@ -180,7 +180,7 @@ impl InternetTransport {
             // platform can no longer report outcomes for in-flight messages.
             self.fail_all_pending();
 
-            let queue_len = self.send_queue.lock().unwrap().len();
+            let queue_len = self.send_queue.lock_or_recover().len();
             if queue_len > 0 {
                 tracing::warn!(
                     pending_messages = queue_len,
@@ -258,7 +258,7 @@ impl InternetTransport {
         self.drain_expired_pending();
 
         let (message, queue_depth) = {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             match queue.pop_front() {
                 Some(m) => {
                     let depth = queue.len();
@@ -276,12 +276,12 @@ impl InternetTransport {
         let data = self.serialize_message(&message)?;
 
         {
-            let mut pending = self.pending_confirmation.lock().unwrap();
+            let mut pending = self.pending_confirmation.lock_or_recover();
             pending.insert(message_id.clone(), Instant::now());
         }
 
         {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.queue_depth = queue_depth;
         }
 
@@ -294,12 +294,12 @@ impl InternetTransport {
     /// enabling DORS to make accurate routing decisions.
     pub fn confirm_sent(&self, message_id: &str) {
         let was_pending = {
-            let mut pending = self.pending_confirmation.lock().unwrap();
+            let mut pending = self.pending_confirmation.lock_or_recover();
             pending.remove(message_id).is_some()
         };
 
         if was_pending {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.success_count = metrics.success_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
             tracing::trace!(
@@ -318,12 +318,12 @@ impl InternetTransport {
     /// Platform reports that a message failed to send (e.g., WebSocket error).
     pub fn report_send_failure(&self, message_id: &str) {
         let was_pending = {
-            let mut pending = self.pending_confirmation.lock().unwrap();
+            let mut pending = self.pending_confirmation.lock_or_recover();
             pending.remove(message_id).is_some()
         };
 
         if was_pending {
-            let mut metrics = self.metrics.lock().unwrap();
+            let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
             tracing::trace!(
@@ -347,7 +347,7 @@ impl InternetTransport {
         let mut expired_count: u32 = 0;
 
         {
-            let mut pending = self.pending_confirmation.lock().unwrap();
+            let mut pending = self.pending_confirmation.lock_or_recover();
             pending.retain(|_id, enqueued_at| {
                 if now.duration_since(*enqueued_at) >= timeout {
                     expired_count += 1;
@@ -374,7 +374,7 @@ impl InternetTransport {
     /// per-message expiry timeout.
     fn fail_all_pending(&self) {
         let count = {
-            let mut pending = self.pending_confirmation.lock().unwrap();
+            let mut pending = self.pending_confirmation.lock_or_recover();
             let count = u32::try_from(pending.len()).unwrap_or(u32::MAX);
             pending.clear();
             count
@@ -391,14 +391,14 @@ impl InternetTransport {
 
     /// Records `count` delivery failures in transport metrics.
     fn record_bulk_failures(&self, count: u32) {
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock_or_recover();
         metrics.failure_count = metrics.failure_count.saturating_add(count);
         recalculate_delivery_ratios(&mut metrics);
     }
 
     /// Returns the count of messages currently awaiting confirmation from the platform.
     pub fn pending_confirmation_count(&self) -> usize {
-        self.pending_confirmation.lock().unwrap().len()
+        self.pending_confirmation.lock_or_recover().len()
     }
 
     /// Checks if reconnection should be attempted.
@@ -407,25 +407,25 @@ impl InternetTransport {
             return false;
         }
 
-        let attempts = *self.reconnect_attempts.lock().unwrap();
+        let attempts = *self.reconnect_attempts.lock_or_recover();
         self.config.max_reconnect_attempts == 0 || attempts < self.config.max_reconnect_attempts
     }
 
     /// Increments reconnection attempt counter.
     /// Uses saturating addition to prevent overflow.
     pub fn increment_reconnect_attempts(&self) {
-        let mut attempts = self.reconnect_attempts.lock().unwrap();
+        let mut attempts = self.reconnect_attempts.lock_or_recover();
         *attempts = attempts.saturating_add(1);
     }
 
     /// Updates heartbeat timestamp.
     pub fn update_heartbeat(&self) {
-        *self.last_heartbeat.lock().unwrap() = Some(Instant::now());
+        *self.last_heartbeat.lock_or_recover() = Some(Instant::now());
     }
 
     /// Checks if heartbeat is needed.
     pub fn needs_heartbeat(&self) -> bool {
-        let last = *self.last_heartbeat.lock().unwrap();
+        let last = *self.last_heartbeat.lock_or_recover();
         match last {
             Some(instant) => {
                 instant.elapsed() >= Duration::from_secs(INTERNET_HEARTBEAT_INTERVAL_SECS)
@@ -442,7 +442,7 @@ impl InternetTransport {
     /// so adding a new confirmation-loop field doesn't require updating this
     /// function — it's preserved by default.
     pub fn update_metrics(&self, incoming: TransportMetrics) {
-        let mut current = self.metrics.lock().unwrap();
+        let mut current = self.metrics.lock_or_recover();
         current.rssi = incoming.rssi;
         current.latency_ms = incoming.latency_ms;
         current.bandwidth_bps = incoming.bandwidth_bps;
@@ -467,11 +467,11 @@ impl Transport for InternetTransport {
     }
 
     fn status(&self) -> TransportStatus {
-        *self.status.lock().unwrap()
+        *self.status.lock_or_recover()
     }
 
     fn metrics(&self) -> TransportMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock_or_recover().clone()
     }
 
     fn send(&self, message: &Message) -> Result<()> {
@@ -483,11 +483,11 @@ impl Transport for InternetTransport {
         }
 
         // Add to send queue
-        let mut queue = self.send_queue.lock().unwrap();
+        let mut queue = self.send_queue.lock_or_recover();
         queue.push_back(message.clone());
 
         // Update metrics
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock_or_recover();
         metrics.queue_depth = queue.len();
         metrics.congestion = ((metrics.queue_depth as f32) / 25.0).clamp(0.0, 1.0);
 
@@ -495,7 +495,7 @@ impl Transport for InternetTransport {
     }
 
     fn receive(&self) -> Result<Option<Message>> {
-        let mut queue = self.receive_queue.lock().unwrap();
+        let mut queue = self.receive_queue.lock_or_recover();
         Ok(queue.pop_front())
     }
 
@@ -507,7 +507,7 @@ impl Transport for InternetTransport {
 
     fn stop(&mut self) -> Result<()> {
         self.fail_all_pending();
-        *self.status.lock().unwrap() = TransportStatus::Disconnected;
+        *self.status.lock_or_recover() = TransportStatus::Disconnected;
         Ok(())
     }
 }
