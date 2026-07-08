@@ -2246,6 +2246,47 @@ impl OfflineProtocol {
         }
     }
 
+    /// Internal: single seam for all carrier-level reachability signals
+    /// (BLE discovery, WiFi Direct connections, and inbound messages on
+    /// Internet/WiFi Direct/Reticulum/Nostr).
+    ///
+    /// Notifies the core protocol via `on_neighbor_discovered()` — which
+    /// drives auto key exchange, outbox flush, and MLS Welcome re-arm and
+    /// has its own is_user_blocked()/self checks — then emits the
+    /// `NeighborDiscovered` platform event. The blocked read here is only
+    /// needed to suppress the platform event.
+    ///
+    /// Message-path callers must drain `receive_message()` first so a
+    /// handshake confirmation in the same inbound batch lands in
+    /// `confirmed_sessions` before the Welcome re-arm decision.
+    fn notify_neighbor_reachable(
+        &self,
+        peer_id: &str,
+        transport: &str,
+        rssi: Option<i16>,
+    ) -> Result<(), ProtocolError> {
+        if peer_id.is_empty() {
+            return Ok(());
+        }
+
+        let is_blocked = {
+            let mut protocol = self.lock_inner()?;
+            let blocked = protocol.is_user_blocked(peer_id);
+            protocol.on_neighbor_discovered(peer_id);
+            blocked
+        };
+
+        if !is_blocked {
+            self.emit_event(CoreEvent::NeighborDiscovered {
+                peer_id: peer_id.to_string(),
+                transport: transport.to_string(),
+                rssi,
+            });
+        }
+
+        Ok(())
+    }
+
     /// Polls for the next event (returns JSON string or None)
     pub fn poll_event(&self) -> Option<String> {
         // Get from queue
@@ -2653,28 +2694,7 @@ impl OfflineProtocol {
             });
         })?;
 
-        // Notify the core protocol of neighbor discovery for auto key exchange.
-        // Note: on_neighbor_discovered() has its own is_user_blocked() check
-        // and returns early for blocked peers (preventing key exchange). The
-        // check here is only needed to suppress the NeighborDiscovered event
-        // emitted by the UniFFI layer.
-        let is_blocked;
-        {
-            let mut protocol = self.lock_inner()?;
-            is_blocked = protocol.is_user_blocked(&peer_id);
-            protocol.on_neighbor_discovered(&peer_id);
-        }
-
-        if !is_blocked {
-            let event = CoreEvent::NeighborDiscovered {
-                peer_id: peer_id.clone(),
-                transport: "BLE".to_string(),
-                rssi: Some(rssi),
-            };
-            self.emit_event(event);
-        }
-
-        Ok(())
+        self.notify_neighbor_reachable(&peer_id, "BLE", Some(rssi))
     }
 
     /// BLE: Peer lost
@@ -2973,19 +2993,9 @@ impl OfflineProtocol {
         }
 
         while protocol.receive_message().is_some() {}
-        let is_blocked = protocol.is_user_blocked(&sender_id);
         drop(protocol);
 
-        if !is_blocked {
-            let event = CoreEvent::NeighborDiscovered {
-                peer_id: sender_id.clone(),
-                transport: "Internet".to_string(),
-                rssi: None,
-            };
-            self.emit_event(event);
-        }
-
-        Ok(())
+        self.notify_neighbor_reachable(&sender_id, "Internet", None)
     }
 
     /// Internet: Get next message to send via WebSocket.
@@ -3186,19 +3196,9 @@ impl OfflineProtocol {
         }
 
         while protocol.receive_message().is_some() {}
-        let is_blocked = protocol.is_user_blocked(&sender_id);
         drop(protocol);
 
-        if !is_blocked {
-            let event = CoreEvent::NeighborDiscovered {
-                peer_id: sender_id.clone(),
-                transport: "WiFiDirect".to_string(),
-                rssi: None,
-            };
-            self.emit_event(event);
-        }
-
-        Ok(())
+        self.notify_neighbor_reachable(&sender_id, "WiFiDirect", None)
     }
 
     /// WiFi Direct: Get next message to send
@@ -3247,21 +3247,7 @@ impl OfflineProtocol {
             wifi_direct_state.connected_peer = Some(peer_id.clone());
         }
 
-        // Suppress NeighborDiscovered event for blocked users
-        let is_blocked = {
-            let guard = self.lock_inner()?;
-            guard.is_user_blocked(&peer_id)
-        };
-        if !is_blocked {
-            let event = CoreEvent::NeighborDiscovered {
-                peer_id,
-                transport: "WiFiDirect".to_string(),
-                rssi: None,
-            };
-            self.emit_event(event);
-        }
-
-        Ok(())
+        self.notify_neighbor_reachable(&peer_id, "WiFiDirect", None)
     }
 
     /// WiFi Direct: Peer disconnected
@@ -3349,23 +3335,14 @@ impl OfflineProtocol {
             )));
         }
 
-        // Separate lock scope: drain received messages and check block status
-        let is_blocked = {
+        // Separate lock scope: drain received messages before the
+        // reachability notification re-acquires the inner lock.
+        {
             let mut protocol = self.lock_inner()?;
             while protocol.receive_message().is_some() {}
-            protocol.is_user_blocked(&sender_id)
-        };
-
-        if !sender_id.is_empty() && !is_blocked {
-            let event = CoreEvent::NeighborDiscovered {
-                peer_id: sender_id.clone(),
-                transport: "Reticulum".to_string(),
-                rssi: None,
-            };
-            self.emit_event(event);
         }
 
-        Ok(())
+        self.notify_neighbor_reachable(&sender_id, "Reticulum", None)
     }
 
     /// Returns the next outgoing Reticulum message, if any.
@@ -3556,22 +3533,12 @@ impl OfflineProtocol {
         // back to the Nostr pubkey if deserialization failed.
         let peer_id = real_sender.unwrap_or(sender_id);
 
-        let is_blocked = {
+        {
             let mut protocol = self.lock_inner()?;
             while protocol.receive_message().is_some() {}
-            protocol.is_user_blocked(&peer_id)
-        };
-
-        if !peer_id.is_empty() && !is_blocked {
-            let event = CoreEvent::NeighborDiscovered {
-                peer_id,
-                transport: "Nostr".to_string(),
-                rssi: None,
-            };
-            self.emit_event(event);
         }
 
-        Ok(())
+        self.notify_neighbor_reachable(&peer_id, "Nostr", None)
     }
 
     /// Returns the next outgoing Nostr message, if any.
@@ -5875,6 +5842,228 @@ mod tests {
         let result = protocol.reticulum_message_received("some-sender".to_string(), vec![0u8; 32]);
         // The data is not valid message format, but it must not panic.
         let _ = result;
+    }
+
+    // ---- Reachability seam: notify_neighbor_reachable (issue #136) ----
+
+    /// Produces valid serialized protocol-message bytes from `sender_id`
+    /// addressed to `recipient`. Every transport uses the shared JSON wire
+    /// format, so Internet-produced bytes are valid inbound data on any path.
+    fn serialized_message_from(sender_id: &str, recipient: &str) -> Vec<u8> {
+        let sender = OfflineProtocol::new(ProtocolConfig {
+            user_id: sender_id.to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        sender.start().unwrap();
+        sender.internet_status_changed(true).unwrap();
+        sender.force_transport(TransportType::Internet).unwrap();
+        sender
+            .send_message(
+                recipient.to_string(),
+                "reachability probe".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+        sender
+            .internet_get_next_message()
+            .expect("Expected outgoing message from sender")
+            .data
+    }
+
+    fn drained_events(protocol: &OfflineProtocol) -> Vec<String> {
+        let mut events = Vec::new();
+        while let Some(event) = protocol.poll_event() {
+            events.push(event);
+        }
+        events
+    }
+
+    #[test]
+    fn test_internet_message_received_marks_neighbor_reachable() {
+        let data = serialized_message_from("sender-user", "receiver-user");
+
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.internet_status_changed(true).unwrap();
+
+        receiver
+            .internet_message_received("sender-user".to_string(), data)
+            .unwrap();
+
+        assert!(
+            receiver.lock_inner().unwrap().is_known_peer("sender-user"),
+            "inbound internet message must notify the core protocol of the reachable sender"
+        );
+        assert!(
+            drained_events(&receiver)
+                .iter()
+                .any(|e| e.contains("neighbor_discovered") && e.contains("sender-user")),
+            "inbound internet message must still emit NeighborDiscovered"
+        );
+    }
+
+    #[test]
+    fn test_wifi_direct_message_received_marks_neighbor_reachable() {
+        let data = serialized_message_from("sender-user", "receiver-user");
+
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.wifi_direct_status_changed(true).unwrap();
+
+        receiver
+            .wifi_direct_message_received("sender-user".to_string(), data)
+            .unwrap();
+
+        assert!(
+            receiver.lock_inner().unwrap().is_known_peer("sender-user"),
+            "inbound WiFi Direct message must notify the core protocol of the reachable sender"
+        );
+    }
+
+    #[test]
+    fn test_wifi_direct_peer_connected_marks_neighbor_reachable() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+
+        protocol
+            .wifi_direct_peer_connected("wifi-peer".to_string())
+            .unwrap();
+
+        assert!(
+            protocol.lock_inner().unwrap().is_known_peer("wifi-peer"),
+            "WiFi Direct connection must notify the core protocol of the reachable peer"
+        );
+    }
+
+    #[test]
+    fn test_ble_peer_discovered_marks_neighbor_reachable() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+
+        protocol
+            .ble_peer_discovered("ble-peer".to_string(), -40)
+            .unwrap();
+
+        assert!(
+            protocol.lock_inner().unwrap().is_known_peer("ble-peer"),
+            "BLE discovery must notify the core protocol of the reachable peer"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_message_received_marks_neighbor_reachable() {
+        let data = serialized_message_from("sender-user", "receiver-user");
+
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_reticulum_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.reticulum_status_changed(true).unwrap();
+
+        receiver
+            .reticulum_message_received("sender-user".to_string(), data)
+            .unwrap();
+
+        assert!(
+            receiver.lock_inner().unwrap().is_known_peer("sender-user"),
+            "inbound Reticulum message must notify the core protocol of the reachable sender"
+        );
+    }
+
+    #[test]
+    fn test_nostr_message_received_marks_neighbor_reachable() {
+        let data = serialized_message_from("sender-user", "receiver-user");
+
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+
+        receiver
+            .nostr_message_received("nostr-routing-pubkey".to_string(), data)
+            .unwrap();
+
+        let core = receiver.lock_inner().unwrap();
+        assert!(
+            core.is_known_peer("sender-user"),
+            "inbound Nostr message must track the real sender from the message body"
+        );
+        assert!(
+            !core.is_known_peer("nostr-routing-pubkey"),
+            "the Nostr routing pubkey is not a protocol identity and must not be tracked"
+        );
+    }
+
+    #[test]
+    fn test_internet_message_received_blocked_sender_not_tracked() {
+        let data = serialized_message_from("sender-user", "receiver-user");
+
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.internet_status_changed(true).unwrap();
+        receiver.block_user("sender-user".to_string()).unwrap();
+
+        receiver
+            .internet_message_received("sender-user".to_string(), data)
+            .unwrap();
+
+        assert!(
+            !receiver.lock_inner().unwrap().is_known_peer("sender-user"),
+            "blocked senders must not be tracked as neighbors"
+        );
+        assert!(
+            !drained_events(&receiver)
+                .iter()
+                .any(|e| e.contains("neighbor_discovered")),
+            "blocked senders must not produce a NeighborDiscovered event"
+        );
+    }
+
+    #[test]
+    fn test_internet_message_received_empty_sender_no_event() {
+        let data = serialized_message_from("sender-user", "receiver-user");
+
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.internet_status_changed(true).unwrap();
+
+        receiver
+            .internet_message_received(String::new(), data)
+            .unwrap();
+
+        assert!(
+            !receiver.lock_inner().unwrap().is_known_peer(""),
+            "an empty sender id must not be tracked as a neighbor"
+        );
+        assert!(
+            !drained_events(&receiver)
+                .iter()
+                .any(|e| e.contains("neighbor_discovered")),
+            "an empty sender id must not produce a NeighborDiscovered event"
+        );
     }
 
     // ---- Telemetry sink adapter end-to-end wiring (step 7) ----
