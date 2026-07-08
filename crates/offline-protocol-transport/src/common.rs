@@ -7,13 +7,13 @@
 
 use crate::constants::DEFAULT_MAX_MESSAGE_SIZE;
 use crate::{Error, Result, TransportMetrics};
-use offline_protocol_core::Message;
+use offline_protocol_core::{Message, MutexExt};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
 /// Queues a received message.
 pub fn on_message_received(receive_queue: &Mutex<VecDeque<Message>>, message: Message) {
-    receive_queue.lock().unwrap().push_back(message);
+    receive_queue.lock_or_recover().push_back(message);
 }
 
 /// Sets the transport peer identity on a message and queues it.
@@ -31,7 +31,7 @@ pub fn on_message_received_from(
         );
         return;
     }
-    receive_queue.lock().unwrap().push_back(message);
+    receive_queue.lock_or_recover().push_back(message);
 }
 
 /// Deserialises raw bytes into a message and queues it.
@@ -42,7 +42,7 @@ pub fn on_data_received(receive_queue: &Mutex<VecDeque<Message>>, data: Vec<u8>)
     }
     match deserialize_message(&data) {
         Ok(message) => {
-            receive_queue.lock().unwrap().push_back(message);
+            receive_queue.lock_or_recover().push_back(message);
             Ok(())
         }
         Err(e) => {
@@ -65,7 +65,7 @@ pub fn on_data_received_from(
     match deserialize_message(&data) {
         Ok(mut message) => {
             message.set_transport_peer_id(peer_id)?;
-            receive_queue.lock().unwrap().push_back(message);
+            receive_queue.lock_or_recover().push_back(message);
             Ok(())
         }
         Err(e) => {
@@ -89,12 +89,12 @@ pub fn deserialize_message(data: &[u8]) -> Result<Message> {
 
 /// Stores an opaque platform handle.
 pub fn set_platform_handle(handle_lock: &Mutex<Option<usize>>, handle: usize) {
-    *handle_lock.lock().unwrap() = Some(handle);
+    *handle_lock.lock_or_recover() = Some(handle);
 }
 
 /// Retrieves the stored platform handle.
 pub fn platform_handle(handle_lock: &Mutex<Option<usize>>) -> Option<usize> {
-    *handle_lock.lock().unwrap()
+    *handle_lock.lock_or_recover()
 }
 
 /// Recalculates `delivery_ratio` and `drop_rate` from the current success/failure counts.

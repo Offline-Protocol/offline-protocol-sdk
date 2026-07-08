@@ -27,7 +27,7 @@ use crate::constants::{
     FRAGMENT_VERSION, MAX_REASONABLE_BLE_PAYLOAD,
 };
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
-use offline_protocol_core::Message;
+use offline_protocol_core::{Message, MutexExt};
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -253,18 +253,18 @@ impl BleTransport {
     /// The platform layer (Swift/Kotlin) implements this to wake up and call
     /// `get_next_fragment()` instead of polling on a timer.
     pub fn set_on_fragments_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_fragments_available.lock().unwrap() = Some(callback);
+        *self.on_fragments_available.lock_or_recover() = Some(callback);
     }
 
     /// Registers a callback that fires when a fragment assembly is evicted
     /// from the reassembly cache due to capacity pressure.
     pub fn set_fragment_eviction_callback(&self, callback: Option<FragmentEvictionCallback>) {
-        *self.eviction_callback.lock().unwrap() = callback;
+        *self.eviction_callback.lock_or_recover() = callback;
     }
 
     /// Notifies the platform that fragments are ready to send.
     fn notify_fragments_available(&self) {
-        let callback = self.on_fragments_available.lock().unwrap().clone();
+        let callback = self.on_fragments_available.lock_or_recover().clone();
         if let Some(cb) = callback {
             cb();
         }
@@ -303,7 +303,7 @@ impl BleTransport {
         // path free of an extra mutex acquisition in release builds.
         #[cfg(debug_assertions)]
         {
-            if !self.peers.lock().unwrap().contains_key(peer_id) {
+            if !self.peers.lock_or_recover().contains_key(peer_id) {
                 tracing::warn!(
                     peer = %peer_id,
                     max_payload,
@@ -321,7 +321,7 @@ impl BleTransport {
                 floor = BLE_MAX_FRAGMENT_SIZE,
                 "ble: undersized MTU report; dropping stored entry and falling back"
             );
-            self.peer_mtus.lock().unwrap().remove(peer_id);
+            self.peer_mtus.lock_or_recover().remove(peer_id);
             return;
         }
         let clamped = max_payload.min(MAX_REASONABLE_BLE_PAYLOAD);
@@ -332,8 +332,7 @@ impl BleTransport {
             "ble: stored per-peer MTU"
         );
         self.peer_mtus
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .insert(peer_id.to_string(), clamped);
     }
 
@@ -341,15 +340,14 @@ impl BleTransport {
     /// renegotiation).
     pub fn clear_peer_mtu(&self, peer_id: &str) {
         tracing::debug!(peer = %peer_id, "ble: cleared per-peer MTU");
-        self.peer_mtus.lock().unwrap().remove(peer_id);
+        self.peer_mtus.lock_or_recover().remove(peer_id);
     }
 
     /// Returns the maximum fragment payload to use for a given peer, falling
     /// back to [`BLE_MAX_FRAGMENT_SIZE`] when no negotiated value is on file.
     pub fn peer_mtu(&self, peer_id: &str) -> usize {
         self.peer_mtus
-            .lock()
-            .unwrap()
+            .lock_or_recover()
             .get(peer_id)
             .copied()
             .unwrap_or(BLE_MAX_FRAGMENT_SIZE)
@@ -411,7 +409,7 @@ impl BleTransport {
 
     /// Called when a peer device is discovered.
     pub fn on_peer_discovered(&self, peer: PeerDevice) {
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock_or_recover();
         peers.insert(peer.device_id.clone(), peer);
     }
 
@@ -421,8 +419,8 @@ impl BleTransport {
     /// stale value from the previous link. Platforms may still call
     /// [`Self::clear_peer_mtu`] directly for mid-link renegotiation paths.
     pub fn on_peer_lost(&self, device_id: &str) {
-        self.peers.lock().unwrap().remove(device_id);
-        self.peer_mtus.lock().unwrap().remove(device_id);
+        self.peers.lock_or_recover().remove(device_id);
+        self.peer_mtus.lock_or_recover().remove(device_id);
     }
 
     /// Called when a message is received from a peer.
@@ -454,44 +452,44 @@ impl BleTransport {
     /// (`undersized_mtu_reports`, `fragment_fallback_count`) are preserved.
     pub fn on_status_changed(&self, status: TransportStatus) {
         let previous = {
-            let mut guard = self.status.lock().unwrap();
+            let mut guard = self.status.lock_or_recover();
             let prev = *guard;
             *guard = status;
             prev
         };
 
         if previous == TransportStatus::Available && status != TransportStatus::Available {
-            self.peers.lock().unwrap().clear();
-            self.peer_mtus.lock().unwrap().clear();
-            self.fragment_buffers.lock().unwrap().clear();
-            self.send_queue.lock().unwrap().clear();
-            self.pending_fragments.lock().unwrap().clear();
-            self.receive_queue.lock().unwrap().clear();
+            self.peers.lock_or_recover().clear();
+            self.peer_mtus.lock_or_recover().clear();
+            self.fragment_buffers.lock_or_recover().clear();
+            self.send_queue.lock_or_recover().clear();
+            self.pending_fragments.lock_or_recover().clear();
+            self.receive_queue.lock_or_recover().clear();
             self.update_queue_metric();
         }
     }
 
     /// Gets all discovered peers.
     pub fn get_peers(&self) -> Vec<PeerDevice> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers.lock_or_recover();
         peers.values().cloned().collect()
     }
 
     /// Gets a specific peer by device ID.
     pub fn get_peer(&self, device_id: &str) -> Option<PeerDevice> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers.lock_or_recover();
         peers.get(device_id).cloned()
     }
 
     /// Updates transport metrics.
     pub fn update_metrics(&self, metrics: TransportMetrics) {
-        *self.metrics.lock().unwrap() = metrics;
+        *self.metrics.lock_or_recover() = metrics;
     }
 
     fn update_queue_metric(&self) {
-        let send_len = self.send_queue.lock().unwrap().len();
-        let fragment_len = self.pending_fragments.lock().unwrap().len();
-        let mut metrics = self.metrics.lock().unwrap();
+        let send_len = self.send_queue.lock_or_recover().len();
+        let fragment_len = self.pending_fragments.lock_or_recover().len();
+        let mut metrics = self.metrics.lock_or_recover();
         metrics.queue_depth = send_len + fragment_len;
         let heuristic_capacity = 50_f32;
         metrics.congestion = ((metrics.queue_depth as f32) / heuristic_capacity).clamp(0.0, 1.0);
@@ -499,7 +497,7 @@ impl BleTransport {
 
     /// Records a successful send for metrics tracking.
     pub fn record_send_success(&self) {
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock_or_recover();
         metrics.success_count = metrics.success_count.saturating_add(1);
         let total = metrics.success_count + metrics.failure_count;
         if total > 0 {
@@ -511,7 +509,7 @@ impl BleTransport {
 
     /// Records a failed send for metrics tracking.
     pub fn record_send_failure(&self) {
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock_or_recover();
         metrics.failure_count = metrics.failure_count.saturating_add(1);
         let total = metrics.success_count + metrics.failure_count;
         if total > 0 {
@@ -523,7 +521,7 @@ impl BleTransport {
 
     fn record_latency(&self, latency_ms: u128) {
         let value = latency_ms.min(u128::from(u32::MAX)) as u32;
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock_or_recover();
         metrics.latency_ms = Some(match metrics.latency_ms {
             Some(existing) => {
                 let ema = (existing as f32 * 0.7) + (value as f32 * 0.3);
@@ -534,7 +532,7 @@ impl BleTransport {
     }
 
     fn cleanup_fragment_buffers(&self) {
-        let mut buffers = self.fragment_buffers.lock().unwrap();
+        let mut buffers = self.fragment_buffers.lock_or_recover();
         let now = SystemTime::now();
         let mut expired = Vec::new();
 
@@ -563,15 +561,15 @@ impl BleTransport {
 
     /// Gets current queue depth for metrics.
     pub fn get_queue_depth(&self) -> usize {
-        let send_len = self.send_queue.lock().unwrap().len();
-        let fragment_len = self.pending_fragments.lock().unwrap().len();
+        let send_len = self.send_queue.lock_or_recover().len();
+        let fragment_len = self.pending_fragments.lock_or_recover().len();
         send_len + fragment_len
     }
 
     /// Processes the send queue (to be called by platform implementation).
     pub fn dequeue_send(&self) -> Option<(String, Message)> {
         let result = {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             queue.pop_front()
         };
 
@@ -584,7 +582,7 @@ impl BleTransport {
 
     /// Checks if there are messages to send.
     pub fn has_pending_sends(&self) -> bool {
-        let queue = self.send_queue.lock().unwrap();
+        let queue = self.send_queue.lock_or_recover();
         !queue.is_empty()
     }
 
@@ -663,11 +661,11 @@ impl BleTransport {
         // by a single thread — safe today (no path holds `peers` while
         // taking `peer_mtus`) but one refactor away from an AB/BA
         // deadlock. Keep this as two statements.
-        let cached_mtu = self.peer_mtus.lock().unwrap().get(recipient).copied();
+        let cached_mtu = self.peer_mtus.lock_or_recover().get(recipient).copied();
         let mtu = match cached_mtu {
             Some(mtu) => mtu,
             None => {
-                let is_direct_peer = self.peers.lock().unwrap().contains_key(recipient);
+                let is_direct_peer = self.peers.lock_or_recover().contains_key(recipient);
                 if is_direct_peer {
                     self.fragment_fallback_count.fetch_add(1, Ordering::Relaxed);
                     // Debug-only: surface the contract break with a
@@ -774,7 +772,7 @@ impl BleTransport {
 
         {
             // Multi-fragment message - add to reassembly buffer
-            let mut buffers = self.fragment_buffers.lock().unwrap();
+            let mut buffers = self.fragment_buffers.lock_or_recover();
             let now = SystemTime::now();
 
             if !buffers.contains_key(&fragment.message_id)
@@ -870,7 +868,7 @@ impl BleTransport {
         // that re-enters the transport (e.g. set_fragment_eviction_callback)
         // cannot self-deadlock.
         if let Some(info) = eviction_info {
-            let cb = self.eviction_callback.lock().unwrap().clone();
+            let cb = self.eviction_callback.lock_or_recover().clone();
             if let Some(cb) = cb {
                 cb(info);
             }
@@ -911,7 +909,7 @@ impl BleTransport {
         match self.process_fragment(&fragment_data) {
             Ok(Some(message)) => {
                 // Message complete - queue it
-                let mut queue = self.receive_queue.lock().unwrap();
+                let mut queue = self.receive_queue.lock_or_recover();
                 queue.push_back(message.clone());
                 // Note: sender/recipient are intentionally not logged to protect user privacy
                 tracing::debug!(
@@ -948,7 +946,7 @@ impl BleTransport {
             Ok(Some(mut message)) => {
                 message.set_transport_peer_id(peer_id)?;
                 let msg_id = message.id.clone();
-                let mut queue = self.receive_queue.lock().unwrap();
+                let mut queue = self.receive_queue.lock_or_recover();
                 queue.push_back(message);
                 tracing::debug!(
                     message_id = %msg_id,
@@ -973,7 +971,7 @@ impl BleTransport {
     pub fn get_next_fragment(&self) -> Result<Option<(String, Vec<u8>)>> {
         // Check for pending fragments first
         if let Some(fragment) = {
-            let mut pending = self.pending_fragments.lock().unwrap();
+            let mut pending = self.pending_fragments.lock_or_recover();
             pending.pop_front()
         } {
             self.update_queue_metric();
@@ -982,7 +980,7 @@ impl BleTransport {
 
         // No serialized fragments waiting – pull a fresh message from the queue
         let maybe_message = {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             queue.pop_front()
         };
 
@@ -999,7 +997,7 @@ impl BleTransport {
         }
 
         {
-            let mut pending = self.pending_fragments.lock().unwrap();
+            let mut pending = self.pending_fragments.lock_or_recover();
             for fragment in fragments {
                 pending.push_back((recipient.clone(), fragment));
             }
@@ -1008,7 +1006,7 @@ impl BleTransport {
         self.update_queue_metric();
 
         let result = {
-            let mut pending = self.pending_fragments.lock().unwrap();
+            let mut pending = self.pending_fragments.lock_or_recover();
             pending.pop_front()
         };
 
@@ -1020,7 +1018,7 @@ impl BleTransport {
     /// Re-queues a fragment at the front of the pending queue (used when platform send fails).
     pub fn requeue_fragment(&self, recipient: &str, fragment_data: Vec<u8>) {
         {
-            let mut pending = self.pending_fragments.lock().unwrap();
+            let mut pending = self.pending_fragments.lock_or_recover();
             pending.push_front((recipient.to_string(), fragment_data));
         }
 
@@ -1131,11 +1129,11 @@ impl Transport for BleTransport {
     }
 
     fn status(&self) -> TransportStatus {
-        *self.status.lock().unwrap()
+        *self.status.lock_or_recover()
     }
 
     fn metrics(&self) -> TransportMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock_or_recover().clone()
     }
 
     fn send(&self, message: &Message) -> Result<()> {
@@ -1151,7 +1149,7 @@ impl Transport for BleTransport {
         let recipient = message.recipient.as_str().to_string();
 
         {
-            let peers = self.peers.lock().unwrap();
+            let peers = self.peers.lock_or_recover();
             if !peers.contains_key(&recipient) {
                 // Distinguish "no BLE peers at all" (ordinary offline; escalate to
                 // the next transport) from "meshing with other peers but not this
@@ -1178,7 +1176,7 @@ impl Transport for BleTransport {
         }
 
         {
-            let mut queue = self.send_queue.lock().unwrap();
+            let mut queue = self.send_queue.lock_or_recover();
             queue.push_back((recipient, message.clone()));
         }
 
@@ -1189,14 +1187,14 @@ impl Transport for BleTransport {
     }
 
     fn receive(&self) -> Result<Option<Message>> {
-        let mut queue = self.receive_queue.lock().unwrap();
+        let mut queue = self.receive_queue.lock_or_recover();
         Ok(queue.pop_front())
     }
 
     fn start(&mut self) -> Result<()> {
         // Set status to Available when starting
         // Platform can still override this via on_status_changed() if BLE is not available
-        *self.status.lock().unwrap() = TransportStatus::Available;
+        *self.status.lock_or_recover() = TransportStatus::Available;
         Ok(())
     }
 
@@ -1208,7 +1206,7 @@ impl Transport for BleTransport {
         // will re-seed state into what is supposed to be an at-rest
         // transport. Android/iOS bindings enforce this by draining
         // their own GATT state before calling into the Rust stop path.
-        *self.status.lock().unwrap() = TransportStatus::Disconnected;
+        *self.status.lock_or_recover() = TransportStatus::Disconnected;
         // Drain every per-session cache on teardown so a subsequent
         // start() observes no state from the prior session. Every
         // reconnect re-runs peer discovery, fragment reassembly, and
@@ -1219,12 +1217,12 @@ impl Transport for BleTransport {
         // would let stale reassembly state outlive the peer it came
         // from. The `undersized_mtu_reports` counter is a monotonic
         // lifetime metric and is intentionally *not* reset here.
-        self.peers.lock().unwrap().clear();
-        self.peer_mtus.lock().unwrap().clear();
-        self.fragment_buffers.lock().unwrap().clear();
-        self.send_queue.lock().unwrap().clear();
-        self.pending_fragments.lock().unwrap().clear();
-        self.receive_queue.lock().unwrap().clear();
+        self.peers.lock_or_recover().clear();
+        self.peer_mtus.lock_or_recover().clear();
+        self.fragment_buffers.lock_or_recover().clear();
+        self.send_queue.lock_or_recover().clear();
+        self.pending_fragments.lock_or_recover().clear();
+        self.receive_queue.lock_or_recover().clear();
         self.update_queue_metric();
         Ok(())
     }
