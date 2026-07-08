@@ -34,9 +34,8 @@ use offline_protocol_router::{
 };
 use offline_protocol_transport::{
     ble::BleTransport, internet::InternetTransport, nostr::NostrTransport,
-    reticulum::ReticulumTransport, wifi_direct::WifiDirectTransport, Transport,
-    TransportMetrics as CoreTransportMetrics, TransportStatus as CoreTransportStatus,
-    TransportType as CoreTransportType,
+    reticulum::ReticulumTransport, Transport, TransportMetrics as CoreTransportMetrics,
+    TransportStatus as CoreTransportStatus, TransportType as CoreTransportType,
 };
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -2011,35 +2010,69 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::LockPoisoned(format!("nostr_state: {}", e)))
     }
 
-    /// Acquire the inner + transport locks, downcast to `ReticulumTransport`,
-    /// and call `f` with it.  Returns `None` when the transport is absent or
-    /// not a `ReticulumTransport`.
-    fn with_reticulum_transport<F, R>(&self, f: F) -> Option<R>
+    /// Acquire the inner + transport locks and call `f` with the transport
+    /// registered under `transport_type`.  Returns `None` when the transport
+    /// is absent.  Dispatch is through the `Transport` trait — no downcast,
+    /// so it cannot silently miss a registered transport.
+    fn with_transport<F, R>(&self, transport_type: CoreTransportType, f: F) -> Option<R>
     where
-        F: FnOnce(&offline_protocol_transport::reticulum::ReticulumTransport) -> R,
+        F: FnOnce(&dyn Transport) -> R,
+    {
+        let protocol = recover_mutex(&self.inner, "inner");
+        let transport_arc = protocol.transport_manager().get_transport(transport_type)?;
+        let transport = recover_mutex(&transport_arc, "transport");
+        Some(f(&**transport))
+    }
+
+    /// Like `with_transport` but uses fallible lock acquisition
+    /// (`lock_inner`) so it can propagate lock-poison errors.
+    fn with_transport_fallible<F, R>(
+        &self,
+        transport_type: CoreTransportType,
+        f: F,
+    ) -> Result<Option<R>, ProtocolError>
+    where
+        F: FnOnce(&dyn Transport) -> R,
+    {
+        let protocol = self.lock_inner()?;
+        let transport_arc = match protocol.transport_manager().get_transport(transport_type) {
+            Some(arc) => arc,
+            None => return Ok(None),
+        };
+        let transport = transport_arc
+            .lock()
+            .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
+        Ok(Some(f(&**transport)))
+    }
+
+    /// Acquire the inner + transport locks, downcast to `BleTransport`, and
+    /// call `f` with it.  Returns `None` when the transport is absent or not
+    /// a `BleTransport`.  Only for BLE-specific inherent methods (peer
+    /// registry, MTU telemetry counters) — everything on the `Transport`
+    /// trait goes through [`Self::with_transport`] instead.
+    fn with_ble_transport<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&BleTransport) -> R,
     {
         let protocol = recover_mutex(&self.inner, "inner");
         let transport_arc = protocol
             .transport_manager()
-            .get_transport(CoreTransportType::Reticulum)?;
+            .get_transport(CoreTransportType::BLE)?;
         let transport = recover_mutex(&transport_arc, "transport");
-        let reticulum_transport = transport
-            .as_any()
-            .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>(
-        )?;
-        Some(f(reticulum_transport))
+        let ble_transport = transport.as_any().downcast_ref::<BleTransport>()?;
+        Some(f(ble_transport))
     }
 
-    /// Like `with_reticulum_transport` but uses fallible lock acquisition
+    /// Like `with_ble_transport` but uses fallible lock acquisition
     /// (`lock_inner`) so it can propagate lock-poison errors.
-    fn with_reticulum_transport_fallible<F, R>(&self, f: F) -> Result<Option<R>, ProtocolError>
+    fn with_ble_transport_fallible<F, R>(&self, f: F) -> Result<Option<R>, ProtocolError>
     where
-        F: FnOnce(&offline_protocol_transport::reticulum::ReticulumTransport) -> R,
+        F: FnOnce(&BleTransport) -> R,
     {
         let protocol = self.lock_inner()?;
         let transport_arc = match protocol
             .transport_manager()
-            .get_transport(CoreTransportType::Reticulum)
+            .get_transport(CoreTransportType::BLE)
         {
             Some(arc) => arc,
             None => return Ok(None),
@@ -2047,19 +2080,18 @@ impl OfflineProtocol {
         let transport = transport_arc
             .lock()
             .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-        let reticulum_transport = match transport
-            .as_any()
-            .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>(
-        ) {
-            Some(rt) => rt,
+        let ble_transport = match transport.as_any().downcast_ref::<BleTransport>() {
+            Some(bt) => bt,
             None => return Ok(None),
         };
-        Ok(Some(f(reticulum_transport)))
+        Ok(Some(f(ble_transport)))
     }
 
     /// Acquire the inner + transport locks, downcast to `NostrTransport`,
     /// and call `f` with it.  Returns `None` when the transport is absent or
-    /// not a `NostrTransport`.
+    /// not a `NostrTransport`.  Only for Nostr-specific inherent methods
+    /// (signed events, pubkey, subscriptions) — everything on the
+    /// `Transport` trait goes through [`Self::with_transport`] instead.
     fn with_nostr_transport<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&offline_protocol_transport::nostr::NostrTransport) -> R,
@@ -2074,33 +2106,6 @@ impl OfflineProtocol {
             .downcast_ref::<offline_protocol_transport::nostr::NostrTransport>(
         )?;
         Some(f(nostr_transport))
-    }
-
-    /// Like `with_nostr_transport` but uses fallible lock acquisition
-    /// (`lock_inner`) so it can propagate lock-poison errors.
-    fn with_nostr_transport_fallible<F, R>(&self, f: F) -> Result<Option<R>, ProtocolError>
-    where
-        F: FnOnce(&offline_protocol_transport::nostr::NostrTransport) -> R,
-    {
-        let protocol = self.lock_inner()?;
-        let transport_arc = match protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::Nostr)
-        {
-            Some(arc) => arc,
-            None => return Ok(None),
-        };
-        let transport = transport_arc
-            .lock()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-        let nostr_transport = match transport
-            .as_any()
-            .downcast_ref::<offline_protocol_transport::nostr::NostrTransport>(
-        ) {
-            Some(nt) => nt,
-            None => return Ok(None),
-        };
-        Ok(Some(f(nostr_transport)))
     }
 
     /// Lock the visualizer mutex, converting poison errors.
@@ -2356,19 +2361,11 @@ impl OfflineProtocol {
     /// should call `ble_get_next_fragment()` inside the callback.
     pub fn set_ble_transport_callback(&self, callback: Box<dyn BleTransportCallback>) {
         let callback: Arc<dyn BleTransportCallback> = Arc::from(callback);
-        let protocol = recover_mutex(&self.inner, "inner");
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
-        {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                let cb = callback.clone();
-                ble_transport.set_on_fragments_available(Arc::new(move || {
-                    cb.on_fragments_available();
-                }));
-            }
-        }
+        self.with_transport(CoreTransportType::BLE, |transport| {
+            transport.set_on_messages_available(Arc::new(move || {
+                callback.on_fragments_available();
+            }));
+        });
     }
 
     /// Registers a WiFi Direct transport callback that fires when outgoing
@@ -2378,29 +2375,20 @@ impl OfflineProtocol {
         callback: Box<dyn WifiDirectTransportCallback>,
     ) {
         let callback: Arc<dyn WifiDirectTransportCallback> = Arc::from(callback);
-        let protocol = recover_mutex(&self.inner, "inner");
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::WiFiDirect)
-        {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
-                let cb = callback.clone();
-                wifi_transport.set_on_messages_available(Arc::new(move || {
-                    cb.on_messages_available();
-                }));
-            }
-        }
+        self.with_transport(CoreTransportType::WiFiDirect, |transport| {
+            transport.set_on_messages_available(Arc::new(move || {
+                callback.on_messages_available();
+            }));
+        });
     }
 
     /// Registers a Reticulum transport callback that fires when outgoing
     /// messages become available. This replaces timer-based polling.
     pub fn set_reticulum_transport_callback(&self, callback: Box<dyn ReticulumTransportCallback>) {
         let callback: Arc<dyn ReticulumTransportCallback> = Arc::from(callback);
-        self.with_reticulum_transport(|rt| {
-            let cb = callback.clone();
-            rt.set_on_messages_available(Arc::new(move || {
-                cb.on_messages_available();
+        self.with_transport(CoreTransportType::Reticulum, |transport| {
+            transport.set_on_messages_available(Arc::new(move || {
+                callback.on_messages_available();
             }));
         });
     }
@@ -2409,10 +2397,9 @@ impl OfflineProtocol {
     /// messages become available. This replaces timer-based polling.
     pub fn set_nostr_transport_callback(&self, callback: Box<dyn NostrTransportCallback>) {
         let callback: Arc<dyn NostrTransportCallback> = Arc::from(callback);
-        self.with_nostr_transport(|nt| {
-            let cb = callback.clone();
-            nt.set_on_messages_available(Arc::new(move || {
-                cb.on_messages_available();
+        self.with_transport(CoreTransportType::Nostr, |transport| {
+            transport.set_on_messages_available(Arc::new(move || {
+                callback.on_messages_available();
             }));
         });
     }
@@ -2665,26 +2652,15 @@ impl OfflineProtocol {
         drop(ble_state);
 
         // Register peer with the BLE transport so send() can route to them
-        {
-            let protocol = self.lock_inner()?;
-            if let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::BLE)
-            {
-                let transport = transport_arc
-                    .lock()
-                    .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-                if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                    ble_transport.on_peer_discovered(offline_protocol_transport::ble::PeerDevice {
-                        device_id: peer_id.clone(),
-                        address: String::new(),
-                        rssi,
-                        last_seen: SystemTime::now(),
-                        connected: true,
-                    });
-                }
-            }
-        }
+        self.with_ble_transport_fallible(|ble_transport| {
+            ble_transport.on_peer_discovered(offline_protocol_transport::ble::PeerDevice {
+                device_id: peer_id.clone(),
+                address: String::new(),
+                rssi,
+                last_seen: SystemTime::now(),
+                connected: true,
+            });
+        })?;
 
         // Notify the core protocol of neighbor discovery for auto key exchange.
         // Note: on_neighbor_discovered() has its own is_user_blocked() check
@@ -2718,20 +2694,9 @@ impl OfflineProtocol {
         drop(ble_state);
 
         // Unregister peer from the BLE transport
-        {
-            let protocol = self.lock_inner()?;
-            if let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::BLE)
-            {
-                let transport = transport_arc
-                    .lock()
-                    .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-                if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                    ble_transport.on_peer_lost(&peer_id);
-                }
-            }
-        }
+        self.with_ble_transport_fallible(|ble_transport| {
+            ble_transport.on_peer_lost(&peer_id);
+        })?;
 
         // Notify the core protocol of neighbor loss
         {
@@ -2751,24 +2716,14 @@ impl OfflineProtocol {
     /// BLE: Status changed
     pub fn ble_status_changed(&self, is_available: bool) -> Result<(), ProtocolError> {
         // Update the BLE transport status based on platform availability
-        let protocol = self.lock_inner()?;
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
-        {
-            let transport = transport_arc
-                .lock()
-                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                let new_status = if is_available {
-                    offline_protocol_transport::TransportStatus::Available
-                } else {
-                    offline_protocol_transport::TransportStatus::Unavailable
-                };
-
-                ble_transport.on_status_changed(new_status);
-            }
-        }
+        let new_status = if is_available {
+            offline_protocol_transport::TransportStatus::Available
+        } else {
+            offline_protocol_transport::TransportStatus::Unavailable
+        };
+        self.with_transport_fallible(CoreTransportType::BLE, |transport| {
+            transport.on_status_changed(new_status);
+        })?;
 
         Ok(())
     }
@@ -2780,30 +2735,17 @@ impl OfflineProtocol {
     /// Android subtracts the 3-byte ATT overhead from `onMtuChanged`'s value.
     /// The Rust transport clamps to [BLE_MAX_FRAGMENT_SIZE, MAX_REASONABLE_BLE_PAYLOAD].
     ///
-    /// If the BLE transport is not registered or not a `BleTransport`
-    /// (both meaning "BLE not configured on this instance"), the call is
-    /// a warn-and-drop no-op rather than an error — the platform layer
-    /// should be free to report MTUs unconditionally without having to
-    /// branch on transport configuration.
+    /// If the BLE transport is not registered (meaning "BLE not configured
+    /// on this instance"), the call is a warn-and-drop no-op rather than an
+    /// error — the platform layer should be free to report MTUs
+    /// unconditionally without having to branch on transport configuration.
+    /// A non-MTU-aware transport registered under BLE warns via the
+    /// `Transport::set_peer_mtu` default instead.
     pub fn ble_set_peer_mtu(&self, peer_id: String, max_payload: u32) -> Result<(), ProtocolError> {
-        let protocol = self.lock_inner()?;
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
-        {
-            let transport = transport_arc
-                .lock()
-                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                ble_transport.set_peer_mtu(&peer_id, max_payload as usize);
-            } else {
-                tracing::warn!(
-                    %peer_id,
-                    max_payload,
-                    "ble_set_peer_mtu: BLE transport registered but wrong type; ignoring"
-                );
-            }
-        } else {
+        let dispatched = self.with_transport_fallible(CoreTransportType::BLE, |transport| {
+            transport.set_peer_mtu(&peer_id, max_payload as usize);
+        })?;
+        if dispatched.is_none() {
             tracing::warn!(
                 %peer_id,
                 max_payload,
@@ -2819,23 +2761,10 @@ impl OfflineProtocol {
     /// shapes warn-and-return-Ok so platform teardown paths can call
     /// unconditionally.
     pub fn ble_clear_peer_mtu(&self, peer_id: String) -> Result<(), ProtocolError> {
-        let protocol = self.lock_inner()?;
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
-        {
-            let transport = transport_arc
-                .lock()
-                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                ble_transport.clear_peer_mtu(&peer_id);
-            } else {
-                tracing::warn!(
-                    %peer_id,
-                    "ble_clear_peer_mtu: BLE transport registered but wrong type; ignoring"
-                );
-            }
-        } else {
+        let dispatched = self.with_transport_fallible(CoreTransportType::BLE, |transport| {
+            transport.clear_peer_mtu(&peer_id);
+        })?;
+        if dispatched.is_none() {
             tracing::warn!(
                 %peer_id,
                 "ble_clear_peer_mtu: BLE transport not registered; ignoring"
@@ -2868,17 +2797,8 @@ impl OfflineProtocol {
     /// poisoning because they mutate state and the caller has a
     /// natural error channel.
     pub fn ble_undersized_mtu_reports(&self) -> u64 {
-        let protocol = recover_mutex(&self.inner, "inner");
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
-        {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                return ble_transport.undersized_mtu_reports();
-            }
-        }
-        0
+        self.with_ble_transport(|ble_transport| ble_transport.undersized_mtu_reports())
+            .unwrap_or(0)
     }
 
     /// BLE: Monotonic count of `fragment_message` calls that fell back
@@ -2908,17 +2828,8 @@ impl OfflineProtocol {
     /// registered. Uses `recover_mutex` for the same reason as
     /// [`Self::ble_undersized_mtu_reports`].
     pub fn ble_fragment_fallback_count(&self) -> u64 {
-        let protocol = recover_mutex(&self.inner, "inner");
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
-        {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                return ble_transport.fragment_fallback_count();
-            }
-        }
-        0
+        self.with_ble_transport(|ble_transport| ble_transport.fragment_fallback_count())
+            .unwrap_or(0)
     }
 
     /// BLE: Fragment received
@@ -2935,15 +2846,9 @@ impl OfflineProtocol {
             let transport = transport_arc
                 .lock()
                 .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                ble_transport.on_fragment_received(fragment).map_err(|e| {
-                    ProtocolError::Other(format!("Fragment processing failed: {}", e))
-                })?;
-            } else {
-                return Err(ProtocolError::Other(
-                    "BLE transport not available or wrong type".to_string(),
-                ));
-            }
+            transport
+                .on_fragment_received(fragment)
+                .map_err(|e| ProtocolError::Other(format!("Fragment processing failed: {}", e)))?;
         }
 
         while protocol.receive_message().is_some() {}
@@ -2953,31 +2858,26 @@ impl OfflineProtocol {
 
     /// BLE: Get next fragment to send
     pub fn ble_get_next_fragment(&self) -> Option<BleFragment> {
-        //  Ensure BLE transport is available for fragment polling
-        let protocol = recover_mutex(&self.inner, "inner");
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
-        {
-            let transport = recover_mutex(&transport_arc, "transport");
-
-            // Safe downcast to BleTransport using Any trait
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+        let fragment = self
+            .with_transport(CoreTransportType::BLE, |transport| {
                 // Ensure BLE is available for fragment polling
-                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available
-                {
-                    ble_transport
+                if transport.status() != offline_protocol_transport::TransportStatus::Available {
+                    transport
                         .on_status_changed(offline_protocol_transport::TransportStatus::Available);
                 }
 
                 // Get next fragment
-                if let Ok(Some((recipient, data))) = ble_transport.get_next_fragment() {
+                if let Ok(Some((recipient, data))) = transport.get_next_fragment() {
                     return Some(BleFragment {
                         recipient_id: recipient,
                         data,
                     });
                 }
-            }
+                None
+            })
+            .flatten();
+        if fragment.is_some() {
+            return fragment;
         }
 
         // Fallback to local queue for backwards compatibility
@@ -3029,27 +2929,14 @@ impl OfflineProtocol {
 
         // Update the Internet transport status in the transport manager
         {
-            let protocol = self.lock_inner()?;
-            if let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::Internet)
-            {
-                let transport = transport_arc
-                    .lock()
-                    .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-                if let Some(internet_transport) =
-                    transport
-                        .as_any()
-                        .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
-                {
-                    let new_status = if is_connected {
-                        offline_protocol_transport::TransportStatus::Available
-                    } else {
-                        offline_protocol_transport::TransportStatus::Disconnected
-                    };
-                    internet_transport.on_status_changed(new_status);
-                }
-            }
+            let new_status = if is_connected {
+                offline_protocol_transport::TransportStatus::Available
+            } else {
+                offline_protocol_transport::TransportStatus::Disconnected
+            };
+            self.with_transport_fallible(CoreTransportType::Internet, |transport| {
+                transport.on_status_changed(new_status);
+            })?;
         }
 
         // When reconnecting after disconnection, immediately flush all pending
@@ -3092,17 +2979,11 @@ impl OfflineProtocol {
             let transport = transport_arc
                 .lock()
                 .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Some(internet_transport) =
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
-            {
-                if let Err(e) = internet_transport.on_data_received(data) {
-                    return Err(ProtocolError::Other(format!(
-                        "Failed to process internet message: {}",
-                        e
-                    )));
-                }
+            if let Err(e) = transport.on_data_received(data) {
+                return Err(ProtocolError::Other(format!(
+                    "Failed to process internet message: {}",
+                    e
+                )));
             }
         }
 
@@ -3142,23 +3023,17 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::Internet)
         {
             let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(internet_transport) =
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
-            {
-                if let Ok(Some((message_id, data))) = internet_transport.get_next_message() {
-                    if let Ok(message) = internet_transport.deserialize_message(&data) {
-                        return Some(InternetMessage {
-                            message_id,
-                            recipient_id: message.recipient.as_str().to_string(),
-                            data,
-                            reply_to_msg: message
-                                .reply_to_msg
-                                .as_ref()
-                                .map(|id| id.as_str().to_string()),
-                        });
-                    }
+            if let Ok(Some((message_id, data))) = transport.get_next_message() {
+                if let Ok(message) = transport.deserialize_message(&data) {
+                    return Some(InternetMessage {
+                        message_id,
+                        recipient_id: message.recipient.as_str().to_string(),
+                        data,
+                        reply_to_msg: message
+                            .reply_to_msg
+                            .as_ref()
+                            .map(|id| id.as_str().to_string()),
+                    });
                 }
             }
         }
@@ -3173,10 +3048,7 @@ impl OfflineProtocol {
                 .get_transport(CoreTransportType::Internet)
             {
                 let transport = recover_mutex(&transport_arc, "transport");
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
-                    .and_then(|it| it.deserialize_message(&data).ok())
+                transport.deserialize_message(&data).ok()
             } else {
                 None
             };
@@ -3233,13 +3105,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::Internet)
         {
             let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(internet_transport) =
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
-            {
-                internet_transport.confirm_sent(&message_id);
-            }
+            transport.confirm_sent(&message_id);
         }
     }
 
@@ -3271,13 +3137,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::Internet)
         {
             let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(internet_transport) =
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
-            {
-                internet_transport.report_send_failure(&message_id);
-            }
+            transport.report_send_failure(&message_id);
         }
     }
 
@@ -3297,23 +3157,14 @@ impl OfflineProtocol {
         }
 
         // Update the WiFi Direct transport status in the transport manager
-        let protocol = self.lock_inner()?;
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::WiFiDirect)
-        {
-            let transport = transport_arc
-                .lock()
-                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
-                let new_status = if is_connected {
-                    offline_protocol_transport::TransportStatus::Available
-                } else {
-                    offline_protocol_transport::TransportStatus::Disconnected
-                };
-                wifi_transport.on_status_changed(new_status);
-            }
-        }
+        let new_status = if is_connected {
+            offline_protocol_transport::TransportStatus::Available
+        } else {
+            offline_protocol_transport::TransportStatus::Disconnected
+        };
+        self.with_transport_fallible(CoreTransportType::WiFiDirect, |transport| {
+            transport.on_status_changed(new_status);
+        })?;
 
         // Emit connection event
         let event = if is_connected {
@@ -3348,13 +3199,11 @@ impl OfflineProtocol {
             let transport = transport_arc
                 .lock()
                 .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
-                if let Err(e) = wifi_transport.on_data_received(data) {
-                    return Err(ProtocolError::Other(format!(
-                        "Failed to process WiFi Direct message: {}",
-                        e
-                    )));
-                }
+            if let Err(e) = transport.on_data_received(data) {
+                return Err(ProtocolError::Other(format!(
+                    "Failed to process WiFi Direct message: {}",
+                    e
+                )));
             }
         }
 
@@ -3385,20 +3234,19 @@ impl OfflineProtocol {
         }
 
         // Try to get message from the WiFi Direct transport
-        let protocol = recover_mutex(&self.inner, "inner");
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::WiFiDirect)
-        {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
-                if let Ok(Some((recipient, data))) = wifi_transport.get_next_message() {
+        let message = self
+            .with_transport(CoreTransportType::WiFiDirect, |transport| {
+                if let Ok(Some((recipient, data))) = transport.get_next_message() {
                     return Some(WifiDirectMessage {
                         recipient_id: recipient,
                         data,
                     });
                 }
-            }
+                None
+            })
+            .flatten();
+        if message.is_some() {
+            return message;
         }
 
         // Fallback to local queue
@@ -3470,13 +3318,13 @@ impl OfflineProtocol {
         };
 
         // Update the Reticulum transport status in the transport manager
-        self.with_reticulum_transport_fallible(|rt| {
+        self.with_transport_fallible(CoreTransportType::Reticulum, |transport| {
             let new_status = if is_connected {
                 offline_protocol_transport::TransportStatus::Available
             } else {
                 offline_protocol_transport::TransportStatus::Disconnected
             };
-            rt.on_status_changed(new_status);
+            transport.on_status_changed(new_status);
         })?;
 
         // When reconnecting after disconnection, immediately flush all pending
@@ -3514,7 +3362,7 @@ impl OfflineProtocol {
         // Deliver data to the transport in an isolated lock scope so the
         // inner + transport locks are released before we re-acquire inner
         // for receive_message().  This reduces contention.
-        if let Some(Err(e)) = self.with_reticulum_transport_fallible(|rt| {
+        if let Some(Err(e)) = self.with_transport_fallible(CoreTransportType::Reticulum, |rt| {
             rt.on_data_received_from(data, sender_id.clone())
         })? {
             return Err(ProtocolError::Other(format!(
@@ -3547,7 +3395,7 @@ impl OfflineProtocol {
     /// `reticulum_confirm_sent()` or `reticulum_send_failed()`.
     pub fn reticulum_get_next_message(&self) -> Option<ReticulumMessage> {
         // Note: there is a benign TOCTOU between the `is_connected` check and
-        // the subsequent `with_reticulum_transport` call — the connection state
+        // the subsequent `with_transport` call — the connection state
         // could change between the two lock acquisitions.  This is acceptable:
         //   - Race to disconnected: `get_next_message()` returns None or the
         //     transport handles it gracefully; the message stays in the queue.
@@ -3562,7 +3410,7 @@ impl OfflineProtocol {
             }
         }
 
-        self.with_reticulum_transport(|rt| {
+        self.with_transport(CoreTransportType::Reticulum, |rt| {
             if let Ok(Some((message_id, data))) = rt.get_next_message() {
                 match rt.deserialize_message(&data) {
                     Ok(message) => {
@@ -3609,7 +3457,7 @@ impl OfflineProtocol {
                 );
             }
         }
-        self.with_reticulum_transport(|rt| {
+        self.with_transport(CoreTransportType::Reticulum, |rt| {
             rt.confirm_sent(&message_id);
         });
     }
@@ -3635,7 +3483,7 @@ impl OfflineProtocol {
                 );
             }
         }
-        self.with_reticulum_transport(|rt| {
+        self.with_transport(CoreTransportType::Reticulum, |rt| {
             rt.report_send_failure(&message_id);
         });
     }
@@ -3653,13 +3501,13 @@ impl OfflineProtocol {
             prev
         };
 
-        self.with_nostr_transport_fallible(|nt| {
+        self.with_transport_fallible(CoreTransportType::Nostr, |transport| {
             let new_status = if is_connected {
                 offline_protocol_transport::TransportStatus::Available
             } else {
                 offline_protocol_transport::TransportStatus::Disconnected
             };
-            nt.on_status_changed(new_status);
+            transport.on_status_changed(new_status);
         })?;
 
         if is_connected && !was_connected {
@@ -3706,7 +3554,7 @@ impl OfflineProtocol {
         // The Message.sender field is the authoritative user identity; the Nostr
         // pubkey (`sender_id`) is only a transport-level routing key.
         let real_sender: Option<String> = self
-            .with_nostr_transport(|nt| {
+            .with_transport(CoreTransportType::Nostr, |nt| {
                 nt.deserialize_message(&data)
                     .ok()
                     .map(|msg| msg.sender.as_str().to_string())
@@ -3717,7 +3565,9 @@ impl OfflineProtocol {
         // is the sender's install signing key, not the protocol user_id. Passing
         // the pubkey as transport_peer_id would cause validate_transport_sender
         // to reject the message due to the identity mismatch.
-        if let Some(Err(e)) = self.with_nostr_transport_fallible(|nt| nt.on_data_received(data))? {
+        if let Some(Err(e)) =
+            self.with_transport_fallible(CoreTransportType::Nostr, |nt| nt.on_data_received(data))?
+        {
             return Err(ProtocolError::Other(format!(
                 "Failed to process nostr message: {}",
                 e
@@ -3789,7 +3639,7 @@ impl OfflineProtocol {
                 );
             }
         }
-        self.with_nostr_transport(|nt| {
+        self.with_transport(CoreTransportType::Nostr, |nt| {
             nt.confirm_sent(&message_id);
         });
     }
@@ -3815,7 +3665,7 @@ impl OfflineProtocol {
                 );
             }
         }
-        self.with_nostr_transport(|nt| {
+        self.with_transport(CoreTransportType::Nostr, |nt| {
             nt.report_send_failure(&message_id);
         });
     }
