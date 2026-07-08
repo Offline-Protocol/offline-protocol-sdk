@@ -405,7 +405,13 @@ impl OfflineProtocol {
         drop(mls_guard);
 
         if let Some(plaintext) = decrypt_result {
-            let text = String::from_utf8_lossy(&plaintext).to_string();
+            let Ok(text) = String::from_utf8(plaintext) else {
+                warn!(
+                    group_id = %payload.group_id,
+                    "Decrypted group payload is not valid UTF-8, dropping"
+                );
+                return InternalMessageResult::Consumed;
+            };
             let msg_id = message.id.as_str().to_string();
             let timestamp = chrono::Utc::now().to_rfc3339();
             info!(group_id = %payload.group_id, "Decrypted mesh group message");
@@ -2831,18 +2837,25 @@ impl OfflineProtocol {
         };
 
         match plaintext {
-            Some(pt) => {
-                let text = String::from_utf8_lossy(&pt).to_string();
-                self.emit_event(Event::group_message_received(
-                    group_id.to_string(),
-                    sender.to_string(),
-                    text,
-                    timestamp.to_string(),
-                    message_id.to_string(),
-                    reply_to_msg,
-                    forward_info_event,
-                ));
-            }
+            Some(pt) => match String::from_utf8(pt) {
+                Ok(text) => {
+                    self.emit_event(Event::group_message_received(
+                        group_id.to_string(),
+                        sender.to_string(),
+                        text,
+                        timestamp.to_string(),
+                        message_id.to_string(),
+                        reply_to_msg,
+                        forward_info_event,
+                    ));
+                }
+                Err(_) => {
+                    warn!(
+                        group_id = %group_id,
+                        "Decrypted relay group payload is not valid UTF-8, dropping"
+                    );
+                }
+            },
             None => {
                 warn!(
                     group_id = %group_id,
