@@ -3,6 +3,38 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Why an identifier was rejected by [`validate_id_chars`].
+///
+/// `type_name` is the caller-supplied label (e.g. `"User ID"`) used only to
+/// prefix the error message.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IdValidationError {
+    /// The identifier is empty.
+    #[error("{type_name} cannot be empty")]
+    Empty {
+        /// Label for the identifier kind being validated.
+        type_name: String,
+    },
+    /// The identifier is a path-traversal component (`.` or `..`).
+    #[error("{type_name} cannot be '.' or '..' (path traversal)")]
+    PathTraversal {
+        /// Label for the identifier kind being validated.
+        type_name: String,
+    },
+    /// The identifier contains ASCII control characters.
+    #[error("{type_name} contains ASCII control characters")]
+    ControlChars {
+        /// Label for the identifier kind being validated.
+        type_name: String,
+    },
+    /// The identifier contains characters hostile to storage backends.
+    #[error("{type_name} contains invalid characters ('/', '\\', or ':')")]
+    InvalidChars {
+        /// Label for the identifier kind being validated.
+        type_name: String,
+    },
+}
+
 /// Validates that an identifier string is safe for use as a storage key.
 ///
 /// Rejects empty strings, path-traversal components (`.`, `..`), ASCII
@@ -16,27 +48,29 @@ use std::fmt;
 /// identifier format itself uses `:` as a namespace separator.
 ///
 /// `type_name` is used only to label the error message.
-pub fn validate_id_chars(id: &str, type_name: &str) -> Result<(), String> {
+pub fn validate_id_chars(id: &str, type_name: &str) -> Result<(), IdValidationError> {
     if id.is_empty() {
-        return Err(format!("{} cannot be empty", type_name));
+        return Err(IdValidationError::Empty {
+            type_name: type_name.to_string(),
+        });
     }
     if id == "." || id == ".." {
-        return Err(format!(
-            "{} cannot be '.' or '..' (path traversal)",
-            type_name
-        ));
+        return Err(IdValidationError::PathTraversal {
+            type_name: type_name.to_string(),
+        });
     }
     // Reject ASCII control characters (0x00–0x1F, 0x7F) and characters
     // hostile to storage backends (filesystem path traversal, key-separator
     // collisions in KV stores).
     if id.bytes().any(|b| b.is_ascii_control()) {
-        return Err(format!("{} contains ASCII control characters", type_name));
+        return Err(IdValidationError::ControlChars {
+            type_name: type_name.to_string(),
+        });
     }
     if id.contains('/') || id.contains('\\') || id.contains(':') {
-        return Err(format!(
-            "{} contains invalid characters ('/', '\\', or ':')",
-            type_name
-        ));
+        return Err(IdValidationError::InvalidChars {
+            type_name: type_name.to_string(),
+        });
     }
     Ok(())
 }
@@ -57,7 +91,8 @@ impl UserId {
     /// Returns `Ok(UserId)` if valid, `Err` if the ID is empty.
     pub fn new(id: impl Into<String>) -> crate::Result<Self> {
         let id_str = id.into();
-        validate_id_chars(&id_str, "User ID").map_err(crate::Error::InvalidUserId)?;
+        validate_id_chars(&id_str, "User ID")
+            .map_err(|e| crate::Error::InvalidUserId(e.to_string()))?;
         Ok(Self(id_str))
     }
 
@@ -96,7 +131,8 @@ impl AppId {
     /// Returns `Ok(AppId)` if valid, `Err` if the ID is empty.
     pub fn new(id: impl Into<String>) -> crate::Result<Self> {
         let id_str = id.into();
-        validate_id_chars(&id_str, "App ID").map_err(crate::Error::InvalidAppId)?;
+        validate_id_chars(&id_str, "App ID")
+            .map_err(|e| crate::Error::InvalidAppId(e.to_string()))?;
         Ok(Self(id_str))
     }
 
