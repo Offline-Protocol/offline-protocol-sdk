@@ -62,7 +62,7 @@ struct BloomFilter {
 
 impl BloomFilter {
     fn new(bit_count: usize, hash_count: usize) -> Self {
-        let word_count = (bit_count + 63) / 64;
+        let word_count = bit_count.div_ceil(64);
         Self {
             bits: vec![0u64; word_count],
             bit_count,
@@ -477,7 +477,7 @@ impl Deduplicator {
     pub fn estimated_memory_bytes(&self) -> usize {
         if self.bloom_filter.is_some() {
             // Each filter uses bit_count/8 bytes, times number of filters
-            let filter_bytes = (self.config.bloom_filter_bits + 7) / 8;
+            let filter_bytes = self.config.bloom_filter_bits.div_ceil(8);
             filter_bytes * self.config.bloom_filter_count
                 + std::mem::size_of::<RotatingBloomFilter>()
         } else {

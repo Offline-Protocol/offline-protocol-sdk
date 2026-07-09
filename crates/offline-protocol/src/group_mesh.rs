@@ -923,7 +923,7 @@ impl OfflineProtocol {
             .group_mesh
             .pending_commits
             .get(group_id)
-            .map_or(true, |v| v.is_empty())
+            .is_none_or(|v| v.is_empty())
         {
             self.group_mesh.pending_commits.remove(group_id);
         }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::BuildHasher;
 use std::time::{Duration, Instant};
 
 mod base64_bytes {
@@ -525,9 +525,7 @@ impl FileTransferManager {
     /// Keyed hash under which a `file_id` is tombstoned. Hashing bounds the
     /// tombstone set's memory regardless of how long a peer makes its ids.
     fn tombstone_key(&self, file_id: &str) -> u64 {
-        let mut hasher = self.tombstone_hasher.build_hasher();
-        file_id.hash(&mut hasher);
-        hasher.finish()
+        self.tombstone_hasher.hash_one(file_id)
     }
 
     /// Marks a transfer as failed so its remaining in-flight chunks are
@@ -631,7 +629,7 @@ impl FileTransferManager {
         // Mirror the receive-side cap: process_chunk rejects total_chunks
         // above this, so a finer chunking would have every chunk silently
         // dropped by any receiver with the same max_file_size.
-        let total_chunks = (file_size + chunk_size as u64 - 1) / chunk_size as u64;
+        let total_chunks = file_size.div_ceil(chunk_size as u64);
         let max_total_chunks = Self::derived_total_chunks_cap(self.config.max_file_size);
         if total_chunks > max_total_chunks {
             return Err(crate::Error::Other(format!(

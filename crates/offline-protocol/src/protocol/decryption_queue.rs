@@ -355,7 +355,7 @@ impl PendingDecryptionQueue {
             .saturating_add(1);
 
         let count = self.metrics.pending_messages_eviction_failures_total;
-        if count == 1 || count % EVICTION_FAILURE_WARN_EVERY == 0 {
+        if count == 1 || count.is_multiple_of(EVICTION_FAILURE_WARN_EVERY) {
             warn!(
                 limit_triggered = limit_triggered.as_str(),
                 peer_id = %peer_id,
@@ -411,7 +411,7 @@ impl PendingDecryptionQueue {
             .entry(peer_id.to_string())
             .or_insert(0);
         *hits = hits.saturating_add(1);
-        if *hits % PEER_PRESSURE_WARN_EVERY == 0 {
+        if hits.is_multiple_of(PEER_PRESSURE_WARN_EVERY) {
             warn!(
                 peer_id = %peer_id,
                 overflow_hits = *hits,
