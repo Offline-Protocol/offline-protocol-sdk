@@ -268,62 +268,22 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private data class BridgeProtocolError(
-        val code: String,
-        val message: String
-    )
-
-    private fun mapProtocolBridgeError(error: Throwable): BridgeProtocolError? {
-        return when (error) {
-            is ProtocolException.NoKeyPackage -> BridgeProtocolError(
-                code = "NoKeyPackage",
-                message = "No key package available for recipient"
-            )
-            is ProtocolException.SessionNotReady -> BridgeProtocolError(
-                code = "SessionNotReady",
-                message = "Session not ready; establishment in progress"
-            )
-            is ProtocolException.EncryptFailed -> BridgeProtocolError(
-                code = "EncryptFailed",
-                message = "Message encryption failed"
-            )
-            is ProtocolException.MediaTransferLimit -> BridgeProtocolError(
-                code = "MediaTransferLimit",
-                message = "Too many concurrent media transfers to this recipient; retry after an active transfer completes"
-            )
-            is ProtocolException.SendFailed -> BridgeProtocolError(
-                code = "SendFailed",
-                message = error.message ?: "Send failed"
-            )
-            is ProtocolException.InvalidState -> BridgeProtocolError(
-                code = "InvalidState",
-                message = error.message ?: "Operation rejected by current state"
-            )
-            is ProtocolException.TransportException -> BridgeProtocolError(
-                code = "TransportError",
-                message = error.message ?: "Transport error"
-            )
-            is ProtocolException.SerializationException -> BridgeProtocolError(
-                code = "SerializationError",
-                message = error.message ?: "Serialization error"
-            )
-            is ProtocolException.ServiceException -> BridgeProtocolError(
-                code = "ServiceError",
-                message = error.message ?: "Service error"
-            )
-            is ProtocolException.GroupNotFound -> BridgeProtocolError(
-                code = "GroupNotFound",
-                message = error.message ?: "Group not found"
-            )
-            is ProtocolException.PermissionDenied -> BridgeProtocolError(
-                code = "PermissionDenied",
-                message = error.message ?: "Permission denied"
-            )
-            is ProtocolException.InvalidArgument -> BridgeProtocolError(
-                code = "InvalidArgument",
-                message = error.message ?: "Invalid argument"
-            )
-            else -> null
+    /**
+     * Rejects [promise] with the stable typed code when the error maps
+     * (see ProtocolErrorBridge.kt), otherwise with the method's legacy
+     * fallback code and "$fallbackMessage: <cause>".
+     */
+    private fun rejectWithProtocolError(
+        promise: Promise,
+        error: Throwable,
+        fallbackCode: String,
+        fallbackMessage: String
+    ) {
+        val mapped = mapProtocolBridgeError(error)
+        if (mapped != null) {
+            promise.reject(mapped.code, mapped.message, error)
+        } else {
+            promise.reject(fallbackCode, "$fallbackMessage: ${error.message}", error)
         }
     }
 
@@ -1078,12 +1038,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.sendMessage(recipient, content, msgPriority, replyToMsg)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_SEND", "Failed to send message: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_SEND", "Failed to send message")
         }
     }
 
@@ -1103,12 +1058,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.forwardMessage(originalMessageJson, newRecipient, msgPriority)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_FORWARD", "Failed to forward message: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_FORWARD", "Failed to forward message")
         }
     }
 
@@ -1128,12 +1078,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.sendConnectionRequest(recipient, senderName, keyPackageData)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_CONNECTION_REQUEST", "Failed to send connection request: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_CONNECTION_REQUEST", "Failed to send connection request")
         }
     }
 
@@ -1153,12 +1098,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.acceptConnectionRequest(recipient, accepterName, keyPackageData)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_CONNECTION_REQUEST", "Failed to accept connection request")
         }
     }
 
@@ -1169,12 +1109,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.rejectConnectionRequest(recipient)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_CONNECTION_REQUEST", "Failed to reject connection request")
         }
     }
 
@@ -1185,12 +1120,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.cancelConnectionRequest(recipient)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_CONNECTION_REQUEST", "Failed to cancel connection request: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_CONNECTION_REQUEST", "Failed to cancel connection request")
         }
     }
 
@@ -3227,12 +3157,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             promise.resolve(result)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to create mesh group: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to create mesh group")
         }
     }
 
@@ -3246,12 +3171,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             proto.inviteToGroup(groupId, inviteeUserId)
             promise.resolve(null)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to invite to mesh group: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to invite to mesh group")
         }
     }
 
@@ -3276,12 +3196,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             messageIds.forEach { result.pushString(it) }
             promise.resolve(result)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to send mesh group message: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to send mesh group message")
         }
     }
 
@@ -3306,12 +3221,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             messageIds.forEach { result.pushString(it) }
             promise.resolve(result)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to forward message to group: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to forward message to group")
         }
     }
 
@@ -3325,12 +3235,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             proto.removeFromGroup(groupId, memberId)
             promise.resolve(null)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to remove from mesh group: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to remove from mesh group")
         }
     }
 
@@ -3344,12 +3249,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             proto.leaveGroup(groupId)
             promise.resolve(null)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to leave mesh group: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to leave mesh group")
         }
     }
 
@@ -3365,12 +3265,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             groups.forEach { result.pushString(it) }
             promise.resolve(result)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to list mesh groups: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to list mesh groups")
         }
     }
 
@@ -3399,12 +3294,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 promise.resolve(null)
             }
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to get group info: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to get group info")
         }
     }
 
@@ -3415,12 +3305,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             proto.setMemberRole(groupId, userId, role)
             promise.resolve(null)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to set member role: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to set member role")
         }
     }
 
@@ -3431,12 +3316,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val role = proto.getMemberRole(groupId, userId)
             promise.resolve(role)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to get member role: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to get member role")
         }
     }
 
@@ -3449,12 +3329,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             roles.forEach { (userId, role) -> result.putString(userId, role) }
             promise.resolve(result)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to get group roles: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to get group roles")
         }
     }
 
@@ -3465,12 +3340,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             proto.renameGroup(groupId, newName)
             promise.resolve(null)
         } catch (e: Exception) {
-            val mapped = mapProtocolBridgeError(e)
-            if (mapped != null) {
-                promise.reject(mapped.code, mapped.message, e)
-            } else {
-                promise.reject("ERROR_MESH_GROUP", "Failed to rename group: ${e.message}", e)
-            }
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to rename group")
         }
     }
 
