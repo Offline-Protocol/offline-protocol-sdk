@@ -1120,6 +1120,66 @@ impl OutboundTransferState {
 mod tests {
     use super::*;
 
+    fn sample_chunk() -> FileChunk {
+        FileChunk {
+            file_id: "file1".to_string(),
+            file_name: "test.txt".to_string(),
+            file_size: 13,
+            total_chunks: 1,
+            chunk_index: 0,
+            chunk_data: b"Hello, World!".to_vec(),
+            file_checksum: "abc123".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_from_bytes_truncated_payload_is_unexpected_eof() {
+        let bytes = sample_chunk().to_bytes();
+        // Truncate mid-header: the first u32 (file_id_len) can't be read.
+        let err = FileChunk::from_bytes(&bytes[..2]).unwrap_err();
+        assert!(matches!(
+            err,
+            ChunkDecodeError::UnexpectedEof { what: "u32" }
+        ));
+        // Truncate mid-body: length prefixes parse but the data falls short.
+        let err = FileChunk::from_bytes(&bytes[..bytes.len() - 1]).unwrap_err();
+        assert!(matches!(
+            err,
+            ChunkDecodeError::UnexpectedEof { what: "bytes" }
+        ));
+    }
+
+    #[test]
+    fn test_from_bytes_oversized_length_prefix_is_field_too_long() {
+        let mut bytes = sample_chunk().to_bytes();
+        // Claim a file_id longer than the wire-format cap.
+        let huge = (FileChunk::MAX_STRING_FIELD_LEN as u32 + 1).to_le_bytes();
+        bytes[..4].copy_from_slice(&huge);
+        let err = FileChunk::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            ChunkDecodeError::FieldTooLong {
+                field: "file_id_len",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_from_bytes_invalid_utf8_names_the_field() {
+        let mut bytes = sample_chunk().to_bytes();
+        // file_id content starts right after its 4-byte length prefix.
+        bytes[4] = 0xFF;
+        let err = FileChunk::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            ChunkDecodeError::InvalidUtf8 {
+                field: "file_id",
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn test_chunk_small_file() {
         let manager = FileTransferManager::new();
