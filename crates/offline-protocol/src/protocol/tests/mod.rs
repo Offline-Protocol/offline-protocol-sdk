@@ -13301,6 +13301,30 @@ fn test_rejected_plaintext_replay_is_not_reacked() {
     );
 }
 
+#[test]
+fn test_plaintext_receive_warned_set_is_bounded() {
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    let warnings = capture_security_warnings(&mut bob);
+
+    let total = MAX_PLAINTEXT_RECEIVE_WARNED_PEERS + 10;
+    for i in 0..total {
+        bob.warn_plaintext_receive_rejected(&format!("forged-{i}"), "test");
+    }
+
+    assert_eq!(
+        warnings.lock().unwrap().len(),
+        total,
+        "every distinct forged peer still warns, even past the cap"
+    );
+    assert!(
+        bob.plaintext_receive_warned.len() <= MAX_PLAINTEXT_RECEIVE_WARNED_PEERS,
+        "warned-peer tracking must stay bounded under a forged-sender flood"
+    );
+}
+
 
 #[test]
 fn test_send_media_plaintext_when_encryption_disabled() {

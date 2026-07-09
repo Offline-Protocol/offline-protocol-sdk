@@ -98,6 +98,15 @@ pub(crate) const MAX_TOFU_PEERS: usize = 1000;
 /// Maximum number of blocked users to retain.
 pub(crate) const MAX_BLOCKED_USERS: usize = 10_000;
 
+/// Maximum number of peers tracked for once-per-peer
+/// `PlaintextReceiveRejected` warning suppression.
+///
+/// The keys are wire-claimed (attacker-controllable) sender ids, so the set
+/// resets at capacity instead of growing without bound: a flood of forged
+/// senders degrades the throttle to once-per-peer-per-generation while
+/// memory stays capped.
+pub(crate) const MAX_PLAINTEXT_RECEIVE_WARNED_PEERS: usize = 1000;
+
 /// Minimum age (in milliseconds) a TOFU entry must have before it can be
 /// evicted by LRU. This prevents a cache-filling attack where an adversary
 /// rapidly registers many fake identities to evict legitimate pinned keys.

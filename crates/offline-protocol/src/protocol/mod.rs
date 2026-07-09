@@ -111,7 +111,10 @@ pub struct OfflineProtocol {
 
     /// Peers already flagged with a `PlaintextReceiveRejected` security
     /// warning, so a chatty legacy or malicious peer warns once per peer
-    /// instead of once per rejected message.
+    /// instead of once per rejected message. Keys are wire-claimed
+    /// (attacker-controllable) sender ids, so the set is bounded: it resets
+    /// at `MAX_PLAINTEXT_RECEIVE_WARNED_PEERS` instead of growing without
+    /// limit.
     pub(crate) plaintext_receive_warned: std::collections::HashSet<String>,
 
     /// Bounded pending decryption queue for encrypted messages received before

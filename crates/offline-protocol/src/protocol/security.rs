@@ -3,7 +3,7 @@
 use super::{
     base64_decode, base64_encode, storage_keys, InternalMessageResult, OfflineProtocol, TofuEntry,
     CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIG_META_KEY, DATA_PLANE_PREFIXES, INTERNAL_PREFIXES,
-    MAX_TOFU_PEERS, TOFU_MIN_EVICTION_AGE_MS,
+    MAX_PLAINTEXT_RECEIVE_WARNED_PEERS, MAX_TOFU_PEERS, TOFU_MIN_EVICTION_AGE_MS,
 };
 use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
@@ -417,19 +417,30 @@ impl OfflineProtocol {
     }
 
     /// Emits a [`SecurityWarningCode::PlaintextReceiveRejected`] warning for
-    /// `peer_id`, at most once per peer per protocol instance. Called from the
-    /// inbound plaintext policy gate ([`Self::accept_plaintext_content`]) when
-    /// cleartext text or legacy media is dropped — the per-rejection `warn!`
-    /// logs live at the call sites; this keeps the event stream from flooding
-    /// when a legacy or malicious peer keeps sending.
+    /// `peer_id`, at most once per peer (tracked in a bounded set that resets
+    /// at [`MAX_PLAINTEXT_RECEIVE_WARNED_PEERS`], so a peer may re-warn after
+    /// a forged-sender flood). Called from the inbound plaintext policy gate
+    /// ([`Self::accept_plaintext_content`]) when cleartext text or legacy
+    /// media is dropped — the per-rejection `warn!` logs live at the call
+    /// sites; this keeps the event stream from flooding when a legacy or
+    /// malicious peer keeps sending.
     pub(super) fn warn_plaintext_receive_rejected(&mut self, peer_id: &str, detail: &str) {
-        if self.plaintext_receive_warned.insert(peer_id.to_string()) {
-            self.emit_security_warning(
-                peer_id,
-                SecurityWarningCode::PlaintextReceiveRejected,
-                detail,
-            );
+        if self.plaintext_receive_warned.contains(peer_id) {
+            return;
         }
+        // The keys are attacker-controlled (wire-claimed sender ids), so the
+        // set resets at capacity instead of growing without bound: a forged-
+        // sender flood degrades the throttle to once-per-peer-per-generation
+        // while memory stays capped.
+        if self.plaintext_receive_warned.len() >= MAX_PLAINTEXT_RECEIVE_WARNED_PEERS {
+            self.plaintext_receive_warned.clear();
+        }
+        self.plaintext_receive_warned.insert(peer_id.to_string());
+        self.emit_security_warning(
+            peer_id,
+            SecurityWarningCode::PlaintextReceiveRejected,
+            detail,
+        );
     }
 
     /// Returns `true` if the message content starts with any internal prefix.
