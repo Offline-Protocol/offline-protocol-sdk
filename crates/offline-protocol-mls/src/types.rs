@@ -44,7 +44,7 @@ impl GroupId {
         }
         for segment in id.split(':') {
             offline_protocol_core::validate_id_chars(segment, "Group ID segment")
-                .map_err(crate::MlsError::InvalidGroupId)?;
+                .map_err(|e| crate::MlsError::InvalidGroupId(e.to_string()))?;
         }
         Ok(())
     }

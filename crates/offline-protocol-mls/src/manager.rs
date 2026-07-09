@@ -264,7 +264,7 @@ impl MlsManager {
     /// another's name.
     pub fn import_key_package(&self, user_id: &str, key_package_data: &[u8]) -> Result<()> {
         offline_protocol_core::validate_id_chars(user_id, "User ID")
-            .map_err(MlsError::InvalidUserId)?;
+            .map_err(|e| MlsError::InvalidUserId(e.to_string()))?;
 
         let key_package_in = KeyPackageIn::tls_deserialize_exact(key_package_data)
             .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
@@ -388,7 +388,7 @@ impl MlsManager {
         // raw storage key for deletes — reject storage-hostile values just
         // like `import_key_package` does for its user id.
         offline_protocol_core::validate_id_chars(other_user_id, "User ID")
-            .map_err(MlsError::InvalidUserId)?;
+            .map_err(|e| MlsError::InvalidUserId(e.to_string()))?;
 
         // Clear any pending welcome we were about to send
         let _ = self.clear_pending_welcome(other_user_id);

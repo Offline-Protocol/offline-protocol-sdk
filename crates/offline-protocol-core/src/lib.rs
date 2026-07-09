@@ -21,6 +21,6 @@ pub use message::{ContentType, ForwardInfo, MediaMetadata, Message, MessageId, M
 pub use service::{ServiceDescriptor, ServiceId};
 pub use sync::{MutexExt, RwLockExt};
 pub use types::{
-    validate_id_chars, AppId, HopCount, LamportClock, LocalInstant, Timestamp, UserId,
-    WallClockTimestamp, TTL,
+    validate_id_chars, AppId, HopCount, IdValidationError, LamportClock, LocalInstant, Timestamp,
+    UserId, WallClockTimestamp, TTL,
 };
