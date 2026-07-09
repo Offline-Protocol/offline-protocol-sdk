@@ -88,8 +88,9 @@ pub enum SecurityWarningCode {
     /// encryption policy: either `require_encryption` is enabled, or a
     /// confirmed MLS session exists with the claimed sender and plaintext
     /// from that peer is a downgrade/forgery attempt (plaintext carries no
-    /// sender authentication). Emitted at most once per peer per protocol
-    /// instance.
+    /// sender authentication). Emitted at most once per peer; the per-peer
+    /// tracking set is bounded, so after a flood of forged sender ids a
+    /// peer may warn again.
     PlaintextReceiveRejected,
 }
 
