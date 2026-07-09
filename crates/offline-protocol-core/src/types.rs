@@ -417,6 +417,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_validate_id_chars_variant_per_rejection() {
+        assert!(matches!(
+            validate_id_chars("", "User ID"),
+            Err(IdValidationError::Empty { .. })
+        ));
+        assert!(matches!(
+            validate_id_chars(".", "User ID"),
+            Err(IdValidationError::PathTraversal { .. })
+        ));
+        assert!(matches!(
+            validate_id_chars("..", "User ID"),
+            Err(IdValidationError::PathTraversal { .. })
+        ));
+        assert!(matches!(
+            validate_id_chars("a\x00b", "User ID"),
+            Err(IdValidationError::ControlChars { .. })
+        ));
+        assert!(matches!(
+            validate_id_chars("a/b", "User ID"),
+            Err(IdValidationError::InvalidChars { .. })
+        ));
+        assert!(matches!(
+            validate_id_chars("a\\b", "User ID"),
+            Err(IdValidationError::InvalidChars { .. })
+        ));
+        assert!(matches!(
+            validate_id_chars("a:b", "User ID"),
+            Err(IdValidationError::InvalidChars { .. })
+        ));
+        assert!(validate_id_chars("alice-123", "User ID").is_ok());
+    }
+
+    #[test]
+    fn test_id_validation_error_display_includes_type_name() {
+        let err = validate_id_chars("", "App ID").unwrap_err();
+        assert_eq!(err.to_string(), "App ID cannot be empty");
+    }
+
+    #[test]
     fn test_user_id_creation() {
         let user_id = UserId::new("user123").unwrap();
         assert_eq!(user_id.as_str(), "user123");
