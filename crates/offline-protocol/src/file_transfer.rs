@@ -1141,6 +1141,14 @@ mod tests {
             err,
             ChunkDecodeError::UnexpectedEof { what: "u32" }
         ));
+        // Truncate mid-header: both string fields parse but the file_size
+        // u64 read hits EOF.
+        let after_strings = 4 + "file1".len() + 4 + "test.txt".len();
+        let err = FileChunk::from_bytes(&bytes[..after_strings + 4]).unwrap_err();
+        assert!(matches!(
+            err,
+            ChunkDecodeError::UnexpectedEof { what: "u64" }
+        ));
         // Truncate mid-body: length prefixes parse but the data falls short.
         let err = FileChunk::from_bytes(&bytes[..bytes.len() - 1]).unwrap_err();
         assert!(matches!(
