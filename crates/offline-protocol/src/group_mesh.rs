@@ -1382,6 +1382,11 @@ impl OfflineProtocol {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id)?;
             let metadata = mls_guard.get_group_metadata(&gid)?;
+            // Mirrors check_is_admin: a missing group is GroupNotFound, not
+            // a permissions failure.
+            if metadata.is_none() && mls_guard.get_group_info(&gid)?.is_none() {
+                return Err(Error::GroupNotFound(group_id.to_string()));
+            }
 
             let is_admin = if let Some(ref meta) = metadata {
                 if meta.has_any_admin() {
@@ -1886,10 +1891,18 @@ impl OfflineProtocol {
     ///
     /// Falls back to `created_by` when no admin role has been stored yet
     /// (handles groups created before role tracking was introduced).
+    ///
+    /// Returns `GroupNotFound` when no MLS group exists locally, so
+    /// admin-gated operations don't misreport a missing group as a
+    /// permissions failure. Inbound handlers that verify senders treat
+    /// this error the same as a deny.
     pub(crate) fn check_is_admin(&self, group_id: &str, user_id: &str) -> Result<bool> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let metadata = mls_guard.get_group_metadata(&gid)?;
+        if metadata.is_none() && mls_guard.get_group_info(&gid)?.is_none() {
+            return Err(Error::GroupNotFound(group_id.to_string()));
+        }
         drop(mls_guard);
 
         if let Some(meta) = &metadata {
@@ -1902,7 +1915,7 @@ impl OfflineProtocol {
             }
         }
 
-        // No metadata at all — deny by default
+        // Group exists but has no role metadata — deny by default
         Ok(false)
     }
 

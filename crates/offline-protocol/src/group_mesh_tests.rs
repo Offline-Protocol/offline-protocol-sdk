@@ -5654,20 +5654,61 @@ fn test_fallback_admin_denies_non_creator() {
 
 #[test]
 fn test_no_metadata_denies_admin() {
-    // When no metadata exists at all, admin check should deny.
+    // A group with no MLS state at all is GroupNotFound — access is denied,
+    // but not misreported as a permissions failure.
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     protocol.initialize_mls(storage).unwrap();
     protocol.start().unwrap();
 
-    // Simulate having a group in the member list but no metadata
+    // Simulate having a group in the member list but no MLS state
     protocol.group_mesh.members.insert(
         "group:phantom".to_string(),
         vec!["alice".to_string(), "bob".to_string()],
     );
 
     let result = protocol.set_member_role("group:phantom", "bob", GroupRole::Admin);
-    assert!(result.is_err(), "No metadata should deny admin access");
+    assert!(
+        matches!(result, Err(crate::Error::GroupNotFound(_))),
+        "Phantom group should be GroupNotFound, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_admin_gated_ops_on_missing_group_return_group_not_found() {
+    // Admin-gated operations on a group that doesn't exist locally must
+    // surface GroupNotFound, not PermissionDenied — FFI callers branch on
+    // the error class.
+    let (mut alice, _events) = setup_started_with_events();
+
+    let result = alice.invite_to_group("group:missing", "bob");
+    assert!(
+        matches!(result, Err(crate::Error::GroupNotFound(_))),
+        "invite_to_group: expected GroupNotFound, got {:?}",
+        result
+    );
+
+    let result = alice.remove_from_group("group:missing", "bob");
+    assert!(
+        matches!(result, Err(crate::Error::GroupNotFound(_))),
+        "remove_from_group: expected GroupNotFound, got {:?}",
+        result
+    );
+
+    let result = alice.set_member_role("group:missing", "bob", GroupRole::Admin);
+    assert!(
+        matches!(result, Err(crate::Error::GroupNotFound(_))),
+        "set_member_role: expected GroupNotFound, got {:?}",
+        result
+    );
+
+    let result = alice.rename_group("group:missing", "New Name");
+    assert!(
+        matches!(result, Err(crate::Error::GroupNotFound(_))),
+        "rename_group: expected GroupNotFound, got {:?}",
+        result
+    );
 }
 
 #[test]
