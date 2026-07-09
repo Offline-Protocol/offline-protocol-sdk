@@ -1381,12 +1381,7 @@ impl OfflineProtocol {
         {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id)?;
-            let metadata = mls_guard.get_group_metadata(&gid)?;
-            // Mirrors check_is_admin: a missing group is GroupNotFound, not
-            // a permissions failure.
-            if metadata.is_none() && mls_guard.get_group_info(&gid)?.is_none() {
-                return Err(Error::GroupNotFound(group_id.to_string()));
-            }
+            let metadata = Self::group_metadata_or_not_found(&mls_guard, &gid, group_id)?;
 
             let is_admin = if let Some(ref meta) = metadata {
                 if meta.has_any_admin() {
@@ -1887,6 +1882,22 @@ impl OfflineProtocol {
         }
     }
 
+    /// Loads a group's role metadata, failing with [`Error::GroupNotFound`]
+    /// when the group has neither metadata nor MLS state. Admin-gated
+    /// operations use this so a missing group is not misreported as a
+    /// permissions failure.
+    fn group_metadata_or_not_found(
+        mls_guard: &offline_protocol_mls::MlsManager,
+        gid: &offline_protocol_mls::GroupId,
+        group_id: &str,
+    ) -> Result<Option<offline_protocol_mls::GroupMetadata>> {
+        let metadata = mls_guard.get_group_metadata(gid)?;
+        if metadata.is_none() && mls_guard.get_group_info(gid)?.is_none() {
+            return Err(Error::GroupNotFound(group_id.to_string()));
+        }
+        Ok(metadata)
+    }
+
     /// Checks if a user is an admin of the given group.
     ///
     /// Falls back to `created_by` when no admin role has been stored yet
@@ -1899,10 +1910,7 @@ impl OfflineProtocol {
     pub(crate) fn check_is_admin(&self, group_id: &str, user_id: &str) -> Result<bool> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id)?;
-        let metadata = mls_guard.get_group_metadata(&gid)?;
-        if metadata.is_none() && mls_guard.get_group_info(&gid)?.is_none() {
-            return Err(Error::GroupNotFound(group_id.to_string()));
-        }
+        let metadata = Self::group_metadata_or_not_found(&mls_guard, &gid, group_id)?;
         drop(mls_guard);
 
         if let Some(meta) = &metadata {
