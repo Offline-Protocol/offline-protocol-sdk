@@ -87,6 +87,12 @@ struct FragmentAssembly {
     /// old (e.g. a backgrounded receiver, a 100-200ms connection interval, or
     /// an iOS->Android sender with no per-write pacing).
     last_seen: SystemTime,
+    /// Running sum of the payload lengths currently stored in `fragments`.
+    /// Maintained incrementally so the [`DEFAULT_MAX_MESSAGE_SIZE`] bound can
+    /// be enforced as fragments arrive, rather than only after the assembly
+    /// completes — otherwise a peer could park unbounded memory in a partial
+    /// assembly that never reaches its declared `total_fragments`.
+    buffered_bytes: usize,
 }
 
 impl FragmentAssembly {
@@ -648,6 +654,16 @@ impl BleTransport {
         // Decode fragment from binary format
         let fragment = decode_fragment(fragment_data)?;
 
+        // Receive-side parity with the send path (see `fragment_message`): a
+        // peer must not be able to declare more fragments than we would ever
+        // produce ourselves. Rejected before any buffer is allocated, so a
+        // fabricated `total_fragments` (a u16, up to 65_535) costs nothing.
+        if fragment.total_fragments as usize > BLE_MAX_FRAGMENT_COUNT {
+            return Err(crate::Error::Other(
+                "Fragment count exceeds maximum".to_string(),
+            ));
+        }
+
         if fragment.total_fragments == 1 {
             if fragment.data.len() > DEFAULT_MAX_MESSAGE_SIZE {
                 return Err(crate::Error::MessageTooLarge(
@@ -707,6 +723,46 @@ impl BleTransport {
                 }
             }
 
+            // Validate the fragment and compute the projected buffered size
+            // with a short read-only borrow, so the overflow path below can
+            // drop the whole assembly without a live &mut borrow fighting the
+            // removal.
+            let projected_bytes = {
+                let existing = buffers.get(&fragment.message_id);
+
+                // Every fragment of a message must agree on the total count.
+                if let Some(a) = existing {
+                    if a.total_fragments != fragment.total_fragments {
+                        return Err(crate::Error::Other(format!(
+                            "Fragment count mismatch: expected {}, got {}",
+                            a.total_fragments, fragment.total_fragments
+                        )));
+                    }
+                }
+
+                // saturating_sub keeps a duplicate fragment index (a retransmit
+                // overwriting an already-counted payload) from inflating the total.
+                let prior_total = existing.map(|a| a.buffered_bytes).unwrap_or(0);
+                let prior_len = existing
+                    .and_then(|a| a.fragments.get(&fragment.fragment_index))
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                prior_total.saturating_sub(prior_len) + fragment.data.len()
+            };
+
+            // Enforce the reassembled-size bound incrementally, before the
+            // assembly can complete. A message whose fragments would exceed the
+            // limit is unrecoverable, so drop the whole assembly to free its
+            // buffered bytes immediately rather than parking them until the
+            // idle timeout.
+            if projected_bytes > DEFAULT_MAX_MESSAGE_SIZE {
+                buffers.remove(&fragment.message_id);
+                return Err(crate::Error::MessageTooLarge(
+                    projected_bytes,
+                    DEFAULT_MAX_MESSAGE_SIZE,
+                ));
+            }
+
             // Get or create assembly buffer
             let assembly = buffers
                 .entry(fragment.message_id.clone())
@@ -715,16 +771,10 @@ impl BleTransport {
                     fragments: HashMap::new(),
                     started_at: now,
                     last_seen: now,
+                    buffered_bytes: 0,
                 });
 
-            // Validate fragment
-            if assembly.total_fragments != fragment.total_fragments {
-                return Err(crate::Error::Other(format!(
-                    "Fragment count mismatch: expected {}, got {}",
-                    assembly.total_fragments, fragment.total_fragments
-                )));
-            }
-
+            assembly.buffered_bytes = projected_bytes;
             assembly
                 .fragments
                 .insert(fragment.fragment_index, fragment.data);
@@ -1358,6 +1408,7 @@ mod tests {
                 fragments: HashMap::new(),
                 started_at: SystemTime::now(),
                 last_seen: SystemTime::now(),
+                buffered_bytes: 0,
             },
         );
 
@@ -2192,10 +2243,17 @@ mod tests {
     fn test_ble_reassembled_payload_rejects_oversized() {
         let transport = BleTransport::new("test-device");
         // Split an oversized payload across many fragments so each individual
-        // fragment's data_len fits in a u16 but the reassembled total exceeds
-        // DEFAULT_MAX_MESSAGE_SIZE.
-        let chunk_size: usize = 60_000; // well under u16::MAX
-        let num_fragments = (DEFAULT_MAX_MESSAGE_SIZE / chunk_size) + 2; // guarantees total > limit
+        // fragment's data_len fits in a u16 but the running total crosses
+        // DEFAULT_MAX_MESSAGE_SIZE before the assembly completes. The bound is
+        // enforced incrementally, so rejection fires on the first fragment that
+        // pushes the buffered total over the limit — not only at completion.
+        // chunk_size stays well under u16::MAX; `+ 2` guarantees the
+        // reassembled total would exceed DEFAULT_MAX_MESSAGE_SIZE.
+        let chunk_size: usize = 60_000;
+        let num_fragments = (DEFAULT_MAX_MESSAGE_SIZE / chunk_size) + 2;
+        // First fragment index whose cumulative bytes exceed the limit:
+        // chunk_size * (i + 1) > DEFAULT_MAX_MESSAGE_SIZE  <=>  i >= floor(limit / chunk_size).
+        let overflow_at = DEFAULT_MAX_MESSAGE_SIZE / chunk_size;
 
         for i in 0..num_fragments {
             let frag = encode_fragment(
@@ -2207,18 +2265,124 @@ mod tests {
             .unwrap();
 
             let result = transport.process_fragment(&frag);
-            if i < num_fragments - 1 {
-                // Incomplete — should be Ok(None)
+            if i < overflow_at {
+                // Under the limit so far — incomplete, buffered.
                 assert!(result.unwrap().is_none());
             } else {
-                // Final fragment completes assembly — must reject as too large
-                assert!(result.is_err());
+                // This fragment pushes the running total over the limit and
+                // must be rejected before the assembly ever completes.
                 assert!(matches!(
                     result.unwrap_err(),
                     crate::Error::MessageTooLarge(_, _)
                 ));
+                break;
             }
         }
+
+        // The overflowing assembly must have been dropped, not left parked.
+        assert!(transport.fragment_buffers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_ble_process_fragment_rejects_excessive_total() {
+        let transport = BleTransport::new("test-device");
+
+        // A fragment declaring more than BLE_MAX_FRAGMENT_COUNT fragments is
+        // rejected up front, before any reassembly buffer is allocated.
+        let over = encode_fragment(b"evil", 0, (BLE_MAX_FRAGMENT_COUNT + 1) as u16, b"x").unwrap();
+        assert!(matches!(
+            transport.process_fragment(&over).unwrap_err(),
+            crate::Error::Other(s) if s.contains("Fragment count exceeds maximum")
+        ));
+
+        // The u16 ceiling is likewise rejected.
+        let max = encode_fragment(b"evil", 0, u16::MAX, b"x").unwrap();
+        assert!(transport.process_fragment(&max).is_err());
+
+        // Neither rejected fragment left an assembly behind.
+        assert!(transport.fragment_buffers.lock().unwrap().is_empty());
+
+        // The boundary value (exactly BLE_MAX_FRAGMENT_COUNT) is accepted and
+        // buffered as an incomplete assembly.
+        let ok = encode_fragment(b"good", 0, BLE_MAX_FRAGMENT_COUNT as u16, b"x").unwrap();
+        assert!(transport.process_fragment(&ok).unwrap().is_none());
+        assert_eq!(transport.fragment_buffers.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_ble_incremental_size_bound_rejects_before_completion() {
+        let transport = BleTransport::new("test-device");
+
+        // A small, valid fragment count (well under BLE_MAX_FRAGMENT_COUNT) but
+        // large per-fragment payloads: the running total must trip the size
+        // bound long before the final fragment could arrive.
+        let total_fragments: u16 = 30;
+        let chunk_size: usize = 60_000;
+        let overflow_at = DEFAULT_MAX_MESSAGE_SIZE / chunk_size;
+
+        let mut rejected_at = None;
+        for i in 0..total_fragments as usize {
+            let frag = encode_fragment(
+                b"partial",
+                i as u16,
+                total_fragments,
+                &vec![0x5A; chunk_size],
+            )
+            .unwrap();
+            match transport.process_fragment(&frag) {
+                Ok(opt) => assert!(opt.is_none(), "fragment {i} should not complete"),
+                Err(crate::Error::MessageTooLarge(_, _)) => {
+                    rejected_at = Some(i);
+                    break;
+                }
+                Err(e) => panic!("unexpected error at fragment {i}: {e}"),
+            }
+        }
+
+        let rejected_at = rejected_at.expect("size bound should have rejected before completion");
+        assert_eq!(
+            rejected_at, overflow_at,
+            "rejection should fire on the first overflowing fragment"
+        );
+        assert!(
+            rejected_at < total_fragments as usize - 1,
+            "rejection must happen strictly before the assembly could complete"
+        );
+        // The overflowing assembly was dropped, not parked.
+        assert!(transport.fragment_buffers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_ble_duplicate_fragment_index_does_not_inflate_size() {
+        let transport = BleTransport::new("test-device");
+
+        // Re-sending the same fragment index must overwrite, not accumulate:
+        // 100 copies of a ~60 KiB fragment at index 0 stay well under the
+        // 1 MiB bound because each replaces the last.
+        let chunk_size: usize = 60_000;
+        for _ in 0..100 {
+            let frag = encode_fragment(b"dup", 0, 4, &vec![0xC3; chunk_size]).unwrap();
+            assert!(
+                transport.process_fragment(&frag).unwrap().is_none(),
+                "duplicate index should never trip the size bound"
+            );
+        }
+
+        // A normal small message still reassembles cleanly afterwards.
+        transport.on_peer_discovered(peer_device("bob"));
+        transport.set_peer_mtu("bob", 244);
+        let msg = small_message();
+        let fragments = transport.fragment_message(&msg).unwrap();
+        let mut done = None;
+        for f in fragments {
+            if let Some(m) = transport.process_fragment(&f).unwrap() {
+                done = Some(m);
+            }
+        }
+        assert_eq!(
+            done.expect("message should reassemble").content,
+            msg.content
+        );
     }
 
     #[test]
