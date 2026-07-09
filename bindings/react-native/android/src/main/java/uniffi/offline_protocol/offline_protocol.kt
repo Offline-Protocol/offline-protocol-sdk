@@ -7985,6 +7985,18 @@ sealed class ProtocolException(message: String): kotlin.Exception(message) {
         
         class Other(message: String) : ProtocolException(message)
         
+        class TransportException(message: String) : ProtocolException(message)
+        
+        class SerializationException(message: String) : ProtocolException(message)
+        
+        class ServiceException(message: String) : ProtocolException(message)
+        
+        class GroupNotFound(message: String) : ProtocolException(message)
+        
+        class PermissionDenied(message: String) : ProtocolException(message)
+        
+        class InvalidArgument(message: String) : ProtocolException(message)
+        
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<ProtocolException> {
         override fun lift(error_buf: RustBuffer.ByValue): ProtocolException = FfiConverterTypeProtocolError.lift(error_buf)
@@ -8012,6 +8024,12 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
             12 -> ProtocolException.MediaTransferLimit(FfiConverterString.read(buf))
             13 -> ProtocolException.LockPoisoned(FfiConverterString.read(buf))
             14 -> ProtocolException.Other(FfiConverterString.read(buf))
+            15 -> ProtocolException.TransportException(FfiConverterString.read(buf))
+            16 -> ProtocolException.SerializationException(FfiConverterString.read(buf))
+            17 -> ProtocolException.ServiceException(FfiConverterString.read(buf))
+            18 -> ProtocolException.GroupNotFound(FfiConverterString.read(buf))
+            19 -> ProtocolException.PermissionDenied(FfiConverterString.read(buf))
+            20 -> ProtocolException.InvalidArgument(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
         
@@ -8077,6 +8095,30 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
             }
             is ProtocolException.Other -> {
                 buf.putInt(14)
+                Unit
+            }
+            is ProtocolException.TransportException -> {
+                buf.putInt(15)
+                Unit
+            }
+            is ProtocolException.SerializationException -> {
+                buf.putInt(16)
+                Unit
+            }
+            is ProtocolException.ServiceException -> {
+                buf.putInt(17)
+                Unit
+            }
+            is ProtocolException.GroupNotFound -> {
+                buf.putInt(18)
+                Unit
+            }
+            is ProtocolException.PermissionDenied -> {
+                buf.putInt(19)
+                Unit
+            }
+            is ProtocolException.InvalidArgument -> {
+                buf.putInt(20)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

@@ -6570,6 +6570,30 @@ class ProtocolError:  # type: ignore
         def __repr__(self):
             return "ProtocolError.Other({})".format(repr(str(self)))
     _UniffiTempProtocolError.Other = Other # type: ignore
+    class TransportError(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.TransportError({})".format(repr(str(self)))
+    _UniffiTempProtocolError.TransportError = TransportError # type: ignore
+    class SerializationError(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.SerializationError({})".format(repr(str(self)))
+    _UniffiTempProtocolError.SerializationError = SerializationError # type: ignore
+    class ServiceError(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.ServiceError({})".format(repr(str(self)))
+    _UniffiTempProtocolError.ServiceError = ServiceError # type: ignore
+    class GroupNotFound(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.GroupNotFound({})".format(repr(str(self)))
+    _UniffiTempProtocolError.GroupNotFound = GroupNotFound # type: ignore
+    class PermissionDenied(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.PermissionDenied({})".format(repr(str(self)))
+    _UniffiTempProtocolError.PermissionDenied = PermissionDenied # type: ignore
+    class InvalidArgument(_UniffiTempProtocolError):
+        def __repr__(self):
+            return "ProtocolError.InvalidArgument({})".format(repr(str(self)))
+    _UniffiTempProtocolError.InvalidArgument = InvalidArgument # type: ignore
 
 ProtocolError = _UniffiTempProtocolError # type: ignore
 del _UniffiTempProtocolError
@@ -6635,6 +6659,30 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             return ProtocolError.Other(
                 _UniffiFfiConverterString.read(buf),
             )
+        if variant == 15:
+            return ProtocolError.TransportError(
+                _UniffiFfiConverterString.read(buf),
+            )
+        if variant == 16:
+            return ProtocolError.SerializationError(
+                _UniffiFfiConverterString.read(buf),
+            )
+        if variant == 17:
+            return ProtocolError.ServiceError(
+                _UniffiFfiConverterString.read(buf),
+            )
+        if variant == 18:
+            return ProtocolError.GroupNotFound(
+                _UniffiFfiConverterString.read(buf),
+            )
+        if variant == 19:
+            return ProtocolError.PermissionDenied(
+                _UniffiFfiConverterString.read(buf),
+            )
+        if variant == 20:
+            return ProtocolError.InvalidArgument(
+                _UniffiFfiConverterString.read(buf),
+            )
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
@@ -6667,6 +6715,18 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             return
         if isinstance(value, ProtocolError.Other):
             return
+        if isinstance(value, ProtocolError.TransportError):
+            return
+        if isinstance(value, ProtocolError.SerializationError):
+            return
+        if isinstance(value, ProtocolError.ServiceError):
+            return
+        if isinstance(value, ProtocolError.GroupNotFound):
+            return
+        if isinstance(value, ProtocolError.PermissionDenied):
+            return
+        if isinstance(value, ProtocolError.InvalidArgument):
+            return
 
     @staticmethod
     def write(value, buf):
@@ -6698,6 +6758,18 @@ class _UniffiFfiConverterTypeProtocolError(_UniffiConverterRustBuffer):
             buf.write_i32(13)
         if isinstance(value, ProtocolError.Other):
             buf.write_i32(14)
+        if isinstance(value, ProtocolError.TransportError):
+            buf.write_i32(15)
+        if isinstance(value, ProtocolError.SerializationError):
+            buf.write_i32(16)
+        if isinstance(value, ProtocolError.ServiceError):
+            buf.write_i32(17)
+        if isinstance(value, ProtocolError.GroupNotFound):
+            buf.write_i32(18)
+        if isinstance(value, ProtocolError.PermissionDenied):
+            buf.write_i32(19)
+        if isinstance(value, ProtocolError.InvalidArgument):
+            buf.write_i32(20)
 
 
 
