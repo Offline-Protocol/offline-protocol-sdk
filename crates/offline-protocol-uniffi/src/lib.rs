@@ -414,6 +414,22 @@ fn map_send_error(err: offline_protocol::Error) -> ProtocolError {
     }
 }
 
+/// Classifies a receive-side chunk rejection: resource-exhaustion and
+/// failed-transfer tombstones are receiver state (`InvalidState` — a retry
+/// with a fresh transfer is meaningful), while malformed or mismatched
+/// chunks are caller-input defects (`InvalidArgument`).
+fn map_chunk_rejection(
+    rejection: offline_protocol::file_transfer::ChunkRejection,
+) -> ProtocolError {
+    use offline_protocol::file_transfer::ChunkRejection;
+    let msg = format!("File chunk rejected: {}", rejection.as_str());
+    if rejection.is_resource_exhaustion() || rejection == ChunkRejection::PreviouslyFailed {
+        ProtocolError::InvalidState(msg)
+    } else {
+        ProtocolError::InvalidArgument(msg)
+    }
+}
+
 /// Message priority levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessagePriority {
@@ -3865,12 +3881,7 @@ impl OfflineProtocol {
         protocol
             .file_transfer_manager_mut()
             .process_chunk(FileTransferManager::MANUAL_SENDER, chunk)
-            .map_err(|rejection| {
-                ProtocolError::InvalidArgument(format!(
-                    "File chunk rejected: {}",
-                    rejection.as_str()
-                ))
-            })?;
+            .map_err(map_chunk_rejection)?;
         Ok(())
     }
 
@@ -5060,7 +5071,7 @@ impl MeshServices {
 
 #[cfg(test)]
 mod error_mapping_tests {
-    use super::{map_send_error, ProtocolError};
+    use super::{map_chunk_rejection, map_send_error, ProtocolError};
     use offline_protocol::Error as E;
     use offline_protocol_core::Error as CoreErr;
     use offline_protocol_services::ServiceError;
@@ -5147,6 +5158,38 @@ mod error_mapping_tests {
         assert!(matches!(group, ProtocolError::GroupNotFound(_)));
         let mls = map_send_error(E::MlsNotInitialized);
         assert!(matches!(mls, ProtocolError::MlsNotInitialized));
+    }
+
+    #[test]
+    fn chunk_rejections_split_receiver_state_from_bad_input() {
+        use offline_protocol::file_transfer::ChunkRejection as R;
+        // Receiver-side resource conditions and failed-transfer tombstones
+        // are retryable with a fresh transfer — they must not surface as
+        // permanent input errors.
+        for rejection in [
+            R::TooManyTransfers,
+            R::SenderQuotaExceeded,
+            R::BufferBudgetExhausted,
+            R::PreviouslyFailed,
+        ] {
+            assert!(
+                matches!(
+                    map_chunk_rejection(rejection),
+                    ProtocolError::InvalidState(_)
+                ),
+                "expected InvalidState for {rejection:?}"
+            );
+        }
+        // Malformed or mismatched chunks are caller-input defects.
+        for rejection in [R::Invalid, R::MetadataMismatch, R::SenderMismatch] {
+            assert!(
+                matches!(
+                    map_chunk_rejection(rejection),
+                    ProtocolError::InvalidArgument(_)
+                ),
+                "expected InvalidArgument for {rejection:?}"
+            );
+        }
     }
 
     #[test]
