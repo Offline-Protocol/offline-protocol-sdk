@@ -163,6 +163,35 @@ pub enum ProtocolError {
     /// Other error
     #[error("{0}")]
     Other(String),
+
+    // New variants are appended only: the generated Swift/Kotlin/Python
+    // bindings decode this enum by positional discriminant, so inserting
+    // or removing a variant breaks every committed binding.
+    /// Transport-layer failure outside an explicit send operation
+    /// (start/stop, inbound data processing). Send-path transport
+    /// failures surface as `SendFailed`.
+    #[error("Transport error: {0}")]
+    TransportError(String),
+
+    /// Payload serialization or deserialization failed.
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+
+    /// Mesh service registry/discovery/request failure.
+    #[error("Service error: {0}")]
+    ServiceError(String),
+
+    /// Group does not exist locally.
+    #[error("Group not found: {0}")]
+    GroupNotFound(String),
+
+    /// Operation requires a group role or permission the caller does not hold.
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+
+    /// A caller-supplied argument failed validation.
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 /// Error types for MLS storage operations
@@ -322,28 +351,60 @@ impl CoreMlsStorage for MlsStorageWrapper {
 }
 
 impl From<offline_protocol::Error> for ProtocolError {
+    // Exhaustive on purpose (no `_` arm): a new engine error variant must
+    // be classified here explicitly instead of silently degrading to
+    // `Other`, which foreign callers cannot act on.
     fn from(err: offline_protocol::Error) -> Self {
+        use offline_protocol::Error as E;
+        use offline_protocol_core::Error as CoreErr;
         match err {
-            offline_protocol::Error::NotStarted => ProtocolError::NotStarted,
-            offline_protocol::Error::AlreadyStarted => ProtocolError::AlreadyStarted,
-            offline_protocol::Error::InvalidConfiguration(msg) => {
-                ProtocolError::InvalidConfiguration(msg)
-            }
-            offline_protocol::Error::NoKeyPackage(peer_id) => ProtocolError::NoKeyPackage(peer_id),
-            offline_protocol::Error::SessionNotReady(state) => {
-                ProtocolError::SessionNotReady(state.into())
-            }
-            offline_protocol::Error::EncryptFailed(message) => {
-                ProtocolError::EncryptFailed(message)
-            }
-            offline_protocol::Error::MlsNotInitialized => ProtocolError::MlsNotInitialized,
-            offline_protocol::Error::Mls(err) => ProtocolError::MlsError(err.to_string()),
-            offline_protocol::Error::UserBlocked(user_id) => ProtocolError::UserBlocked(user_id),
-            offline_protocol::Error::MediaTransferLimit(user_id) => {
-                ProtocolError::MediaTransferLimit(user_id)
-            }
-            _ => ProtocolError::Other(err.to_string()),
+            E::NotStarted => ProtocolError::NotStarted,
+            E::AlreadyStarted => ProtocolError::AlreadyStarted,
+            E::InvalidConfiguration(msg) => ProtocolError::InvalidConfiguration(msg),
+            E::NoKeyPackage(peer_id) => ProtocolError::NoKeyPackage(peer_id),
+            E::SessionNotReady(state) => ProtocolError::SessionNotReady(state.into()),
+            E::EncryptFailed(message) => ProtocolError::EncryptFailed(message),
+            E::MlsNotInitialized => ProtocolError::MlsNotInitialized,
+            E::Mls(err) => ProtocolError::MlsError(err.to_string()),
+            E::UserBlocked(user_id) => ProtocolError::UserBlocked(user_id),
+            E::MediaTransferLimit(user_id) => ProtocolError::MediaTransferLimit(user_id),
+            E::Transport(err) => ProtocolError::TransportError(err.to_string()),
+            E::Serialization(msg) => ProtocolError::SerializationError(msg),
+            E::Service(err) => ProtocolError::ServiceError(err.to_string()),
+            E::GroupNotFound(group_id) => ProtocolError::GroupNotFound(group_id),
+            E::PermissionDenied(msg) => ProtocolError::PermissionDenied(msg),
+            E::InvalidState(msg) => ProtocolError::InvalidState(msg),
+            E::InvalidArgument(msg) => ProtocolError::InvalidArgument(msg),
+            E::Core(err) => match err {
+                CoreErr::SerializationError(msg) | CoreErr::DeserializationError(msg) => {
+                    ProtocolError::SerializationError(msg)
+                }
+                CoreErr::Other(msg) => ProtocolError::Other(msg),
+                err @ (CoreErr::InvalidMessage(_)
+                | CoreErr::InvalidUserId(_)
+                | CoreErr::InvalidAppId(_)
+                | CoreErr::InvalidTTL(_)
+                | CoreErr::InvalidHopCount(_)
+                | CoreErr::InvalidServiceId(_)) => ProtocolError::InvalidArgument(err.to_string()),
+            },
+            // Router/reliability failures are delivery-infrastructure
+            // internals with no FFI-visible producer today; the first one
+            // that appears forces an explicit decision here.
+            err @ (E::Router(_) | E::Reliability(_)) => ProtocolError::Other(err.to_string()),
+            E::Other(msg) => ProtocolError::Other(msg),
         }
+    }
+}
+
+/// Error mapping for send-shaped operations (message, group, media,
+/// presence, connection-request sends): a transport-layer failure during
+/// an explicit send surfaces as `SendFailed`; every other error keeps its
+/// class from the `From` impl. Non-send paths (start/stop, inbound data
+/// processing) map transport failures to `TransportError` instead.
+fn map_send_error(err: offline_protocol::Error) -> ProtocolError {
+    match err {
+        offline_protocol::Error::Transport(e) => ProtocolError::SendFailed(e.to_string()),
+        other => other.into(),
     }
 }
 
@@ -2472,11 +2533,11 @@ impl OfflineProtocol {
                     core_transport,
                     reply_to_msg,
                 )
-                .map_err(ProtocolError::from)?
+                .map_err(map_send_error)?
         } else {
             protocol
                 .send_message(&recipient, &content, Some(priority.into()), reply_to_msg)
-                .map_err(ProtocolError::from)?
+                .map_err(map_send_error)?
         };
 
         Ok(message_id.as_str())
@@ -2500,7 +2561,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .forward_message(&original, &new_recipient, core_priority)
-            .map_err(ProtocolError::from)?;
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -2555,7 +2616,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .send_connection_request(&recipient, &sender_name, key_package)
-            .map_err(ProtocolError::from)?;
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -2569,7 +2630,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .accept_connection_request(&recipient, &accepter_name, key_package)
-            .map_err(ProtocolError::from)?;
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -2578,7 +2639,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .reject_connection_request(&recipient)
-            .map_err(ProtocolError::from)?;
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -2587,7 +2648,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .cancel_connection_request(&recipient)
-            .map_err(ProtocolError::from)?;
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -2646,7 +2707,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         protocol
             .send_service_request(&provider, &service_id, &method, &body)
-            .map_err(ProtocolError::from)
+            .map_err(map_send_error)
     }
 
     /// Responds to a service request from another peer.
@@ -2661,7 +2722,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .respond_to_service_request(&request_id, &requester, &service_id, &status, &body)
-            .map_err(ProtocolError::from)?;
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -2856,9 +2917,9 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::BLE)
         {
-            transport_arc
-                .on_fragment_received(fragment)
-                .map_err(|e| ProtocolError::Other(format!("Fragment processing failed: {}", e)))?;
+            transport_arc.on_fragment_received(fragment).map_err(|e| {
+                ProtocolError::TransportError(format!("Fragment processing failed: {}", e))
+            })?;
         }
 
         while protocol.receive_message().is_some() {}
@@ -2987,7 +3048,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::Internet)
         {
             if let Err(e) = transport_arc.on_data_received(data) {
-                return Err(ProtocolError::Other(format!(
+                return Err(ProtocolError::TransportError(format!(
                     "Failed to process internet message: {}",
                     e
                 )));
@@ -3190,7 +3251,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::WiFiDirect)
         {
             if let Err(e) = transport_arc.on_data_received(data) {
-                return Err(ProtocolError::Other(format!(
+                return Err(ProtocolError::TransportError(format!(
                     "Failed to process WiFi Direct message: {}",
                     e
                 )));
@@ -3339,7 +3400,7 @@ impl OfflineProtocol {
         if let Some(Err(e)) = self.with_transport_fallible(CoreTransportType::Reticulum, |rt| {
             rt.on_data_received_from(data, sender_id.clone())
         })? {
-            return Err(ProtocolError::Other(format!(
+            return Err(ProtocolError::TransportError(format!(
                 "Failed to process reticulum message: {}",
                 e
             )));
@@ -3533,7 +3594,7 @@ impl OfflineProtocol {
         if let Some(Err(e)) =
             self.with_transport_fallible(CoreTransportType::Nostr, |nt| nt.on_data_received(data))?
         {
-            return Err(ProtocolError::Other(format!(
+            return Err(ProtocolError::TransportError(format!(
                 "Failed to process nostr message: {}",
                 e
             )));
@@ -3744,7 +3805,7 @@ impl OfflineProtocol {
                 content_type.into(),
                 core_meta,
             )
-            .map_err(|e| e.into())
+            .map_err(map_send_error)
     }
 
     /// Convenience: sends a generic file (delegates to send_media with ContentType::File).
@@ -3799,7 +3860,10 @@ impl OfflineProtocol {
             .file_transfer_manager_mut()
             .process_chunk(FileTransferManager::MANUAL_SENDER, chunk)
             .map_err(|rejection| {
-                ProtocolError::Other(format!("File chunk rejected: {}", rejection.as_str()))
+                ProtocolError::InvalidArgument(format!(
+                    "File chunk rejected: {}",
+                    rejection.as_str()
+                ))
             })?;
         Ok(())
     }
@@ -3823,7 +3887,9 @@ impl OfflineProtocol {
         protocol
             .file_transfer_manager_mut()
             .finalize_file(&file_id)
-            .ok_or_else(|| ProtocolError::Other("File not found or incomplete".to_string()))?;
+            .ok_or_else(|| {
+                ProtocolError::InvalidState("File not found or incomplete".to_string())
+            })?;
         Ok(())
     }
 
@@ -3836,7 +3902,9 @@ impl OfflineProtocol {
         {
             Ok(())
         } else {
-            Err(ProtocolError::Other("File transfer not found".to_string()))
+            Err(ProtocolError::InvalidState(
+                "File transfer not found".to_string(),
+            ))
         }
     }
 
@@ -4610,7 +4678,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .send_presence_update(&recipient, status.into())
-            .map_err(ProtocolError::from)?;
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -4626,7 +4694,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .send_typing_indicator(&recipient, &conversation_id, is_typing)
-            .map_err(ProtocolError::from)?;
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -4640,7 +4708,7 @@ impl OfflineProtocol {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .send_read_receipt(&recipient, message_ids)
-            .map_err(ProtocolError::from)?;
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -4655,8 +4723,9 @@ impl OfflineProtocol {
             "type": "CheckPresence",
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize CheckPresence: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::SerializationError(format!("Failed to serialize CheckPresence: {}", e))
+        })
     }
 
     /// Request prekey bundle for a user to establish encrypted communication.
@@ -4667,7 +4736,10 @@ impl OfflineProtocol {
             "username": username
         });
         serde_json::to_string(&payload).map_err(|e| {
-            ProtocolError::Other(format!("Failed to serialize RequestPreKeyBundle: {}", e))
+            ProtocolError::SerializationError(format!(
+                "Failed to serialize RequestPreKeyBundle: {}",
+                e
+            ))
         })
     }
 
@@ -4681,12 +4753,15 @@ impl OfflineProtocol {
     ) -> Result<String, ProtocolError> {
         let signed_prekey: serde_json::Value =
             serde_json::from_str(&signed_prekey_json).map_err(|e| {
-                ProtocolError::Other(format!("Failed to parse signed_prekey JSON: {}", e))
+                ProtocolError::InvalidArgument(format!("Failed to parse signed_prekey JSON: {}", e))
             })?;
 
         let one_time_prekeys: Vec<serde_json::Value> = serde_json::from_str(&one_time_prekeys_json)
             .map_err(|e| {
-                ProtocolError::Other(format!("Failed to parse one_time_prekeys JSON: {}", e))
+                ProtocolError::InvalidArgument(format!(
+                    "Failed to parse one_time_prekeys JSON: {}",
+                    e
+                ))
             })?;
 
         let payload = serde_json::json!({
@@ -4695,8 +4770,9 @@ impl OfflineProtocol {
             "signed_prekey": signed_prekey,
             "one_time_prekeys": one_time_prekeys
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize UploadKeys: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::SerializationError(format!("Failed to serialize UploadKeys: {}", e))
+        })
     }
 
     /// Set typing indicator via relay server (JSON payload formatter).
@@ -4706,8 +4782,9 @@ impl OfflineProtocol {
             "type": "SetTyping",
             "conversation_id": conversation_id
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize SetTyping: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::SerializationError(format!("Failed to serialize SetTyping: {}", e))
+        })
     }
 
     /// Clear typing indicator via relay server (JSON payload formatter).
@@ -4717,8 +4794,9 @@ impl OfflineProtocol {
             "type": "ClearTyping",
             "conversation_id": conversation_id
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize ClearTyping: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::SerializationError(format!("Failed to serialize ClearTyping: {}", e))
+        })
     }
 
     // ========================================================================
@@ -4731,7 +4809,7 @@ impl OfflineProtocol {
         guard
             .create_group(&group_name)
             .map(MlsGroupInfo::from)
-            .map_err(|e| ProtocolError::Other(e.to_string()))
+            .map_err(ProtocolError::from)
     }
 
     /// Send an MLS-encrypted message to all group members.
@@ -4747,7 +4825,7 @@ impl OfflineProtocol {
         guard
             .send_group_message(&group_id, &content, core_priority, reply_to_msg.as_deref())
             .map(|ids| ids.into_iter().map(|id| id.as_str().to_string()).collect())
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))
+            .map_err(map_send_error)
     }
 
     /// Forward a message to all members of a group with forwarding attribution.
@@ -4769,7 +4847,7 @@ impl OfflineProtocol {
         guard
             .forward_message_to_group(&original, &group_id, core_priority)
             .map(|ids| ids.into_iter().map(|id| id.as_str().to_string()).collect())
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))
+            .map_err(map_send_error)
     }
 
     /// Invite a user to an MLS group.
@@ -4781,7 +4859,7 @@ impl OfflineProtocol {
         let mut guard = self.lock_inner()?;
         guard
             .invite_to_group(&group_id, &invitee_user_id)
-            .map_err(|e| ProtocolError::Other(e.to_string()))
+            .map_err(ProtocolError::from)
     }
 
     /// Remove a member from an MLS group.
@@ -4793,23 +4871,19 @@ impl OfflineProtocol {
         let mut guard = self.lock_inner()?;
         guard
             .remove_from_group(&group_id, &member_id)
-            .map_err(|e| ProtocolError::Other(e.to_string()))
+            .map_err(ProtocolError::from)
     }
 
     /// Leave an MLS group.
     pub fn leave_group(&self, group_id: String) -> Result<(), ProtocolError> {
         let mut guard = self.lock_inner()?;
-        guard
-            .leave_group(&group_id)
-            .map_err(|e| ProtocolError::Other(e.to_string()))
+        guard.leave_group(&group_id).map_err(ProtocolError::from)
     }
 
     /// List all MLS groups (excluding 1:1 sessions).
     pub fn list_groups(&self) -> Result<Vec<String>, ProtocolError> {
         let guard = self.lock_inner()?;
-        guard
-            .list_groups()
-            .map_err(|e| ProtocolError::Other(e.to_string()))
+        guard.list_groups().map_err(ProtocolError::from)
     }
 
     /// Get information about an MLS group.
@@ -4817,7 +4891,7 @@ impl OfflineProtocol {
         let guard = self.lock_inner()?;
         Ok(guard
             .get_group_info(&group_id)
-            .map_err(|e| ProtocolError::Other(e.to_string()))?
+            .map_err(ProtocolError::from)?
             .map(MlsGroupInfo::from))
     }
 
@@ -4832,12 +4906,12 @@ impl OfflineProtocol {
         let parsed_role: offline_protocol_mls::GroupRole =
             role.parse()
                 .map_err(|e: offline_protocol_mls::ParseGroupRoleError| {
-                    ProtocolError::Other(e.to_string())
+                    ProtocolError::InvalidArgument(e.to_string())
                 })?;
         let mut guard = self.lock_inner()?;
         guard
             .set_member_role(&group_id, &user_id, parsed_role)
-            .map_err(|e| ProtocolError::Other(e.to_string()))
+            .map_err(ProtocolError::from)
     }
 
     /// Get a member's role in a group.
@@ -4851,7 +4925,7 @@ impl OfflineProtocol {
         guard
             .get_member_role(&group_id, &user_id)
             .map(|r| r.to_string())
-            .map_err(|e| ProtocolError::Other(e.to_string()))
+            .map_err(ProtocolError::from)
     }
 
     /// Get all member roles in a group.
@@ -4864,7 +4938,7 @@ impl OfflineProtocol {
         guard
             .get_group_roles(&group_id)
             .map(|roles| roles.into_iter().map(|(k, v)| (k, v.to_string())).collect())
-            .map_err(|e| ProtocolError::Other(e.to_string()))
+            .map_err(ProtocolError::from)
     }
 
     /// Rename a group (admin only, broadcasts to all members).
@@ -4872,7 +4946,7 @@ impl OfflineProtocol {
         let mut guard = self.lock_inner()?;
         guard
             .rename_group(&group_id, &new_name)
-            .map_err(|e| ProtocolError::Other(e.to_string()))
+            .map_err(ProtocolError::from)
     }
 
     // ========================================================================
@@ -4973,6 +5047,90 @@ impl MeshServices {
     ) -> Result<String, ProtocolError> {
         self.protocol
             .svc_respond_to_service_request(request_id, requester, service_id, status, body)
+    }
+}
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::{map_send_error, ProtocolError};
+    use offline_protocol::Error as E;
+    use offline_protocol_core::Error as CoreErr;
+    use offline_protocol_services::ServiceError;
+    use offline_protocol_transport::Error as TransportErr;
+
+    #[test]
+    fn from_maps_engine_error_classes() {
+        let cases: Vec<(E, fn(&ProtocolError) -> bool)> = vec![
+            (E::Transport(TransportErr::SendFailed("boom".into())), |e| {
+                matches!(e, ProtocolError::TransportError(_))
+            }),
+            (E::Serialization("bad json".into()), |e| {
+                matches!(e, ProtocolError::SerializationError(_))
+            }),
+            (
+                E::Service(ServiceError::PayloadTooLarge("query".into())),
+                |e| matches!(e, ProtocolError::ServiceError(_)),
+            ),
+            (E::GroupNotFound("g1".into()), |e| {
+                matches!(e, ProtocolError::GroupNotFound(_))
+            }),
+            (
+                E::PermissionDenied("Only admins can invite members".into()),
+                |e| matches!(e, ProtocolError::PermissionDenied(_)),
+            ),
+            (
+                E::InvalidState("Cannot demote the last admin".into()),
+                |e| matches!(e, ProtocolError::InvalidState(_)),
+            ),
+            (
+                E::InvalidArgument("Group name cannot be empty".into()),
+                |e| matches!(e, ProtocolError::InvalidArgument(_)),
+            ),
+            (E::Other("misc".into()), |e| {
+                matches!(e, ProtocolError::Other(_))
+            }),
+        ];
+        for (input, check) in cases {
+            let debug = format!("{:?}", input);
+            let mapped = ProtocolError::from(input);
+            assert!(check(&mapped), "wrong mapping for {debug}: got {mapped:?}");
+        }
+    }
+
+    #[test]
+    fn from_splits_core_errors_by_class() {
+        let ser = ProtocolError::from(E::Core(CoreErr::SerializationError("x".into())));
+        assert!(matches!(ser, ProtocolError::SerializationError(_)));
+        let de = ProtocolError::from(E::Core(CoreErr::DeserializationError("x".into())));
+        assert!(matches!(de, ProtocolError::SerializationError(_)));
+        let arg = ProtocolError::from(E::Core(CoreErr::InvalidUserId("bad id".into())));
+        assert!(matches!(arg, ProtocolError::InvalidArgument(_)));
+        let ttl = ProtocolError::from(E::Core(CoreErr::InvalidTTL(0)));
+        assert!(matches!(ttl, ProtocolError::InvalidArgument(_)));
+        let other = ProtocolError::from(E::Core(CoreErr::Other("misc".into())));
+        assert!(matches!(other, ProtocolError::Other(_)));
+    }
+
+    #[test]
+    fn send_paths_map_transport_failures_to_send_failed() {
+        let sent = map_send_error(E::Transport(TransportErr::SendFailed(
+            "All transports failed".into(),
+        )));
+        assert!(matches!(sent, ProtocolError::SendFailed(_)));
+
+        // Non-transport errors keep their class on send paths.
+        let group = map_send_error(E::GroupNotFound("g1".into()));
+        assert!(matches!(group, ProtocolError::GroupNotFound(_)));
+        let mls = map_send_error(E::MlsNotInitialized);
+        assert!(matches!(mls, ProtocolError::MlsNotInitialized));
+    }
+
+    #[test]
+    fn transport_error_display_keeps_engine_prefix() {
+        // Callers that only look at the message must see the same
+        // "Transport error: ..." text the old catch-all produced.
+        let mapped = ProtocolError::from(E::Transport(TransportErr::SendFailed("boom".into())));
+        assert_eq!(mapped.to_string(), "Transport error: Send failed: boom");
     }
 }
 
