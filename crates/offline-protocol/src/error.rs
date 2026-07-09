@@ -73,6 +73,7 @@ impl SessionStateError {
             Error::MlsNotInitialized => Self::NotInitialized,
             Error::Transport(_) => Self::TransportFailure,
             Error::EncryptFailed(_) => Self::CryptoFailure,
+            Error::GroupNotFound(_) => Self::GroupNotFound,
             Error::Mls(inner) => Self::from(inner),
             _ => Self::Unknown,
         }
@@ -231,6 +232,14 @@ mod tests {
     #[test]
     fn classify_maps_mls_group_not_found() {
         let classified = SessionStateError::from(&MlsError::GroupNotFound("g1".to_string()));
+        assert_eq!(classified, SessionStateError::GroupNotFound);
+    }
+
+    #[test]
+    fn classify_maps_protocol_group_not_found() {
+        // The protocol-level variant must land in the same class as the
+        // MLS-layer one — one condition, one category.
+        let classified = SessionStateError::classify(&Error::GroupNotFound("g1".to_string()));
         assert_eq!(classified, SessionStateError::GroupNotFound);
     }
 
