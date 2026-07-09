@@ -361,6 +361,28 @@ impl Deduplicator {
         }
     }
 
+    /// Removes a message from the seen set so a future copy is processed
+    /// fresh instead of being treated as a duplicate.
+    ///
+    /// Intended for receivers that reject a message *after* marking it seen
+    /// (e.g. an encryption-policy or security-gate rejection): forgetting the
+    /// id makes a replay re-enter the same gate — and be rejected again
+    /// without a delivery ACK — instead of hitting the duplicate re-ACK path,
+    /// which would confirm to an injector that the target is online.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the message was tracked and has been removed.
+    /// Bloom filters do not support removal, so in bloom filter mode this is
+    /// a no-op returning `false`: a replayed rejected message is treated as a
+    /// duplicate until its filter window rotates out.
+    pub fn unmark_seen(&mut self, message_id: &MessageId) -> bool {
+        if self.bloom_filter.is_some() {
+            return false;
+        }
+        self.seen_messages.remove(&message_id.as_str()).is_some()
+    }
+
     /// Removes expired entries that exceed the retention time.
     ///
     /// # Returns
@@ -552,6 +574,49 @@ mod tests {
         // Second time should be duplicate
         assert!(dedup.is_duplicate(&msg_id));
         assert!(!dedup.mark_seen(msg_id.clone()));
+    }
+
+    #[test]
+    fn test_unmark_seen_hashmap_mode() {
+        let mut dedup = Deduplicator::with_config(hashmap_config());
+        let msg_id = MessageId::new();
+
+        dedup.mark_seen(msg_id.clone());
+        assert!(dedup.is_duplicate(&msg_id));
+
+        assert!(dedup.unmark_seen(&msg_id), "tracked id must be removed");
+        assert!(
+            !dedup.is_duplicate(&msg_id),
+            "unmarked message must be processed fresh on replay"
+        );
+        assert!(
+            !dedup.unmark_seen(&msg_id),
+            "second unmark of the same id is a no-op"
+        );
+    }
+
+    #[test]
+    fn test_unmark_seen_noop_in_bloom_mode() {
+        let config = DeduplicatorConfig {
+            use_bloom_filter: true,
+            bloom_filter_bits: 1 << 16,
+            bloom_hash_count: 5,
+            bloom_filter_count: 2,
+            bloom_rotation_secs: 60,
+            ..Default::default()
+        };
+        let mut dedup = Deduplicator::with_config(config);
+        let msg_id = MessageId::new();
+
+        dedup.mark_seen(msg_id.clone());
+        assert!(
+            !dedup.unmark_seen(&msg_id),
+            "bloom filters cannot remove entries"
+        );
+        assert!(
+            dedup.is_duplicate(&msg_id),
+            "bloom mode keeps the id until its window rotates"
+        );
     }
 
     #[test]
