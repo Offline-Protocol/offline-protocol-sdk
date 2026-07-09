@@ -13274,6 +13274,58 @@ fn capture_security_warnings(
 }
 
 #[test]
+fn test_plaintext_rejected_warning_fires_per_distinct_peer() {
+    let (mut bob, bob_handle) = strict_text_protocol("bob", true);
+    let warnings = capture_security_warnings(&mut bob);
+
+    bob_handle.queue_message(plaintext_text_message("alice", "bob", "from alice"));
+    bob_handle.queue_message(plaintext_text_message("carol", "bob", "from carol"));
+    assert!(bob.receive_message().is_none());
+
+    assert_eq!(
+        warnings.lock().unwrap().as_slice(),
+        &[
+            (
+                "alice".to_string(),
+                SecurityWarningCode::PlaintextReceiveRejected
+            ),
+            (
+                "carol".to_string(),
+                SecurityWarningCode::PlaintextReceiveRejected
+            ),
+        ],
+        "each distinct peer gets its own once-per-peer warning"
+    );
+}
+
+#[test]
+fn test_plaintext_text_rejected_when_mls_uninitialized() {
+    // The gate must fail closed on the config alone, before initialize_mls.
+    let (mut bob, bob_handle) = strict_text_protocol("bob", false);
+    let warnings = capture_security_warnings(&mut bob);
+
+    let mut injected = plaintext_text_message("alice", "bob", "pre-init injection");
+    injected.requires_ack = true;
+    bob_handle.queue_message(injected);
+
+    assert!(
+        bob.receive_message().is_none(),
+        "plaintext must be rejected even with MLS uninitialized"
+    );
+    assert!(
+        bob_handle.sent_messages().is_empty(),
+        "rejection must not send a delivery ACK"
+    );
+    assert_eq!(
+        warnings.lock().unwrap().as_slice(),
+        &[(
+            "alice".to_string(),
+            SecurityWarningCode::PlaintextReceiveRejected
+        )],
+    );
+}
+
+#[test]
 fn test_rejected_plaintext_replay_is_not_reacked() {
     let (mut bob, bob_handle) = strict_text_protocol("bob", true);
     let warnings = capture_security_warnings(&mut bob);
@@ -13324,7 +13376,6 @@ fn test_plaintext_receive_warned_set_is_bounded() {
         "warned-peer tracking must stay bounded under a forged-sender flood"
     );
 }
-
 
 #[test]
 fn test_send_media_plaintext_when_encryption_disabled() {
