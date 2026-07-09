@@ -23,7 +23,7 @@ authors = ["Offline Protocol Contributors"]
 # without confirming downstream cargo-deny configurations expect that form.
 license = "AGPL-3.0-only"
 repository = "https://github.com/Offline-Protocol/offline-protocol-sdk"
-rust-version = "1.70"
+rust-version = "1.87"
 
 [workspace.dependencies]
 # Serialization

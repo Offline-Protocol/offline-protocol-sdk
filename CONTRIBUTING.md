@@ -6,7 +6,7 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 ### Prerequisites
 
-- Rust 1.70+ (`rustup default stable`)
+- Rust 1.87+ (`rustup default stable`)
 - For mobile: Android NDK, Xcode
 - For web: wasm-pack
 
