@@ -88,7 +88,11 @@ export class ProtocolError extends Error {
 }
 
 /**
- * Error codes
+ * Error codes (mirrors the ProtocolError enum in the UDL).
+ *
+ * Codes surfaced as `err.code` on native promise rejections are the subset
+ * mapped by the native modules' mapProtocolBridgeError; everything else
+ * arrives under a generic `ERROR_*` code with the message preserved.
  */
 export enum ProtocolErrorCode {
   NOT_STARTED = 'NotStarted',
@@ -98,7 +102,19 @@ export enum ProtocolErrorCode {
   NO_KEY_PACKAGE = 'NoKeyPackage',
   SESSION_NOT_READY = 'SessionNotReady',
   ENCRYPT_FAILED = 'EncryptFailed',
+  INVALID_STATE = 'InvalidState',
+  MLS_NOT_INITIALIZED = 'MlsNotInitialized',
+  MLS_ERROR = 'MlsError',
+  USER_BLOCKED = 'UserBlocked',
+  MEDIA_TRANSFER_LIMIT = 'MediaTransferLimit',
+  LOCK_POISONED = 'LockPoisoned',
   OTHER = 'Other',
+  TRANSPORT_ERROR = 'TransportError',
+  SERIALIZATION_ERROR = 'SerializationError',
+  SERVICE_ERROR = 'ServiceError',
+  GROUP_NOT_FOUND = 'GroupNotFound',
+  PERMISSION_DENIED = 'PermissionDenied',
+  INVALID_ARGUMENT = 'InvalidArgument',
 }
 
 /** Per-peer establishment state (for SessionNotReady and getEstablishmentState). */

@@ -5881,6 +5881,18 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     
     case Other(message: String)
     
+    case TransportError(message: String)
+    
+    case SerializationError(message: String)
+    
+    case ServiceError(message: String)
+    
+    case GroupNotFound(message: String)
+    
+    case PermissionDenied(message: String)
+    
+    case InvalidArgument(message: String)
+    
 
     
 
@@ -5964,6 +5976,30 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
+        case 15: return .TransportError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 16: return .SerializationError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 17: return .ServiceError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 18: return .GroupNotFound(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 19: return .PermissionDenied(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 20: return .InvalidArgument(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6003,6 +6039,18 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(13))
         case .Other(_ /* message is ignored*/):
             writeInt(&buf, Int32(14))
+        case .TransportError(_ /* message is ignored*/):
+            writeInt(&buf, Int32(15))
+        case .SerializationError(_ /* message is ignored*/):
+            writeInt(&buf, Int32(16))
+        case .ServiceError(_ /* message is ignored*/):
+            writeInt(&buf, Int32(17))
+        case .GroupNotFound(_ /* message is ignored*/):
+            writeInt(&buf, Int32(18))
+        case .PermissionDenied(_ /* message is ignored*/):
+            writeInt(&buf, Int32(19))
+        case .InvalidArgument(_ /* message is ignored*/):
+            writeInt(&buf, Int32(20))
 
         
         }

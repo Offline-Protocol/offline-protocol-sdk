@@ -234,6 +234,20 @@ class OfflineProtocolModule: RCTEventEmitter {
             return ("EncryptFailed", "Message encryption failed")
         case .MediaTransferLimit:
             return ("MediaTransferLimit", "Too many concurrent media transfers to this recipient; retry after an active transfer completes")
+        case let .InvalidState(message):
+            return ("InvalidState", message)
+        case let .TransportError(message):
+            return ("TransportError", message)
+        case let .SerializationError(message):
+            return ("SerializationError", message)
+        case let .ServiceError(message):
+            return ("ServiceError", message)
+        case let .GroupNotFound(message):
+            return ("GroupNotFound", message)
+        case let .PermissionDenied(message):
+            return ("PermissionDenied", message)
+        case let .InvalidArgument(message):
+            return ("InvalidArgument", message)
         default:
             return nil
         }
@@ -3055,7 +3069,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             ]
             resolver(result)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to create mesh group: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to create mesh group: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3072,7 +3090,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.inviteToGroup(groupId: groupId, inviteeUserId: inviteeUserId)
             resolver(nil)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to invite to mesh group: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to invite to mesh group: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3107,7 +3129,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageIds = try proto.sendGroupMessage(groupId: groupId, content: content, priority: msgPriority, replyToMsg: replyToMsg)
             resolver(messageIds)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to send mesh group message: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to send mesh group message: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3141,7 +3167,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageIds = try proto.forwardMessageToGroup(originalMessageJson: originalMessageJson, groupId: groupId, priority: msgPriority)
             resolver(messageIds)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to forward message to group: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to forward message to group: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3158,7 +3188,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.removeFromGroup(groupId: groupId, memberId: memberId)
             resolver(nil)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to remove member from mesh group: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to remove member from mesh group: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3174,7 +3208,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.leaveGroup(groupId: groupId)
             resolver(nil)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to leave mesh group: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to leave mesh group: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3189,7 +3227,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let groups = try proto.listGroups()
             resolver(groups)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to list mesh groups: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to list mesh groups: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3217,7 +3259,11 @@ class OfflineProtocolModule: RCTEventEmitter {
                 resolver(NSNull())
             }
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to get group info: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to get group info: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3235,7 +3281,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.setMemberRole(groupId: groupId, userId: userId, role: role)
             resolver(nil)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to set member role: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to set member role: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3252,7 +3302,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let role = try proto.getMemberRole(groupId: groupId, userId: userId)
             resolver(role)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to get member role: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to get member role: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3268,7 +3322,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let roles = try proto.getGroupRoles(groupId: groupId)
             resolver(roles)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to get group roles: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to get group roles: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -3285,7 +3343,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.renameGroup(groupId: groupId, newName: newName)
             resolver(nil)
         } catch {
-            rejecter("ERROR_MESH_GROUP", "Failed to rename group: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_MESH_GROUP", "Failed to rename group: \(error.localizedDescription)", error)
+            }
         }
     }
 
