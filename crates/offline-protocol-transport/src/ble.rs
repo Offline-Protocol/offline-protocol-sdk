@@ -618,8 +618,7 @@ impl BleTransport {
         }
 
         let max_fragment_payload = mtu - header_overhead;
-        let total_fragments =
-            (message_bytes.len() + max_fragment_payload - 1) / max_fragment_payload;
+        let total_fragments = message_bytes.len().div_ceil(max_fragment_payload);
         if total_fragments == 0 {
             return Err(crate::Error::Other("Empty message".to_string()));
         }
@@ -661,6 +660,21 @@ impl BleTransport {
         if fragment.total_fragments as usize > BLE_MAX_FRAGMENT_COUNT {
             return Err(crate::Error::Other(
                 "Fragment count exceeds maximum".to_string(),
+            ));
+        }
+
+        // Every index must fall inside the declared range. The count cap above
+        // bounds how many fragments a message may declare, but nothing stops a
+        // peer from declaring a small `total_fragments` and then stuffing the
+        // assembly map with up to 65_536 *distinct* out-of-range indices —
+        // `buffered_bytes` only sees payload bytes, so tiny/empty fragments
+        // bloat the HashMap with per-entry overhead the size bound never
+        // catches. Rejecting `index >= total` closes that hole and, since no
+        // `u16` index can be `< 0`, also rejects `total_fragments == 0` (an
+        // assembly that could otherwise never complete and never free).
+        if fragment.fragment_index >= fragment.total_fragments {
+            return Err(crate::Error::Other(
+                "Fragment index out of range".to_string(),
             ));
         }
 
@@ -2382,6 +2396,81 @@ mod tests {
         assert_eq!(
             done.expect("message should reassemble").content,
             msg.content
+        );
+    }
+
+    #[test]
+    fn test_ble_process_fragment_rejects_out_of_range_index() {
+        let transport = BleTransport::new("test-device");
+
+        // A fragment whose index falls at or beyond the declared count must be
+        // rejected before it is buffered. Without this, a peer could declare a
+        // small `total_fragments` (satisfying the count cap) yet address tens of
+        // thousands of distinct out-of-range indices.
+        let total: u16 = 4;
+        for bad_index in [total, total + 1, 100, u16::MAX] {
+            let frag = encode_fragment(b"oob", bad_index, total, b"x").unwrap();
+            assert!(
+                matches!(
+                    transport.process_fragment(&frag).unwrap_err(),
+                    crate::Error::Other(s) if s.contains("Fragment index out of range")
+                ),
+                "index {bad_index} (total {total}) should be rejected"
+            );
+        }
+
+        // Nothing was buffered by the rejected fragments.
+        assert!(transport.fragment_buffers.lock().unwrap().is_empty());
+
+        // The last valid index (total - 1) is still accepted and buffered.
+        let ok = encode_fragment(b"oob", total - 1, total, b"x").unwrap();
+        assert!(transport.process_fragment(&ok).unwrap().is_none());
+        assert_eq!(transport.fragment_buffers.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_ble_process_fragment_rejects_zero_total() {
+        let transport = BleTransport::new("test-device");
+
+        // `total_fragments == 0` describes an assembly that can never complete —
+        // `fragments.len()` is at least 1 once any fragment lands, so it never
+        // equals 0. The index-range guard rejects it for free: no u16 index is
+        // less than 0, so every fragment claiming total 0 is out of range.
+        for index in [0u16, 1, u16::MAX] {
+            let frag = encode_fragment(b"zero", index, 0, b"x").unwrap();
+            assert!(
+                matches!(
+                    transport.process_fragment(&frag).unwrap_err(),
+                    crate::Error::Other(s) if s.contains("Fragment index out of range")
+                ),
+                "total_fragments == 0 (index {index}) should be rejected"
+            );
+        }
+        assert!(transport.fragment_buffers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_ble_distinct_out_of_range_indices_cannot_bloat_assembly_map() {
+        let transport = BleTransport::new("test-device");
+
+        // The byte-size bound only counts payload bytes, so empty/tiny fragments
+        // never trip it, and the count cap bounds only how many fragments a
+        // message may *declare* — not how many distinct indices actually land.
+        // Without the index-range guard, a peer declaring `total_fragments = 2`
+        // could park thousands of distinct out-of-range indices, each a HashMap
+        // entry whose overhead the byte counter never sees. Every one must be
+        // rejected, leaving no assembly behind.
+        let total: u16 = 2;
+        for index in 2u16..5_000 {
+            let frag = encode_fragment(b"flood", index, total, b"").unwrap();
+            assert!(
+                transport.process_fragment(&frag).is_err(),
+                "out-of-range index {index} must be rejected, not buffered"
+            );
+        }
+        assert!(
+            transport.fragment_buffers.lock().unwrap().is_empty(),
+            "out-of-range indices must never create an assembly"
         );
     }
 
