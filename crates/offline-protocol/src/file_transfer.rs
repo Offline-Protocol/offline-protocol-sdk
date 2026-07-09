@@ -133,6 +133,35 @@ impl ChunkRejection {
     }
 }
 
+/// Why [`FileChunk::from_bytes`] rejected a binary payload.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChunkDecodeError {
+    /// The payload ended before the named value could be read.
+    #[error("unexpected end of data reading {what}")]
+    UnexpectedEof {
+        /// What was being read (`"u32"`, `"u64"`, or `"bytes"`).
+        what: &'static str,
+    },
+    /// A length prefix exceeds the wire-format cap for its field.
+    #[error("{field} {len} exceeds maximum {max}")]
+    FieldTooLong {
+        /// Name of the offending length field.
+        field: &'static str,
+        /// Claimed length.
+        len: usize,
+        /// Maximum allowed length.
+        max: usize,
+    },
+    /// A string field holds invalid UTF-8.
+    #[error("invalid {field} UTF-8: {source}")]
+    InvalidUtf8 {
+        /// Name of the offending string field.
+        field: &'static str,
+        /// The underlying UTF-8 decode failure.
+        source: std::string::FromUtf8Error,
+    },
+}
+
 /// A file chunk message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChunk {
@@ -219,30 +248,30 @@ impl FileChunk {
     const MAX_CHUNK_DATA_LEN: usize = 128 * 1024 * 1024; // 128 MB
 
     /// Deserializes from the compact binary format produced by `to_bytes`.
-    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, ChunkDecodeError> {
         let mut pos = 0;
 
-        let read_u32 = |pos: &mut usize| -> Result<u32, String> {
+        let read_u32 = |pos: &mut usize| -> Result<u32, ChunkDecodeError> {
             if *pos + 4 > data.len() {
-                return Err("unexpected end of data reading u32".to_string());
+                return Err(ChunkDecodeError::UnexpectedEof { what: "u32" });
             }
             let val = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
             *pos += 4;
             Ok(val)
         };
 
-        let read_u64 = |pos: &mut usize| -> Result<u64, String> {
+        let read_u64 = |pos: &mut usize| -> Result<u64, ChunkDecodeError> {
             if *pos + 8 > data.len() {
-                return Err("unexpected end of data reading u64".to_string());
+                return Err(ChunkDecodeError::UnexpectedEof { what: "u64" });
             }
             let val = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
             *pos += 8;
             Ok(val)
         };
 
-        let read_bytes = |pos: &mut usize, len: usize| -> Result<Vec<u8>, String> {
+        let read_bytes = |pos: &mut usize, len: usize| -> Result<Vec<u8>, ChunkDecodeError> {
             if *pos + len > data.len() {
-                return Err("unexpected end of data reading bytes".to_string());
+                return Err(ChunkDecodeError::UnexpectedEof { what: "bytes" });
             }
             let val = data[*pos..*pos + len].to_vec();
             *pos += len;
@@ -251,25 +280,33 @@ impl FileChunk {
 
         let file_id_len = read_u32(&mut pos)? as usize;
         if file_id_len > Self::MAX_STRING_FIELD_LEN {
-            return Err(format!(
-                "file_id_len {} exceeds maximum {}",
-                file_id_len,
-                Self::MAX_STRING_FIELD_LEN
-            ));
+            return Err(ChunkDecodeError::FieldTooLong {
+                field: "file_id_len",
+                len: file_id_len,
+                max: Self::MAX_STRING_FIELD_LEN,
+            });
         }
-        let file_id = String::from_utf8(read_bytes(&mut pos, file_id_len)?)
-            .map_err(|e| format!("invalid file_id UTF-8: {}", e))?;
+        let file_id = String::from_utf8(read_bytes(&mut pos, file_id_len)?).map_err(|e| {
+            ChunkDecodeError::InvalidUtf8 {
+                field: "file_id",
+                source: e,
+            }
+        })?;
 
         let file_name_len = read_u32(&mut pos)? as usize;
         if file_name_len > Self::MAX_STRING_FIELD_LEN {
-            return Err(format!(
-                "file_name_len {} exceeds maximum {}",
-                file_name_len,
-                Self::MAX_STRING_FIELD_LEN
-            ));
+            return Err(ChunkDecodeError::FieldTooLong {
+                field: "file_name_len",
+                len: file_name_len,
+                max: Self::MAX_STRING_FIELD_LEN,
+            });
         }
-        let file_name = String::from_utf8(read_bytes(&mut pos, file_name_len)?)
-            .map_err(|e| format!("invalid file_name UTF-8: {}", e))?;
+        let file_name = String::from_utf8(read_bytes(&mut pos, file_name_len)?).map_err(|e| {
+            ChunkDecodeError::InvalidUtf8 {
+                field: "file_name",
+                source: e,
+            }
+        })?;
 
         let file_size = read_u64(&mut pos)?;
         let total_chunks = read_u32(&mut pos)?;
@@ -277,24 +314,29 @@ impl FileChunk {
 
         let chunk_data_len = read_u32(&mut pos)? as usize;
         if chunk_data_len > Self::MAX_CHUNK_DATA_LEN {
-            return Err(format!(
-                "chunk_data_len {} exceeds maximum {}",
-                chunk_data_len,
-                Self::MAX_CHUNK_DATA_LEN
-            ));
+            return Err(ChunkDecodeError::FieldTooLong {
+                field: "chunk_data_len",
+                len: chunk_data_len,
+                max: Self::MAX_CHUNK_DATA_LEN,
+            });
         }
         let chunk_data = read_bytes(&mut pos, chunk_data_len)?;
 
         let checksum_len = read_u32(&mut pos)? as usize;
         if checksum_len > Self::MAX_STRING_FIELD_LEN {
-            return Err(format!(
-                "checksum_len {} exceeds maximum {}",
-                checksum_len,
-                Self::MAX_STRING_FIELD_LEN
-            ));
+            return Err(ChunkDecodeError::FieldTooLong {
+                field: "checksum_len",
+                len: checksum_len,
+                max: Self::MAX_STRING_FIELD_LEN,
+            });
         }
-        let file_checksum = String::from_utf8(read_bytes(&mut pos, checksum_len)?)
-            .map_err(|e| format!("invalid checksum UTF-8: {}", e))?;
+        let file_checksum =
+            String::from_utf8(read_bytes(&mut pos, checksum_len)?).map_err(|e| {
+                ChunkDecodeError::InvalidUtf8 {
+                    field: "checksum",
+                    source: e,
+                }
+            })?;
 
         Ok(Self {
             file_id,

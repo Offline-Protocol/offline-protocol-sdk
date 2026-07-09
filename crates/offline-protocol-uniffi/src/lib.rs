@@ -4830,7 +4830,10 @@ impl OfflineProtocol {
         role: String,
     ) -> Result<(), ProtocolError> {
         let parsed_role: offline_protocol_mls::GroupRole =
-            role.parse().map_err(|e: String| ProtocolError::Other(e))?;
+            role.parse()
+                .map_err(|e: offline_protocol_mls::ParseGroupRoleError| {
+                    ProtocolError::Other(e.to_string())
+                })?;
         let mut guard = self.lock_inner()?;
         guard
             .set_member_role(&group_id, &user_id, parsed_role)
