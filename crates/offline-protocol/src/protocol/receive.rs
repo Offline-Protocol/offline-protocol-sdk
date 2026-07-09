@@ -127,6 +127,11 @@ impl OfflineProtocol {
                                 // bad signature, TOFU violation). Do NOT send a delivery
                                 // ACK — acknowledging would confirm to the attacker that
                                 // the target peer is online and processing messages.
+                                // Forget the id too, or an exact replay would hit the
+                                // duplicate re-ACK path above and leak that presence
+                                // anyway; reprocessing a replay costs no more than a
+                                // fresh forged message.
+                                self.deduplicator.unmark_seen(&message.id);
                                 continue;
                             }
                             InternalMessageResult::Decrypted(plaintext) => {
@@ -151,7 +156,8 @@ impl OfflineProtocol {
                     // same gate after telling the two apart. Rejection sends
                     // no delivery ACK, mirroring SecurityRejected: don't
                     // confirm to an injector that the target processes their
-                    // messages.
+                    // messages. The id is forgotten so a replay re-enters
+                    // this gate instead of the duplicate re-ACK path.
                     if !was_decrypted
                         && message.content_type != ContentType::FileChunk
                         && !self.accept_plaintext_content(message.sender.as_str())
@@ -165,6 +171,7 @@ impl OfflineProtocol {
                             message.sender.as_str(),
                             "Inbound plaintext message rejected by encryption policy",
                         );
+                        self.deduplicator.unmark_seen(&message.id);
                         continue;
                     }
 

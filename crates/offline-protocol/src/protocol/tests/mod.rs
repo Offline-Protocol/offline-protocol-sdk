@@ -13231,6 +13231,77 @@ fn test_plaintext_text_accepted_without_session_when_not_required() {
     );
 }
 
+/// Builds a strict-mode (`require_encryption = true`) protocol instance for
+/// inbound plaintext gate tests, optionally with MLS initialized — the gate
+/// must hold in both states.
+fn strict_text_protocol(user_id: &str, init_mls: bool) -> (OfflineProtocol, MockTransport) {
+    let mut config = create_test_config_for_user(user_id);
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    if init_mls {
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+    }
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+    (protocol, handle)
+}
+
+/// Captures SecurityWarning events as (peer_id, reason_code) pairs.
+fn capture_security_warnings(
+    protocol: &mut OfflineProtocol,
+) -> Arc<Mutex<Vec<(String, SecurityWarningCode)>>> {
+    let store: Arc<Mutex<Vec<(String, SecurityWarningCode)>>> = Arc::new(Mutex::new(Vec::new()));
+    let store_clone = store.clone();
+    protocol.on_event(move |event| {
+        if let Event::SecurityWarning {
+            peer_id,
+            reason_code,
+            ..
+        } = event
+        {
+            store_clone.lock().unwrap().push((peer_id, reason_code));
+        }
+    });
+    store
+}
+
+#[test]
+fn test_rejected_plaintext_replay_is_not_reacked() {
+    let (mut bob, bob_handle) = strict_text_protocol("bob", true);
+    let warnings = capture_security_warnings(&mut bob);
+
+    let mut injected = plaintext_text_message("alice", "bob", "replayed injection");
+    injected.requires_ack = true;
+
+    // Exact replay: the same wire message (same id) delivered twice. The
+    // first copy is rejected and deliberately forgotten by the deduplicator,
+    // so the replay re-enters the policy gate instead of the duplicate
+    // re-ACK path — neither copy may produce an ACK (presence leak).
+    bob_handle.queue_message(injected.clone());
+    assert!(bob.receive_message().is_none());
+    bob_handle.queue_message(injected);
+    assert!(bob.receive_message().is_none());
+
+    assert!(
+        bob_handle.sent_messages().is_empty(),
+        "a replayed rejected message must not be re-ACKed as a duplicate"
+    );
+    assert_eq!(
+        warnings.lock().unwrap().len(),
+        1,
+        "once-per-peer warning throttle holds across replays"
+    );
+}
+
+
 #[test]
 fn test_send_media_plaintext_when_encryption_disabled() {
     let mut config = create_test_config_for_user("alice");
