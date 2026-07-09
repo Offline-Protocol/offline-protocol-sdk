@@ -365,6 +365,11 @@ impl From<offline_protocol::Error> for ProtocolError {
             E::SessionNotReady(state) => ProtocolError::SessionNotReady(state.into()),
             E::EncryptFailed(message) => ProtocolError::EncryptFailed(message),
             E::MlsNotInitialized => ProtocolError::MlsNotInitialized,
+            // MLS-layer "group missing" joins the mesh-layer variant so
+            // callers handle one code for the condition.
+            E::Mls(offline_protocol_mls::MlsError::GroupNotFound(group_id)) => {
+                ProtocolError::GroupNotFound(group_id)
+            }
             E::Mls(err) => ProtocolError::MlsError(err.to_string()),
             E::UserBlocked(user_id) => ProtocolError::UserBlocked(user_id),
             E::MediaTransferLimit(user_id) => ProtocolError::MediaTransferLimit(user_id),
@@ -397,10 +402,11 @@ impl From<offline_protocol::Error> for ProtocolError {
 }
 
 /// Error mapping for send-shaped operations (message, group, media,
-/// presence, connection-request sends): a transport-layer failure during
-/// an explicit send surfaces as `SendFailed`; every other error keeps its
-/// class from the `From` impl. Non-send paths (start/stop, inbound data
-/// processing) map transport failures to `TransportError` instead.
+/// presence, connection-request sends, and the group-leave notification
+/// fan-out): a transport-layer failure during an explicit send surfaces as
+/// `SendFailed`; every other error keeps its class from the `From` impl.
+/// Non-send paths (start/stop, inbound data processing) map transport
+/// failures to `TransportError` instead.
 fn map_send_error(err: offline_protocol::Error) -> ProtocolError {
     match err {
         offline_protocol::Error::Transport(e) => ProtocolError::SendFailed(e.to_string()),
@@ -4877,7 +4883,9 @@ impl OfflineProtocol {
     /// Leave an MLS group.
     pub fn leave_group(&self, group_id: String) -> Result<(), ProtocolError> {
         let mut guard = self.lock_inner()?;
-        guard.leave_group(&group_id).map_err(ProtocolError::from)
+        // map_send_error: total failure of the leave-notification fan-out is
+        // a send failure (retryable), same as send_group_message.
+        guard.leave_group(&group_id).map_err(map_send_error)
     }
 
     /// List all MLS groups (excluding 1:1 sessions).
@@ -5074,6 +5082,16 @@ mod error_mapping_tests {
             (E::GroupNotFound("g1".into()), |e| {
                 matches!(e, ProtocolError::GroupNotFound(_))
             }),
+            // MLS-layer group-missing folds into GroupNotFound; every other
+            // MLS error keeps the MlsError class.
+            (
+                E::Mls(offline_protocol_mls::MlsError::GroupNotFound("g1".into())),
+                |e| matches!(e, ProtocolError::GroupNotFound(_)),
+            ),
+            (
+                E::Mls(offline_protocol_mls::MlsError::Encryption("boom".into())),
+                |e| matches!(e, ProtocolError::MlsError(_)),
+            ),
             (
                 E::PermissionDenied("Only admins can invite members".into()),
                 |e| matches!(e, ProtocolError::PermissionDenied(_)),
@@ -5118,11 +5136,58 @@ mod error_mapping_tests {
         )));
         assert!(matches!(sent, ProtocolError::SendFailed(_)));
 
+        // Any transport-layer failure on a send path becomes SendFailed,
+        // not just TransportErr::SendFailed.
+        let unreachable =
+            map_send_error(E::Transport(TransportErr::PeerNotReachable("bob".into())));
+        assert!(matches!(unreachable, ProtocolError::SendFailed(_)));
+
         // Non-transport errors keep their class on send paths.
         let group = map_send_error(E::GroupNotFound("g1".into()));
         assert!(matches!(group, ProtocolError::GroupNotFound(_)));
         let mls = map_send_error(E::MlsNotInitialized);
         assert!(matches!(mls, ProtocolError::MlsNotInitialized));
+    }
+
+    #[test]
+    fn udl_protocol_error_variant_order_is_pinned() {
+        // Generated Swift/Kotlin/Python bindings decode ProtocolError by
+        // positional discriminant, so the UDL enum is append-only. If this
+        // fails you either reordered/removed a variant (never do that) or
+        // appended one — extend this list and regenerate every committed
+        // binding.
+        const EXPECTED: [&str; 20] = [
+            "NotStarted",
+            "AlreadyStarted",
+            "InvalidConfiguration",
+            "SendFailed",
+            "NoKeyPackage",
+            "SessionNotReady",
+            "EncryptFailed",
+            "InvalidState",
+            "MlsNotInitialized",
+            "MlsError",
+            "UserBlocked",
+            "MediaTransferLimit",
+            "LockPoisoned",
+            "Other",
+            "TransportError",
+            "SerializationError",
+            "ServiceError",
+            "GroupNotFound",
+            "PermissionDenied",
+            "InvalidArgument",
+        ];
+        let udl = include_str!("offline_protocol.udl");
+        let enum_body = udl
+            .split_once("enum ProtocolError {")
+            .expect("ProtocolError enum missing from UDL")
+            .1
+            .split_once('}')
+            .expect("unterminated ProtocolError enum in UDL")
+            .0;
+        let variants: Vec<&str> = enum_body.split('"').skip(1).step_by(2).collect();
+        assert_eq!(variants, EXPECTED, "ProtocolError UDL variants drifted");
     }
 
     #[test]
