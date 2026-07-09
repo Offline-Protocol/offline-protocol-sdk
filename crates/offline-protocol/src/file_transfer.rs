@@ -431,11 +431,8 @@ impl FileAssembly {
 
         // Reassemble chunks in order
         for i in 0..self.total_chunks {
-            if let Some(chunk_data) = self.received_chunks.get(&i) {
-                file_data.extend_from_slice(chunk_data);
-            } else {
-                return None; // Missing chunk
-            }
+            let chunk_data = self.received_chunks.get(&i)?; // Missing chunk
+            file_data.extend_from_slice(chunk_data);
         }
 
         Some(file_data)
