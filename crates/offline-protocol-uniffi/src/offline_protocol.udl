@@ -88,7 +88,10 @@ enum EstablishmentState {
     "SessionConfirmed",
 };
 
-// Error types
+// Error types.
+// New variants are appended only: generated bindings decode this enum by
+// positional discriminant, so inserting or removing a variant breaks every
+// committed Swift/Kotlin/Python binding.
 [Error]
 enum ProtocolError {
     "NotStarted",
@@ -105,6 +108,12 @@ enum ProtocolError {
     "MediaTransferLimit",
     "LockPoisoned",
     "Other",
+    "TransportError",
+    "SerializationError",
+    "ServiceError",
+    "GroupNotFound",
+    "PermissionDenied",
+    "InvalidArgument",
 };
 
 // Message priority levels

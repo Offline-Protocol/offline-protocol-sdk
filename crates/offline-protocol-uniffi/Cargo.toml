@@ -20,6 +20,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uniffi = "0.30"
 
+[dev-dependencies]
+offline-protocol-services = { workspace = true }
+
 [build-dependencies]
 uniffi = { version = "0.30", features = ["build"] }
 
