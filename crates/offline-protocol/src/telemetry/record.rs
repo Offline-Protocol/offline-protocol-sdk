@@ -244,6 +244,7 @@ mod tests {
             content_type: String::new(),
             media_metadata: None,
             forward_info: None,
+            encrypted: false,
         };
         assert_eq!(
             TelemetryRecord::Protocol(Box::new(event)).name(),
@@ -379,6 +380,7 @@ mod tests {
                 content_type: String::new(),
                 media_metadata: None,
                 forward_info: None,
+                encrypted: false,
             },
             Event::MessageDelivered {
                 message_id: String::new(),

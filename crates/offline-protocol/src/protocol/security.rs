@@ -416,6 +416,22 @@ impl OfflineProtocol {
         }
     }
 
+    /// Emits a [`SecurityWarningCode::PlaintextReceiveRejected`] warning for
+    /// `peer_id`, at most once per peer per protocol instance. Called from the
+    /// inbound plaintext policy gate ([`Self::accept_plaintext_content`]) when
+    /// cleartext text or legacy media is dropped — the per-rejection `warn!`
+    /// logs live at the call sites; this keeps the event stream from flooding
+    /// when a legacy or malicious peer keeps sending.
+    pub(super) fn warn_plaintext_receive_rejected(&mut self, peer_id: &str, detail: &str) {
+        if self.plaintext_receive_warned.insert(peer_id.to_string()) {
+            self.emit_security_warning(
+                peer_id,
+                SecurityWarningCode::PlaintextReceiveRejected,
+                detail,
+            );
+        }
+    }
+
     /// Returns `true` if the message content starts with any internal prefix.
     /// Used for injection prevention on the public send APIs.
     pub(crate) fn is_internal_prefix(content: &str) -> bool {

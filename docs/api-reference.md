@@ -309,6 +309,15 @@ Set `require_encryption = false` to explicitly opt in to plaintext operation;
 each plaintext send then emits a `SecurityWarning` event with the
 `PLAINTEXT_SEND` reason code (once per peer).
 
+Inbound plaintext is gated by the same policy: with `require_encryption = true`,
+plaintext text and legacy media from the mesh are rejected instead of being
+surfaced (plaintext carries no sender authentication), emitting a
+`SecurityWarning` with the `PLAINTEXT_RECEIVE_REJECTED` reason code (once per
+peer). Even under the opt-out, inbound plaintext from a peer with a confirmed
+MLS session is rejected as a downgrade/forgery attempt. The `message_received`
+event's `encrypted` field tells apps whether the content was MLS-decrypted
+(`true`) or accepted as plaintext under the opt-out (`false`).
+
 In strict mode, send failures are fail-fast and do not transmit transport payloads.
 Connection-control APIs (connection request/accept/reject) are internal plaintext
 bootstrap messages and are exempt from `require_encryption` — same as key

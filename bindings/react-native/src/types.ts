@@ -529,7 +529,12 @@ export interface MessageReceivedEvent extends BaseEvent {
   timestamp: number;
   /** Lamport logical clock value for causal ordering (0 for legacy messages). */
   lamport_clock: number;
-  /** Whether the message was encrypted (auto-decrypted) */
+  /**
+   * `true` when the content arrived MLS-encrypted and was auto-decrypted;
+   * `false` for plaintext accepted under the `requireEncryption: false`
+   * opt-out. Always present on the wire since the inbound plaintext gate
+   * landed; optional here for compatibility with older SDK cores.
+   */
   encrypted?: boolean;
   /** The type of content (text, image, video, voice_note, etc.). */
   content_type?: string;
@@ -1187,7 +1192,8 @@ export type SecurityWarningCode =
   | 'SIGNATURE_DOWNGRADE'
   | 'CONTROL_SIGNATURE_INVALID'
   | 'MEDIA_SENDER_GROUP_MISMATCH'
-  | 'PLAINTEXT_SEND';
+  | 'PLAINTEXT_SEND'
+  | 'PLAINTEXT_RECEIVE_REJECTED';
 
 /**
  * A security-relevant anomaly was detected for a peer. `TOFU_KEY_MISMATCH`

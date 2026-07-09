@@ -300,7 +300,8 @@ Under the default strict mode:
 - `sendMessage` / `sendMessageViaTransport` fail fast with typed errors (`SessionNotReady`, `EncryptFailed`) and do not send transport payloads on failure. With `storePending: true` (default), messages for peers whose session is not yet confirmed are queued and sent encrypted once it is.
 - `SessionNotReady` carries establishment progress (`NoKeyPackage`, `HaveKeyPackage`, `SessionPending`, `SessionConfirmed`) for retry/UI decisions.
 - Internal control messages (`sendConnectionRequest`, `acceptConnectionRequest`, `rejectConnectionRequest`, key packages, service discovery) are exempt — they are plaintext bootstrap messages and continue to work.
-- Inbound legacy plaintext media chunks are rejected.
+- Inbound plaintext content is rejected — text messages and legacy media chunks alike. Rejected plaintext is never surfaced as `message_received` (plaintext carries no sender authentication, so anyone could inject it under a contact's name); a `SecurityWarning` with reason code `PLAINTEXT_RECEIVE_REJECTED` is emitted once per peer. Even with `requireEncryption: false`, inbound plaintext from a peer with a confirmed MLS session is rejected as a downgrade/forgery attempt.
+- The `message_received` event carries `encrypted: true` when the content arrived MLS-encrypted and was auto-decrypted, and `encrypted: false` for plaintext accepted under the opt-out.
 
 Rust migration note:
 - `EncryptionConfig::default()` sets `require_encryption: true` (fail-closed). Nodes that never call `initialize_mls` now fail sends with `EncryptFailed` instead of silently sending plaintext.

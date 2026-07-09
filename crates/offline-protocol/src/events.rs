@@ -84,6 +84,13 @@ pub enum SecurityWarningCode {
     /// (an explicit opt-out — the default fails closed). Emitted at most once
     /// per peer per protocol instance.
     PlaintextSend,
+    /// Inbound plaintext content (text or legacy media) was rejected by the
+    /// encryption policy: either `require_encryption` is enabled, or a
+    /// confirmed MLS session exists with the claimed sender and plaintext
+    /// from that peer is a downgrade/forgery attempt (plaintext carries no
+    /// sender authentication). Emitted at most once per peer per protocol
+    /// instance.
+    PlaintextReceiveRejected,
 }
 
 impl SecurityWarningCode {
@@ -97,6 +104,7 @@ impl SecurityWarningCode {
             Self::ControlSignatureInvalid => "CONTROL_SIGNATURE_INVALID",
             Self::MediaSenderGroupMismatch => "MEDIA_SENDER_GROUP_MISMATCH",
             Self::PlaintextSend => "PLAINTEXT_SEND",
+            Self::PlaintextReceiveRejected => "PLAINTEXT_RECEIVE_REJECTED",
         }
     }
 }
@@ -294,6 +302,11 @@ pub enum Event {
         /// Forwarding attribution (present when this is a forwarded message).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forward_info: Option<ForwardInfoEvent>,
+        /// `true` when the content arrived MLS-encrypted and was decrypted by
+        /// this node; `false` for plaintext accepted under the
+        /// `require_encryption = false` opt-out.
+        #[serde(default)]
+        encrypted: bool,
     },
 
     /// A message was successfully delivered (ACK received).
@@ -1850,6 +1863,7 @@ impl fmt::Debug for Event {
                 content_type,
                 media_metadata: _,
                 forward_info,
+                encrypted,
             } => f
                 .debug_struct("MessageReceived")
                 .field("message_id", message_id)
@@ -1863,6 +1877,7 @@ impl fmt::Debug for Event {
                 .field("reply_to_msg", &"[REDACTED]")
                 .field("content_type", content_type)
                 .field("forward_info", &forward_info.is_some())
+                .field("encrypted", encrypted)
                 .finish(),
             Self::MessageDelivered {
                 message_id,
@@ -2645,6 +2660,7 @@ mod tests {
             SecurityWarningCode::ControlSignatureInvalid,
             SecurityWarningCode::MediaSenderGroupMismatch,
             SecurityWarningCode::PlaintextSend,
+            SecurityWarningCode::PlaintextReceiveRejected,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -2664,7 +2680,8 @@ mod tests {
                 | SecurityWarningCode::SignatureDowngrade
                 | SecurityWarningCode::ControlSignatureInvalid
                 | SecurityWarningCode::MediaSenderGroupMismatch
-                | SecurityWarningCode::PlaintextSend => {}
+                | SecurityWarningCode::PlaintextSend
+                | SecurityWarningCode::PlaintextReceiveRejected => {}
             }
         }
     }

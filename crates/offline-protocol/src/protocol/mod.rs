@@ -109,6 +109,11 @@ pub struct OfflineProtocol {
     /// per message.
     pub(crate) plaintext_send_warned: std::collections::HashSet<String>,
 
+    /// Peers already flagged with a `PlaintextReceiveRejected` security
+    /// warning, so a chatty legacy or malicious peer warns once per peer
+    /// instead of once per rejected message.
+    pub(crate) plaintext_receive_warned: std::collections::HashSet<String>,
+
     /// Bounded pending decryption queue for encrypted messages received before
     /// the MLS session is ready.
     pub(crate) pending_queue: PendingDecryptionQueue,
@@ -319,6 +324,7 @@ impl OfflineProtocol {
             known_peers: HashMap::new(),
             confirmed_sessions: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
+            plaintext_receive_warned: std::collections::HashSet::new(),
             pending_queue: PendingDecryptionQueue::default(),
             message_storage: None,
             lamport_clock: LamportClock::new(),
