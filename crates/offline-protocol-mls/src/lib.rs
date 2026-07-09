@@ -46,5 +46,5 @@ pub use manager::MlsManager;
 pub use storage::{MlsStorage, StorageError};
 pub use types::{
     EncryptedMessage, GroupId, GroupInfo, GroupMetadata, GroupRole, KeyPackageBundle,
-    MlsMessageType, WelcomeMessage,
+    MlsMessageType, ParseGroupRoleError, WelcomeMessage,
 };

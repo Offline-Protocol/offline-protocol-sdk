@@ -100,14 +100,19 @@ impl fmt::Display for GroupRole {
     }
 }
 
+/// Error returned when parsing a [`GroupRole`] from a string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Invalid role '{0}', must be 'admin' or 'member'")]
+pub struct ParseGroupRoleError(pub String);
+
 impl FromStr for GroupRole {
-    type Err = String;
+    type Err = ParseGroupRoleError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "admin" => Ok(Self::Admin),
             "member" => Ok(Self::Member),
-            _ => Err(format!("Invalid role '{}', must be 'admin' or 'member'", s)),
+            _ => Err(ParseGroupRoleError(s.to_string())),
         }
     }
 }
