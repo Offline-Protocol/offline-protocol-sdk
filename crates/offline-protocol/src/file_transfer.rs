@@ -648,19 +648,19 @@ impl FileTransferManager {
         let file_size = file_data.len() as u64;
 
         if file_size > self.config.max_file_size {
-            return Err(crate::Error::Other(format!(
+            return Err(crate::Error::InvalidArgument(format!(
                 "File size {} exceeds maximum {}",
                 file_size, self.config.max_file_size
             )));
         }
 
         if file_data.is_empty() {
-            return Err(crate::Error::Other("File is empty".to_string()));
+            return Err(crate::Error::InvalidArgument("File is empty".to_string()));
         }
 
         let chunk_size = chunk_size_override.unwrap_or(self.config.chunk_size);
         if chunk_size == 0 {
-            return Err(crate::Error::Other(
+            return Err(crate::Error::InvalidArgument(
                 "Chunk size must be greater than zero".to_string(),
             ));
         }
@@ -671,7 +671,7 @@ impl FileTransferManager {
         let total_chunks = file_size.div_ceil(chunk_size as u64);
         let max_total_chunks = Self::derived_total_chunks_cap(self.config.max_file_size);
         if total_chunks > max_total_chunks {
-            return Err(crate::Error::Other(format!(
+            return Err(crate::Error::InvalidArgument(format!(
                 "Chunk size {} splits {} bytes into {} chunks, exceeding the receive-side cap of {}; use a larger chunk size",
                 chunk_size, file_size, total_chunks, max_total_chunks
             )));

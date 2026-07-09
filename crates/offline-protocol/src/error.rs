@@ -184,6 +184,23 @@ pub enum Error {
     )]
     MediaTransferLimit(String),
 
+    /// Group does not exist locally.
+    #[error("Group not found: {0}")]
+    GroupNotFound(String),
+
+    /// Operation requires a group role or permission the caller does not hold.
+    #[error("{0}")]
+    PermissionDenied(String),
+
+    /// Operation rejected by the current group or protocol state (e.g.
+    /// last-admin constraints, member limits, expired key packages).
+    #[error("{0}")]
+    InvalidState(String),
+
+    /// A caller-supplied argument failed validation.
+    #[error("{0}")]
+    InvalidArgument(String),
+
     /// Generic error.
     #[error("{0}")]
     Other(String),

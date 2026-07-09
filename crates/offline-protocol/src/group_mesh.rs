@@ -1155,7 +1155,7 @@ impl OfflineProtocol {
         let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let info = mls_guard
             .get_group_info(&gid)?
-            .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
+            .ok_or_else(|| Error::GroupNotFound(group_id.to_string()))?;
         let members = info.members.clone();
         drop(mls_guard);
         self.group_mesh
@@ -1174,7 +1174,9 @@ impl OfflineProtocol {
     pub fn create_group(&mut self, group_name: &str) -> Result<offline_protocol_mls::GroupInfo> {
         let trimmed = group_name.trim();
         if trimmed.is_empty() {
-            return Err(Error::Other("Group name cannot be empty".to_string()));
+            return Err(Error::InvalidArgument(
+                "Group name cannot be empty".to_string(),
+            ));
         }
         let mls_guard = self.read_mls_guard()?;
         let group_info = mls_guard.create_group(group_name)?;
@@ -1205,7 +1207,9 @@ impl OfflineProtocol {
         // Admin check
         let self_id = self.config.user_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
-            return Err(Error::Other("Only admins can invite members".to_string()));
+            return Err(Error::PermissionDenied(
+                "Only admins can invite members".to_string(),
+            ));
         }
 
         // Check group member cap before adding
@@ -1225,7 +1229,7 @@ impl OfflineProtocol {
             .unwrap_or(0);
         let max_members = self.config.group.max_group_members;
         if current_count >= max_members {
-            return Err(Error::Other(format!(
+            return Err(Error::InvalidState(format!(
                 "Group has {} members, cannot exceed {} limit",
                 current_count, max_members
             )));
@@ -1240,12 +1244,10 @@ impl OfflineProtocol {
         let received_pkg = self
             .pending_key_packages
             .get(invitee_user_id)
-            .ok_or_else(|| {
-                Error::Other(format!("No key package available for {}", invitee_user_id))
-            })?;
+            .ok_or_else(|| Error::NoKeyPackage(invitee_user_id.to_string()))?;
         if now_ms >= received_pkg.local_expires_at_ms {
             self.pending_key_packages.remove(invitee_user_id);
-            return Err(Error::Other(format!(
+            return Err(Error::InvalidState(format!(
                 "Key package for {} has expired",
                 invitee_user_id
             )));
@@ -1312,7 +1314,7 @@ impl OfflineProtocol {
             "{}{}",
             internal_prefixes::GROUP_MLS_WELCOME,
             serde_json::to_string(&welcome_payload)
-                .map_err(|e| Error::Other(format!("Serialize welcome: {}", e)))?
+                .map_err(|e| Error::Serialization(format!("Serialize welcome: {}", e)))?
         );
         self.send_internal_message(invitee_user_id, welcome_content, MessagePriority::High)?;
 
@@ -1330,7 +1332,7 @@ impl OfflineProtocol {
             "{}{}",
             internal_prefixes::GROUP_MLS_COMMIT,
             serde_json::to_string(&commit_payload)
-                .map_err(|e| Error::Other(format!("Serialize commit: {}", e)))?
+                .map_err(|e| Error::Serialization(format!("Serialize commit: {}", e)))?
         );
         let mut failed_commit_members: Vec<String> = Vec::new();
         for member in &members {
@@ -1393,7 +1395,9 @@ impl OfflineProtocol {
                 false
             };
             if !is_admin {
-                return Err(Error::Other("Only admins can remove members".to_string()));
+                return Err(Error::PermissionDenied(
+                    "Only admins can remove members".to_string(),
+                ));
             }
 
             if let Some(ref meta) = metadata {
@@ -1415,7 +1419,7 @@ impl OfflineProtocol {
                     // other), the remaining sole member gets auto-promoted, so
                     // we allow the removal.
                     if admin_count <= 1 && member_count > 2 {
-                        return Err(Error::Other(
+                        return Err(Error::InvalidState(
                             "Cannot remove the last admin while other members remain. Promote another member to admin first.".to_string(),
                         ));
                     }
@@ -1453,7 +1457,7 @@ impl OfflineProtocol {
             "{}{}",
             internal_prefixes::GROUP_MLS_COMMIT,
             serde_json::to_string(&commit_payload)
-                .map_err(|e| Error::Other(format!("Serialize commit: {}", e)))?
+                .map_err(|e| Error::Serialization(format!("Serialize commit: {}", e)))?
         );
         let mut failed_commit_members: Vec<String> = Vec::new();
         for member in &members {
@@ -1555,7 +1559,7 @@ impl OfflineProtocol {
                         .filter(|r| **r == GroupRole::Admin)
                         .count();
                     if admin_count <= 1 {
-                        return Err(Error::Other(
+                        return Err(Error::InvalidState(
                             "Cannot leave group as the last admin while other members remain. Promote another member to admin first.".to_string(),
                         ));
                     }
@@ -1573,7 +1577,7 @@ impl OfflineProtocol {
             "{}{}",
             internal_prefixes::GROUP_MLS_LEAVE,
             serde_json::to_string(&leave_payload)
-                .map_err(|e| Error::Other(format!("Serialize leave: {}", e)))?
+                .map_err(|e| Error::Serialization(format!("Serialize leave: {}", e)))?
         );
 
         // Send notifications first — if all fail, keep local state intact for retry
@@ -1603,8 +1607,10 @@ impl OfflineProtocol {
         // If there were other members but no notification succeeded, fail so the
         // caller can retry rather than silently orphaning the membership.
         if had_recipients && !any_sent {
-            return Err(Error::Other(
-                "All leave notifications failed — local state preserved for retry".to_string(),
+            return Err(Error::Transport(
+                offline_protocol_transport::Error::SendFailed(
+                    "All leave notifications failed — local state preserved for retry".to_string(),
+                ),
             ));
         }
 
@@ -1659,7 +1665,7 @@ impl OfflineProtocol {
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the forwarding API.
         if Self::is_internal_prefix(&original_message.content) {
-            return Err(Error::Other(
+            return Err(Error::InvalidArgument(
                 "Cannot forward a message with reserved internal prefix content".to_string(),
             ));
         }
@@ -1667,7 +1673,7 @@ impl OfflineProtocol {
         let forward_info = ForwardInfo::from_message(original_message);
 
         if forward_info.forward_count > crate::constants::MAX_FORWARD_COUNT {
-            return Err(Error::Other(format!(
+            return Err(Error::InvalidArgument(format!(
                 "Forward count {} exceeds maximum of {}",
                 forward_info.forward_count,
                 crate::constants::MAX_FORWARD_COUNT,
@@ -1711,7 +1717,7 @@ impl OfflineProtocol {
                 let gid = offline_protocol_mls::GroupId::new(group_id)?;
                 let info = mls_guard
                     .get_group_info(&gid)?
-                    .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
+                    .ok_or_else(|| Error::GroupNotFound(group_id.to_string()))?;
                 info.members.clone()
             }
         };
@@ -1762,7 +1768,7 @@ impl OfflineProtocol {
             "{}{}",
             internal_prefixes::GROUP_MLS_MSG,
             serde_json::to_string(&msg_payload)
-                .map_err(|e| Error::Other(format!("Serialize group message: {}", e)))?
+                .map_err(|e| Error::Serialization(format!("Serialize group message: {}", e)))?
         );
 
         // Per-member fan-out (mesh or DORS-selected transport)
@@ -1803,7 +1809,11 @@ impl OfflineProtocol {
                 failed_members,
                 succeeded_members,
             ));
-            return Err(Error::Other("All group message sends failed".to_string()));
+            return Err(Error::Transport(
+                offline_protocol_transport::Error::SendFailed(
+                    "All group message sends failed".to_string(),
+                ),
+            ));
         }
 
         // Emit appropriate event
@@ -1906,7 +1916,9 @@ impl OfflineProtocol {
     ) -> Result<()> {
         let self_id = self.config.user_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
-            return Err(Error::Other("Only admins can change roles".to_string()));
+            return Err(Error::PermissionDenied(
+                "Only admins can change roles".to_string(),
+            ));
         }
 
         // Verify target is a member (before acquiring guard for role operations)
@@ -1918,7 +1930,7 @@ impl OfflineProtocol {
             .or_else(|| self.refresh_group_members(group_id).ok())
             .unwrap_or_default();
         if !members.iter().any(|m| m == target_user_id) {
-            return Err(Error::Other(format!(
+            return Err(Error::InvalidState(format!(
                 "User {} is not a member of group {}",
                 target_user_id, group_id
             )));
@@ -1939,7 +1951,9 @@ impl OfflineProtocol {
                             .filter(|r| **r == GroupRole::Admin)
                             .count();
                         if admin_count <= 1 {
-                            return Err(Error::Other("Cannot demote the last admin".to_string()));
+                            return Err(Error::InvalidState(
+                                "Cannot demote the last admin".to_string(),
+                            ));
                         }
                     }
                 }
@@ -1960,7 +1974,7 @@ impl OfflineProtocol {
             "{}{}",
             internal_prefixes::GROUP_ROLE_CHANGE,
             serde_json::to_string(&payload)
-                .map_err(|e| Error::Other(format!("Serialize role change: {}", e)))?
+                .map_err(|e| Error::Serialization(format!("Serialize role change: {}", e)))?
         );
         for member in &members {
             if member == &self_id {
@@ -1990,7 +2004,7 @@ impl OfflineProtocol {
         let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let metadata = mls_guard
             .get_group_metadata(&gid)?
-            .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
+            .ok_or_else(|| Error::GroupNotFound(group_id.to_string()))?;
         Ok(metadata.get_role(user_id))
     }
 
@@ -2000,7 +2014,7 @@ impl OfflineProtocol {
         let gid = offline_protocol_mls::GroupId::new(group_id)?;
         let metadata = mls_guard
             .get_group_metadata(&gid)?
-            .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
+            .ok_or_else(|| Error::GroupNotFound(group_id.to_string()))?;
         Ok(metadata.get_all_roles())
     }
 
@@ -2080,11 +2094,15 @@ impl OfflineProtocol {
     pub fn rename_group(&mut self, group_id: &str, new_name: &str) -> Result<()> {
         let trimmed = new_name.trim();
         if trimmed.is_empty() {
-            return Err(Error::Other("Group name cannot be empty".to_string()));
+            return Err(Error::InvalidArgument(
+                "Group name cannot be empty".to_string(),
+            ));
         }
         let self_id = self.config.user_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
-            return Err(Error::Other("Only admins can rename groups".to_string()));
+            return Err(Error::PermissionDenied(
+                "Only admins can rename groups".to_string(),
+            ));
         }
 
         // Load old name before updating
@@ -2121,7 +2139,7 @@ impl OfflineProtocol {
             "{}{}",
             internal_prefixes::GROUP_RENAME,
             serde_json::to_string(&payload)
-                .map_err(|e| Error::Other(format!("Serialize group rename: {}", e)))?
+                .map_err(|e| Error::Serialization(format!("Serialize group rename: {}", e)))?
         );
         for member in &members {
             if member == &self_id {
@@ -2301,8 +2319,10 @@ impl OfflineProtocol {
         let content = format!(
             "{}{}",
             internal_prefixes::GROUP_RELAY_REGISTER,
-            serde_json::to_string(&payload)
-                .map_err(|e| Error::Other(format!("Serialize relay registration: {}", e)))?
+            serde_json::to_string(&payload).map_err(|e| Error::Serialization(format!(
+                "Serialize relay registration: {}",
+                e
+            )))?
         );
 
         // Send to self — the relay server intercepts messages with this prefix
@@ -2347,7 +2367,7 @@ impl OfflineProtocol {
             "{}{}",
             internal_prefixes::GROUP_RELAY_BROADCAST,
             serde_json::to_string(&payload)
-                .map_err(|e| Error::Other(format!("Serialize relay broadcast: {}", e)))?
+                .map_err(|e| Error::Serialization(format!("Serialize relay broadcast: {}", e)))?
         );
 
         let self_id = self.config.user_id.clone();
