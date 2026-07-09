@@ -255,6 +255,22 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    /// Rejects with the stable typed code when the error maps (see
+    /// mapProtocolBridgeError), otherwise with the method's legacy fallback
+    /// code and "<fallbackMessage>: <cause>".
+    private func rejectWithProtocolError(
+        _ error: Error,
+        _ rejecter: RCTPromiseRejectBlock,
+        fallbackCode: String,
+        fallbackMessage: String
+    ) {
+        if let mapped = mapProtocolBridgeError(error) {
+            rejecter(mapped.code, mapped.message, error)
+        } else {
+            rejecter(fallbackCode, "\(fallbackMessage): \(error.localizedDescription)", error)
+        }
+    }
+
     private func applyInitialRuntimeConfig(_ proto: OfflineProtocol, rawConfig: [String: Any]) {
         if let dorsDict = rawConfig["dors"] as? [String: Any] {
             let preferOnline = dorsDict["preferOnline"] as? Bool ?? dorsDict["prefer_online"] as? Bool ?? false
@@ -863,11 +879,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.sendMessage(recipient: recipient, content: content, priority: msgPriority, replyToMsg: replyToMsg)
             resolver(messageId)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_SEND", "Failed to send message: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND", fallbackMessage: "Failed to send message")
         }
     }
 
@@ -897,11 +909,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.forwardMessage(originalMessageJson: originalMessageJson, newRecipient: newRecipient, priority: msgPriority)
             resolver(messageId)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_FORWARD", "Failed to forward message: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_FORWARD", fallbackMessage: "Failed to forward message")
         }
     }
 
@@ -924,11 +932,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             )
             resolver(messageId)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_CONNECTION_REQUEST", "Failed to send connection request: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_CONNECTION_REQUEST", fallbackMessage: "Failed to send connection request")
         }
     }
 
@@ -951,11 +955,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             )
             resolver(messageId)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_CONNECTION_REQUEST", fallbackMessage: "Failed to accept connection request")
         }
     }
 
@@ -971,11 +971,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.rejectConnectionRequest(recipient: recipient)
             resolver(messageId)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_CONNECTION_REQUEST", fallbackMessage: "Failed to reject connection request")
         }
     }
 
@@ -991,11 +987,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.cancelConnectionRequest(recipient: recipient)
             resolver(messageId)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_CONNECTION_REQUEST", "Failed to cancel connection request: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_CONNECTION_REQUEST", fallbackMessage: "Failed to cancel connection request")
         }
     }
     
@@ -3071,11 +3063,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             ]
             resolver(result)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to create mesh group: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to create mesh group")
         }
     }
 
@@ -3092,11 +3080,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.inviteToGroup(groupId: groupId, inviteeUserId: inviteeUserId)
             resolver(nil)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to invite to mesh group: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to invite to mesh group")
         }
     }
 
@@ -3131,11 +3115,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageIds = try proto.sendGroupMessage(groupId: groupId, content: content, priority: msgPriority, replyToMsg: replyToMsg)
             resolver(messageIds)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to send mesh group message: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to send mesh group message")
         }
     }
 
@@ -3169,11 +3149,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageIds = try proto.forwardMessageToGroup(originalMessageJson: originalMessageJson, groupId: groupId, priority: msgPriority)
             resolver(messageIds)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to forward message to group: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to forward message to group")
         }
     }
 
@@ -3190,11 +3166,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.removeFromGroup(groupId: groupId, memberId: memberId)
             resolver(nil)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to remove member from mesh group: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to remove member from mesh group")
         }
     }
 
@@ -3210,11 +3182,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.leaveGroup(groupId: groupId)
             resolver(nil)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to leave mesh group: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to leave mesh group")
         }
     }
 
@@ -3229,11 +3197,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let groups = try proto.listGroups()
             resolver(groups)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to list mesh groups: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to list mesh groups")
         }
     }
 
@@ -3261,11 +3225,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                 resolver(NSNull())
             }
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to get group info: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to get group info")
         }
     }
 
@@ -3283,11 +3243,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.setMemberRole(groupId: groupId, userId: userId, role: role)
             resolver(nil)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to set member role: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to set member role")
         }
     }
 
@@ -3304,11 +3260,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let role = try proto.getMemberRole(groupId: groupId, userId: userId)
             resolver(role)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to get member role: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to get member role")
         }
     }
 
@@ -3324,11 +3276,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let roles = try proto.getGroupRoles(groupId: groupId)
             resolver(roles)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to get group roles: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to get group roles")
         }
     }
 
@@ -3345,11 +3293,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.renameGroup(groupId: groupId, newName: newName)
             resolver(nil)
         } catch {
-            if let mapped = mapProtocolBridgeError(error) {
-                rejecter(mapped.code, mapped.message, error)
-            } else {
-                rejecter("ERROR_MESH_GROUP", "Failed to rename group: \(error.localizedDescription)", error)
-            }
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to rename group")
         }
     }
 
