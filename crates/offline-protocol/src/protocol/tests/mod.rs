@@ -6430,12 +6430,25 @@ fn test_mls_pipeline_happy_path_init_send_encrypted_receive_decrypted() {
         .content
         .starts_with(internal_prefixes::ENCRYPTED));
 
+    let encrypted_flags: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let flags_clone = encrypted_flags.clone();
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { encrypted, .. } = event {
+            flags_clone.lock().unwrap().push(encrypted);
+        }
+    });
+
     bob_transport_handle.queue_message(encrypted_wire);
     let received = bob.receive_message().expect("expected decrypted message");
     assert_eq!(received.content, "hello-through-mls");
     assert_eq!(
         received.metadata.get("encrypted").map(String::as_str),
         Some("true")
+    );
+    assert_eq!(
+        *encrypted_flags.lock().unwrap(),
+        vec![true],
+        "decrypted delivery must surface with encrypted=true on the event"
     );
 }
 
@@ -13099,6 +13112,122 @@ fn test_plaintext_media_rejected_when_encryption_required() {
     assert!(
         received.lock().unwrap().is_empty(),
         "plaintext media must be rejected when encryption is required"
+    );
+}
+
+/// Builds a plaintext (no internal prefix) text message.
+fn plaintext_text_message(sender: &str, recipient: &str, content: &str) -> Message {
+    Message::new(
+        UserId::new(sender).unwrap(),
+        UserId::new(recipient).unwrap(),
+        AppId::new("test-app").unwrap(),
+        content,
+    )
+}
+
+#[test]
+fn test_plaintext_text_rejected_when_encryption_required() {
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let bob_handle = mock_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    bob.start().unwrap();
+
+    let received_events: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let warnings: Arc<Mutex<Vec<(String, crate::events::SecurityWarningCode)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let received_clone = received_events.clone();
+    let warnings_clone = warnings.clone();
+    bob.on_event(move |event| match event {
+        Event::MessageReceived { encrypted, .. } => {
+            received_clone.lock().unwrap().push(encrypted);
+        }
+        Event::SecurityWarning {
+            peer_id,
+            reason_code,
+            ..
+        } => {
+            warnings_clone.lock().unwrap().push((peer_id, reason_code));
+        }
+        _ => {}
+    });
+
+    let mut injected = plaintext_text_message("alice", "bob", "injected cleartext");
+    injected.requires_ack = true;
+    bob_handle.queue_message(injected);
+    assert!(
+        bob.receive_message().is_none(),
+        "plaintext text must not surface when encryption is required"
+    );
+
+    // A second injection from the same peer is also dropped, but the
+    // security warning stays once-per-peer.
+    bob_handle.queue_message(plaintext_text_message("alice", "bob", "again"));
+    assert!(bob.receive_message().is_none());
+
+    assert!(
+        received_events.lock().unwrap().is_empty(),
+        "no MessageReceived event may fire for rejected plaintext"
+    );
+    let got_warnings = warnings.lock().unwrap();
+    assert_eq!(
+        got_warnings.as_slice(),
+        &[(
+            "alice".to_string(),
+            crate::events::SecurityWarningCode::PlaintextReceiveRejected
+        )],
+        "exactly one PlaintextReceiveRejected warning per peer"
+    );
+    assert!(
+        bob_handle.sent_messages().is_empty(),
+        "rejection must not send a delivery ACK (mirrors SecurityRejected)"
+    );
+}
+
+#[test]
+fn test_plaintext_text_rejected_once_session_confirmed() {
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    bob_handle.queue_message(plaintext_text_message("alice", "bob", "downgrade attempt"));
+    assert!(
+        bob.receive_message().is_none(),
+        "plaintext text from a session-confirmed peer must be rejected (downgrade/forgery)"
+    );
+}
+
+#[test]
+fn test_plaintext_text_accepted_without_session_when_not_required() {
+    // Encryption enabled but no session with the sender and
+    // require_encryption=false: legacy plaintext text stays interoperable.
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+
+    let encrypted_flags: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+    let flags_clone = encrypted_flags.clone();
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { encrypted, .. } = event {
+            flags_clone.lock().unwrap().push(encrypted);
+        }
+    });
+
+    bob_handle.queue_message(plaintext_text_message("alice", "bob", "legacy hello"));
+    let received = bob
+        .receive_message()
+        .expect("legacy plaintext interop must be preserved under the opt-out");
+    assert_eq!(received.content, "legacy hello");
+    assert_eq!(
+        *encrypted_flags.lock().unwrap(),
+        vec![false],
+        "plaintext delivery must surface with encrypted=false"
     );
 }
 

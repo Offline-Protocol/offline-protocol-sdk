@@ -80,14 +80,21 @@ pub struct EncryptionConfig {
     /// Messages will be sent automatically after the session is established.
     pub store_pending: bool,
 
-    /// Require encryption for outbound messages (default: `true`).
+    /// Require encryption for messages (default: `true`).
     ///
     /// When enabled, sends fail closed if encryption cannot be applied:
     /// with MLS uninitialized every send returns [`crate::Error::EncryptFailed`],
     /// and with no confirmed session messages are queued (when
     /// `store_pending` is set) or fail with
     /// [`crate::Error::SessionNotReady`] instead of ever leaving as
-    /// plaintext. Inbound legacy plaintext media is also rejected.
+    /// plaintext. Inbound plaintext content — text messages and legacy
+    /// media alike — is rejected without being surfaced to the app
+    /// (plaintext carries no sender authentication, so anyone could
+    /// inject it under a contact's name); each rejection emits a
+    /// [`crate::events::SecurityWarningCode::PlaintextReceiveRejected`]
+    /// warning, once per peer. Even under the opt-out, inbound plaintext
+    /// from a peer with a confirmed MLS session is rejected as a
+    /// downgrade/forgery attempt.
     ///
     /// Disable only for deployments that deliberately send cleartext
     /// (e.g. open broadcast/mesh bootstrap without provisioned MLS

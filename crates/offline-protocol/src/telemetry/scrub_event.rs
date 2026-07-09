@@ -142,6 +142,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             reply_to_msg: _,
             content_type: _,
             media_metadata: _,
+            encrypted: _,
         } => {
             hash_string(sender, scrubber);
             hash_string(recipient, scrubber);
@@ -683,6 +684,7 @@ mod tests {
                 original_timestamp: 0,
                 forward_count: 1,
             }),
+            encrypted: false,
         };
         let scrubbed = scrub_event(&event, &scrubber_enabled()).into_owned();
         match scrubbed {

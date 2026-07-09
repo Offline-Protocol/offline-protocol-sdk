@@ -102,6 +102,7 @@ impl OfflineProtocol {
                     }
 
                     // Handle internal MLS messages
+                    let mut was_decrypted = false;
                     if let Some(result) = self.process_internal_message(&message) {
                         match result {
                             InternalMessageResult::Consumed => {
@@ -130,12 +131,41 @@ impl OfflineProtocol {
                             }
                             InternalMessageResult::Decrypted(plaintext) => {
                                 // Replace content with decrypted plaintext
+                                was_decrypted = true;
                                 message.content = plaintext;
                                 message
                                     .metadata
                                     .insert("encrypted".to_string(), "true".to_string());
                             }
                         }
+                    }
+
+                    // Policy gate for inbound plaintext (SEC: inbound text must
+                    // honor require_encryption exactly like legacy media does).
+                    // A message that reaches this point without decryption is
+                    // unauthenticated cleartext with an attacker-controllable
+                    // sender. FileChunk messages are exempt: encrypted media
+                    // envelopes carry no content prefix (the ciphertext rides
+                    // in binary_content), so they are indistinguishable from
+                    // plaintext here — handle_incoming_file_chunk applies this
+                    // same gate after telling the two apart. Rejection sends
+                    // no delivery ACK, mirroring SecurityRejected: don't
+                    // confirm to an injector that the target processes their
+                    // messages.
+                    if !was_decrypted
+                        && message.content_type != ContentType::FileChunk
+                        && !self.accept_plaintext_content(message.sender.as_str())
+                    {
+                        warn!(
+                            message_id = %message.id,
+                            sender = %message.sender,
+                            "Rejecting unencrypted inbound message (encryption policy)"
+                        );
+                        self.warn_plaintext_receive_rejected(
+                            message.sender.as_str(),
+                            "Inbound plaintext message rejected by encryption policy",
+                        );
+                        continue;
                     }
 
                     if message.requires_ack {
@@ -176,6 +206,7 @@ impl OfflineProtocol {
                         content_type: message.content_type.to_string(),
                         media_metadata: message.media_metadata.clone(),
                         forward_info,
+                        encrypted: was_decrypted,
                     };
 
                     let Ok(state) = lock_shared_state(&self.shared_state) else {
@@ -318,11 +349,15 @@ impl OfflineProtocol {
                 };
                 (chunk, inner.media_metadata, inner.original_content_type)
             } else {
-                if !self.accept_plaintext_media(&sender) {
+                if !self.accept_plaintext_content(&sender) {
                     warn!(
                         message_id = %message.id,
                         sender = %sender,
                         "Rejecting unencrypted media chunk (encryption policy)"
+                    );
+                    self.warn_plaintext_receive_rejected(
+                        &sender,
+                        "Inbound plaintext media chunk rejected by encryption policy",
                     );
                     return;
                 }
@@ -341,11 +376,15 @@ impl OfflineProtocol {
                 (chunk, meta, oct)
             }
         } else {
-            if !self.accept_plaintext_media(&sender) {
+            if !self.accept_plaintext_content(&sender) {
                 warn!(
                     message_id = %message.id,
                     sender = %sender,
                     "Rejecting unencrypted media chunk (encryption policy)"
+                );
+                self.warn_plaintext_receive_rejected(
+                    &sender,
+                    "Inbound plaintext media chunk rejected by encryption policy",
                 );
                 return;
             }
@@ -464,12 +503,13 @@ impl OfflineProtocol {
         (message.media_metadata.clone(), original_ct)
     }
 
-    /// Policy gate for legacy (unencrypted) media chunks: rejected when this
-    /// node requires encryption, and rejected once a confirmed MLS session
-    /// exists with the sender — an encryption-capable peer sending plaintext
-    /// media is a downgrade/forgery attempt (plaintext chunks carry no sender
-    /// authentication, so anyone could inject them under a contact's name).
-    fn accept_plaintext_media(&mut self, sender: &str) -> bool {
+    /// Policy gate for inbound plaintext content — text messages and legacy
+    /// (unencrypted) media chunks alike: rejected when this node requires
+    /// encryption, and rejected once a confirmed MLS session exists with the
+    /// sender — an encryption-capable peer sending plaintext is a
+    /// downgrade/forgery attempt (plaintext carries no sender authentication,
+    /// so anyone could inject it under a contact's name).
+    fn accept_plaintext_content(&mut self, sender: &str) -> bool {
         if self.config.encryption.require_encryption {
             return false;
         }

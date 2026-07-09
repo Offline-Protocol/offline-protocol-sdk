@@ -154,6 +154,7 @@ impl OfflineProtocol {
                                     .forwarded_from
                                     .as_ref()
                                     .map(crate::events::ForwardInfoEvent::from),
+                                encrypted: true,
                             };
                             state.emit_event(event);
                         }
