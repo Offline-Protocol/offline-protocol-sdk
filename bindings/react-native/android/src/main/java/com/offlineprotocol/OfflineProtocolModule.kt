@@ -291,6 +291,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 code = "MediaTransferLimit",
                 message = "Too many concurrent media transfers to this recipient; retry after an active transfer completes"
             )
+            is ProtocolException.SendFailed -> BridgeProtocolError(
+                code = "SendFailed",
+                message = error.message ?: "Send failed"
+            )
             is ProtocolException.InvalidState -> BridgeProtocolError(
                 code = "InvalidState",
                 message = error.message ?: "Operation rejected by current state"

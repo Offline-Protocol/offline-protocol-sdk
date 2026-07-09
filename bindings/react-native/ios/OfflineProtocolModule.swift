@@ -234,6 +234,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             return ("EncryptFailed", "Message encryption failed")
         case .MediaTransferLimit:
             return ("MediaTransferLimit", "Too many concurrent media transfers to this recipient; retry after an active transfer completes")
+        case let .SendFailed(message):
+            return ("SendFailed", message)
         case let .InvalidState(message):
             return ("InvalidState", message)
         case let .TransportError(message):
