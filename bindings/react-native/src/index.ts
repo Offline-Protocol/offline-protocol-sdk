@@ -2550,6 +2550,12 @@ export class OfflineProtocol {
    * events carrying the verbatim frame; correlate request/response with your
    * own `request_id` where the relay supports one.
    *
+   * Do not send frame types the SDK itself manages (`SendMessage`,
+   * `CreateGroup` / member deltas, `LeaveGroup`, `CheckPresence`, …): the
+   * SDK cannot correlate their answers with its own in-flight state, and a
+   * raw `CreateGroup`/`LeaveGroup` desyncs the bridge's registration
+   * tracking. Use the typed SDK APIs for those.
+   *
    * @param json - A complete relay frame, e.g.
    *   `{"type":"CreateGroupInviteLink","group_id":"g1","expires_in_secs":604800,"request_id":"req_…"}`
    * @returns true once the socket accepted the command (write-confirmed on

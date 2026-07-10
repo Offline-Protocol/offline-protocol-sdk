@@ -56,10 +56,12 @@ public class InternetManager: NSObject, TransportManager {
     private var isAuthenticated = false
     private var transportStartAt: Date?
     
-    // Failure tracking for DORS
-    private var consecutiveSendFailures: Int = 0
-    private var consecutivePingFailures: Int = 0
-    private let MAX_CONSECUTIVE_FAILURES = 2  // Trigger disconnect after 2 consecutive failures
+    // Failure tracking for DORS. Atomic (lock-guarded): send/ping completions
+    // mutate on the URLSession delegate queue while handleConnectionOpened
+    // resets on main — mirrors the Kotlin bridge's AtomicInteger.
+    private let consecutiveSendFailures = AtomicCounter()
+    private let consecutivePingFailures = AtomicCounter()
+    private let MAX_CONSECUTIVE_FAILURES: Int64 = 2  // Trigger disconnect after 2 consecutive failures
 
     // Correlates the relay's recipient-keyed failure signals (DeliveryError /
     // ConnectionRequestError carry no message_id) back to in-flight sends.
@@ -81,11 +83,14 @@ public class InternetManager: NSObject, TransportManager {
     /// the module forwards them to JS as the `internet_server_message` event.
     public var serverMessageEmitter: ((String) -> Void)?
     
-    // Metrics
-    private var bytesSent: UInt64 = 0
-    private var bytesReceived: UInt64 = 0
-    private var messagesSent: UInt64 = 0
-    private var messagesReceived: UInt64 = 0
+    // Metrics. Atomic (lock-guarded): send completions mutate on the
+    // URLSession delegate queue, receive paths too, and getMetrics() reads
+    // from the caller's thread — mirrors the Kotlin bridge's AtomicLong
+    // metrics.
+    private let bytesSent = AtomicCounter()
+    private let bytesReceived = AtomicCounter()
+    private let messagesSent = AtomicCounter()
+    private let messagesReceived = AtomicCounter()
     
     // MARK: - Initialization
     
@@ -228,10 +233,10 @@ public class InternetManager: NSObject, TransportManager {
     
     public func getMetrics() -> [String: Any] {
         return [
-            "bytes_sent": bytesSent,
-            "bytes_received": bytesReceived,
-            "messages_sent": messagesSent,
-            "messages_received": messagesReceived,
+            "bytes_sent": bytesSent.get(),
+            "bytes_received": bytesReceived.get(),
+            "messages_sent": messagesSent.get(),
+            "messages_received": messagesReceived.get(),
             "is_connected": isConnected,
             "reconnect_attempts": reconnectAttempts
         ]
@@ -263,11 +268,40 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     private func disconnect() {
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        // Detach before cancel so the cancel-triggered delegate/receive
+        // callbacks see a stale task and no-op (see isStale).
+        let task = webSocketTask
         webSocketTask = nil
+        task?.cancel(with: .goingAway, reason: nil)
         isConnected = false
         isConnecting = false
         isAuthenticated = false
+    }
+
+    /// True when the callback belongs to a socket task that is no longer the
+    /// manager's current one (replaced by a reconnect or detached by a
+    /// teardown). A stale task's terminal callbacks must not clear the
+    /// in-flight tracker, reset the translator, or report the transport down
+    /// while a newer, healthy connection is live. Mirrors the Kotlin
+    /// listener's stale-socket guard.
+    private func isStale(_ task: URLSessionTask) -> Bool {
+        return task !== webSocketTask
+    }
+
+    /// Cancels and detaches the current socket task, then runs the closed
+    /// handler exactly once for it. Detaching before cancel makes the
+    /// cancel-triggered delegate/receive callbacks no-ops (the stale-task
+    /// guard), so a dead socket can never tear down the connection rebuilt
+    /// after it. Mirrors the Kotlin bridge's teardownCurrentSocket.
+    private func teardownCurrentSocket(reason: String) {
+        let task = webSocketTask
+        webSocketTask = nil
+        task?.cancel(with: .goingAway, reason: nil)
+        handleConnectionClosed(error: NSError(
+            domain: "OfflineProtocol.InternetManager",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: reason]
+        ))
     }
     
     private func handleConnectionOpened() {
@@ -276,8 +310,8 @@ public class InternetManager: NSObject, TransportManager {
         isAuthenticated = false
         reconnectAttempts = 0
         currentReconnectDelay = RECONNECT_INITIAL_DELAY
-        consecutiveSendFailures = 0
-        consecutivePingFailures = 0
+        consecutiveSendFailures.set(0)
+        consecutivePingFailures.set(0)
         
         emitDiagnostic("info", "WebSocket connected, authenticating...", context: [
             "serverUrl": serverUrl?.absoluteString ?? "unknown"
@@ -417,15 +451,20 @@ public class InternetManager: NSObject, TransportManager {
     // MARK: - Message Handling
     
     private func receiveMessage() {
-        webSocketTask?.receive { [weak self] result in
+        guard let task = webSocketTask else { return }
+        task.receive { [weak self] result in
             guard let self = self else { return }
-            
+            // A stale task's completion must neither tear down the
+            // connection rebuilt after it nor re-arm a second receive loop
+            // onto the new task (see isStale).
+            guard !self.isStale(task) else { return }
+
             switch result {
             case .success(let message):
                 self.handleReceivedMessage(message)
                 // Continue receiving
                 self.receiveMessage()
-                
+
             case .failure(let error):
                 self.handleConnectionClosed(error: error)
             }
@@ -446,7 +485,7 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     private func processReceivedData(_ data: Data) {
-        bytesReceived += UInt64(data.count)
+        bytesReceived.add(Int64(data.count))
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let messageType = json["type"] as? String else {
@@ -469,7 +508,11 @@ public class InternetManager: NSObject, TransportManager {
             emitDiagnostic("error", "Authentication failed", context: [
                 "reason": reason
             ])
-            handleConnectionClosed(error: nil)
+            // The auth-failed socket must actually be closed — left open,
+            // its eventual close callback would race the reconnect's fresh
+            // connection (the teardown detaches it first, so the
+            // cancel-triggered callbacks are ignored as stale).
+            teardownCurrentSocket(reason: reason)
             
         case "MessageSent":
             // Handle MessageSent event from WebSocket server
@@ -502,7 +545,7 @@ public class InternetManager: NSObject, TransportManager {
             let replyToMsg = json["reply_to_msg"] as? String
             let messageId = json["message_id"] as? String
             
-            messagesReceived += 1
+            messagesReceived.increment()
             
             messageQueue.async { [weak self] in
                 guard let self = self else { return }
@@ -962,14 +1005,16 @@ public class InternetManager: NSObject, TransportManager {
         // Timer already runs on messageQueue, no need for extra dispatch
         // Poll for next message from protocol - batch send up to 10 messages per poll
         // to efficiently flush the outbox after reconnection
-        var messagesSent = 0
+        // Batch counter — deliberately NOT the messagesSent metric, which the
+        // send completions own.
+        var batchSent = 0
         let maxBatchSize = 10
-        
-        while messagesSent < maxBatchSize {
+
+        while batchSent < maxBatchSize {
             // Re-check connection state between messages to handle mid-batch disconnects
             guard isConnected, isAuthenticated else {
                 emitDiagnostic("warning", "Connection lost mid-batch, stopping message send", context: [
-                    "messagesSent": messagesSent
+                    "messagesSent": batchSent
                 ])
                 break
             }
@@ -1017,12 +1062,12 @@ public class InternetManager: NSObject, TransportManager {
                     replyToMsg: message.replyToMsg
                 )
             }
-            messagesSent += 1
+            batchSent += 1
         }
-        
-        if messagesSent > 1 {
+
+        if batchSent > 1 {
             emitDiagnostic("debug", "Batch sent messages", context: [
-                "count": messagesSent
+                "count": batchSent
             ])
         }
     }
@@ -1097,30 +1142,30 @@ public class InternetManager: NSObject, TransportManager {
             guard let self = self else { return }
             
             if let error = error {
-                self.consecutiveSendFailures += 1
+                let failures = self.consecutiveSendFailures.increment()
                 self.protocolInstance.internetSendFailed(messageId: messageId)
                 self.emitDiagnostic("error", "Failed to send WebSocket message", context: [
                     "error": error.localizedDescription,
                     "messageId": messageId,
                     "recipientId": recipientId,
-                    "consecutiveFailures": self.consecutiveSendFailures
+                    "consecutiveFailures": failures
                 ])
-                
+
                 // If too many consecutive send failures, the connection is likely dead
                 // Trigger disconnect so DORS can switch to another transport
-                if self.consecutiveSendFailures >= self.MAX_CONSECUTIVE_FAILURES {
+                if failures >= self.MAX_CONSECUTIVE_FAILURES {
                     self.emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect for DORS", context: [
-                        "failures": self.consecutiveSendFailures
+                        "failures": failures
                     ])
                     DispatchQueue.main.async {
-                        self.handleConnectionClosed(error: error)
+                        self.teardownCurrentSocket(reason: "Send failures exceeded threshold")
                     }
                 }
             } else {
                 // Reset failure counter on successful send
-                self.consecutiveSendFailures = 0
-                self.bytesSent += UInt64(jsonData.count)
-                self.messagesSent += 1
+                self.consecutiveSendFailures.set(0)
+                self.bytesSent.add(Int64(jsonData.count))
+                self.messagesSent.increment()
                 // Track for recipient-keyed failure correlation: a later
                 // DeliveryError for this recipient fails-fast this message id.
                 self.inFlightTracker.recordSent(
@@ -1215,24 +1260,24 @@ public class InternetManager: NSObject, TransportManager {
                     return
                 }
                 if let error = error {
-                    self.consecutiveSendFailures += 1
+                    let failures = self.consecutiveSendFailures.increment()
                     self.protocolInstance.internetSendFailed(messageId: messageId)
                     self.emitDiagnostic("error", "Failed to send relay-native control op", context: [
                         "controlOp": controlOp,
                         "messageId": messageId,
                         "error": error.localizedDescription,
-                        "consecutiveFailures": self.consecutiveSendFailures
+                        "consecutiveFailures": failures
                     ])
-                    if self.consecutiveSendFailures >= self.MAX_CONSECUTIVE_FAILURES {
+                    if failures >= self.MAX_CONSECUTIVE_FAILURES {
                         DispatchQueue.main.async {
-                            self.handleConnectionClosed(error: error)
+                            self.teardownCurrentSocket(reason: "Send failures exceeded threshold")
                         }
                     }
                     onSettled()
                 } else {
-                    self.consecutiveSendFailures = 0
-                    self.bytesSent += UInt64(primaryData.count)
-                    self.messagesSent += 1
+                    self.consecutiveSendFailures.set(0)
+                    self.bytesSent.add(Int64(primaryData.count))
+                    self.messagesSent.increment()
                     self.inFlightTracker.recordSent(
                         recipient: recipientId,
                         messageId: messageId,
@@ -1351,7 +1396,11 @@ public class InternetManager: NSObject, TransportManager {
                 reason: "recipient_unreachable: \(reason)"
             )
         }
-        presenceWatch.watch(recipient, nowMs: now)
+        // Never watch self: a malformed self-addressed frame's DeliveryError
+        // would otherwise occupy a rotation slot until the idle TTL.
+        if recipient != deviceId {
+            presenceWatch.watch(recipient, nowMs: now)
+        }
         protocolInstance.internetPeerPresence(peerId: recipient, online: false, lastSeenMs: nil)
         emitDiagnostic("warning", "Recipient unreachable", context: [
             "recipient": recipient,
@@ -1454,29 +1503,33 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     private func sendPing() {
-        webSocketTask?.sendPing { [weak self] error in
+        guard let task = webSocketTask else { return }
+        task.sendPing { [weak self] error in
             guard let self = self else { return }
-            
+            // A stale task's ping outcome says nothing about the current
+            // connection (see isStale).
+            guard !self.isStale(task) else { return }
+
             if let error = error {
-                self.consecutivePingFailures += 1
+                let failures = self.consecutivePingFailures.increment()
                 self.emitDiagnostic("warning", "Ping failed", context: [
                     "error": error.localizedDescription,
-                    "consecutiveFailures": self.consecutivePingFailures
+                    "consecutiveFailures": failures
                 ])
-                
+
                 // If ping fails, the connection is likely dead
                 // Trigger disconnect so DORS can switch to another transport
-                if self.consecutivePingFailures >= self.MAX_CONSECUTIVE_FAILURES {
+                if failures >= self.MAX_CONSECUTIVE_FAILURES {
                     self.emitDiagnostic("warning", "Too many consecutive ping failures, triggering reconnect for DORS", context: [
-                        "failures": self.consecutivePingFailures
+                        "failures": failures
                     ])
                     DispatchQueue.main.async {
-                        self.handleConnectionClosed(error: error)
+                        self.teardownCurrentSocket(reason: "Ping failures exceeded threshold")
                     }
                 }
             } else {
                 // Reset failure counter on successful ping
-                self.consecutivePingFailures = 0
+                self.consecutivePingFailures.set(0)
             }
         }
     }
@@ -1501,29 +1554,70 @@ extension InternetManager: URLSessionWebSocketDelegate {
     
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         DispatchQueue.main.async { [weak self] in
-            self?.handleConnectionOpened()
+            guard let self = self, !self.isStale(webSocketTask) else { return }
+            self.handleConnectionOpened()
         }
     }
-    
+
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         DispatchQueue.main.async { [weak self] in
+            // A replaced or detached socket's close must not tear down the
+            // connection rebuilt after it (see isStale).
+            guard let self = self, !self.isStale(webSocketTask) else { return }
             let reasonString = reason.flatMap { String(data: $0, encoding: .utf8) }
-            self?.emitDiagnostic("info", "WebSocket closed", context: [
+            self.emitDiagnostic("info", "WebSocket closed", context: [
                 "closeCode": closeCode.rawValue,
                 "reason": reasonString ?? "none"
             ])
-            self?.handleConnectionClosed(error: nil)
+            self.handleConnectionClosed(error: nil)
         }
     }
-    
+
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error = error {
             DispatchQueue.main.async { [weak self] in
-                self?.handleConnectionClosed(error: error)
+                guard let self = self, !self.isStale(task) else { return }
+                self.handleConnectionClosed(error: error)
             }
         }
     }
 }
 
 extension InternetManager: @unchecked Sendable {}
+
+/// Lock-guarded counter mirroring the Kotlin bridge's atomic metrics and
+/// failure counters: send/ping completions mutate on the URLSession delegate
+/// queue, the poll loop on messageQueue, and getMetrics() reads from the
+/// caller's thread.
+final class AtomicCounter {
+    private var value: Int64 = 0
+    private let lock = NSLock()
+
+    /// Adds one and returns the new value.
+    @discardableResult
+    func increment() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
+    }
+
+    func add(_ delta: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        value += delta
+    }
+
+    func set(_ newValue: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = newValue
+    }
+
+    func get() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
 

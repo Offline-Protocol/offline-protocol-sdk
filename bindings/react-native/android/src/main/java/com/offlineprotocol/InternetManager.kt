@@ -1089,7 +1089,7 @@ class InternetManager(
             null
         }
     }
-    
+
     /** Build serialized Message JSON bytes for an internal (relay) message, same shape as MessageReceived. */
     private fun buildInternalMessageBytes(senderId: String, content: String): ByteArray {
         val messageJson = org.json.JSONObject().apply {
@@ -1139,19 +1139,21 @@ class InternetManager(
 
         try {
             // Poll for next message from protocol - batch send up to 10 messages per poll
-            // to efficiently flush the outbox after reconnection
-            var messagesSent = 0
+            // to efficiently flush the outbox after reconnection.
+            // Batch counter — deliberately NOT the messagesSent metric, which
+            // the send paths own.
+            var batchSent = 0
             val maxBatchSize = 10
-            
-            while (messagesSent < maxBatchSize) {
+
+            while (batchSent < maxBatchSize) {
                 // Re-check connection state between messages to handle mid-batch disconnects
                 if (!isConnected.get() || !isAuthenticated.get()) {
                     emitDiagnostic("warning", "Connection lost mid-batch, stopping message send", mapOf(
-                        "messagesSent" to messagesSent
+                        "messagesSent" to batchSent
                     ))
                     break
                 }
-                
+
                 val message = protocol.internetGetNextMessage() ?: break
                 val controlOp = message.controlOp
                 if (controlOp != null) {
@@ -1166,12 +1168,12 @@ class InternetManager(
                 } else {
                     sendMessage(message.messageId, message.recipientId, message.data.map { it.toByte() }.toByteArray(), message.replyToMsg)
                 }
-                messagesSent++
+                batchSent++
             }
-            
-            if (messagesSent > 1) {
+
+            if (batchSent > 1) {
                 emitDiagnostic("debug", "Batch sent messages", mapOf(
-                    "count" to messagesSent
+                    "count" to batchSent
                 ))
             }
         } catch (e: Exception) {
