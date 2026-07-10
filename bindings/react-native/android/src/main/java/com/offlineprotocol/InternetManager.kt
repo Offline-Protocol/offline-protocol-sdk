@@ -740,7 +740,7 @@ class InternetManager(
                 // relay may send epoch numbers directly.
                 val lastSeenMs = when (val rawLastSeen = json.opt("last_seen")) {
                     is Number -> rawLastSeen.toLong()
-                    is String -> parseTimestampToMsOrNull(rawLastSeen)
+                    is String -> RelayTimestamps.parseToMsOrNull(rawLastSeen)
                     else -> null
                 }
                 if (online) {
@@ -1072,21 +1072,6 @@ class InternetManager(
             java.time.Instant.parse(timestampStr).toEpochMilli()
         } catch (e: Exception) {
             System.currentTimeMillis()
-        }
-    }
-
-    /**
-     * Like [parseTimestampToMs] but returns null instead of now() when the
-     * value is absent or unparseable — a last-seen display must not invent a
-     * timestamp. Accepts ISO-8601 or epoch milliseconds.
-     */
-    private fun parseTimestampToMsOrNull(timestampStr: String): Long? {
-        if (timestampStr.isEmpty()) return null
-        timestampStr.toLongOrNull()?.let { return it }
-        return try {
-            java.time.Instant.parse(timestampStr).toEpochMilli()
-        } catch (e: Exception) {
-            null
         }
     }
 
