@@ -7192,11 +7192,20 @@ fn test_commit_and_message_both_outrun_welcome() {
 }
 
 #[test]
-fn test_pending_group_message_global_cap_evicts_oldest_across_groups() {
+fn test_pending_group_message_spread_flood_bounded_by_group_cap() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let total = MAX_PENDING_GROUP_MESSAGES_TOTAL + 2;
+    // A spread flood: one entry per fabricated group ID, past the
+    // distinct-group cap. Buffer sizes all tie at 1, so eviction degrades to
+    // globally-oldest — the group cap bounds how wide the spread can reach,
+    // and every evicted entry must release its dedup ID so a sender-side
+    // redelivery is accepted fresh rather than permanently lost.
+    let total = MAX_PENDING_GROUP_MESSAGE_GROUPS + 8;
     for i in 0..total {
+        protocol
+            .group_mesh
+            .message_dedup
+            .insert(format!("m{}", i), Instant::now());
         protocol.buffer_pending_group_message(
             &format!("group-{}", i),
             PendingGroupMessage {
@@ -7212,31 +7221,111 @@ fn test_pending_group_message_global_cap_evicts_oldest_across_groups() {
         );
     }
 
-    let buffered: usize = protocol
-        .group_mesh
-        .pending_group_messages
-        .values()
-        .map(|b| b.len())
-        .sum();
-    assert_eq!(buffered, MAX_PENDING_GROUP_MESSAGES_TOTAL);
+    assert_eq!(
+        protocol.group_mesh.pending_group_messages.len(),
+        MAX_PENDING_GROUP_MESSAGE_GROUPS,
+        "Distinct buffered groups must be capped"
+    );
     assert!(
         !protocol
             .group_mesh
             .pending_group_messages
             .contains_key("group-0"),
-        "Globally oldest entry should be evicted first"
-    );
-    assert!(
-        !protocol
-            .group_mesh
-            .pending_group_messages
-            .contains_key("group-1"),
-        "Second-oldest entry should be evicted next"
+        "Oldest spread entry should be evicted first"
     );
     assert!(protocol
         .group_mesh
         .pending_group_messages
         .contains_key(&format!("group-{}", total - 1)));
+    // Entries 0..8 were evicted undelivered — dedup IDs released; survivors
+    // keep theirs so transports still reject genuine replays.
+    assert!(!protocol.group_mesh.message_dedup.contains_key("m0"));
+    assert!(!protocol.group_mesh.message_dedup.contains_key("m7"));
+    assert!(protocol.group_mesh.message_dedup.contains_key("m8"));
+    assert!(protocol
+        .group_mesh
+        .message_dedup
+        .contains_key(&format!("m{}", total - 1)));
+}
+
+#[test]
+fn test_evicted_pending_group_message_releases_dedup_entry() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    for i in 0..(MAX_PENDING_GROUP_MESSAGES_PER_GROUP + 1) {
+        protocol
+            .group_mesh
+            .message_dedup
+            .insert(format!("evict{}", i), Instant::now());
+        protocol.buffer_pending_group_message(
+            "evict-group",
+            PendingGroupMessage {
+                sender: "alice".to_string(),
+                message_id: format!("evict{}", i),
+                ciphertext_b64: base64_encode(b"x"),
+                timestamp: None,
+                reply_to: None,
+                forward_info: None,
+                buffered_at: Instant::now(),
+            },
+        );
+    }
+
+    // The insert past the per-group cap evicted the oldest buffered copy;
+    // its dedup ID must be released so a redelivery is accepted fresh, while
+    // surviving buffered entries keep theirs.
+    assert!(!protocol.group_mesh.message_dedup.contains_key("evict0"));
+    assert!(protocol.group_mesh.message_dedup.contains_key("evict1"));
+    assert_eq!(
+        protocol
+            .group_mesh
+            .pending_group_messages
+            .get("evict-group")
+            .map(|b| b.len()),
+        Some(MAX_PENDING_GROUP_MESSAGES_PER_GROUP)
+    );
+}
+
+#[test]
+fn test_drain_expired_pending_group_message_releases_dedup_entry() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    protocol
+        .group_mesh
+        .message_dedup
+        .insert("expired-dedup-1".to_string(), Instant::now());
+    protocol
+        .group_mesh
+        .pending_group_messages
+        .entry("dedup-ttl-group".to_string())
+        .or_default()
+        .push_back(PendingGroupMessage {
+            sender: "alice".to_string(),
+            message_id: "expired-dedup-1".to_string(),
+            ciphertext_b64: base64_encode(b"x"),
+            timestamp: None,
+            reply_to: None,
+            forward_info: None,
+            buffered_at: Instant::now()
+                - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+        });
+
+    protocol.drain_pending_group_messages("dedup-ttl-group");
+
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_group_messages
+            .contains_key("dedup-ttl-group"),
+        "Expired entry should be dropped on drain"
+    );
+    assert!(
+        !protocol
+            .group_mesh
+            .message_dedup
+            .contains_key("expired-dedup-1"),
+        "Dropping an undelivered expired message must release its dedup ID"
+    );
 }
 
 #[test]
@@ -7284,12 +7373,17 @@ fn test_pending_group_message_global_byte_cap() {
 }
 
 #[test]
-fn test_pending_commit_global_cap() {
+fn test_pending_commit_global_entry_cap_concentrated_flood() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let total = MAX_PENDING_COMMITS_TOTAL + 2;
-    for i in 0..total {
-        protocol.buffer_pending_commit(&format!("commit-group-{}", i), "alice", "commit-data");
+    // Fill enough groups to their per-group cap to exceed the global entry
+    // cap (9 * 8 = 72 > 64) while staying under the distinct-group cap.
+    let groups = MAX_PENDING_COMMITS_TOTAL / MAX_PENDING_COMMITS_PER_GROUP + 1;
+    assert!(groups <= MAX_PENDING_COMMIT_GROUPS);
+    for g in 0..groups {
+        for _ in 0..MAX_PENDING_COMMITS_PER_GROUP {
+            protocol.buffer_pending_commit(&format!("commit-group-{}", g), "alice", "commit-data");
+        }
     }
 
     let buffered: usize = protocol
@@ -7299,10 +7393,30 @@ fn test_pending_commit_global_cap() {
         .map(|b| b.len())
         .sum();
     assert_eq!(buffered, MAX_PENDING_COMMITS_TOTAL);
+    assert_eq!(
+        protocol.group_mesh.pending_commits.len(),
+        groups,
+        "Largest-buffer-first eviction spreads the cost across the flood's own buffers"
+    );
     assert!(protocol
         .group_mesh
         .pending_commits
-        .contains_key(&format!("commit-group-{}", total - 1)));
+        .contains_key(&format!("commit-group-{}", groups - 1)));
+}
+
+#[test]
+fn test_pending_commit_spread_flood_bounded_by_group_cap() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    for i in 0..(MAX_PENDING_COMMIT_GROUPS + 4) {
+        protocol.buffer_pending_commit(&format!("spread-commit-{}", i), "alice", "commit-data");
+    }
+
+    assert_eq!(
+        protocol.group_mesh.pending_commits.len(),
+        MAX_PENDING_COMMIT_GROUPS,
+        "Distinct buffered commit groups must be capped"
+    );
 }
 
 #[test]
