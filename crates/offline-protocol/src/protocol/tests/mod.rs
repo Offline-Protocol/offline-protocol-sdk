@@ -14631,10 +14631,20 @@ fn test_group_created_ack_gates_relay_sync() {
     );
 
     // The relay's GroupCreated answer (bridged as __GROUP_CREATED__ over
-    // the internet path) is the registration acknowledgment: only now is
-    // broadcast fan-out trusted.
+    // the internet path) is the registration acknowledgment: create_group
+    // armed the pending-registration correlation when it enqueued the
+    // __GRP_RELAY_REG__ frame, so only now is broadcast fan-out trusted —
+    // and the correlation is consumed by the ack.
+    assert!(protocol
+        .group_mesh
+        .relay_register_pending
+        .contains(&group_id));
     protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
     assert!(protocol.group_mesh.relay_synced.contains(&group_id));
+    assert!(!protocol
+        .group_mesh
+        .relay_register_pending
+        .contains(&group_id));
 
     // An ack for a group we don't track locally must not create sync state.
     let foreign_ack = Message::new(
@@ -14649,7 +14659,8 @@ fn test_group_created_ack_gates_relay_sync() {
         .relay_synced
         .contains("someone-elses-group"));
 
-    // A group-scoped relay error revokes the sync: fall back to per-member.
+    // A group-scoped relay error revokes the sync AND the pending
+    // correlation: fall back to per-member.
     let error = Message::new(
         UserId::new("relay").unwrap(),
         UserId::new("user123").unwrap(),
@@ -14661,6 +14672,26 @@ fn test_group_created_ack_gates_relay_sync() {
     );
     protocol.process_internal_message(&error);
     assert!(!protocol.group_mesh.relay_synced.contains(&group_id));
+
+    // The relay forwards peer message content verbatim, so a malicious peer
+    // can deliver a crafted __GROUP_CREATED__ over the *internet* path too.
+    // With no registration outstanding (the GroupError above consumed it),
+    // the forged ack must not resurrect the sync flag — otherwise one forged
+    // frame per revocation permanently black-holes group sends.
+    protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
+    assert!(
+        !protocol.group_mesh.relay_synced.contains(&group_id),
+        "internet-arrived GroupCreated with no registration outstanding must not mark the group relay-synced"
+    );
+
+    // A genuine re-registration re-arms the correlation, after which the
+    // relay's answer is accepted again.
+    protocol
+        .group_mesh
+        .relay_register_pending
+        .insert(group_id.clone());
+    protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
+    assert!(protocol.group_mesh.relay_synced.contains(&group_id));
 
     protocol.stop().unwrap();
 }

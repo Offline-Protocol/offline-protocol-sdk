@@ -890,15 +890,24 @@ impl OfflineProtocol {
                 // see try_relay_register_group). Only now may
                 // send_group_message take the O(1) relay-broadcast path.
                 //
-                // The ack must also have arrived over the Internet transport:
-                // any mesh peer can craft a `__GROUP_CREATED__` frame, and a
-                // spoofed sync flag would route broadcasts into a relay that
-                // never registered the group — unrecoverable content loss on
-                // a store-less relay. (The group_created app event below is
-                // unchanged: spoofing it is cosmetic, gating it would hide
-                // legitimate relay answers from apps on unusual topologies.)
+                // The ack must also have arrived over the Internet transport
+                // AND answer a registration we actually sent: any mesh peer
+                // can craft a `__GROUP_CREATED__` frame, and the relay
+                // forwards peer message content verbatim, so an internet
+                // peer can too. A spoofed sync flag would route broadcasts
+                // into a relay that never registered the group —
+                // unrecoverable content loss on a store-less relay. The
+                // pending-registration correlation narrows acceptance to the
+                // window where the relay's genuine answer is due. (The
+                // group_created app event below is unchanged: spoofing it is
+                // cosmetic, gating it would hide legitimate relay answers
+                // from apps on unusual topologies.)
                 if arrival_transport == Some(TransportType::Internet)
                     && self.group_mesh.members.contains_key(&payload.group_id)
+                    && self
+                        .group_mesh
+                        .relay_register_pending
+                        .remove(&payload.group_id)
                 {
                     self.group_mesh
                         .relay_synced
@@ -1124,6 +1133,10 @@ impl OfflineProtocol {
                 // routing content into a relay that disowned the group.
                 if let Some(group_id) = &payload.group_id {
                     self.group_mesh.relay_synced.remove(group_id);
+                    // The denial also answers any outstanding registration:
+                    // drop the pending correlation so a later forged
+                    // `__GROUP_CREATED__` cannot claim it.
+                    self.group_mesh.relay_register_pending.remove(group_id);
                 }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::group_error(payload.reason));
