@@ -65,6 +65,34 @@ class RelayControlOpTranslator(private val selfId: String) {
          * relay source (see docs/relay-transport-parity-spec.md).
          */
         internal const val ADMIN_DENIED_REASON_MARKER = "Only admins"
+
+        /**
+         * SDK content prefixes only the relay server (bridged by this
+         * layer's `injectGroupInternalMessage`) may originate — never a
+         * peer. The relay forwards peer message content verbatim, so
+         * without this firewall any peer could deliver a crafted
+         * `__GROUP_CREATED__` over the authenticated internet path and (in
+         * concert with a spoofed registration window) mark a group
+         * relay-synced against a relay that never registered it —
+         * black-holing broadcasts on a store-less relay. `__GROUP_MSG__` is
+         * deliberately absent: it is legitimate peer/relay group traffic.
+         */
+        private val SERVER_PLANE_ANSWER_PREFIXES = arrayOf(
+            "__GROUP_CREATED__",
+            "__GROUP_MEMBER_ADDED__",
+            "__GROUP_MEMBER_REMOVED__",
+            "__GROUP_INFO__",
+            "__USER_GROUPS__",
+            "__GROUP_ERROR__"
+        )
+
+        /**
+         * True when peer-delivered message content must be dropped because
+         * it impersonates a relay server answer. Called by the
+         * `MessageReceived` ingest path with the inner SDK content.
+         */
+        fun isForgedServerPlaneAnswer(content: String): Boolean =
+            SERVER_PLANE_ANSWER_PREFIXES.any { content.startsWith(it) }
     }
 
     sealed class Translation {

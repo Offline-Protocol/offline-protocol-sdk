@@ -69,7 +69,15 @@ class RelayRateLimiter(
             return
         }
         val elapsedMs = nowMs - lastRefillAtMs
-        if (elapsedMs <= 0) return
+        if (elapsedMs < 0) {
+            // Clock went backwards (wall-clock step, or a caller switching
+            // time sources). No minting — but the baseline must resync, or
+            // refill stays frozen until the clock re-passes the old mark and
+            // the whole outbound path is silenced for the step duration.
+            lastRefillAtMs = nowMs
+            return
+        }
+        if (elapsedMs == 0L) return
         tokens = minOf(capacity.toDouble(), tokens + elapsedMs / 1000.0 * refillPerSecond)
         lastRefillAtMs = nowMs
     }

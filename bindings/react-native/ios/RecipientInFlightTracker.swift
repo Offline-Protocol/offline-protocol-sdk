@@ -46,6 +46,34 @@ final class RecipientInFlightTracker {
         byRecipient[recipient] = queue
     }
 
+    /// Resolves one in-flight entry on the relay's `MessageSent` answer: the
+    /// relay accepted and forwarded that frame, so it must not be swept into
+    /// a later recipient-keyed `DeliveryError` (which would false-fail a
+    /// delivered message — for a welcome, parking a lifecycle the peer
+    /// actually received). Removes the exact `messageId` when the relay
+    /// echoed ours; otherwise removes the oldest entry for the recipient —
+    /// sends per recipient are FIFO on one socket and the relay answers in
+    /// order, so oldest-first is the sound correlation.
+    func resolveOnRelayAccepted(recipient: String, messageId: String?, nowMs: Int64) {
+        guard !recipient.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard var queue = byRecipient[recipient] else { return }
+        queue.removeAll { nowMs - $0.sentAtMs > ttlMs }
+        if !queue.isEmpty {
+            if let messageId = messageId, queue.contains(where: { $0.messageId == messageId }) {
+                queue.removeAll { $0.messageId == messageId }
+            } else {
+                queue.removeFirst()
+            }
+        }
+        if queue.isEmpty {
+            byRecipient.removeValue(forKey: recipient)
+        } else {
+            byRecipient[recipient] = queue
+        }
+    }
+
     /// Removes and returns every live (non-expired) in-flight id for a recipient.
     func drainRecipient(_ recipient: String, nowMs: Int64) -> [String] {
         lock.lock()

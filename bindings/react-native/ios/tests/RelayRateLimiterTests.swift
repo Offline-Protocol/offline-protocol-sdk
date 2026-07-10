@@ -65,6 +65,20 @@ final class RelayRateLimiterTests: XCTestCase {
         XCTAssertFalse(limiter.tryAcquire(nowMs: t0 - 5_000))
     }
 
+    func testRefillRecoversAfterABackwardClockStep() {
+        let limiter = RelayRateLimiter(capacity: 5, refillPerSecond: 1.0)
+        let t0: Int64 = 100_000
+        for _ in 0..<5 { XCTAssertTrue(limiter.tryAcquire(nowMs: t0)) }
+        // The clock steps back 30 minutes with the bucket empty. No minting —
+        // but the baseline must resync to the new now, not freeze until the
+        // clock re-passes the old mark (which would silence every relay-bound
+        // frame for the full step duration).
+        let stepped = t0 - 1_800_000
+        XCTAssertFalse(limiter.tryAcquire(nowMs: stepped))
+        // One second after the backward step, refill has resumed.
+        XCTAssertTrue(limiter.tryAcquire(nowMs: stepped + 1_000))
+    }
+
     func testDefaultsSitUnderTheRelayBudget() {
         // The relay's documented bucket is 30 burst / 10 per second; the
         // client mirror must leave headroom for unmetered frames (auth).

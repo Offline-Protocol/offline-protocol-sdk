@@ -37,6 +37,34 @@ class RecipientInFlightTracker(
         }
     }
 
+    /**
+     * Resolves one in-flight entry on the relay's `MessageSent` answer: the
+     * relay accepted and forwarded that frame, so it must not be swept into a
+     * later recipient-keyed `DeliveryError` (which would false-fail a
+     * delivered message — for a welcome, parking a lifecycle the peer
+     * actually received). Removes the exact `messageId` when the relay
+     * echoed ours; otherwise removes the oldest entry for the recipient —
+     * sends per recipient are FIFO on one socket and the relay answers in
+     * order, so oldest-first is the sound correlation.
+     */
+    fun resolveOnRelayAccepted(recipient: String, messageId: String?, nowMs: Long) {
+        if (recipient.isEmpty()) return
+        synchronized(lock) {
+            val queue = byRecipient[recipient] ?: return
+            while (queue.isNotEmpty() && nowMs - queue.first().sentAtMs > ttlMs) {
+                queue.removeFirst()
+            }
+            if (queue.isNotEmpty()) {
+                if (messageId != null && !queue.removeAll { it.messageId == messageId }) {
+                    queue.removeFirst()
+                } else if (messageId == null) {
+                    queue.removeFirst()
+                }
+            }
+            if (queue.isEmpty()) byRecipient.remove(recipient)
+        }
+    }
+
     /** Removes and returns every live (non-expired) in-flight id for a recipient. */
     fun drainRecipient(recipient: String, nowMs: Long): List<String> {
         synchronized(lock) {
