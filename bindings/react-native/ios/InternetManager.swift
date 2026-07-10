@@ -549,14 +549,18 @@ public class InternetManager: NSObject, TransportManager {
             // regardless of which stack the sender uses.
             let typingUserId = json["user_id"] as? String ?? ""
             let conversationId = json["conversation_id"] as? String ?? ""
-            // Strict "typing" check: if the relay renames or drops the
-            // field, that must surface as a diagnostic instead of silently
-            // degrading every event to typing=false.
+            // Strict "typing" check: if the relay renames, drops, or retypes
+            // the field, that must surface as a diagnostic instead of silently
+            // degrading every event to typing=false. The CFBoolean type check
+            // rejects JSON numbers (NSNumber 0/1 would otherwise bridge to
+            // Bool), matching the Android bridge's strictness.
             guard !typingUserId.isEmpty, !conversationId.isEmpty,
-                  let typing = json["typing"] as? Bool else {
+                  let typingNumber = json["typing"] as? NSNumber,
+                  CFGetTypeID(typingNumber) == CFBooleanGetTypeID() else {
                 emitDiagnostic("warning", "Invalid TypingUpdate format: missing user_id/conversation_id/typing", context: [:])
                 return
             }
+            let typing = typingNumber.boolValue
             let typingPayload: [String: Any] = [
                 "conversation_id": conversationId,
                 "is_typing": typing,
