@@ -16,6 +16,7 @@ Pod::Spec.new do |s|
   # Source files
   s.source_files = [
     "OfflineProtocolModule.{m,swift}",
+    "ProtocolErrorBridge.swift",
     "TransportManager.swift",
     "BleManager.swift",
     "InternetManager.swift",
