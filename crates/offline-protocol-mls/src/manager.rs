@@ -1151,6 +1151,18 @@ impl MlsManager {
     }
 }
 
+/// Returns `true` when `bytes` parse as a well-formed MLS wire message
+/// (`MlsMessageIn` TLS framing, consuming the input exactly).
+///
+/// Inbound routing uses this to distinguish MLS ciphertext from legacy
+/// plaintext that merely happens to be valid base64: the strict TLS framing
+/// (protocol version, wire format, exact-length body) makes an accidental
+/// match against non-MLS bytes vanishingly unlikely. This is a framing
+/// check only — it says nothing about whether the message can be decrypted.
+pub fn is_mls_framed(bytes: &[u8]) -> bool {
+    MlsMessageIn::tls_deserialize_exact(bytes).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

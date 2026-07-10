@@ -886,8 +886,16 @@ impl OfflineProtocol {
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MSG) {
             if let Ok(payload) = serde_json::from_str::<GroupMessageReceivedPayload>(data) {
                 info!(group_id = %payload.group_id, message_id = %payload.message_id, "Group message received");
-                // If we have local MLS state for this group, route through MLS decryption
-                if self.group_mesh.members.contains_key(&payload.group_id) {
+                // Route through MLS decryption whenever MLS is available —
+                // not just when we already have state for the group. A relay
+                // group message can outrun its Welcome (we are a member on
+                // the relay before the join lands locally), and gating on
+                // the members cache would emit its ciphertext raw instead of
+                // buffering it for the post-join drain. The MLS path itself
+                // falls back to a raw emit for legacy non-MLS content.
+                if self.group_mesh.members.contains_key(&payload.group_id)
+                    || self.is_mls_initialized()
+                {
                     self.handle_relay_group_message_with_mls(
                         &payload.group_id,
                         &payload.sender,

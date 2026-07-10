@@ -7978,3 +7978,291 @@ fn test_leave_group_clears_pending_buffers() {
         "Leaving a group must drop its buffered messages"
     );
 }
+
+#[test]
+fn test_relay_group_message_before_welcome_buffered_via_dispatch() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+
+    let ciphertext_b64 = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        base64_encode(
+            &mls.encrypt_for_group(&gid, b"dispatch race")
+                .unwrap()
+                .ciphertext,
+        )
+    };
+    // Drive the message through the REAL dispatch path
+    // (process_internal_message -> handle_group_relay_message), not the MLS
+    // handler directly: Bob has no local MLS state for the group yet, and
+    // the dispatch must still route into the buffering path instead of the
+    // legacy raw-emit branch.
+    let payload = serde_json::json!({
+        "group_id": group_id,
+        "sender": "alice",
+        "content": ciphertext_b64,
+        "timestamp": "2026-07-10T00:00:00Z",
+        "message_id": "relay-dispatch-race-1",
+    });
+    let content = format!("{}{}", internal_prefixes::GROUP_MSG, payload);
+    let message = make_message("relay", "bob", &content);
+    let result = bob.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+    assert!(
+        group_messages_received(&events).is_empty(),
+        "Ciphertext must not be emitted raw before the Welcome"
+    );
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(1),
+        "Relay message arriving before the Welcome must be buffered by the dispatch path"
+    );
+
+    bob.handle_group_mls_welcome("welcome-dispatch-1", "alice", &welcome_json);
+
+    let received = group_messages_received(&events);
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].0, "dispatch race");
+    assert_eq!(received[0].1, "relay-dispatch-race-1");
+    assert_eq!(received[0].2, "2026-07-10T00:00:00Z");
+}
+
+#[test]
+fn test_relay_group_message_legacy_base64_plaintext_emitted_raw_via_dispatch() {
+    let (mut protocol, events) = setup_with_events();
+
+    // "aGVsbG8=" is valid base64 ("hello") but its decoded bytes are not
+    // MLS wire framing. With no local MLS state for the group this is a
+    // legacy relay-only group message that merely looks like base64 — it
+    // must be emitted raw, not buffered as a welcome-racing ciphertext
+    // (which would silently lose it after the TTL).
+    let payload = serde_json::json!({
+        "group_id": "group:legacy-relay-1",
+        "sender": "alice",
+        "content": "aGVsbG8=",
+        "timestamp": "2026-07-10T00:00:00Z",
+        "message_id": "legacy-b64-1",
+    });
+    let content = format!("{}{}", internal_prefixes::GROUP_MSG, payload);
+    let message = make_message("relay", "user123", &content);
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+    let received = group_messages_received(&events);
+    assert_eq!(
+        received.len(),
+        1,
+        "Legacy base64-looking plaintext must be emitted raw"
+    );
+    assert_eq!(received[0].0, "aGVsbG8=");
+    assert_eq!(received[0].1, "legacy-b64-1");
+    assert!(
+        protocol.group_mesh.pending_group_messages.is_empty(),
+        "Non-MLS content must not occupy the welcome-race buffer"
+    );
+}
+
+#[test]
+fn test_relay_group_message_without_mls_emitted_raw_via_dispatch() {
+    // Relay-only deployment: MLS never initialized. Every group message —
+    // even base64-decodable content — must take the legacy branch and be
+    // emitted raw.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    protocol.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let payload = serde_json::json!({
+        "group_id": "group:relay-only-1",
+        "sender": "alice",
+        "content": "aGVsbG8=",
+        "timestamp": "2026-07-10T00:00:00Z",
+        "message_id": "relay-only-1",
+    });
+    let content = format!("{}{}", internal_prefixes::GROUP_MSG, payload);
+    let message = make_message("relay", "user123", &content);
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+    let received = group_messages_received(&events);
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].0, "aGVsbG8=");
+    assert!(protocol.group_mesh.pending_group_messages.is_empty());
+}
+
+#[test]
+fn test_mesh_group_message_non_mls_payload_not_buffered() {
+    let (mut protocol, events) = setup_with_events();
+
+    // The mesh channel carries MLS ciphertext by protocol; base64 of
+    // non-MLS bytes for a group with no local state is garbage, not a
+    // welcome race — it must be dropped, not buffered.
+    let msg_json = serde_json::json!({
+        "group_id": "group:garbage-1",
+        "ciphertext": base64_encode(b"definitely not mls"),
+        "epoch": 0,
+    })
+    .to_string();
+    let wire = make_message("mallory", "user123", "unused-envelope");
+    let result = protocol.handle_group_mls_msg(&wire, "mallory", &msg_json);
+    assert!(matches!(result, InternalMessageResult::Consumed));
+
+    assert!(group_messages_received(&events).is_empty());
+    assert!(
+        protocol.group_mesh.pending_group_messages.is_empty(),
+        "Non-MLS payloads must not occupy the welcome-race buffer"
+    );
+}
+
+#[test]
+fn test_evicted_pending_group_message_releases_transport_dedup() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // Mesh envelope IDs live in BOTH replay-protection layers: the group
+    // dedup table and the transport-level deduplicator at the receive loop.
+    // Eviction must release both, or the receive loop swallows (and
+    // re-ACKs) the redelivery before it can reach the group handlers.
+    let ids: Vec<offline_protocol_core::MessageId> = (0..(MAX_PENDING_GROUP_MESSAGES_PER_GROUP
+        + 1))
+        .map(|_| offline_protocol_core::MessageId::new())
+        .collect();
+    for mid in &ids {
+        protocol.deduplicator.mark_seen(mid.clone());
+        protocol
+            .group_mesh
+            .message_dedup
+            .insert(mid.as_str().to_string(), Instant::now());
+        protocol.buffer_pending_group_message(
+            "transport-evict-group",
+            PendingGroupMessage {
+                sender: "alice".to_string(),
+                message_id: mid.as_str().to_string(),
+                ciphertext_b64: base64_encode(b"x"),
+                timestamp: None,
+                reply_to: None,
+                forward_info: None,
+                buffered_at: Instant::now(),
+            },
+        );
+    }
+
+    assert!(
+        !protocol.deduplicator.is_duplicate(&ids[0]),
+        "Evicting a buffered message must release its transport-level dedup entry"
+    );
+    assert!(
+        protocol.deduplicator.is_duplicate(&ids[1]),
+        "Surviving buffered messages keep their transport-level dedup entry"
+    );
+    assert!(!protocol
+        .group_mesh
+        .message_dedup
+        .contains_key(&ids[0].as_str().to_string()));
+}
+
+#[test]
+fn test_drain_expired_pending_entries_release_transport_dedup() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let msg_mid = offline_protocol_core::MessageId::new();
+    let commit_mid = offline_protocol_core::MessageId::new();
+    protocol.deduplicator.mark_seen(msg_mid.clone());
+    protocol.deduplicator.mark_seen(commit_mid.clone());
+
+    protocol
+        .group_mesh
+        .pending_group_messages
+        .entry("transport-ttl-group".to_string())
+        .or_default()
+        .push_back(PendingGroupMessage {
+            sender: "alice".to_string(),
+            message_id: msg_mid.as_str().to_string(),
+            ciphertext_b64: base64_encode(b"x"),
+            timestamp: None,
+            reply_to: None,
+            forward_info: None,
+            buffered_at: Instant::now()
+                - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+        });
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry("transport-ttl-group".to_string())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "alice".to_string(),
+            message_id: commit_mid.as_str().to_string(),
+            data: "commit-data".to_string(),
+            buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10),
+            retry_count: 0,
+        });
+
+    protocol.drain_pending_group_messages("transport-ttl-group");
+    protocol.drain_pending_commits("transport-ttl-group");
+
+    assert!(
+        !protocol.deduplicator.is_duplicate(&msg_mid),
+        "Drain-expired message must release its transport-level dedup entry"
+    );
+    assert!(
+        !protocol.deduplicator.is_duplicate(&commit_mid),
+        "Drain-expired commit must release its transport-level dedup entry"
+    );
+}
+
+#[test]
+fn test_cleanup_sweep_releases_transport_dedup_for_expired_entries() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let commit_mid = offline_protocol_core::MessageId::new();
+    let msg_mid = offline_protocol_core::MessageId::new();
+    protocol.deduplicator.mark_seen(commit_mid.clone());
+    protocol.deduplicator.mark_seen(msg_mid.clone());
+
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry("sweep-transport-group".to_string())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "alice".to_string(),
+            message_id: commit_mid.as_str().to_string(),
+            data: "commit-data".to_string(),
+            buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10),
+            retry_count: 0,
+        });
+    protocol
+        .group_mesh
+        .pending_group_messages
+        .entry("sweep-transport-group".to_string())
+        .or_default()
+        .push_back(PendingGroupMessage {
+            sender: "alice".to_string(),
+            message_id: msg_mid.as_str().to_string(),
+            ciphertext_b64: base64_encode(b"x"),
+            timestamp: None,
+            reply_to: None,
+            forward_info: None,
+            buffered_at: Instant::now()
+                - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+        });
+
+    protocol.cleanup_group_message_dedup();
+
+    assert!(protocol.group_mesh.pending_commits.is_empty());
+    assert!(protocol.group_mesh.pending_group_messages.is_empty());
+    assert!(
+        !protocol.deduplicator.is_duplicate(&commit_mid),
+        "Sweep-expired commit must release its transport-level dedup entry"
+    );
+    assert!(
+        !protocol.deduplicator.is_duplicate(&msg_mid),
+        "Sweep-expired message must release its transport-level dedup entry"
+    );
+}
