@@ -14,6 +14,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # CI builds are always from a cache-restored or cold state; incremental
+  # compilation only adds overhead and bloats the rust-cache snapshots.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   fmt:
