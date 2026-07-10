@@ -152,6 +152,96 @@ class RelayControlOpTranslatorTest {
     }
 
     @Test
+    fun notAdminHintSkipsMemberDeltasUpFront() {
+        val translator = RelayControlOpTranslator("bob")
+
+        // The core's is_admin=false hint: no deltas are ever attempted, so
+        // the relay never answers the group-scoped denials that would revoke
+        // relay_synced and surface as app-visible group_error on reconnect.
+        val translation = translator.translate(
+            "group_relay_register",
+            """{"group_id":"g1","members":["alice","bob","carol"],"is_admin":false}""",
+            "bob"
+        )
+        assertTrue(translation is RelayControlOpTranslator.Translation.Replace)
+        val sent = frames(translation)
+        assertEquals(1, sent.size)
+        assertEquals("CreateGroup", sent[0].getString("type"))
+
+        // is_admin=true keeps the normal delta behavior.
+        val admin = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g2","members":["alice","bob"],"is_admin":true}""",
+                "bob"
+            )
+        )
+        assertEquals(2, admin.size)
+        assertEquals("AddGroupMember", admin[1].getString("type"))
+        assertEquals("alice", admin[1].getString("username"))
+    }
+
+    @Test
+    fun leaveAfterRejoinSendsLeaveGroupAgain() {
+        val translator = RelayControlOpTranslator("alice")
+
+        commit(
+            translator.translate(
+                "group_mls_leave",
+                """{"group_id":"g1","leaving_member":"alice"}""",
+                "bob"
+            )
+        )
+
+        // Rejoining re-registers the group: that proves membership again and
+        // must re-arm the leave dedup.
+        commit(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "alice"
+            )
+        )
+
+        val secondLeave = translator.translate(
+            "group_mls_leave",
+            """{"group_id":"g1","leaving_member":"alice"}""",
+            "bob"
+        )
+        assertTrue(secondLeave is RelayControlOpTranslator.Translation.Tap)
+        val leave = frames(secondLeave).single()
+        assertEquals("LeaveGroup", leave.getString("type"))
+        assertEquals("g1", leave.getString("group_id"))
+    }
+
+    @Test
+    fun adminDenialDuringFlightWinsOverCommit() {
+        val translator = RelayControlOpTranslator("bob")
+
+        // Frames produced, but the relay's denial lands before the caller
+        // commits (reader thread races the send loop): the commit must not
+        // record the membership snapshot the relay refused.
+        val inFlight = translator.translate(
+            "group_relay_register",
+            """{"group_id":"g1","members":["alice","bob"]}""",
+            "bob"
+        )
+        translator.onGroupError("g1", "Only admins can add members")
+        commit(inFlight)
+
+        val after = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "bob"
+            )
+        )
+        // Denied: CreateGroup only, and no snapshot was committed.
+        assertEquals(1, after.size)
+        assertEquals("CreateGroup", after[0].getString("type"))
+    }
+
+    @Test
     fun broadcastTranslatesToSendGroupMessage() {
         val translator = RelayControlOpTranslator("alice")
         val bcast = frames(

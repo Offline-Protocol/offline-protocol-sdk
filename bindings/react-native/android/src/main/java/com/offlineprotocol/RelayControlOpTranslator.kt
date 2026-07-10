@@ -20,9 +20,12 @@ import org.json.JSONObject
  *   which is the core's sync acknowledgment) plus `AddGroupMember`/
  *   `RemoveGroupMember` deltas against the last *committed* membership.
  *   Member deltas are admin-gated server-side ("Only admins can add
- *   members"), so after a group's first admin-denied GroupError no further
- *   deltas are sent for it this connection — the admin's own device is the
- *   authoritative registrar.
+ *   members"): when the payload carries the core's `is_admin=false` hint the
+ *   deltas are skipped up front (the admin's own device is the authoritative
+ *   registrar), and without the hint a group's first admin-denied GroupError
+ *   stops further deltas for it this connection — otherwise every reconnect
+ *   would re-send N denied deltas whose group-scoped errors revoke the
+ *   core's relay sync and surface as app-visible group_error events.
  * - `group_relay_broadcast` — [Translation.Replace] with `SendGroupMessage`
  *   carrying the MLS ciphertext; the relay fans out `GroupMessageReceived`
  *   per member (bridged back as `__GROUP_MSG__`, MLS-decrypted in core).
@@ -47,6 +50,18 @@ import org.json.JSONObject
  * state is guarded by an internal lock.
  */
 class RelayControlOpTranslator(private val selfId: String) {
+
+    companion object {
+        /**
+         * Cross-layer contract: substring of the relay server's admin-denial
+         * GroupError reasons ("Only admins can add members" / "Only admins
+         * can remove members"). If the relay rewords these, non-admin devices
+         * without the core's `is_admin` hint fall back to re-learning the
+         * denial each connection — noisy but safe. Keep in sync with the
+         * relay source (see docs/relay-transport-parity-spec.md).
+         */
+        internal const val ADMIN_DENIED_REASON_MARKER = "Only admins"
+    }
 
     sealed class Translation {
         /**
@@ -169,6 +184,15 @@ class RelayControlOpTranslator(private val selfId: String) {
             (0 until array.length()).mapNotNull { array.optString(it).takeIf { m -> m.isNotEmpty() } }
         } ?: emptyList()
 
+        // A register proves membership again: a rejoin after a committed
+        // leave must be allowed to send LeaveGroup again later.
+        leaveSent.remove(groupId)
+
+        // The core's admin hint: explicitly-not-admin devices never send
+        // member deltas (the relay would deny each with a group-scoped
+        // GroupError). Absent hint = unknown, fall back to send-and-learn.
+        val notAdmin = payload.has("is_admin") && !payload.optBoolean("is_admin", true)
+
         val frames = ArrayList<JSONObject>()
         frames.add(JSONObject().apply {
             put("type", "CreateGroup")
@@ -180,7 +204,7 @@ class RelayControlOpTranslator(private val selfId: String) {
         // redundant, so the self id never appears in a delta. Sorted for a
         // deterministic wire order across platforms.
         var commit: (() -> Unit)? = null
-        if (!memberDeltasDenied.contains(groupId)) {
+        if (!notAdmin && !memberDeltasDenied.contains(groupId)) {
             val desired = members.filter { it != selfId }.toSet()
             val known = registeredMembers[groupId] ?: emptySet()
             for (added in (desired - known).sorted()) {
@@ -223,20 +247,12 @@ class RelayControlOpTranslator(private val selfId: String) {
     /** Feed relay GroupError answers so admin-denied groups stop producing member deltas. */
     fun onGroupError(groupId: String, reason: String) {
         if (groupId.isEmpty()) return
-        if (reason.contains("Only admins", ignoreCase = true)) {
+        if (reason.contains(ADMIN_DENIED_REASON_MARKER, ignoreCase = true)) {
             synchronized(lock) {
                 memberDeltasDenied.add(groupId)
                 // The membership snapshot was not applied server-side.
                 registeredMembers.remove(groupId)
             }
-        }
-    }
-
-    /** Drop per-group state (member left / removed / group deleted). */
-    fun forgetGroup(groupId: String) {
-        synchronized(lock) {
-            registeredMembers.remove(groupId)
-            memberDeltasDenied.remove(groupId)
         }
     }
 
