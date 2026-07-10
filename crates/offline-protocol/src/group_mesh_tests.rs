@@ -6742,3 +6742,369 @@ fn test_create_group_empty_name_rejected() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("cannot be empty"));
 }
+
+// ---------------------------------------------------------------------------
+// Out-of-order group application messages (Welcome / first-message race)
+// ---------------------------------------------------------------------------
+
+/// Builds the wire JSON for a `__GRP_MLS_MSG__` payload encrypted by `sender`.
+fn make_group_mls_msg_json(sender: &OfflineProtocol, group_id: &str, text: &str) -> String {
+    let encrypted = {
+        let mls = sender.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(group_id).unwrap();
+        mls.encrypt_for_group(&gid, text.as_bytes()).unwrap()
+    };
+    serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": base64_encode(&encrypted.ciphertext),
+        "epoch": encrypted.epoch,
+    })
+    .to_string()
+}
+
+/// Creates Alice with a group and an invited (but not yet joined) Bob.
+/// Returns (alice, bob, bob_events, group_id, welcome_json) where
+/// `welcome_json` is the wire payload Bob has NOT yet received.
+fn setup_race_alice_bob() -> (
+    OfflineProtocol,
+    OfflineProtocol,
+    Arc<Mutex<Vec<Event>>>,
+    String,
+    String,
+) {
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    alice.initialize_mls(storage_a).unwrap();
+    bob.initialize_mls(storage_b).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let group_info = alice.create_group("Race Group").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    let welcome = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        let (welcome, _commit) = alice_mls
+            .add_group_member(&gid, &bob_kp.key_package_data)
+            .unwrap();
+        welcome
+    };
+    alice.refresh_group_members(&group_id).unwrap();
+
+    let welcome_json = serde_json::json!({
+        "group_id": group_id,
+        "group_name": "Race Group",
+        "welcome_data": base64_encode(&welcome.welcome_data),
+        "member_list": ["alice", "bob"],
+    })
+    .to_string();
+
+    (alice, bob, events, group_id, welcome_json)
+}
+
+fn group_messages_received(events: &Arc<Mutex<Vec<Event>>>) -> Vec<(String, String, String)> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::GroupMessageReceived {
+                content,
+                message_id,
+                timestamp,
+                ..
+            } => Some((content.clone(), message_id.clone(), timestamp.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn test_group_message_before_welcome_buffered_then_delivered_on_join() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+
+    // The first group message reaches Bob BEFORE the Welcome.
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    let result = bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    assert!(matches!(result, InternalMessageResult::Consumed));
+
+    // Not delivered yet — buffered, not dropped.
+    assert!(group_messages_received(&events).is_empty());
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(1),
+        "Message arriving before the Welcome should be buffered"
+    );
+
+    // Now the Welcome arrives — the buffered message must be delivered.
+    bob.handle_group_mls_welcome("welcome-race-1", "alice", &welcome_json);
+
+    let received = group_messages_received(&events);
+    assert_eq!(
+        received.len(),
+        1,
+        "Buffered message should be delivered after the Welcome"
+    );
+    assert_eq!(received[0].0, "hello race");
+    assert_eq!(received[0].1, wire.id.as_str());
+    assert!(
+        !bob.group_mesh
+            .pending_group_messages
+            .contains_key(&group_id),
+        "Buffer should be empty after drain"
+    );
+}
+
+#[test]
+fn test_group_message_before_welcome_redelivery_not_duplicated() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    // Redelivery via a second transport: same message ID, rejected by dedup,
+    // but the buffered copy must survive.
+    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(1),
+        "Redelivery must not create a second buffered copy"
+    );
+
+    bob.handle_group_mls_welcome("welcome-race-2", "alice", &welcome_json);
+
+    let received = group_messages_received(&events);
+    assert_eq!(received.len(), 1, "Exactly one delivery after the Welcome");
+    assert_eq!(received[0].0, "hello race");
+}
+
+#[test]
+fn test_group_message_at_future_epoch_buffered_then_delivered_after_commit() {
+    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Epoch Race");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Alice adds Charlie, advancing the epoch. Bob has not seen the commit.
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
+    charlie.initialize_mls(storage_c).unwrap();
+    let charlie_kp = {
+        let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
+        charlie_mls.generate_key_package().unwrap()
+    };
+    let commit = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        let (_welcome, commit) = alice_mls
+            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .unwrap();
+        commit
+    };
+    alice.refresh_group_members(&group_id).unwrap();
+
+    // Alice's next message is encrypted at the new epoch and outruns the commit.
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "after epoch bump");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+
+    assert!(group_messages_received(&events).is_empty());
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(1),
+        "Future-epoch message should be buffered"
+    );
+
+    // The commit catches up — processing it must drain the buffered message.
+    let commit_json = serde_json::json!({
+        "group_id": group_id,
+        "commit_type": "add",
+        "ciphertext": base64_encode(&commit.ciphertext),
+        "epoch": commit.epoch,
+        "affected_member": "charlie",
+    })
+    .to_string();
+    bob.handle_group_mls_commit("commit-epoch-race", "alice", &commit_json);
+
+    let received = group_messages_received(&events);
+    assert_eq!(
+        received.len(),
+        1,
+        "Buffered message should be delivered after the commit advances the epoch"
+    );
+    assert_eq!(received[0].0, "after epoch bump");
+}
+
+#[test]
+fn test_relay_group_message_before_welcome_buffered_then_delivered() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+
+    // Relay path: raw base64 ciphertext with a relay-provided timestamp.
+    let ciphertext_b64 = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        base64_encode(
+            &mls.encrypt_for_group(&gid, b"relay race")
+                .unwrap()
+                .ciphertext,
+        )
+    };
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &ciphertext_b64,
+        "2026-07-10T00:00:00Z",
+        "relay-race-1",
+        None,
+        None,
+    );
+
+    assert!(group_messages_received(&events).is_empty());
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(1),
+        "Relay message arriving before the Welcome should be buffered"
+    );
+
+    bob.handle_group_mls_welcome("welcome-race-3", "alice", &welcome_json);
+
+    let received = group_messages_received(&events);
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].0, "relay race");
+    assert_eq!(received[0].1, "relay-race-1");
+    assert_eq!(
+        received[0].2, "2026-07-10T00:00:00Z",
+        "Relay-provided timestamp should be preserved through the buffer"
+    );
+}
+
+#[test]
+fn test_pending_group_message_buffer_cap() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    for i in 0..(MAX_PENDING_GROUP_MESSAGES_PER_GROUP + 2) {
+        protocol.buffer_pending_group_message(
+            "cap-group",
+            PendingGroupMessage {
+                sender: "alice".to_string(),
+                message_id: format!("m{}", i),
+                ciphertext_b64: base64_encode(b"x"),
+                timestamp: None,
+                reply_to: None,
+                forward_info: None,
+                buffered_at: Instant::now(),
+            },
+        );
+    }
+
+    let buf = protocol
+        .group_mesh
+        .pending_group_messages
+        .get("cap-group")
+        .unwrap();
+    assert_eq!(buf.len(), MAX_PENDING_GROUP_MESSAGES_PER_GROUP);
+    assert_eq!(buf[0].message_id, "m2", "Oldest entries should be dropped");
+}
+
+#[test]
+fn test_pending_group_message_expired_entries_cleaned_up() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let expired = PendingGroupMessage {
+        sender: "alice".to_string(),
+        message_id: "expired-1".to_string(),
+        ciphertext_b64: base64_encode(b"x"),
+        timestamp: None,
+        reply_to: None,
+        forward_info: None,
+        buffered_at: Instant::now() - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+    };
+    let recent = PendingGroupMessage {
+        sender: "bob".to_string(),
+        message_id: "recent-1".to_string(),
+        ciphertext_b64: base64_encode(b"x"),
+        timestamp: None,
+        reply_to: None,
+        forward_info: None,
+        buffered_at: Instant::now(),
+    };
+    protocol
+        .group_mesh
+        .pending_group_messages
+        .entry("ttl-group".to_string())
+        .or_default()
+        .extend([expired, recent]);
+
+    protocol.cleanup_group_message_dedup();
+
+    let buf = protocol
+        .group_mesh
+        .pending_group_messages
+        .get("ttl-group")
+        .unwrap();
+    assert_eq!(
+        buf.len(),
+        1,
+        "Only the recent pending message should survive"
+    );
+    assert_eq!(buf[0].message_id, "recent-1");
+}
+
+#[test]
+fn test_drain_pending_group_messages_drops_expired() {
+    let (mut protocol, events) = setup_with_events();
+
+    let expired = PendingGroupMessage {
+        sender: "alice".to_string(),
+        message_id: "expired-drain-1".to_string(),
+        ciphertext_b64: base64_encode(b"x"),
+        timestamp: None,
+        reply_to: None,
+        forward_info: None,
+        buffered_at: Instant::now() - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+    };
+    protocol
+        .group_mesh
+        .pending_group_messages
+        .entry("drain-group".to_string())
+        .or_default()
+        .push_back(expired);
+
+    protocol.drain_pending_group_messages("drain-group");
+
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_group_messages
+            .contains_key("drain-group"),
+        "Expired entry should be dropped on drain"
+    );
+    assert!(group_messages_received(&events).is_empty());
+}
