@@ -33,6 +33,10 @@ pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 pub(super) const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits (2 minutes).
 pub(super) const PENDING_COMMIT_TTL_SECS: u64 = 120;
+/// Maximum number of buffered out-of-order group application messages per group.
+pub(super) const MAX_PENDING_GROUP_MESSAGES_PER_GROUP: usize = 16;
+/// TTL for buffered out-of-order group application messages (2 minutes).
+pub(super) const PENDING_GROUP_MESSAGE_TTL_SECS: u64 = 120;
 /// Timeout before the next eligible member re-elects itself for a leave
 /// remove-commit when the original elected remover fails (30 seconds).
 pub(super) const LEAVE_ELECTION_TIMEOUT_SECS: u64 = 30;
@@ -72,6 +76,12 @@ pub(crate) struct GroupMeshState {
     /// When a commit succeeds for a group, buffered commits are drained and retried.
     pub(crate) pending_commits: HashMap<String, VecDeque<PendingCommit>>,
 
+    /// Buffer for group application messages that failed MLS decryption
+    /// because local group state lagged the sender's (Welcome not yet
+    /// processed, or epoch behind). Drained after a successful Welcome join
+    /// or commit for the group. Maps group_id -> deque of pending messages.
+    pub(crate) pending_group_messages: HashMap<String, VecDeque<PendingGroupMessage>>,
+
     /// Group IDs that have been successfully registered with the relay server.
     /// Cleared when Internet transport disconnects so that groups are re-synced
     /// when connectivity returns.
@@ -101,6 +111,23 @@ enum CommitOutcome {
     /// Permanently failed (parse error, bad ciphertext, MLS unavailable);
     /// should not be retried.
     Rejected,
+}
+
+/// Outcome of attempting to decrypt a group application message.
+enum GroupDecryptOutcome {
+    /// Decrypted application data.
+    Plaintext(Vec<u8>),
+    /// MLS consumed a Commit or Proposal that arrived via the message
+    /// channel (e.g., due to reordering) — not application data.
+    NonApplication,
+    /// Wire sender does not match the MLS-authenticated sender (SEC-M1).
+    SecurityRejected,
+    /// Local group state lags the sender's (no group yet, or epoch behind);
+    /// the message may decrypt after a Welcome or commit lands, so it is
+    /// worth buffering for deferred retry.
+    Retriable,
+    /// Permanently failed; not worth retrying.
+    Failed,
 }
 
 // --- Group (mesh/MLS) payloads ---
@@ -263,6 +290,31 @@ pub(crate) struct PendingCommit {
     pub(crate) retry_count: u32,
 }
 
+/// A group application message that arrived before local MLS state could
+/// decrypt it (Welcome not yet processed, or epoch behind the sender's).
+///
+/// The Welcome and the first group message are sent back-to-back and can
+/// arrive out of order across transports. The ciphertext is buffered at
+/// first arrival — the message-ID dedup table keeps rejecting redeliveries,
+/// so this buffered copy is the message's only path to delivery.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingGroupMessage {
+    /// The original wire sender of this message.
+    pub(crate) sender: String,
+    /// The original message ID (already recorded in the dedup table).
+    pub(crate) message_id: String,
+    /// Base64-encoded MLS application ciphertext.
+    pub(crate) ciphertext_b64: String,
+    /// Relay-provided timestamp; `None` for mesh messages (stamped at emit).
+    pub(crate) timestamp: Option<String>,
+    /// Optional ID of the message this one replies to.
+    pub(crate) reply_to: Option<String>,
+    /// Optional forwarding attribution.
+    pub(crate) forward_info: Option<offline_protocol_core::ForwardInfo>,
+    /// When this message was first buffered.
+    pub(crate) buffered_at: Instant,
+}
+
 /// Tracks a leave election where we're waiting for the elected remover to
 /// issue a remove-commit. If the timeout expires and the member is still
 /// in the group, the next eligible member re-elects itself.
@@ -350,86 +402,133 @@ impl OfflineProtocol {
             }
         };
 
-        // Decrypt via MLS
+        match self.decrypt_group_application(&payload.group_id, ciphertext_bytes, sender) {
+            GroupDecryptOutcome::Plaintext(plaintext) => {
+                let Ok(text) = String::from_utf8(plaintext) else {
+                    warn!(
+                        group_id = %payload.group_id,
+                        "Decrypted group payload is not valid UTF-8, dropping"
+                    );
+                    return InternalMessageResult::Consumed;
+                };
+                let msg_id = message.id.as_str().to_string();
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                info!(group_id = %payload.group_id, "Decrypted mesh group message");
+                let forward_info_event = payload
+                    .forward_info
+                    .as_ref()
+                    .map(crate::events::ForwardInfoEvent::from);
+                self.emit_event(Event::group_message_received(
+                    payload.group_id,
+                    sender.to_string(),
+                    text,
+                    timestamp,
+                    msg_id,
+                    payload.reply_to,
+                    forward_info_event,
+                ));
+                InternalMessageResult::Consumed
+            }
+            GroupDecryptOutcome::SecurityRejected => InternalMessageResult::SecurityRejected,
+            GroupDecryptOutcome::Retriable => {
+                let group_id = payload.group_id.clone();
+                self.buffer_pending_group_message(
+                    &group_id,
+                    PendingGroupMessage {
+                        sender: sender.to_string(),
+                        message_id: message.id.as_str().to_string(),
+                        ciphertext_b64: payload.ciphertext,
+                        timestamp: None,
+                        reply_to: payload.reply_to,
+                        forward_info: payload.forward_info,
+                        buffered_at: Instant::now(),
+                    },
+                );
+                InternalMessageResult::Consumed
+            }
+            GroupDecryptOutcome::NonApplication | GroupDecryptOutcome::Failed => {
+                InternalMessageResult::Consumed
+            }
+        }
+    }
+
+    /// Decrypts a group application ciphertext, classifying the failure
+    /// modes shared by the mesh (`handle_group_mls_msg`), relay
+    /// (`handle_relay_group_message_with_mls`), and deferred-retry
+    /// (`drain_pending_group_messages`) inbound paths.
+    fn decrypt_group_application(
+        &self,
+        group_id: &str,
+        ciphertext: Vec<u8>,
+        sender: &str,
+    ) -> GroupDecryptOutcome {
         let mls_guard = match self.read_mls_guard() {
             Ok(guard) => guard,
             Err(e) => {
-                warn!(group_id = %payload.group_id, error = %e, "MLS unavailable, dropping group message");
-                return InternalMessageResult::Consumed;
+                warn!(group_id = %group_id, error = %e, "MLS unavailable, dropping group message");
+                return GroupDecryptOutcome::Failed;
             }
         };
-        let gid = match offline_protocol_mls::GroupId::new(&payload.group_id) {
+        let gid = match offline_protocol_mls::GroupId::new(group_id) {
             Ok(gid) => gid,
             Err(e) => {
-                warn!(group_id = %payload.group_id, error = %e, "Dropping group message with invalid group id");
-                return InternalMessageResult::Consumed;
+                warn!(group_id = %group_id, error = %e, "Dropping group message with invalid group id");
+                return GroupDecryptOutcome::Failed;
             }
         };
+        // The epoch field is not used for decryption — OpenMLS determines
+        // the epoch from the ciphertext header itself.
         let encrypted = offline_protocol_mls::EncryptedMessage {
             group_id: gid,
             message_type: offline_protocol_mls::MlsMessageType::Application,
-            epoch: payload.epoch,
-            ciphertext: ciphertext_bytes,
+            epoch: 0,
+            ciphertext,
             sender_id: sender.to_string(),
             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
         };
-        let decrypt_result = match mls_guard.decrypt_from_group(&encrypted, sender) {
-            Ok(Some(plaintext)) => Some(plaintext),
+        match mls_guard.decrypt_from_group(&encrypted, sender) {
+            Ok(Some(plaintext)) => GroupDecryptOutcome::Plaintext(plaintext),
             Ok(None) => {
                 // Ok(None) means MLS consumed a Commit or Proposal — not application
                 // data. This is normal for non-application messages that arrive via the
                 // group message channel (e.g., due to message reordering).
                 debug!(
-                    group_id = %payload.group_id,
+                    group_id = %group_id,
                     "MLS returned no plaintext (commit/proposal consumed), not an application message"
                 );
-                None
+                GroupDecryptOutcome::NonApplication
             }
             Err(offline_protocol_mls::MlsError::SenderIdentityMismatch {
                 claimed,
                 authenticated,
             }) => {
                 error!(
-                    group_id = %payload.group_id,
+                    group_id = %group_id,
                     claimed = %claimed,
                     authenticated = %authenticated,
                     "SECURITY: wire sender does not match MLS-authenticated sender, rejecting group message"
                 );
-                return InternalMessageResult::SecurityRejected;
+                GroupDecryptOutcome::SecurityRejected
+            }
+            Err(
+                e @ (offline_protocol_mls::MlsError::GroupNotFound(_)
+                | offline_protocol_mls::MlsError::Decryption(_)),
+            ) => {
+                // No local group state yet (Welcome still in flight) or an
+                // epoch-lagged ciphertext — may decrypt once local group
+                // state catches up.
+                warn!(
+                    group_id = %group_id,
+                    error = %e,
+                    "Failed to decrypt group message (may be out-of-order, buffering)"
+                );
+                GroupDecryptOutcome::Retriable
             }
             Err(e) => {
-                warn!(group_id = %payload.group_id, error = %e, "Failed to decrypt group message");
-                None
+                warn!(group_id = %group_id, error = %e, "Failed to decrypt group message");
+                GroupDecryptOutcome::Failed
             }
-        };
-        drop(mls_guard);
-
-        if let Some(plaintext) = decrypt_result {
-            let Ok(text) = String::from_utf8(plaintext) else {
-                warn!(
-                    group_id = %payload.group_id,
-                    "Decrypted group payload is not valid UTF-8, dropping"
-                );
-                return InternalMessageResult::Consumed;
-            };
-            let msg_id = message.id.as_str().to_string();
-            let timestamp = chrono::Utc::now().to_rfc3339();
-            info!(group_id = %payload.group_id, "Decrypted mesh group message");
-            let forward_info_event = payload
-                .forward_info
-                .as_ref()
-                .map(crate::events::ForwardInfoEvent::from);
-            self.emit_event(Event::group_message_received(
-                payload.group_id,
-                sender.to_string(),
-                text,
-                timestamp,
-                msg_id,
-                payload.reply_to,
-                forward_info_event,
-            ));
         }
-        InternalMessageResult::Consumed
     }
 
     /// Handles an incoming MLS Welcome message (group invite).
@@ -532,11 +631,16 @@ impl OfflineProtocol {
             }
 
             self.emit_event(Event::group_member_added(
-                group_id,
+                group_id.clone(),
                 self.config.user_id.clone(),
                 sender.to_string(),
                 payload.group_name.clone(),
             ));
+
+            // A group message can race ahead of its Welcome (they are sent
+            // back-to-back and may take different paths); now that the group
+            // exists locally, retry anything that was buffered.
+            self.drain_pending_group_messages(&group_id);
         }
     }
 
@@ -568,6 +672,9 @@ impl OfflineProtocol {
         match self.process_commit_core(sender, data) {
             CommitOutcome::Success(group_id) => {
                 self.drain_pending_commits(&group_id);
+                // A commit that advanced the epoch may unblock buffered
+                // application messages encrypted at the newer epoch.
+                self.drain_pending_group_messages(&group_id);
             }
             CommitOutcome::Retriable(group_id) => {
                 self.buffer_pending_commit(&group_id, sender, data);
@@ -678,6 +785,9 @@ impl OfflineProtocol {
                     }
                     self.group_mesh.members.remove(&payload.group_id);
                     self.group_mesh.relay_synced.remove(&payload.group_id);
+                    self.group_mesh
+                        .pending_group_messages
+                        .remove(&payload.group_id);
                     self.emit_event(Event::group_member_removed(
                         payload.group_id.clone(),
                         self_id,
@@ -934,6 +1044,121 @@ impl OfflineProtocol {
         // are more likely just slow mesh delivery and are not flagged.
         if retried_expired_count > 0 && !self.group_mesh.epoch_forks.contains_key(group_id) {
             self.flag_potential_epoch_fork(group_id);
+        }
+    }
+
+    /// Buffers a group application message whose decryption failed because
+    /// local group state lagged (Welcome not yet processed / epoch behind).
+    ///
+    /// The message ID is already in the dedup table, so redeliveries via
+    /// other transports are rejected there — this buffered copy is the
+    /// message's only path to delivery, via `drain_pending_group_messages`.
+    pub(crate) fn buffer_pending_group_message(
+        &mut self,
+        group_id: &str,
+        pending: PendingGroupMessage,
+    ) {
+        let buf = self
+            .group_mesh
+            .pending_group_messages
+            .entry(group_id.to_string())
+            .or_default();
+        if buf.len() >= MAX_PENDING_GROUP_MESSAGES_PER_GROUP {
+            warn!(
+                group_id = %group_id,
+                "Pending group message buffer full, dropping oldest"
+            );
+            buf.pop_front();
+        }
+        buf.push_back(pending);
+        debug!(
+            group_id = %group_id,
+            buffered_count = buf.len(),
+            "Buffered out-of-order group message for deferred retry"
+        );
+    }
+
+    /// Drains buffered group application messages after local MLS state for
+    /// the group advanced (successful Welcome join or commit). Messages are
+    /// retried in arrival order; entries that still fail retriably are
+    /// re-buffered until their TTL expires.
+    pub(crate) fn drain_pending_group_messages(&mut self, group_id: &str) {
+        let pending = match self.group_mesh.pending_group_messages.get_mut(group_id) {
+            Some(buf) if !buf.is_empty() => std::mem::take(buf),
+            _ => return,
+        };
+
+        let mut still_pending = VecDeque::new();
+        for entry in pending {
+            if entry.buffered_at.elapsed() > StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS)
+            {
+                debug!(
+                    group_id = %group_id,
+                    msg_id = %entry.message_id,
+                    "Dropping expired pending group message"
+                );
+                continue;
+            }
+            // Validated at buffer time; failure here is defensive only.
+            let Ok(ciphertext_bytes) = base64_decode(&entry.ciphertext_b64) else {
+                continue;
+            };
+            match self.decrypt_group_application(group_id, ciphertext_bytes, &entry.sender) {
+                GroupDecryptOutcome::Plaintext(plaintext) => {
+                    let Ok(text) = String::from_utf8(plaintext) else {
+                        warn!(
+                            group_id = %group_id,
+                            "Decrypted group payload is not valid UTF-8, dropping"
+                        );
+                        continue;
+                    };
+                    info!(
+                        group_id = %group_id,
+                        msg_id = %entry.message_id,
+                        "Delivered buffered group message after group state caught up"
+                    );
+                    let forward_info_event = entry
+                        .forward_info
+                        .as_ref()
+                        .map(crate::events::ForwardInfoEvent::from);
+                    let timestamp = entry
+                        .timestamp
+                        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                    self.emit_event(Event::group_message_received(
+                        group_id.to_string(),
+                        entry.sender,
+                        text,
+                        timestamp,
+                        entry.message_id,
+                        entry.reply_to,
+                        forward_info_event,
+                    ));
+                }
+                GroupDecryptOutcome::Retriable => {
+                    still_pending.push_back(entry);
+                }
+                GroupDecryptOutcome::NonApplication
+                | GroupDecryptOutcome::SecurityRejected
+                | GroupDecryptOutcome::Failed => {}
+            }
+        }
+
+        if !still_pending.is_empty() {
+            self.group_mesh
+                .pending_group_messages
+                .entry(group_id.to_string())
+                .or_default()
+                .extend(still_pending);
+        }
+
+        // Clean up empty entries
+        if self
+            .group_mesh
+            .pending_group_messages
+            .get(group_id)
+            .is_none_or(|v| v.is_empty())
+        {
+            self.group_mesh.pending_group_messages.remove(group_id);
         }
     }
 
@@ -1623,6 +1848,7 @@ impl OfflineProtocol {
         // Remove from caches
         self.group_mesh.members.remove(group_id);
         self.group_mesh.relay_synced.remove(group_id);
+        self.group_mesh.pending_group_messages.remove(group_id);
 
         info!(group_id = %group_id, "Left group");
         Ok(())
@@ -2310,6 +2536,14 @@ impl OfflineProtocol {
                 self.flag_potential_epoch_fork(&group_id);
             }
         }
+
+        // Expire stale pending group messages — covers groups where no
+        // Welcome or commit ever arrives to trigger a drain.
+        let msg_cutoff = Instant::now() - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS);
+        self.group_mesh.pending_group_messages.retain(|_, msgs| {
+            msgs.retain(|m| m.buffered_at > msg_cutoff);
+            !msgs.is_empty()
+        });
     }
 
     // ========================================================================
@@ -2846,41 +3080,8 @@ impl OfflineProtocol {
             }
         };
 
-        // Try MLS decryption
-        let plaintext = {
-            let mls_guard = match self.read_mls_guard() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    warn!(group_id = %group_id, error = %e, "MLS unavailable, dropping relay group message");
-                    return;
-                }
-            };
-            let gid = match offline_protocol_mls::GroupId::new(group_id) {
-                Ok(gid) => gid,
-                Err(e) => {
-                    warn!(group_id = %group_id, error = %e, "Dropping relay group message with invalid group id");
-                    return;
-                }
-            };
-            // The epoch field is not used by MLS for decryption — OpenMLS
-            // determines the epoch from the ciphertext header itself. We pass
-            // 0 here because the relay protocol does not carry epoch metadata.
-            let encrypted = offline_protocol_mls::EncryptedMessage {
-                group_id: gid,
-                message_type: offline_protocol_mls::MlsMessageType::Application,
-                epoch: 0,
-                ciphertext: ciphertext_bytes,
-                sender_id: sender.to_string(),
-                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-            };
-            match mls_guard.decrypt_from_group(&encrypted, sender) {
-                Ok(Some(pt)) => Some(pt),
-                _ => None,
-            }
-        };
-
-        match plaintext {
-            Some(pt) => match String::from_utf8(pt) {
+        match self.decrypt_group_application(group_id, ciphertext_bytes, sender) {
+            GroupDecryptOutcome::Plaintext(pt) => match String::from_utf8(pt) {
                 Ok(text) => {
                     self.emit_event(Event::group_message_received(
                         group_id.to_string(),
@@ -2899,7 +3100,23 @@ impl OfflineProtocol {
                     );
                 }
             },
-            None => {
+            GroupDecryptOutcome::Retriable => {
+                self.buffer_pending_group_message(
+                    group_id,
+                    PendingGroupMessage {
+                        sender: sender.to_string(),
+                        message_id: message_id.to_string(),
+                        ciphertext_b64: content.to_string(),
+                        timestamp: Some(timestamp.to_string()),
+                        reply_to: reply_to_msg,
+                        forward_info,
+                        buffered_at: Instant::now(),
+                    },
+                );
+            }
+            GroupDecryptOutcome::NonApplication
+            | GroupDecryptOutcome::SecurityRejected
+            | GroupDecryptOutcome::Failed => {
                 warn!(
                     group_id = %group_id,
                     "Failed to decrypt relay group message via MLS, dropping"
