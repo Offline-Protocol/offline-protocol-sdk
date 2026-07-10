@@ -1328,6 +1328,7 @@ fn test_group_mls_commit_failure_buffers_for_retry() {
     let group_id = "group:buffer-test".to_string();
     let pending = PendingCommit {
         sender: "alice".to_string(),
+        message_id: "test-mid-1".to_string(),
         data: serde_json::to_string(&GroupMlsCommitPayload {
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
@@ -1382,7 +1383,7 @@ fn test_group_mls_pending_commit_buffer_cap() {
             role: None,
         })
         .unwrap();
-        protocol.buffer_pending_commit(&group_id, "alice", &data);
+        protocol.buffer_pending_commit(&group_id, &format!("mid-{}", i), "alice", &data);
     }
 
     // Buffer should be capped at MAX_PENDING_COMMITS_PER_GROUP
@@ -1402,6 +1403,7 @@ fn test_group_mls_pending_commit_expired_entries_cleaned_up() {
     // Insert a pending commit with an expired timestamp
     let expired = PendingCommit {
         sender: "alice".to_string(),
+        message_id: "test-mid-2".to_string(),
         data: "{}".to_string(),
         buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10),
         retry_count: 0,
@@ -1416,6 +1418,7 @@ fn test_group_mls_pending_commit_expired_entries_cleaned_up() {
     // Insert a recent one
     let recent = PendingCommit {
         sender: "bob".to_string(),
+        message_id: "test-mid-3".to_string(),
         data: "{}".to_string(),
         buffered_at: Instant::now(),
         retry_count: 0,
@@ -1679,12 +1682,14 @@ fn test_group_mls_drain_pending_commits_no_double_buffering() {
         VecDeque::from(vec![
             PendingCommit {
                 sender: "alice".to_string(),
+                message_id: "test-mid-4".to_string(),
                 data: bad_data.clone(),
                 buffered_at: Instant::now(),
                 retry_count: 0,
             },
             PendingCommit {
                 sender: "bob".to_string(),
+                message_id: "test-mid-5".to_string(),
                 data: bad_data,
                 buffered_at: Instant::now(),
                 retry_count: 0,
@@ -1730,6 +1735,7 @@ fn test_group_mls_drain_pending_commits_expired_entries_dropped() {
         group_id.clone(),
         VecDeque::from(vec![PendingCommit {
             sender: "alice".to_string(),
+            message_id: "test-mid-6".to_string(),
             data,
             buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 1),
             retry_count: 0,
@@ -1832,7 +1838,12 @@ fn test_group_mls_buffer_pending_commit_respects_cap() {
 
     // Fill the buffer to capacity
     for i in 0..MAX_PENDING_COMMITS_PER_GROUP {
-        protocol.buffer_pending_commit(&group_id, &format!("sender-{}", i), &format!("data-{}", i));
+        protocol.buffer_pending_commit(
+            &group_id,
+            &format!("mid-{}", i),
+            &format!("sender-{}", i),
+            &format!("data-{}", i),
+        );
     }
     assert_eq!(
         protocol.group_mesh.pending_commits[&group_id].len(),
@@ -1840,7 +1851,7 @@ fn test_group_mls_buffer_pending_commit_respects_cap() {
     );
 
     // One more should evict the oldest
-    protocol.buffer_pending_commit(&group_id, "sender-new", "data-new");
+    protocol.buffer_pending_commit(&group_id, "mid-new", "sender-new", "data-new");
     let buf = &protocol.group_mesh.pending_commits[&group_id];
     assert_eq!(buf.len(), MAX_PENDING_COMMITS_PER_GROUP);
     // The oldest (sender-0) should have been evicted
@@ -2537,6 +2548,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
     let mut buf = VecDeque::new();
     buf.push_back(PendingCommit {
         sender: "alice".to_string(),
+        message_id: "test-mid-7".to_string(),
         data: serde_json::to_string(&GroupMlsCommitPayload {
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
@@ -2551,6 +2563,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
     });
     buf.push_back(PendingCommit {
         sender: "bob".to_string(),
+        message_id: "test-mid-8".to_string(),
         data: serde_json::to_string(&GroupMlsCommitPayload {
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
@@ -3049,6 +3062,7 @@ fn test_epoch_fork_not_flagged_for_never_retried_expired_commits() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-9".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 0,
@@ -3084,6 +3098,7 @@ fn test_epoch_fork_flagged_for_retried_expired_commits() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-10".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 3,
@@ -3134,6 +3149,7 @@ fn test_epoch_fork_not_duplicated_if_already_tracked() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-11".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 2,
@@ -3180,6 +3196,7 @@ fn test_epoch_fork_max_entries_eviction() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-12".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 1,
@@ -3505,7 +3522,7 @@ fn test_pending_commit_retry_count_incremented() {
     // Insert a non-expired pending commit with invalid data.
     // process_commit_core will return Rejected (bad data), so it won't
     // be re-buffered. Instead, test the buffering path directly.
-    protocol.buffer_pending_commit(&group_id, "bob", "fake-data");
+    protocol.buffer_pending_commit(&group_id, "mid-fake", "bob", "fake-data");
 
     let pending = protocol.group_mesh.pending_commits.get(&group_id).unwrap();
     assert_eq!(pending.len(), 1);
@@ -3557,6 +3574,7 @@ fn test_epoch_fork_detected_via_periodic_cleanup_without_drain() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-13".to_string(),
             data: "fake-commit".to_string(),
             buffered_at: past,
             retry_count: 2,
@@ -3596,6 +3614,7 @@ fn test_epoch_fork_not_flagged_via_cleanup_for_never_retried() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-14".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 0, // never retried
@@ -3645,6 +3664,7 @@ fn test_epoch_fork_cleanup_does_not_duplicate_existing_fork() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-15".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 3,
@@ -3892,6 +3912,7 @@ fn test_epoch_fork_multiple_concurrent_groups() {
             .or_default()
             .push_back(PendingCommit {
                 sender: "bob".to_string(),
+                message_id: "test-mid-16".to_string(),
                 data: "fake".to_string(),
                 buffered_at: past,
                 retry_count: 1,
@@ -4063,6 +4084,7 @@ fn test_epoch_fork_detection_with_mls_unavailable_uses_none_epoch() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-17".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 1,
@@ -4291,6 +4313,7 @@ fn test_epoch_fork_detection_event_has_none_epoch_when_mls_unavailable() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-18".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 1,
@@ -4328,6 +4351,7 @@ fn test_epoch_fork_periodic_cleanup_multiple_groups_mixed() {
         .or_default()
         .push_back(PendingCommit {
             sender: "bob".to_string(),
+            message_id: "test-mid-19".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 2,
@@ -4341,6 +4365,7 @@ fn test_epoch_fork_periodic_cleanup_multiple_groups_mixed() {
         .or_default()
         .push_back(PendingCommit {
             sender: "carol".to_string(),
+            message_id: "test-mid-20".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
             retry_count: 0,
@@ -4717,6 +4742,7 @@ fn test_drain_pending_commits_mixed_retried_and_non_retried_expired() {
     // Never-retried expired commit (slow delivery)
     buf.push_back(PendingCommit {
         sender: "alice".to_string(),
+        message_id: "test-mid-21".to_string(),
         data: "fake-1".to_string(),
         buffered_at: past,
         retry_count: 0,
@@ -4724,6 +4750,7 @@ fn test_drain_pending_commits_mixed_retried_and_non_retried_expired() {
     // Retried expired commit (epoch mismatch signal)
     buf.push_back(PendingCommit {
         sender: "bob".to_string(),
+        message_id: "test-mid-22".to_string(),
         data: "fake-2".to_string(),
         buffered_at: past,
         retry_count: 2,
@@ -4731,6 +4758,7 @@ fn test_drain_pending_commits_mixed_retried_and_non_retried_expired() {
     // Non-expired commit (should survive)
     buf.push_back(PendingCommit {
         sender: "carol".to_string(),
+        message_id: "test-mid-23".to_string(),
         data: "fake-3".to_string(),
         buffered_at: Instant::now(),
         retry_count: 0,
@@ -7014,6 +7042,135 @@ fn test_relay_group_message_before_welcome_buffered_then_delivered() {
 }
 
 #[test]
+fn test_commit_riding_message_channel_drains_buffered_messages() {
+    let (mut alice, mut bob, group_id) = setup_alice_bob_group("NonApp Drain");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Alice adds Charlie, advancing the epoch. Bob has not seen the commit.
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
+    charlie.initialize_mls(storage_c).unwrap();
+    let charlie_kp = {
+        let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
+        charlie_mls.generate_key_package().unwrap()
+    };
+    let commit = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        let (_welcome, commit) = alice_mls
+            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .unwrap();
+        commit
+    };
+    alice.refresh_group_members(&group_id).unwrap();
+
+    // The future-epoch message arrives first and is buffered.
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "unblocked by riding commit");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    assert!(group_messages_received(&events).is_empty());
+
+    // The commit catches up on the *message* channel (not the commit
+    // channel): MLS consumes it (NonApplication), which must drain the
+    // buffered message just like a commit-channel success.
+    let commit_as_msg_json = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": base64_encode(&commit.ciphertext),
+        "epoch": commit.epoch,
+    })
+    .to_string();
+    let wire2 = make_message("alice", "bob", "unused-envelope");
+    let result = bob.handle_group_mls_msg(&wire2, "alice", &commit_as_msg_json);
+    assert!(matches!(result, InternalMessageResult::Consumed));
+
+    let received = group_messages_received(&events);
+    assert_eq!(
+        received.len(),
+        1,
+        "Buffered message should be delivered after the riding commit advances the epoch"
+    );
+    assert_eq!(received[0].0, "unblocked by riding commit");
+    assert!(
+        !bob.group_mesh
+            .pending_group_messages
+            .contains_key(&group_id),
+        "Buffer should be empty after the NonApplication-triggered drain"
+    );
+}
+
+#[test]
+fn test_buffered_commit_riding_message_channel_unblocks_earlier_entries() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+
+    // Alice adds Charlie after creating Bob's Welcome, then sends a message
+    // at the post-Charlie epoch. Bob sees, in order: the future-epoch
+    // message, the commit riding the message channel, and only then the
+    // Welcome (which joins at the pre-Charlie epoch).
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
+    charlie.initialize_mls(storage_c).unwrap();
+    let charlie_kp = {
+        let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
+        charlie_mls.generate_key_package().unwrap()
+    };
+    let commit = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        let (_welcome, commit) = alice_mls
+            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .unwrap();
+        commit
+    };
+
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "needs two passes");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+
+    let commit_as_msg_json = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": base64_encode(&commit.ciphertext),
+        "epoch": commit.epoch,
+    })
+    .to_string();
+    let wire2 = make_message("alice", "bob", "unused-envelope");
+    bob.handle_group_mls_msg(&wire2, "alice", &commit_as_msg_json);
+
+    // Both are buffered — Bob has no group state at all yet.
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(2)
+    );
+
+    // The Welcome lands. Drain pass 1: the app message (front of the
+    // buffer) still fails — it is one epoch ahead — and is re-buffered; the
+    // riding commit behind it is consumed and advances the epoch. The
+    // NonApplication-triggered second pass must deliver the message.
+    bob.handle_group_mls_welcome("welcome-nonapp-race", "alice", &welcome_json);
+
+    let received = group_messages_received(&events);
+    assert_eq!(
+        received.len(),
+        1,
+        "Second drain pass should deliver the message the riding commit unblocked"
+    );
+    assert_eq!(received[0].0, "needs two passes");
+    assert!(
+        !bob.group_mesh
+            .pending_group_messages
+            .contains_key(&group_id),
+        "Buffer should be empty once both passes complete"
+    );
+}
+
+#[test]
 fn test_pending_group_message_buffer_cap() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
@@ -7329,6 +7486,241 @@ fn test_drain_expired_pending_group_message_releases_dedup_entry() {
 }
 
 #[test]
+fn test_evicted_pending_commit_releases_dedup_entry() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    for i in 0..(MAX_PENDING_COMMITS_PER_GROUP + 1) {
+        protocol
+            .group_mesh
+            .message_dedup
+            .insert(format!("cevict{}", i), Instant::now());
+        protocol.buffer_pending_commit(
+            "commit-evict-group",
+            &format!("cevict{}", i),
+            "alice",
+            "commit-data",
+        );
+    }
+
+    // The insert past the per-group cap evicted the oldest buffered commit;
+    // its dedup ID must be released so a redelivery is accepted fresh, while
+    // surviving buffered commits keep theirs.
+    assert!(!protocol.group_mesh.message_dedup.contains_key("cevict0"));
+    assert!(protocol.group_mesh.message_dedup.contains_key("cevict1"));
+    assert_eq!(
+        protocol
+            .group_mesh
+            .pending_commits
+            .get("commit-evict-group")
+            .map(|b| b.len()),
+        Some(MAX_PENDING_COMMITS_PER_GROUP)
+    );
+}
+
+#[test]
+fn test_drain_expired_pending_commit_releases_dedup_entry() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    protocol
+        .group_mesh
+        .message_dedup
+        .insert("expired-commit-1".to_string(), Instant::now());
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry("commit-ttl-group".to_string())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "alice".to_string(),
+            message_id: "expired-commit-1".to_string(),
+            data: "{}".to_string(),
+            buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10),
+            retry_count: 0,
+        });
+
+    protocol.drain_pending_commits("commit-ttl-group");
+
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_commits
+            .contains_key("commit-ttl-group"),
+        "Expired commit should be dropped on drain"
+    );
+    assert!(
+        !protocol
+            .group_mesh
+            .message_dedup
+            .contains_key("expired-commit-1"),
+        "Dropping an unprocessed expired commit must release its dedup ID"
+    );
+}
+
+#[test]
+fn test_group_cap_eviction_evicts_single_group_wholesale() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // Fill the group cap with multi-entry buffers, staying under the entry
+    // and byte caps. Group 0's front is the oldest entry, making it the
+    // tie-broken victim when a new group needs a slot.
+    let per_group = 4usize;
+    for g in 0..MAX_PENDING_GROUP_MESSAGE_GROUPS {
+        for j in 0..per_group {
+            let mid = format!("wg-{}-{}", g, j);
+            protocol
+                .group_mesh
+                .message_dedup
+                .insert(mid.clone(), Instant::now());
+            protocol.buffer_pending_group_message(
+                &format!("wg-group-{}", g),
+                PendingGroupMessage {
+                    sender: "alice".to_string(),
+                    message_id: mid,
+                    ciphertext_b64: base64_encode(b"x"),
+                    timestamp: None,
+                    reply_to: None,
+                    forward_info: None,
+                    // Older for smaller (g, j): deterministic victim ranking.
+                    buffered_at: Instant::now()
+                        - StdDuration::from_millis(
+                            ((MAX_PENDING_GROUP_MESSAGE_GROUPS - g) * 100 + (per_group - j)) as u64,
+                        ),
+                },
+            );
+        }
+    }
+
+    protocol
+        .group_mesh
+        .message_dedup
+        .insert("wg-fresh".to_string(), Instant::now());
+    protocol.buffer_pending_group_message(
+        "wg-group-fresh",
+        PendingGroupMessage {
+            sender: "alice".to_string(),
+            message_id: "wg-fresh".to_string(),
+            ciphertext_b64: base64_encode(b"x"),
+            timestamp: None,
+            reply_to: None,
+            forward_info: None,
+            buffered_at: Instant::now(),
+        },
+    );
+
+    // Exactly one whole group is evicted to free the slot — not a map-wide
+    // cascade that levels every buffer down to empty.
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_group_messages
+            .contains_key("wg-group-0"),
+        "The group with the oldest front entry should be evicted wholesale"
+    );
+    assert_eq!(
+        protocol.group_mesh.pending_group_messages.len(),
+        MAX_PENDING_GROUP_MESSAGE_GROUPS
+    );
+    let total: usize = protocol
+        .group_mesh
+        .pending_group_messages
+        .values()
+        .map(|b| b.len())
+        .sum();
+    assert_eq!(
+        total,
+        MAX_PENDING_GROUP_MESSAGE_GROUPS * per_group - per_group + 1,
+        "Only the victim group's entries may be evicted"
+    );
+    assert_eq!(
+        protocol
+            .group_mesh
+            .pending_group_messages
+            .get("wg-group-1")
+            .map(|b| b.len()),
+        Some(per_group),
+        "Non-victim groups must be untouched"
+    );
+    // The victim's dedup IDs are released; survivors keep theirs.
+    for j in 0..per_group {
+        assert!(!protocol
+            .group_mesh
+            .message_dedup
+            .contains_key(&format!("wg-0-{}", j)));
+    }
+    assert!(protocol.group_mesh.message_dedup.contains_key("wg-1-0"));
+}
+
+#[test]
+fn test_pending_commit_group_cap_eviction_evicts_single_group_wholesale() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let per_group = 3usize;
+    for g in 0..MAX_PENDING_COMMIT_GROUPS {
+        for j in 0..per_group {
+            let mid = format!("cg-{}-{}", g, j);
+            protocol
+                .group_mesh
+                .message_dedup
+                .insert(mid.clone(), Instant::now());
+            protocol
+                .group_mesh
+                .pending_commits
+                .entry(format!("cg-group-{}", g))
+                .or_default()
+                .push_back(PendingCommit {
+                    sender: "alice".to_string(),
+                    message_id: mid,
+                    data: "commit-data".to_string(),
+                    // Older for smaller (g, j): deterministic victim ranking.
+                    buffered_at: Instant::now()
+                        - StdDuration::from_millis(
+                            ((MAX_PENDING_COMMIT_GROUPS - g) * 100 + (per_group - j)) as u64,
+                        ),
+                    retry_count: 0,
+                });
+        }
+    }
+
+    protocol
+        .group_mesh
+        .message_dedup
+        .insert("cg-fresh".to_string(), Instant::now());
+    protocol.buffer_pending_commit("cg-group-fresh", "cg-fresh", "alice", "fresh-commit");
+
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_commits
+            .contains_key("cg-group-0"),
+        "The group with the oldest front entry should be evicted wholesale"
+    );
+    assert_eq!(
+        protocol.group_mesh.pending_commits.len(),
+        MAX_PENDING_COMMIT_GROUPS
+    );
+    let total: usize = protocol
+        .group_mesh
+        .pending_commits
+        .values()
+        .map(|b| b.len())
+        .sum();
+    assert_eq!(
+        total,
+        MAX_PENDING_COMMIT_GROUPS * per_group - per_group + 1,
+        "Only the victim group's commits may be evicted"
+    );
+    // The victim's dedup IDs are released; survivors keep theirs.
+    for j in 0..per_group {
+        assert!(!protocol
+            .group_mesh
+            .message_dedup
+            .contains_key(&format!("cg-0-{}", j)));
+    }
+    assert!(protocol.group_mesh.message_dedup.contains_key("cg-1-0"));
+    assert!(protocol.group_mesh.message_dedup.contains_key("cg-fresh"));
+}
+
+#[test]
 fn test_pending_group_message_global_byte_cap() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
@@ -7381,8 +7773,13 @@ fn test_pending_commit_global_entry_cap_concentrated_flood() {
     let groups = MAX_PENDING_COMMITS_TOTAL / MAX_PENDING_COMMITS_PER_GROUP + 1;
     assert!(groups <= MAX_PENDING_COMMIT_GROUPS);
     for g in 0..groups {
-        for _ in 0..MAX_PENDING_COMMITS_PER_GROUP {
-            protocol.buffer_pending_commit(&format!("commit-group-{}", g), "alice", "commit-data");
+        for j in 0..MAX_PENDING_COMMITS_PER_GROUP {
+            protocol.buffer_pending_commit(
+                &format!("commit-group-{}", g),
+                &format!("mid-{}-{}", g, j),
+                "alice",
+                "commit-data",
+            );
         }
     }
 
@@ -7409,7 +7806,12 @@ fn test_pending_commit_spread_flood_bounded_by_group_cap() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     for i in 0..(MAX_PENDING_COMMIT_GROUPS + 4) {
-        protocol.buffer_pending_commit(&format!("spread-commit-{}", i), "alice", "commit-data");
+        protocol.buffer_pending_commit(
+            &format!("spread-commit-{}", i),
+            &format!("mid-{}", i),
+            "alice",
+            "commit-data",
+        );
     }
 
     assert_eq!(
@@ -7423,12 +7825,12 @@ fn test_pending_commit_spread_flood_bounded_by_group_cap() {
 fn test_oversized_pending_commit_rejected_without_purging_buffer() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    protocol.buffer_pending_commit("honest-group", "alice", "small-commit");
+    protocol.buffer_pending_commit("honest-group", "mid-honest", "alice", "small-commit");
 
     // A single entry larger than the whole global byte budget must be
     // rejected outright — not evict every buffered entry and land anyway.
     let oversized = "x".repeat(MAX_PENDING_COMMIT_TOTAL_BYTES + 1);
-    protocol.buffer_pending_commit("attacker-group", "mallory", &oversized);
+    protocol.buffer_pending_commit("attacker-group", "mid-oversized", "mallory", &oversized);
 
     assert!(
         !protocol
@@ -7548,7 +7950,7 @@ fn test_leave_group_clears_pending_buffers() {
     let info = protocol.create_group("Leave Cleanup").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    protocol.buffer_pending_commit(&group_id, "alice", "stale-commit");
+    protocol.buffer_pending_commit(&group_id, "mid-stale", "alice", "stale-commit");
     protocol.buffer_pending_group_message(
         &group_id,
         PendingGroupMessage {
