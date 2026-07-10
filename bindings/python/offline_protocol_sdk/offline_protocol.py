@@ -3602,17 +3602,19 @@ class _UniffiFfiConverterOptionalString(_UniffiConverterRustBuffer):
 
 @dataclass
 class InternetMessage:
-    def __init__(self, *, message_id:str, recipient_id:str, data:typing.List[int], reply_to_msg:typing.Optional[str]):
+    def __init__(self, *, message_id:str, recipient_id:str, data:typing.List[int], reply_to_msg:typing.Optional[str], control_op:typing.Optional[str], control_payload:typing.Optional[str]):
         self.message_id = message_id
         self.recipient_id = recipient_id
         self.data = data
         self.reply_to_msg = reply_to_msg
+        self.control_op = control_op
+        self.control_payload = control_payload
         
         
 
     
     def __str__(self):
-        return "InternetMessage(message_id={}, recipient_id={}, data={}, reply_to_msg={})".format(self.message_id, self.recipient_id, self.data, self.reply_to_msg)
+        return "InternetMessage(message_id={}, recipient_id={}, data={}, reply_to_msg={}, control_op={}, control_payload={})".format(self.message_id, self.recipient_id, self.data, self.reply_to_msg, self.control_op, self.control_payload)
     def __eq__(self, other):
         if self.message_id != other.message_id:
             return False
@@ -3621,6 +3623,10 @@ class InternetMessage:
         if self.data != other.data:
             return False
         if self.reply_to_msg != other.reply_to_msg:
+            return False
+        if self.control_op != other.control_op:
+            return False
+        if self.control_payload != other.control_payload:
             return False
         return True
 
@@ -3632,6 +3638,8 @@ class _UniffiFfiConverterTypeInternetMessage(_UniffiConverterRustBuffer):
             recipient_id=_UniffiFfiConverterString.read(buf),
             data=_UniffiFfiConverterSequenceUInt8.read(buf),
             reply_to_msg=_UniffiFfiConverterOptionalString.read(buf),
+            control_op=_UniffiFfiConverterOptionalString.read(buf),
+            control_payload=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -3640,6 +3648,8 @@ class _UniffiFfiConverterTypeInternetMessage(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.check_lower(value.recipient_id)
         _UniffiFfiConverterSequenceUInt8.check_lower(value.data)
         _UniffiFfiConverterOptionalString.check_lower(value.reply_to_msg)
+        _UniffiFfiConverterOptionalString.check_lower(value.control_op)
+        _UniffiFfiConverterOptionalString.check_lower(value.control_payload)
 
     @staticmethod
     def write(value, buf):
@@ -3647,6 +3657,8 @@ class _UniffiFfiConverterTypeInternetMessage(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.recipient_id, buf)
         _UniffiFfiConverterSequenceUInt8.write(value.data, buf)
         _UniffiFfiConverterOptionalString.write(value.reply_to_msg, buf)
+        _UniffiFfiConverterOptionalString.write(value.control_op, buf)
+        _UniffiFfiConverterOptionalString.write(value.control_payload, buf)
 
 class _UniffiFfiConverterOptionalUInt64(_UniffiConverterRustBuffer):
     @classmethod

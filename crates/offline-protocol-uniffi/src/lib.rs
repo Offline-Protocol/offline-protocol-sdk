@@ -1826,6 +1826,12 @@ pub struct InternetMessage {
     pub recipient_id: String,
     pub data: Vec<u8>,
     pub reply_to_msg: Option<String>,
+    /// Server-plane control op the bridge must translate to a relay-native
+    /// message (see `OfflineProtocol::internet_control_op`); None = normal
+    /// traffic, send verbatim as `SendMessage`.
+    pub control_op: Option<String>,
+    /// JSON payload after the internal prefix (empty for payload-less ops).
+    pub control_payload: Option<String>,
 }
 
 /// WiFi Direct message for outgoing data
@@ -3112,6 +3118,7 @@ impl OfflineProtocol {
         {
             if let Ok(Some((message_id, data))) = transport_arc.get_next_message() {
                 if let Ok(message) = transport_arc.deserialize_message(&data) {
+                    let control = protocol.internet_control_op(&message);
                     return Some(InternetMessage {
                         message_id,
                         recipient_id: message.recipient.as_str().to_string(),
@@ -3120,6 +3127,8 @@ impl OfflineProtocol {
                             .reply_to_msg
                             .as_ref()
                             .map(|id| id.as_str().to_string()),
+                        control_op: control.as_ref().map(|(op, _)| op.to_string()),
+                        control_payload: control.map(|(_, payload)| payload),
                     });
                 }
             }
@@ -3160,12 +3169,17 @@ impl OfflineProtocol {
             let reply_to_msg = parsed
                 .as_ref()
                 .and_then(|msg| msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()));
+            let control = parsed
+                .as_ref()
+                .and_then(|msg| protocol.internet_control_op(msg));
 
             return Some(InternetMessage {
                 message_id: msg_id,
                 recipient_id: recipient,
                 data,
                 reply_to_msg,
+                control_op: control.as_ref().map(|(op, _)| op.to_string()),
+                control_payload: control.map(|(_, payload)| payload),
             });
         }
 

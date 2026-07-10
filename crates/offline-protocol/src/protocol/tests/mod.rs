@@ -14457,3 +14457,145 @@ fn test_welcome_pending_peers_tracks_unconfirmed_sessions() {
 
     protocol.stop().unwrap();
 }
+
+#[test]
+fn test_internet_control_op_classification() {
+    let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let make = |recipient: &str, content: &str| {
+        Message::new(
+            UserId::new("user123").unwrap(),
+            UserId::new(recipient).unwrap(),
+            AppId::new("test-app").unwrap(),
+            content,
+        )
+    };
+
+    // Connection ops classify for any recipient, payload = JSON after prefix.
+    let msg = make("bob", "__CONN_REQ__{\"sender_name\":\"Alice\"}");
+    assert_eq!(
+        protocol.internet_control_op(&msg),
+        Some(("conn_req", "{\"sender_name\":\"Alice\"}".to_string()))
+    );
+    let msg = make("bob", "__CONN_ACC__{\"accepted_by_name\":\"Alice\"}");
+    assert_eq!(
+        protocol.internet_control_op(&msg),
+        Some(("conn_acc", "{\"accepted_by_name\":\"Alice\"}".to_string()))
+    );
+    let msg = make("bob", "__CONN_REJ__");
+    assert_eq!(
+        protocol.internet_control_op(&msg),
+        Some(("conn_rej", String::new()))
+    );
+    let msg = make("bob", "__CONN_CAN__");
+    assert_eq!(
+        protocol.internet_control_op(&msg),
+        Some(("conn_can", String::new()))
+    );
+
+    // Leave is a tap op: classified for the per-member notification.
+    let msg = make("bob", "__GRP_MLS_LEAVE__{\"group_id\":\"g1\"}");
+    assert_eq!(
+        protocol.internet_control_op(&msg),
+        Some(("group_mls_leave", "{\"group_id\":\"g1\"}".to_string()))
+    );
+
+    // Relay hints classify only when self-addressed...
+    let msg = make("user123", "__GRP_RELAY_REG__{\"group_id\":\"g1\"}");
+    assert_eq!(
+        protocol.internet_control_op(&msg),
+        Some(("group_relay_register", "{\"group_id\":\"g1\"}".to_string()))
+    );
+    let msg = make("user123", "__GRP_RELAY_BCAST__{\"group_id\":\"g1\"}");
+    assert_eq!(
+        protocol.internet_control_op(&msg),
+        Some(("group_relay_broadcast", "{\"group_id\":\"g1\"}".to_string()))
+    );
+    // ...never for another recipient (a peer-addressed frame with a relay
+    // prefix is not a relay hint).
+    let msg = make("bob", "__GRP_RELAY_BCAST__{\"group_id\":\"g1\"}");
+    assert_eq!(protocol.internet_control_op(&msg), None);
+
+    // Normal traffic — including MLS/e2e frames — is never classified.
+    for content in [
+        "hello",
+        "__MLS_WELCOME__abc",
+        "__MLS_ENC__abc",
+        "__TYPING__{}",
+        "__READ_RECEIPT__{}",
+        "__PRESENCE__{}",
+        "__GRP_MLS_MSG__{}",
+        "__GRP_MLS_WELCOME__{}",
+        "__GRP_MLS_COMMIT__{}",
+    ] {
+        let msg = make("bob", content);
+        assert_eq!(
+            protocol.internet_control_op(&msg),
+            None,
+            "content {:?} must not classify",
+            content
+        );
+    }
+}
+
+#[test]
+fn test_group_created_ack_gates_relay_sync() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let group_info = protocol.create_group("ack-gate-group").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+    assert!(!protocol.group_mesh.relay_synced.contains(&group_id));
+
+    // The relay's GroupCreated answer (bridged as __GROUP_CREATED__) is the
+    // registration acknowledgment: only now is broadcast fan-out trusted.
+    let ack = Message::new(
+        UserId::new("relay").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "__GROUP_CREATED__{{\"group_id\":\"{}\",\"name\":\"ack-gate-group\"}}",
+            group_id
+        ),
+    );
+    protocol.process_internal_message(&ack);
+    assert!(protocol.group_mesh.relay_synced.contains(&group_id));
+
+    // An ack for a group we don't track locally must not create sync state.
+    let foreign_ack = Message::new(
+        UserId::new("relay").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "__GROUP_CREATED__{\"group_id\":\"someone-elses-group\",\"name\":\"x\"}",
+    );
+    protocol.process_internal_message(&foreign_ack);
+    assert!(!protocol
+        .group_mesh
+        .relay_synced
+        .contains("someone-elses-group"));
+
+    // A group-scoped relay error revokes the sync: fall back to per-member.
+    let error = Message::new(
+        UserId::new("relay").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "__GROUP_ERROR__{{\"reason\":\"Only admins can sync this group\",\"group_id\":\"{}\"}}",
+            group_id
+        ),
+    );
+    protocol.process_internal_message(&error);
+    assert!(!protocol.group_mesh.relay_synced.contains(&group_id));
+
+    protocol.stop().unwrap();
+}

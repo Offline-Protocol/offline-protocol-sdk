@@ -874,6 +874,17 @@ impl OfflineProtocol {
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_CREATED) {
             if let Ok(payload) = serde_json::from_str::<GroupCreatedPayload>(data) {
                 info!(group_id = %payload.group_id, "Group created");
+                // The relay only answers GroupCreated on the connection that
+                // sent CreateGroup, so for a locally-tracked group this is the
+                // positive registration acknowledgment that `relay_synced`
+                // requires (enqueueing the registration frame proves nothing —
+                // see try_relay_register_group). Only now may
+                // send_group_message take the O(1) relay-broadcast path.
+                if self.group_mesh.members.contains_key(&payload.group_id) {
+                    self.group_mesh
+                        .relay_synced
+                        .insert(payload.group_id.clone());
+                }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::group_created(payload.group_id, payload.name));
                 }
@@ -1083,7 +1094,14 @@ impl OfflineProtocol {
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_ERROR) {
             if let Ok(payload) = serde_json::from_str::<GroupErrorPayload>(data) {
-                warn!(reason = %payload.reason, "Group error");
+                warn!(reason = %payload.reason, group_id = ?payload.group_id, "Group error");
+                // A group-scoped relay error (registration denied, not a
+                // member, ...) means relay-side fan-out cannot be trusted for
+                // this group: drop the sync flag so sends fall back to the
+                // always-correct per-member path.
+                if let Some(group_id) = &payload.group_id {
+                    self.group_mesh.relay_synced.remove(group_id);
+                }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::group_error(payload.reason));
                 }

@@ -1777,6 +1777,55 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    /// Classifies an outbound internet frame as a server-plane control op the
+    /// platform bridge should translate to (or mirror as) a relay-native
+    /// message instead of an opaque `SendMessage`.
+    ///
+    /// Returns `(op, payload)` where `payload` is the JSON after the prefix
+    /// (empty string for payload-less ops). `None` means normal traffic —
+    /// send verbatim.
+    ///
+    /// Ops and their bridge semantics:
+    /// - `conn_req` / `conn_acc` / `conn_rej` / `conn_can` — REPLACE with the
+    ///   relay-native connection-request op so the relay's server-side state
+    ///   (error feedback, legacy-client interop) participates.
+    /// - `group_relay_register` / `group_relay_broadcast` — self-addressed
+    ///   relay hints (`send_group_message` optimization); REPLACE with
+    ///   relay-native `CreateGroup`+member deltas / `SendGroupMessage`. The
+    ///   relay does not intercept content prefixes, so untranslated frames
+    ///   would be echoed back uselessly.
+    /// - `group_mls_leave` — TAP, don't replace: the per-member leave
+    ///   notification must still be delivered verbatim, but the bridge also
+    ///   sends one relay-native `LeaveGroup` so the relay's group registry
+    ///   (which feeds invite links and broadcast fan-out) doesn't go stale.
+    pub fn internet_control_op(&self, message: &Message) -> Option<(&'static str, String)> {
+        let content = message.content.as_str();
+        if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_REQUEST) {
+            return Some(("conn_req", payload.to_string()));
+        }
+        if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_ACCEPT) {
+            return Some(("conn_acc", payload.to_string()));
+        }
+        if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_REJECT) {
+            return Some(("conn_rej", payload.to_string()));
+        }
+        if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_CANCEL) {
+            return Some(("conn_can", payload.to_string()));
+        }
+        if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_MLS_LEAVE) {
+            return Some(("group_mls_leave", payload.to_string()));
+        }
+        if message.recipient.as_str() == self.config.user_id {
+            if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_RELAY_REGISTER) {
+                return Some(("group_relay_register", payload.to_string()));
+            }
+            if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_RELAY_BROADCAST) {
+                return Some(("group_relay_broadcast", payload.to_string()));
+            }
+        }
+        None
+    }
+
     pub(super) fn handle_outbound_media_chunk_delivered(&mut self, message_id: &MessageId) {
         let Some((file_id, chunk_index)) = self.outbound_media_chunks.remove(message_id) else {
             return;

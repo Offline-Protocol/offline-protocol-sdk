@@ -5974,6 +5974,10 @@ data class InternetMessage (
     var `data`: List<kotlin.UByte>
     , 
     var `replyToMsg`: kotlin.String?
+    , 
+    var `controlOp`: kotlin.String?
+    , 
+    var `controlPayload`: kotlin.String?
     
 ){
     
@@ -5992,6 +5996,8 @@ public object FfiConverterTypeInternetMessage: FfiConverterRustBuffer<InternetMe
             FfiConverterString.read(buf),
             FfiConverterSequenceUByte.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -5999,7 +6005,9 @@ public object FfiConverterTypeInternetMessage: FfiConverterRustBuffer<InternetMe
             FfiConverterString.allocationSize(value.`messageId`) +
             FfiConverterString.allocationSize(value.`recipientId`) +
             FfiConverterSequenceUByte.allocationSize(value.`data`) +
-            FfiConverterOptionalString.allocationSize(value.`replyToMsg`)
+            FfiConverterOptionalString.allocationSize(value.`replyToMsg`) +
+            FfiConverterOptionalString.allocationSize(value.`controlOp`) +
+            FfiConverterOptionalString.allocationSize(value.`controlPayload`)
     )
 
     override fun write(value: InternetMessage, buf: ByteBuffer) {
@@ -6007,6 +6015,8 @@ public object FfiConverterTypeInternetMessage: FfiConverterRustBuffer<InternetMe
             FfiConverterString.write(value.`recipientId`, buf)
             FfiConverterSequenceUByte.write(value.`data`, buf)
             FfiConverterOptionalString.write(value.`replyToMsg`, buf)
+            FfiConverterOptionalString.write(value.`controlOp`, buf)
+            FfiConverterOptionalString.write(value.`controlPayload`, buf)
     }
 }
 
