@@ -54,7 +54,11 @@ class InternetManager(
     
     // OkHttp components
     private var okHttpClient: OkHttpClient? = null
-    private var webSocket: WebSocket? = null
+    // Written on main (connect/disconnect) and on the OkHttp reader thread
+    // (AuthError teardown); read from RN bridge threads (sendRawCommand,
+    // checkPresence). Volatile so those reads don't depend on an incidental
+    // happens-before chain through the connection-state atomics.
+    @Volatile private var webSocket: WebSocket? = null
     
     // Handler for main thread operations
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -122,11 +126,12 @@ class InternetManager(
      */
     var serverMessageEmitter: ((String) -> Unit)? = null
     
-    // Metrics
-    private var bytesSent: Long = 0
-    private var bytesReceived: Long = 0
-    private var messagesSent: Long = 0
-    private var messagesReceived: Long = 0
+    // Metrics. Atomic: send paths mutate on main, receive paths on the
+    // OkHttp reader thread, and getMetrics() reads from the caller's thread.
+    private val bytesSent = java.util.concurrent.atomic.AtomicLong(0)
+    private val bytesReceived = java.util.concurrent.atomic.AtomicLong(0)
+    private val messagesSent = java.util.concurrent.atomic.AtomicLong(0)
+    private val messagesReceived = java.util.concurrent.atomic.AtomicLong(0)
     
     // MARK: - Helper
     
@@ -260,7 +265,8 @@ class InternetManager(
         // Stop timers
         stopMessagePolling()
         stopPingTimer()
-        
+        stopPresenceWatch()
+
         // Close WebSocket
         disconnect()
         
@@ -283,24 +289,29 @@ class InternetManager(
         runOnMainSync {
             stopMessagePolling()
             stopPingTimer()
+            // A backgrounded app must not keep spending battery and relay
+            // rate-limit budget on CheckPresence ticks; parked welcomes
+            // re-arm from the watch loop after resume().
+            stopPresenceWatch()
         }
     }
-    
+
     override fun resume() {
         runOnMainSync {
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
                 startPingTimer()
+                startPresenceWatch()
             }
         }
     }
     
     override fun getMetrics(): Map<String, Any> {
         return mapOf(
-            "bytes_sent" to bytesSent,
-            "bytes_received" to bytesReceived,
-            "messages_sent" to messagesSent,
-            "messages_received" to messagesReceived,
+            "bytes_sent" to bytesSent.get(),
+            "bytes_received" to bytesReceived.get(),
+            "messages_sent" to messagesSent.get(),
+            "messages_received" to messagesReceived.get(),
             "is_connected" to isConnected.get(),
             "is_authenticated" to isAuthenticated.get(),
             "reconnect_attempts" to reconnectAttempts.get()
@@ -492,35 +503,62 @@ class InternetManager(
     // MARK: - WebSocket Listener
     
     private val webSocketListener = object : WebSocketListener() {
+        /**
+         * True when the callback belongs to a socket that is no longer the
+         * manager's current one (replaced by a reconnect or detached by a
+         * teardown). A stale socket's terminal callbacks must not clear the
+         * in-flight tracker, reset the translator, or report the transport
+         * down while a newer, healthy connection is live.
+         */
+        private fun isStale(ws: WebSocket): Boolean = ws !== webSocket
+
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            if (isStale(webSocket)) return
             handleConnectionOpened()
         }
-        
+
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (isStale(webSocket)) return
             processReceivedData(text.toByteArray(Charsets.UTF_8))
         }
-        
+
         override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+            if (isStale(webSocket)) return
             processReceivedData(bytes.toByteArray())
         }
-        
+
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             webSocket.close(1000, null)
         }
-        
+
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            if (isStale(webSocket)) return
             handleConnectionClosed(code, reason)
         }
-        
+
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            if (isStale(webSocket)) return
             handleConnectionFailure(t)
         }
+    }
+
+    /**
+     * Cancels and detaches the current socket, then runs the closed handler
+     * exactly once for it. Detaching before cancel makes the cancel-triggered
+     * onFailure/onClosed no-ops (the listener ignores stale sockets), so a
+     * dead socket can never tear down the connection rebuilt after it.
+     */
+    private fun teardownCurrentSocket(reason: String) {
+        val socket = webSocket
+        webSocket = null
+        socket?.cancel()
+        handleConnectionClosed(-1, reason)
     }
     
     // MARK: - Message Handling
     
     private fun processReceivedData(data: ByteArray) {
-        bytesReceived += data.size
+        bytesReceived.addAndGet(data.size.toLong())
         
         val json: org.json.JSONObject
         val messageType: String
@@ -549,7 +587,11 @@ class InternetManager(
                 emitDiagnostic("error", "Authentication failed", mapOf(
                     "reason" to reason
                 ))
-                handleConnectionClosed(-1, reason)
+                // The auth-failed socket must actually be closed — left open,
+                // its eventual onClosed would race the reconnect's fresh
+                // connection (the teardown detaches it first, so the
+                // cancel-triggered callbacks are ignored as stale).
+                teardownCurrentSocket(reason)
             }
             
             "MessageSent" -> {
@@ -585,8 +627,8 @@ class InternetManager(
                     emitDiagnostic("warning", "Invalid MessageReceived format")
                     return
                 }
-                
-                messagesReceived++
+
+                messagesReceived.incrementAndGet()
                 
                 try {
                     // The protocol expects the full serialized Message JSON bytes
@@ -693,7 +735,14 @@ class InternetManager(
                     emitDiagnostic("warning", "Invalid presence format: missing user_id/online")
                     return
                 }
-                val lastSeenMs = json.optNullableString("last_seen")?.let { parseTimestampToMsOrNull(it) }
+                // Type-branched: Android's org.json coerces numbers via
+                // getString but the JVM org.json (unit tests) throws, and the
+                // relay may send epoch numbers directly.
+                val lastSeenMs = when (val rawLastSeen = json.opt("last_seen")) {
+                    is Number -> rawLastSeen.toLong()
+                    is String -> parseTimestampToMsOrNull(rawLastSeen)
+                    else -> null
+                }
                 if (online) {
                     presenceWatch.unwatch(userId)
                 }
@@ -962,12 +1011,23 @@ class InternetManager(
                 serverMessageEmitter?.invoke(json.toString())
             }
 
+            "RateLimited" -> {
+                // The relay dropped whatever exceeded the bucket — possibly a
+                // best-effort member delta whose membership snapshot the
+                // translator has already committed. Reset so the next
+                // register re-derives deltas from scratch; the worst case is
+                // an idempotent re-registration.
+                controlOpTranslator.reset()
+                serverMessageEmitter?.invoke(json.toString())
+                emitDiagnostic("warning", "Relay rate limit hit — translator state reset")
+            }
+
             // Server-plane frames that are app concerns, not SDK concerns —
             // forwarded verbatim as the internet_server_message event so the
             // invite-link lifecycle and misc server events can ride the
             // SDK's socket without a second WebSocket in the app.
             "GroupInviteLinkCreated", "GroupInviteLinkRevoked", "GroupJoinedViaInvite",
-            "GroupInviteJoinPending", "GroupRoleChanged", "GroupDeleted", "RateLimited" -> {
+            "GroupInviteJoinPending", "GroupRoleChanged", "GroupDeleted" -> {
                 serverMessageEmitter?.invoke(json.toString())
                 emitDiagnostic("debug", "Relay server message forwarded", mapOf(
                     "type" to messageType
@@ -1158,8 +1218,8 @@ class InternetManager(
         if (sent) {
             // Reset failure counter on successful send
             consecutiveSendFailures.set(0)
-            bytesSent += jsonString.length
-            messagesSent++
+            bytesSent.addAndGet(jsonString.toByteArray(Charsets.UTF_8).size.toLong())
+            messagesSent.incrementAndGet()
             // Track for recipient-keyed failure correlation: a later
             // DeliveryError for this recipient fails-fast this message id.
             inFlightTracker.recordSent(recipientId, messageId, System.currentTimeMillis())
@@ -1185,7 +1245,7 @@ class InternetManager(
                 emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect for DORS", mapOf(
                     "failures" to failures
                 ))
-                mainHandler.post { handleConnectionClosed(-1, "Send failures exceeded threshold") }
+                mainHandler.post { teardownCurrentSocket("Send failures exceeded threshold") }
             }
         }
     }
@@ -1239,8 +1299,8 @@ class InternetManager(
                 val sent = ws.send(primaryJson)
                 if (sent) {
                     consecutiveSendFailures.set(0)
-                    bytesSent += primaryJson.length
-                    messagesSent++
+                    bytesSent.addAndGet(primaryJson.toByteArray(Charsets.UTF_8).size.toLong())
+                    messagesSent.incrementAndGet()
                     inFlightTracker.recordSent(recipientId, messageId, System.currentTimeMillis())
                     try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
                     if (sendRelayFramesBestEffort(translation.frames.drop(1), controlOp)) {
@@ -1260,7 +1320,7 @@ class InternetManager(
                         "consecutiveFailures" to failures
                     ))
                     if (failures >= MAX_CONSECUTIVE_FAILURES) {
-                        mainHandler.post { handleConnectionClosed(-1, "Send failures exceeded threshold") }
+                        mainHandler.post { teardownCurrentSocket("Send failures exceeded threshold") }
                     }
                 }
             }
@@ -1327,7 +1387,11 @@ class InternetManager(
                 Log.e(TAG, "Failed to fail-fast in-flight message $id", e)
             }
         }
-        presenceWatch.watch(recipient, now)
+        // Never watch self: a malformed self-addressed frame's DeliveryError
+        // would otherwise occupy a rotation slot until the idle TTL.
+        if (recipient != deviceId) {
+            presenceWatch.watch(recipient, now)
+        }
         try {
             protocol.internetPeerPresence(recipient, false, null)
         } catch (e: Exception) {

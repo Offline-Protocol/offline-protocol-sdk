@@ -1363,8 +1363,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 "internet" -> {
                     // Configure and start Internet transport via InternetManager
                     if (internetManager == null) {
-                        // Create manager if not already created
-                        internetManager = InternetManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                        // The manager's identity must be the real user id: the
+                        // control-op translator filters self out of member
+                        // deltas and gates LeaveGroup on it, so a placeholder
+                        // would silently corrupt relay group state.
+                        val userId = currentConfig?.userId
+                            ?: throw IllegalStateException("Cannot enable Internet transport before initialize(config)")
+                        internetManager = InternetManager(reactApplicationContext, proto, userId) { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }.also { manager ->
                             manager.serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) }
