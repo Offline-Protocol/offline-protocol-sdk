@@ -14080,3 +14080,92 @@ fn test_pending_queue_byte_accounting_across_drain() {
     assert_eq!(drained.len(), 2);
     assert_eq!(protocol.pending_queue.total_bytes(), 0);
 }
+
+#[test]
+fn test_group_registration_enqueue_does_not_mark_relay_synced() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let group_info = protocol.create_group("relay-sync-group").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+
+    // The self-addressed registration frame still goes out for a relay (or
+    // bridge adapter) that understands the prefix...
+    let sent = internet_handle.sent_messages();
+    assert!(
+        sent.iter().any(|m| m.recipient.as_str() == "user123"
+            && m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)),
+        "expected a __GRP_RELAY_REG__ frame to self"
+    );
+
+    // ...but enqueueing proves nothing about relay support: a prefix-unaware
+    // relay echoes a self-addressed frame back instead of registering the
+    // group. Sync may only be set by the relay's GroupCreated acknowledgment,
+    // otherwise send_group_message takes the broadcast path and the messages
+    // vanish into the echo.
+    assert!(!protocol.group_mesh.relay_synced.contains(&group_id));
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_group_send_takes_broadcast_path_only_when_relay_synced() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let group_info = protocol.create_group("relay-bcast-group").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+
+    // Unsynced: the broadcast frame must not be emitted (a prefix-unaware
+    // relay would swallow it). A solo group has no other members, so the
+    // per-member fan-out legitimately sends nothing.
+    let ids = protocol
+        .send_group_message(&group_id, "hello", None, None)
+        .unwrap();
+    assert!(ids.is_empty());
+    assert!(!internet_handle
+        .sent_messages()
+        .iter()
+        .any(|m| m
+            .content
+            .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)));
+
+    // Simulate the relay's GroupCreated acknowledgment: only now may the
+    // O(1) broadcast path be taken.
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+    let ids = protocol
+        .send_group_message(&group_id, "hello again", None, None)
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    let sent = internet_handle.sent_messages();
+    assert!(sent.iter().any(|m| m.recipient.as_str() == "user123"
+        && m.content
+            .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)));
+
+    protocol.stop().unwrap();
+}
