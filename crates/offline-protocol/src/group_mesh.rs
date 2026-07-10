@@ -305,6 +305,11 @@ pub(crate) struct RelayGroupBroadcastPayload {
 pub(crate) struct PendingCommit {
     /// The original sender of this commit.
     pub(crate) sender: String,
+    /// The original message ID (already recorded in the dedup table).
+    /// Released when the buffered copy is dropped undelivered by cap
+    /// eviction, so a redelivery is accepted fresh instead of being
+    /// rejected as a replay of a copy that no longer exists anywhere.
+    pub(crate) message_id: String,
     /// The raw JSON data (after prefix strip) for replay.
     pub(crate) data: String,
     /// When this pending commit was first buffered.
@@ -414,17 +419,26 @@ const PENDING_GROUP_MESSAGE_CAPS: GlobalBufferCaps = GlobalBufferCaps {
 /// per-group caps alone leave total retention open-ended across
 /// attacker-chosen group IDs.
 ///
-/// Eviction takes the oldest entry of the *largest* per-group buffer
-/// (tie-broken by age), so a flood that concentrates in a few group IDs is
-/// evicted before honest welcome-race entries, which are few per group. A
-/// flood that instead spreads one entry per fabricated group ID levels the
-/// buffer sizes and degrades eviction to globally-oldest; the group cap
-/// bounds how wide such a spread can reach (and the map-key memory it
-/// retains), but within it a sustained spread flood can still push out an
-/// honest entry. Callers mitigate that by releasing the evicted entry's
-/// dedup ID, turning the loss into a redelivery retry instead of a permanent
-/// one — full protection would need sender-level accounting, which none of
-/// these pre-join paths have.
+/// Freeing a *group slot* (admitting a new group ID at the group cap)
+/// evicts the single largest per-group buffer wholesale: emptying some
+/// group is the only way to free a slot, and doing it one entry at a time
+/// would round-robin across level-sized buffers — purging nearly every
+/// buffered entry map-wide before any single group emptied. Evicting one
+/// group as a unit bounds the damage at one per-group buffer and
+/// preferentially removes a concentrated flood over honest few-entry
+/// groups.
+///
+/// Entry/byte pressure then evicts the oldest entry of the *largest*
+/// remaining buffer (tie-broken by age), so a flood that concentrates in a
+/// few group IDs is evicted before honest welcome-race entries, which are
+/// few per group. A flood that instead spreads one entry per fabricated
+/// group ID levels the buffer sizes and degrades eviction to
+/// globally-oldest; the group cap bounds how wide such a spread can reach
+/// (and the map-key memory it retains), but within it a sustained spread
+/// flood can still push out an honest entry. Callers mitigate that by
+/// releasing the evicted entry's dedup ID, turning the loss into a
+/// redelivery retry instead of a permanent one — full protection would
+/// need sender-level accounting, which none of these pre-join paths have.
 fn enforce_global_buffer_bound<T>(
     map: &mut HashMap<String, VecDeque<T>>,
     incoming_group: &str,
@@ -440,24 +454,36 @@ fn enforce_global_buffer_bound<T>(
         .values()
         .flat_map(|buf| buf.iter())
         .fold((0usize, 0usize), |(n, b), e| (n + 1, b + entry_bytes(e)));
-    let mut all_evicted = Vec::new();
-    while entries >= caps.max_entries
-        || bytes + incoming_bytes > caps.max_bytes
-        || (map.len() >= caps.max_groups && !map.contains_key(incoming_group))
-    {
-        // Each deque is in arrival order, so its front is its oldest entry.
-        // Rank groups by (buffer length, entry age): largest buffer first,
-        // oldest front entry breaking ties.
-        let Some(victim_group) = map
-            .iter()
+    // Each deque is in arrival order, so its front is its oldest entry.
+    // Rank groups by (buffer length, entry age): largest buffer first,
+    // oldest front entry breaking ties.
+    let pick_victim = |map: &HashMap<String, VecDeque<T>>| {
+        map.iter()
             .filter_map(|(gid, buf)| {
                 buf.front()
                     .map(|e| ((buf.len(), std::cmp::Reverse(buffered_at(e))), gid))
             })
             .max_by_key(|(rank, _)| *rank)
             .map(|(_, gid)| gid.clone())
-        else {
-            return Some(all_evicted);
+    };
+    let mut all_evicted = Vec::new();
+    while map.len() >= caps.max_groups && !map.contains_key(incoming_group) {
+        let Some(victim_group) = pick_victim(map) else {
+            break;
+        };
+        warn!(
+            group_id = %victim_group,
+            "Pending buffers at group capacity, evicting largest group buffer wholesale"
+        );
+        if let Some(buf) = map.remove(&victim_group) {
+            entries -= buf.len();
+            bytes -= buf.iter().map(&entry_bytes).sum::<usize>();
+            all_evicted.extend(buf);
+        }
+    }
+    while entries >= caps.max_entries || bytes + incoming_bytes > caps.max_bytes {
+        let Some(victim_group) = pick_victim(map) else {
+            break;
         };
         warn!(
             group_id = %victim_group,
@@ -572,9 +598,16 @@ impl OfflineProtocol {
                 );
                 InternalMessageResult::Consumed
             }
-            GroupDecryptOutcome::NonApplication | GroupDecryptOutcome::Failed => {
+            GroupDecryptOutcome::NonApplication => {
+                // MLS consumed a commit or proposal riding the application
+                // channel — group state may have advanced, which can unblock
+                // buffered commits and messages exactly like a commit-channel
+                // success.
+                self.drain_pending_commits(&payload.group_id);
+                self.drain_pending_group_messages(&payload.group_id);
                 InternalMessageResult::Consumed
             }
+            GroupDecryptOutcome::Failed => InternalMessageResult::Consumed,
         }
     }
 
@@ -806,7 +839,7 @@ impl OfflineProtocol {
                 self.drain_pending_group_messages(&group_id);
             }
             CommitOutcome::Retriable(group_id) => {
-                self.buffer_pending_commit(&group_id, sender, data);
+                self.buffer_pending_commit(&group_id, message_id, sender, data);
             }
             CommitOutcome::Rejected => {}
         }
@@ -1069,23 +1102,35 @@ impl OfflineProtocol {
     }
 
     /// Buffers a failed commit for deferred retry.
-    pub(crate) fn buffer_pending_commit(&mut self, group_id: &str, sender: &str, data: &str) {
+    ///
+    /// The commit's message ID is already in the dedup table, so this
+    /// buffered copy is its only path to processing — whenever a buffered
+    /// commit is dropped unprocessed (cap eviction here, TTL expiry at
+    /// drain), its dedup ID is released so a redelivery gets a fresh chance
+    /// instead of being permanently rejected, mirroring
+    /// `buffer_pending_group_message`.
+    pub(crate) fn buffer_pending_commit(
+        &mut self,
+        group_id: &str,
+        message_id: &str,
+        sender: &str,
+        data: &str,
+    ) {
         let pending = PendingCommit {
             sender: sender.to_string(),
+            message_id: message_id.to_string(),
             data: data.to_string(),
             buffered_at: Instant::now(),
             retry_count: 0,
         };
-        if enforce_global_buffer_bound(
+        let Some(evicted) = enforce_global_buffer_bound(
             &mut self.group_mesh.pending_commits,
             group_id,
             &PENDING_COMMIT_CAPS,
             pending.data.len(),
             |c| c.data.len(),
             |c| c.buffered_at,
-        )
-        .is_none()
-        {
+        ) else {
             // Only the ciphertext field is size-guarded at decode time; the
             // JSON around it is attacker-sized, so an oversized payload must
             // be dropped rather than allowed to purge the whole buffer.
@@ -1095,9 +1140,15 @@ impl OfflineProtocol {
                 "Pending commit exceeds the global byte budget, dropping"
             );
             return;
+        };
+        // An evicted commit was never processed — release its dedup ID so a
+        // sender-side redelivery is accepted fresh instead of being rejected
+        // as a replay of a copy that no longer exists anywhere.
+        for entry in &evicted {
+            self.group_mesh.message_dedup.remove(&entry.message_id);
         }
-        let buf = self
-            .group_mesh
+        let group_mesh = &mut self.group_mesh;
+        let buf = group_mesh
             .pending_commits
             .entry(group_id.to_string())
             .or_default();
@@ -1113,7 +1164,9 @@ impl OfflineProtocol {
                 group_id = %group_id,
                 "Pending commit buffer full, dropping oldest"
             );
-            buf.pop_front();
+            if let Some(evicted) = buf.pop_front() {
+                group_mesh.message_dedup.remove(&evicted.message_id);
+            }
             buf.push_back(pending);
         }
     }
@@ -1156,6 +1209,10 @@ impl OfflineProtocol {
                     if entry.retry_count > 0 {
                         retried_expired_count += 1;
                     }
+                    // Never processed — release the dedup ID so a redelivery
+                    // is accepted fresh even before the periodic dedup sweep
+                    // runs.
+                    self.group_mesh.message_dedup.remove(&entry.message_id);
                     continue;
                 }
                 match self.process_commit_core(&entry.sender, &entry.data) {
@@ -1272,76 +1329,97 @@ impl OfflineProtocol {
     /// the group advanced (successful Welcome join or commit). Messages are
     /// retried in arrival order; entries that still fail retriably are
     /// re-buffered until their TTL expires.
+    ///
+    /// A buffered entry can turn out to be a commit or proposal riding the
+    /// application channel (`NonApplication`): MLS consumes it, so group
+    /// state may have advanced mid-drain. When that happens, buffered
+    /// commits are drained and another pass runs, since entries re-buffered
+    /// earlier in the same pass may now decrypt. Terminates: a pass loops
+    /// only after consuming a `NonApplication` entry, which is never
+    /// re-buffered, so each looping pass shrinks the buffer.
     pub(crate) fn drain_pending_group_messages(&mut self, group_id: &str) {
-        let pending = match self.group_mesh.pending_group_messages.get_mut(group_id) {
-            Some(buf) if !buf.is_empty() => std::mem::take(buf),
-            _ => return,
-        };
-
-        let mut still_pending = VecDeque::new();
-        for entry in pending {
-            if entry.buffered_at.elapsed() > StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS)
-            {
-                debug!(
-                    group_id = %group_id,
-                    msg_id = %entry.message_id,
-                    "Dropping expired pending group message"
-                );
-                // Never delivered — release the dedup ID so a redelivery is
-                // accepted fresh even before the periodic dedup sweep runs.
-                self.group_mesh.message_dedup.remove(&entry.message_id);
-                continue;
-            }
-            // Validated at buffer time; failure here is defensive only.
-            let Ok(ciphertext_bytes) = base64_decode(&entry.ciphertext_b64) else {
-                continue;
+        loop {
+            let pending = match self.group_mesh.pending_group_messages.get_mut(group_id) {
+                Some(buf) if !buf.is_empty() => std::mem::take(buf),
+                _ => break,
             };
-            match self.decrypt_group_application(group_id, ciphertext_bytes, &entry.sender) {
-                GroupDecryptOutcome::Plaintext(plaintext) => {
-                    let Ok(text) = String::from_utf8(plaintext) else {
-                        warn!(
-                            group_id = %group_id,
-                            "Decrypted group payload is not valid UTF-8, dropping"
-                        );
-                        continue;
-                    };
-                    info!(
+
+            let mut state_advanced = false;
+            let mut still_pending = VecDeque::new();
+            for entry in pending {
+                if entry.buffered_at.elapsed()
+                    > StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS)
+                {
+                    debug!(
                         group_id = %group_id,
                         msg_id = %entry.message_id,
-                        "Delivered buffered group message after group state caught up"
+                        "Dropping expired pending group message"
                     );
-                    let forward_info_event = entry
-                        .forward_info
-                        .as_ref()
-                        .map(crate::events::ForwardInfoEvent::from);
-                    let timestamp = entry
-                        .timestamp
-                        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-                    self.emit_event(Event::group_message_received(
-                        group_id.to_string(),
-                        entry.sender,
-                        text,
-                        timestamp,
-                        entry.message_id,
-                        entry.reply_to,
-                        forward_info_event,
-                    ));
+                    // Never delivered — release the dedup ID so a redelivery is
+                    // accepted fresh even before the periodic dedup sweep runs.
+                    self.group_mesh.message_dedup.remove(&entry.message_id);
+                    continue;
                 }
-                GroupDecryptOutcome::Retriable => {
-                    still_pending.push_back(entry);
+                // Validated at buffer time; failure here is defensive only.
+                let Ok(ciphertext_bytes) = base64_decode(&entry.ciphertext_b64) else {
+                    continue;
+                };
+                match self.decrypt_group_application(group_id, ciphertext_bytes, &entry.sender) {
+                    GroupDecryptOutcome::Plaintext(plaintext) => {
+                        let Ok(text) = String::from_utf8(plaintext) else {
+                            warn!(
+                                group_id = %group_id,
+                                "Decrypted group payload is not valid UTF-8, dropping"
+                            );
+                            continue;
+                        };
+                        info!(
+                            group_id = %group_id,
+                            msg_id = %entry.message_id,
+                            "Delivered buffered group message after group state caught up"
+                        );
+                        let forward_info_event = entry
+                            .forward_info
+                            .as_ref()
+                            .map(crate::events::ForwardInfoEvent::from);
+                        let timestamp = entry
+                            .timestamp
+                            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                        self.emit_event(Event::group_message_received(
+                            group_id.to_string(),
+                            entry.sender,
+                            text,
+                            timestamp,
+                            entry.message_id,
+                            entry.reply_to,
+                            forward_info_event,
+                        ));
+                    }
+                    GroupDecryptOutcome::Retriable => {
+                        still_pending.push_back(entry);
+                    }
+                    GroupDecryptOutcome::NonApplication => {
+                        state_advanced = true;
+                    }
+                    GroupDecryptOutcome::SecurityRejected | GroupDecryptOutcome::Failed => {}
                 }
-                GroupDecryptOutcome::NonApplication
-                | GroupDecryptOutcome::SecurityRejected
-                | GroupDecryptOutcome::Failed => {}
             }
-        }
 
-        if !still_pending.is_empty() {
-            self.group_mesh
-                .pending_group_messages
-                .entry(group_id.to_string())
-                .or_default()
-                .extend(still_pending);
+            if !still_pending.is_empty() {
+                self.group_mesh
+                    .pending_group_messages
+                    .entry(group_id.to_string())
+                    .or_default()
+                    .extend(still_pending);
+            }
+
+            if !state_advanced {
+                break;
+            }
+            // The consumed commit may also unblock buffered commit-channel
+            // commits; drain them before the next message pass (the pass itself
+            // satisfies drain_pending_commits' call-site contract).
+            self.drain_pending_commits(group_id);
         }
 
         // Clean up empty entries
@@ -3318,9 +3396,13 @@ impl OfflineProtocol {
                     },
                 );
             }
-            GroupDecryptOutcome::NonApplication
-            | GroupDecryptOutcome::SecurityRejected
-            | GroupDecryptOutcome::Failed => {
+            GroupDecryptOutcome::NonApplication => {
+                // Same as the mesh path: MLS consumed a commit or proposal
+                // riding the message channel — group state may have advanced.
+                self.drain_pending_commits(group_id);
+                self.drain_pending_group_messages(group_id);
+            }
+            GroupDecryptOutcome::SecurityRejected | GroupDecryptOutcome::Failed => {
                 warn!(
                     group_id = %group_id,
                     "Failed to decrypt relay group message via MLS, dropping"
