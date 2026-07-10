@@ -2539,6 +2539,25 @@ export class OfflineProtocol {
   }
 
   /**
+   * Sends a raw, caller-built relay command verbatim over the SDK's internet
+   * socket — the generic server-command channel for relay features that are
+   * app concerns rather than SDK APIs (the invite-link lifecycle:
+   * `CreateGroupInviteLink`, `JoinGroupViaInvite`, `AckGroupInviteJoin`, …).
+   *
+   * Responses the SDK doesn't consume arrive as `internet_server_message`
+   * events carrying the verbatim frame; correlate request/response with your
+   * own `request_id` where the relay supports one.
+   *
+   * @param json - A complete relay frame, e.g.
+   *   `{"type":"CreateGroupInviteLink","group_id":"g1","expires_in_secs":604800,"request_id":"req_…"}`
+   * @returns true if written to the socket (connected, authenticated, and
+   *          valid JSON), false otherwise
+   */
+  async sendRawServerCommand(json: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.internetSendRawCommand(json);
+  }
+
+  /**
    * Sends a typing indicator to a peer.
    *
    * @param recipient - Recipient's user ID

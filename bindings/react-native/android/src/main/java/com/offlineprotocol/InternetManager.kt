@@ -110,6 +110,17 @@ class InternetManager(
 
     // Which peers to query via CheckPresence, and how many per tick.
     private val presenceWatch = PresenceWatchPolicy()
+
+    // Translates core-tagged server-plane control frames (control_op on
+    // InternetMessage) into relay-native ops.
+    private val controlOpTranslator = RelayControlOpTranslator(deviceId)
+
+    /**
+     * Receives raw relay frames that are app/server concerns rather than SDK
+     * concerns (invite links, role changes, rate limiting, unknown types) —
+     * the module forwards them to JS as the `internet_server_message` event.
+     */
+    var serverMessageEmitter: ((String) -> Unit)? = null
     
     // Metrics
     private var bytesSent: Long = 0
@@ -404,6 +415,10 @@ class InternetManager(
             // Wire outcomes for anything in flight are now owned by the
             // transport layer (fail_all_pending on disconnect).
             inFlightTracker.clear()
+            // Registration diffs are per-connection: a reconnect re-registers
+            // groups from scratch (sync_groups_to_relay re-sends on the
+            // internet 0→1 transition).
+            controlOpTranslator.reset()
         }
         
         // Always notify protocol of disconnection so DORS excludes Internet from
@@ -932,16 +947,62 @@ class InternetManager(
             
             "GroupError" -> {
                 val reason = json.safeOptString("reason", "Unknown error")
-                val payloadJson = org.json.JSONObject().apply { put("reason", reason) }
+                val groupId = json.safeOptString("group_id")
+                // Admin-denied registration must stop member-delta attempts.
+                controlOpTranslator.onGroupError(groupId, reason)
+                val payloadJson = org.json.JSONObject().apply {
+                    put("reason", reason)
+                    // group_id lets the core revoke relay_synced so group
+                    // sends fall back to per-member delivery.
+                    if (groupId.isNotEmpty()) put("group_id", groupId)
+                }
                 injectGroupInternalMessage("relay", "__GROUP_ERROR__", payloadJson)
+                // Dual-emit: apps correlating request_id-carrying errors
+                // (invite-link ops ride the raw channel) need the full frame.
+                serverMessageEmitter?.invoke(json.toString())
             }
-            
+
+            // Server-plane frames that are app concerns, not SDK concerns —
+            // forwarded verbatim as the internet_server_message event so the
+            // invite-link lifecycle and misc server events can ride the
+            // SDK's socket without a second WebSocket in the app.
+            "GroupInviteLinkCreated", "GroupInviteLinkRevoked", "GroupJoinedViaInvite",
+            "GroupInviteJoinPending", "GroupRoleChanged", "GroupDeleted", "RateLimited" -> {
+                serverMessageEmitter?.invoke(json.toString())
+                emitDiagnostic("debug", "Relay server message forwarded", mapOf(
+                    "type" to messageType
+                ))
+            }
+
             else -> {
+                // Unknown types are forwarded too — future relay additions
+                // surface to the app instead of being silently dropped.
+                serverMessageEmitter?.invoke(json.toString())
                 emitDiagnostic("debug", "Received relay message", mapOf(
                     "type" to messageType
                 ))
             }
         }
+    }
+
+    /**
+     * Sends a raw, caller-built relay command verbatim (RN
+     * `internetSendRawCommand`). The JSON must parse; returns false when
+     * invalid or not connected+authenticated. Responses the SDK doesn't
+     * consume arrive as `internet_server_message` events.
+     */
+    fun sendRawCommand(json: String): Boolean {
+        if (!isConnected.get() || !isAuthenticated.get()) return false
+        val ws = webSocket ?: return false
+        val validated = try {
+            org.json.JSONObject(json)
+        } catch (e: Exception) {
+            emitDiagnostic("warning", "Rejected invalid raw server command", mapOf(
+                "error" to (e.message ?: "unknown")
+            ))
+            return false
+        }
+        return ws.send(validated.toString())
     }
     
     /** Parse ISO-8601 timestamp string to Unix ms, or return current time if invalid. */
@@ -1032,7 +1093,19 @@ class InternetManager(
                 }
                 
                 val message = protocol.internetGetNextMessage() ?: break
-                sendMessage(message.messageId, message.recipientId, message.data.map { it.toByte() }.toByteArray(), message.replyToMsg)
+                val controlOp = message.controlOp
+                if (controlOp != null) {
+                    sendControlOp(
+                        message.messageId,
+                        message.recipientId,
+                        controlOp,
+                        message.controlPayload ?: "",
+                        message.data.map { it.toByte() }.toByteArray(),
+                        message.replyToMsg
+                    )
+                } else {
+                    sendMessage(message.messageId, message.recipientId, message.data.map { it.toByte() }.toByteArray(), message.replyToMsg)
+                }
                 messagesSent++
             }
             
@@ -1117,8 +1190,91 @@ class InternetManager(
         }
     }
     
+    /**
+     * Sends a core-tagged server-plane control frame via the relay-native
+     * protocol (see [RelayControlOpTranslator]). Wire-outcome contract is the
+     * same as [sendMessage]: the original message id is confirmed on the
+     * primary frame's socket-write success, failed otherwise.
+     */
+    private fun sendControlOp(
+        messageId: String,
+        recipientId: String,
+        controlOp: String,
+        controlPayload: String,
+        data: ByteArray,
+        replyToMsg: String?
+    ) {
+        when (val translation = controlOpTranslator.translate(controlOp, controlPayload, recipientId)) {
+            is RelayControlOpTranslator.Translation.PassThrough -> {
+                sendMessage(messageId, recipientId, data, replyToMsg)
+            }
+
+            is RelayControlOpTranslator.Translation.Tap -> {
+                // Verbatim delivery owns the message id outcome; the extra
+                // relay-native frames are best-effort.
+                sendMessage(messageId, recipientId, data, replyToMsg)
+                sendRelayFramesBestEffort(translation.frames, controlOp)
+            }
+
+            is RelayControlOpTranslator.Translation.Replace -> {
+                val ws = webSocket
+                if (!isConnected.get() || !isAuthenticated.get() || ws == null) {
+                    try { protocol.internetSendFailed(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to report send failure for $messageId", e) }
+                    return
+                }
+                val primary = translation.frames.firstOrNull()
+                if (primary == null) {
+                    // Nothing to send (fully deduped) — the intent is already
+                    // reflected server-side; confirm so the core moves on.
+                    try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
+                    return
+                }
+                val primaryJson = primary.toString()
+                val sent = ws.send(primaryJson)
+                if (sent) {
+                    consecutiveSendFailures.set(0)
+                    bytesSent += primaryJson.length
+                    messagesSent++
+                    inFlightTracker.recordSent(recipientId, messageId, System.currentTimeMillis())
+                    try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
+                    sendRelayFramesBestEffort(translation.frames.drop(1), controlOp)
+                    emitDiagnostic("debug", "Control op sent relay-native", mapOf(
+                        "controlOp" to controlOp,
+                        "messageId" to messageId,
+                        "frames" to translation.frames.size
+                    ))
+                } else {
+                    val failures = consecutiveSendFailures.incrementAndGet()
+                    try { protocol.internetSendFailed(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to report send failure for $messageId", e) }
+                    emitDiagnostic("error", "Failed to send relay-native control op", mapOf(
+                        "controlOp" to controlOp,
+                        "messageId" to messageId,
+                        "consecutiveFailures" to failures
+                    ))
+                    if (failures >= MAX_CONSECUTIVE_FAILURES) {
+                        mainHandler.post { handleConnectionClosed(-1, "Send failures exceeded threshold") }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun sendRelayFramesBestEffort(frames: List<org.json.JSONObject>, controlOp: String) {
+        val ws = webSocket ?: return
+        for (frame in frames) {
+            if (!isConnected.get() || !isAuthenticated.get()) return
+            if (!ws.send(frame.toString())) {
+                emitDiagnostic("warning", "Best-effort relay frame dropped", mapOf(
+                    "controlOp" to controlOp,
+                    "frameType" to frame.optString("type")
+                ))
+                return
+            }
+        }
+    }
+
     // MARK: - Ping
-    
+
     private fun startPingTimer() {
         stopPingTimer()
         mainHandler.postDelayed(pingRunnable, PING_INTERVAL_MS)

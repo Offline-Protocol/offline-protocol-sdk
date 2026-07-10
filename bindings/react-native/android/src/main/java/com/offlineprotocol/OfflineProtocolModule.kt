@@ -370,6 +370,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 internetManager = InternetManager(reactApplicationContext, proto, config.userId) { level, message, context ->
                     emitDiagnostic(level, message, context)
                 }.also { manager ->
+                    manager.serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) }
                     manager.listener = object : TransportManagerListener {
                         override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
                             emitDiagnostic("info", "Internet transport state changed", mapOf(
@@ -496,6 +497,25 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             sendEvent(EVENT_NAME, params)
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Failed to emit diagnostic event", e)
+        }
+    }
+
+    /**
+     * Forwards a raw relay frame that is an app/server concern (invite
+     * links, role changes, rate limiting, unknown types) to JS as the
+     * `internet_server_message` event.
+     */
+    private fun emitServerMessageEvent(rawJson: String) {
+        try {
+            val json = JSONObject()
+            json.put("type", "internet_server_message")
+            json.put("json", rawJson)
+            val params = Arguments.createMap().apply {
+                putString("eventJson", json.toString())
+            }
+            sendEvent(EVENT_NAME, params)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Failed to emit server message event", e)
         }
     }
 
@@ -1346,6 +1366,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         // Create manager if not already created
                         internetManager = InternetManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
                             emitDiagnostic(level, message, context)
+                        }.also { manager ->
+                            manager.serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) }
                         }
                         emitDiagnostic("info", "Internet manager created on demand")
                     }
@@ -3350,6 +3372,22 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(manager.checkPresence(userId))
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_INTERNET", "Failed to query presence")
+        }
+    }
+
+    /**
+     * Sends a raw, caller-built relay command verbatim over the SDK's
+     * socket (invite-link lifecycle and other server-plane ops). Resolves
+     * true when written; false when invalid JSON or not connected and
+     * authenticated. Responses arrive as `internet_server_message` events.
+     */
+    @ReactMethod
+    fun internetSendRawCommand(json: String, promise: Promise) {
+        try {
+            val manager = internetManager ?: throw IllegalStateException("Internet transport not initialized")
+            promise.resolve(manager.sendRawCommand(json))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_INTERNET", "Failed to send raw server command")
         }
     }
 
