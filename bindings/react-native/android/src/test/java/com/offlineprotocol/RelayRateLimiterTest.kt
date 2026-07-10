@@ -67,6 +67,21 @@ class RelayRateLimiterTest {
     }
 
     @Test
+    fun refillRecoversAfterABackwardClockStep() {
+        val limiter = RelayRateLimiter(capacity = 5, refillPerSecond = 1.0)
+        val t0 = 100_000L
+        repeat(5) { assertTrue(limiter.tryAcquire(t0)) }
+        // The clock steps back 30 minutes with the bucket empty. No minting —
+        // but the baseline must resync to the new now, not freeze until the
+        // clock re-passes the old mark (which would silence every relay-bound
+        // frame for the full step duration).
+        val stepped = t0 - 1_800_000
+        assertFalse(limiter.tryAcquire(stepped))
+        // One second after the backward step, refill has resumed.
+        assertTrue(limiter.tryAcquire(stepped + 1_000))
+    }
+
+    @Test
     fun defaultsSitUnderTheRelayBudget() {
         // The relay's documented bucket is 30 burst / 10 per second; the
         // client mirror must leave headroom for unmetered frames (auth).

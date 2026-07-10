@@ -52,6 +52,50 @@ class RecipientInFlightTrackerTest {
     }
 
     @Test
+    fun relayAcceptedResolvesExactIdWhenItMatches() {
+        val tracker = RecipientInFlightTracker(ttlMs = 60_000, maxPerRecipient = 32)
+        tracker.recordSent("bob", "m1", nowMs = 1_000)
+        tracker.recordSent("bob", "m2", nowMs = 2_000)
+
+        tracker.resolveOnRelayAccepted("bob", "m2", nowMs = 3_000)
+
+        // Only the accepted frame left the tracker; a later DeliveryError
+        // still fails the genuinely unresolved one.
+        assertEquals(listOf("m1"), tracker.drainRecipient("bob", nowMs = 4_000))
+    }
+
+    @Test
+    fun relayAcceptedFallsBackToOldestForUnknownOrMissingId() {
+        val tracker = RecipientInFlightTracker(ttlMs = 60_000, maxPerRecipient = 32)
+        tracker.recordSent("bob", "m1", nowMs = 1_000)
+        tracker.recordSent("bob", "m2", nowMs = 2_000)
+        tracker.recordSent("bob", "m3", nowMs = 3_000)
+
+        // The relay echoes a server-generated id: sends per recipient are
+        // FIFO on one socket, so the answer belongs to the oldest in-flight.
+        tracker.resolveOnRelayAccepted("bob", "server-id", nowMs = 4_000)
+        tracker.resolveOnRelayAccepted("bob", null, nowMs = 4_000)
+
+        assertEquals(listOf("m3"), tracker.drainRecipient("bob", nowMs = 5_000))
+    }
+
+    @Test
+    fun relayAcceptedIgnoresExpiredEntriesAndUnknownRecipients() {
+        val tracker = RecipientInFlightTracker(ttlMs = 1_000, maxPerRecipient = 32)
+        tracker.recordSent("bob", "stale", nowMs = 0)
+        tracker.recordSent("bob", "fresh", nowMs = 2_500)
+
+        // The stale entry is expired housekeeping, not the oldest live send:
+        // the answer must resolve "fresh", not be eaten by "stale".
+        tracker.resolveOnRelayAccepted("bob", null, nowMs = 3_000)
+        assertTrue(tracker.drainRecipient("bob", nowMs = 3_000).isEmpty())
+
+        // No-ops, never throws.
+        tracker.resolveOnRelayAccepted("nobody", "m1", nowMs = 3_000)
+        tracker.resolveOnRelayAccepted("", "m1", nowMs = 3_000)
+    }
+
+    @Test
     fun ignoresEmptyInputsAndClearForgetsEverything() {
         val tracker = RecipientInFlightTracker()
         tracker.recordSent("", "m1", nowMs = 1)

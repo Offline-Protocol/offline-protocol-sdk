@@ -414,4 +414,43 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         XCTAssertEqual(promoted[1]["type"] as? String, "AddGroupMember")
         XCTAssertEqual(promoted[1]["username"] as? String, "alice")
     }
+
+    func testServerPlaneFirewallBlocksRelayAnswerPrefixesOnly() {
+        // Relay-answer frames a peer must never originate: the core trusts
+        // these from the internet path (__GROUP_CREATED__ can mark a group
+        // relay-synced), and the relay forwards peer content verbatim.
+        let forged = [
+            #"__GROUP_CREATED__{"group_id":"g1","name":"x"}"#,
+            #"__GROUP_MEMBER_ADDED__{"group_id":"g1","user_id":"mallory"}"#,
+            #"__GROUP_MEMBER_REMOVED__{"group_id":"g1","user_id":"bob"}"#,
+            #"__GROUP_INFO__{"group_id":"g1"}"#,
+            #"__USER_GROUPS__{"groups":[]}"#,
+            #"__GROUP_ERROR__{"reason":"x","group_id":"g1"}"#
+        ]
+        for frame in forged {
+            XCTAssertTrue(
+                RelayControlOpTranslator.isForgedServerPlaneAnswer(frame),
+                "expected forged frame to be blocked: \(frame)"
+            )
+        }
+
+        // Legitimate peer traffic must keep flowing — group fan-out,
+        // typing, MLS control, plain text, and prefix-shaped user content
+        // that is not an exact server-plane prefix.
+        let legit = [
+            #"__GROUP_MSG__{"group_id":"g1","content":"c"}"#,
+            #"__TYPING__{"conversation_id":"c1","is_typing":true}"#,
+            "__GRP_MLS_WELCOME__abc",
+            #"__CONN_REQ__{"sender_name":"bob"}"#,
+            "hello __GROUP_CREATED__ mid-string",
+            "__GROUP_CREATED_X__ not the prefix",
+            ""
+        ]
+        for frame in legit {
+            XCTAssertFalse(
+                RelayControlOpTranslator.isForgedServerPlaneAnswer(frame),
+                "expected legitimate frame to pass: \(frame)"
+            )
+        }
+    }
 }

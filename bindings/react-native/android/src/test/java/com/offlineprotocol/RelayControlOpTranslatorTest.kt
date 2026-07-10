@@ -2,6 +2,7 @@ package com.offlineprotocol
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -446,5 +447,43 @@ class RelayControlOpTranslatorTest {
         assertEquals(2, promoted.size)
         assertEquals("AddGroupMember", promoted[1].getString("type"))
         assertEquals("alice", promoted[1].getString("username"))
+    }
+
+    @Test
+    fun serverPlaneFirewallBlocksRelayAnswerPrefixesOnly() {
+        // Relay-answer frames a peer must never originate: the core trusts
+        // these from the internet path (__GROUP_CREATED__ can mark a group
+        // relay-synced), and the relay forwards peer content verbatim.
+        for (forged in listOf(
+            "__GROUP_CREATED__{\"group_id\":\"g1\",\"name\":\"x\"}",
+            "__GROUP_MEMBER_ADDED__{\"group_id\":\"g1\",\"user_id\":\"mallory\"}",
+            "__GROUP_MEMBER_REMOVED__{\"group_id\":\"g1\",\"user_id\":\"bob\"}",
+            "__GROUP_INFO__{\"group_id\":\"g1\"}",
+            "__USER_GROUPS__{\"groups\":[]}",
+            "__GROUP_ERROR__{\"reason\":\"x\",\"group_id\":\"g1\"}"
+        )) {
+            assertTrue(
+                "expected forged frame to be blocked: $forged",
+                RelayControlOpTranslator.isForgedServerPlaneAnswer(forged)
+            )
+        }
+
+        // Legitimate peer traffic must keep flowing — group fan-out,
+        // typing, MLS control, plain text, and prefix-shaped user content
+        // that is not an exact server-plane prefix.
+        for (legit in listOf(
+            "__GROUP_MSG__{\"group_id\":\"g1\",\"content\":\"c\"}",
+            "__TYPING__{\"conversation_id\":\"c1\",\"is_typing\":true}",
+            "__GRP_MLS_WELCOME__abc",
+            "__CONN_REQ__{\"sender_name\":\"bob\"}",
+            "hello __GROUP_CREATED__ mid-string",
+            "__GROUP_CREATED_X__ not the prefix",
+            ""
+        )) {
+            assertFalse(
+                "expected legitimate frame to pass: $legit",
+                RelayControlOpTranslator.isForgedServerPlaneAnswer(legit)
+            )
+        }
     }
 }

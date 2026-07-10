@@ -35,6 +35,31 @@ final class RelayControlOpTranslator {
     /// source (see docs/relay-transport-parity-spec.md).
     static let adminDeniedReasonMarker = "Only admins"
 
+    /// SDK content prefixes only the relay server (bridged by
+    /// InternetManager's injectGroupInternalMessage) may originate — never a
+    /// peer. The relay forwards peer message content verbatim, so without
+    /// this firewall any peer could deliver a crafted `__GROUP_CREATED__`
+    /// over the authenticated internet path and (in concert with a spoofed
+    /// registration window) mark a group relay-synced against a relay that
+    /// never registered it — black-holing broadcasts on a store-less relay.
+    /// `__GROUP_MSG__` is deliberately absent: it is legitimate peer/relay
+    /// group traffic. Mirrors the Kotlin translator — keep in sync.
+    private static let serverPlaneAnswerPrefixes = [
+        "__GROUP_CREATED__",
+        "__GROUP_MEMBER_ADDED__",
+        "__GROUP_MEMBER_REMOVED__",
+        "__GROUP_INFO__",
+        "__USER_GROUPS__",
+        "__GROUP_ERROR__"
+    ]
+
+    /// True when peer-delivered message content must be dropped because it
+    /// impersonates a relay server answer. Called by the `MessageReceived`
+    /// ingest path with the inner SDK content.
+    static func isForgedServerPlaneAnswer(_ content: String) -> Bool {
+        return serverPlaneAnswerPrefixes.contains { content.hasPrefix($0) }
+    }
+
     enum Translation {
         /// Send these relay-native frames instead of the original message.
         /// Invoke the commit ONLY after every frame was written to the

@@ -134,6 +134,14 @@ class InternetManager(
     private val rateLimiter = RelayRateLimiter()
 
     /**
+     * Time source for the rate limiter: monotonic (and sleep-inclusive), so
+     * a wall-clock step (NTP correction, manual change) can never freeze or
+     * over-mint token refill. Every rateLimiter call must use this — mixing
+     * time sources per call site would look like clock jumps to the bucket.
+     */
+    private fun monotonicNowMs(): Long = android.os.SystemClock.elapsedRealtime()
+
+    /**
      * Control-op frames deferred by the rate limiter, drained (oldest first)
      * at the start of each poll tick. A translation's commit closure runs
      * only after its LAST frame is written. Main-thread only; cleared on
@@ -261,7 +269,17 @@ class InternetManager(
         
         updateState(TransportState.STARTING)
         transportStartAt = System.currentTimeMillis()
-        
+
+        // An explicit start() means "run": a pause() from a previous
+        // session must not leave this fresh transport authenticated-but-mute
+        // (e.g. pause → stop → push-triggered enableTransport, which would
+        // otherwise skip the poll/ping/presence timers on Authenticated).
+        // The reconnect backoff is likewise per-session state: a stale 30s
+        // delay must not slow the first retry of a brand-new start.
+        isPaused = false
+        reconnectAttempts.set(0)
+        currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
+
         // Create OkHttp client
         okHttpClient = OkHttpClient.Builder()
             .connectTimeout(CONNECTION_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -306,6 +324,11 @@ class InternetManager(
         inFlightTracker.clear()
         controlOpTranslator.reset()
         pendingControlFrames.clear()
+        // The watch set survives *reconnects* on purpose (pending traffic is
+        // still pending), but an explicit stop() ends the session: without
+        // this, a stop/start cycle spends up to the idle TTL of CheckPresence
+        // tokens on the previous session's peers.
+        presenceWatch.clear()
 
         // Notify protocol
         try {
@@ -378,6 +401,12 @@ class InternetManager(
             .addHeader("X-Device-ID", deviceId)
             .build()
 
+        // Invariant: OkHttp dispatches listener callbacks asynchronously
+        // (DNS/TCP take milliseconds), so a terminal callback cannot observe
+        // `webSocket` before the volatile store below publishes it. If that
+        // ever changed, the callback's staleness check would suppress it and
+        // `isConnecting` would latch forever (a wedged transport) — keep the
+        // assignment immediately after newWebSocket, nothing in between.
         webSocket = client.newWebSocket(request, webSocketListener)
 
         emitDiagnostic("info", "Connecting to WebSocket", mapOf(
@@ -689,6 +718,19 @@ class InternetManager(
                 val recipient = json.safeOptString("recipient")
                 val timestamp = json.safeOptString("timestamp")
 
+                // The relay accepted this frame (forwarded, or FCM-poked an
+                // offline recipient) — either way it is no longer in flight
+                // and must not be swept into a later recipient-keyed
+                // DeliveryError. NOT a delivery signal (the poke case), so
+                // the recipient is deliberately not unwatched here.
+                if (recipient.isNotEmpty()) {
+                    inFlightTracker.resolveOnRelayAccepted(
+                        recipient,
+                        messageId?.takeIf { it.isNotEmpty() },
+                        System.currentTimeMillis()
+                    )
+                }
+
                 if (messageId != null && messageId.isNotEmpty()) {
                     // The server has confirmed the message was sent with this message_id
                     // We need to notify the protocol so it can update the message ID
@@ -724,7 +766,10 @@ class InternetManager(
                     // (since that's what we sent). However, the server also extracts reply_to_msg and message_id as
                     // separate fields, so we need to ensure they're included in the Message JSON.
                     var messageBytes: ByteArray
-                    
+                    // The SDK-level content inside the Message, for the
+                    // server-plane firewall below.
+                    var innerContent: String = content
+
                     try {
                         // Try to parse content as JSON to see if it's already a full Message
                         val contentJson = org.json.JSONObject(content)
@@ -738,6 +783,7 @@ class InternetManager(
                             if (replyToMsg != null && replyToMsg.isNotEmpty() && !contentJson.has("reply_to_msg")) {
                                 contentJson.put("reply_to_msg", replyToMsg)
                             }
+                            innerContent = contentJson.optString("content", "")
                             messageBytes = contentJson.toString().toByteArray(Charsets.UTF_8)
                         } else {
                             // Content is just the message text, reconstruct full Message JSON
@@ -781,6 +827,21 @@ class InternetManager(
                         messageBytes = messageJson.toString().toByteArray(Charsets.UTF_8)
                     }
                     
+                    // Server-plane firewall: peers must never originate
+                    // relay-answer frames (__GROUP_CREATED__ & co.). The
+                    // relay forwards content verbatim, and the core trusts
+                    // these answers from the internet path — one forged
+                    // GroupCreated could mark a group relay-synced against a
+                    // relay that never registered it. Legitimate answers
+                    // enter via injectGroupInternalMessage, not this path.
+                    if (RelayControlOpTranslator.isForgedServerPlaneAnswer(innerContent)) {
+                        emitDiagnostic("warning", "Dropped peer frame impersonating a relay server answer", mapOf(
+                            "senderId" to senderId,
+                            "prefix" to innerContent.take(32)
+                        ))
+                        return
+                    }
+
                     val bytes = messageBytes.map { it.toUByte() }
                     protocol.internetMessageReceived(senderId, bytes)
 
@@ -867,6 +928,9 @@ class InternetManager(
                     put("timestamp_ms", System.currentTimeMillis())
                 }
                 injectGroupInternalMessage(typingUserId, "__TYPING__", typingPayload)
+                // A typing peer is provably online — same inbound-proof rule
+                // as MessageReceived: stop spending CheckPresence slots on it.
+                presenceWatch.unwatch(typingUserId)
                 emitDiagnostic("debug", "Typing update bridged from relay", mapOf(
                     "userId" to typingUserId,
                     "typing" to typing
@@ -1109,9 +1173,19 @@ class InternetManager(
                 // and the next register re-derives deltas from scratch; the
                 // worst case is an idempotent re-registration. Drain the
                 // local bucket too: it was clearly too optimistic.
-                controlOpTranslator.reset()
-                rateLimiter.drain(System.currentTimeMillis())
-                mainHandler.post { pendingControlFrames.clear() }
+                //
+                // The whole reaction runs as ONE main post so it serializes
+                // with poll ticks: resetting the translator here on the
+                // reader thread while the clear is still queued would let an
+                // interleaved tick translate a post-reset register whose
+                // delta frames the clear then wipes (their commits never
+                // run, and the group's relay membership stays stale until
+                // the next register trigger).
+                mainHandler.post {
+                    controlOpTranslator.reset()
+                    rateLimiter.drain(monotonicNowMs())
+                    pendingControlFrames.clear()
+                }
                 serverMessageEmitter?.invoke(json.toString())
                 emitDiagnostic("warning", "Relay rate limit hit — translator state reset")
             }
@@ -1175,7 +1249,7 @@ class InternetManager(
             ))
             return false
         }
-        if (!rateLimiter.tryAcquire(System.currentTimeMillis())) return false
+        if (!rateLimiter.tryAcquire(monotonicNowMs())) return false
         val sent = ws.send(json)
         if (!sent) rateLimiter.refund()
         return sent
@@ -1264,7 +1338,7 @@ class InternetManager(
                 // frames/s at the relay's 10/s bucket, and over-budget frames
                 // are dropped server-side AFTER the local write "succeeded".
                 // Out of tokens: leave the rest queued in the core.
-                if (!rateLimiter.tryAcquire(System.currentTimeMillis())) break
+                if (!rateLimiter.tryAcquire(monotonicNowMs())) break
 
                 val message = protocol.internetGetNextMessage()
                 if (message == null) {
@@ -1311,11 +1385,14 @@ class InternetManager(
                 "isAuthenticated" to isAuthenticated.get(),
                 "hasSocket" to (ws != null)
             ))
+            // The poll loop acquired a token for this frame; nothing was
+            // written, so return it ("false means defer, never drop").
+            rateLimiter.refund()
             // Report failure so DORS metrics stay accurate
             try { protocol.internetSendFailed(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to report send failure for $messageId", e) }
             return
         }
-        
+
         // Convert data to string content for the relay protocol
         val content = String(data, Charsets.UTF_8)
         
@@ -1349,6 +1426,8 @@ class InternetManager(
                 "contentLength" to content.length
             ))
         } else {
+            // Nothing reached the relay's bucket — return the token.
+            rateLimiter.refund()
             val failures = consecutiveSendFailures.incrementAndGet()
             try { protocol.internetSendFailed(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to report send failure for $messageId", e) }
             emitDiagnostic("error", "Failed to send WebSocket message", mapOf(
@@ -1401,6 +1480,7 @@ class InternetManager(
             is RelayControlOpTranslator.Translation.Replace -> {
                 val ws = webSocket
                 if (!isConnected.get() || !isAuthenticated.get() || ws == null) {
+                    rateLimiter.refund()
                     try { protocol.internetSendFailed(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to report send failure for $messageId", e) }
                     return
                 }
@@ -1408,6 +1488,8 @@ class InternetManager(
                 if (primary == null) {
                     // Nothing to send (fully deduped) — the intent is already
                     // reflected server-side; confirm so the core moves on.
+                    // No frame was written: return the poll loop's token.
+                    rateLimiter.refund()
                     translation.commit?.invoke()
                     try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
                     return
@@ -1427,6 +1509,8 @@ class InternetManager(
                         "frames" to translation.frames.size
                     ))
                 } else {
+                    // Nothing reached the relay's bucket — return the token.
+                    rateLimiter.refund()
                     val failures = consecutiveSendFailures.incrementAndGet()
                     try { protocol.internetSendFailed(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to report send failure for $messageId", e) }
                     emitDiagnostic("error", "Failed to send relay-native control op", mapOf(
@@ -1477,11 +1561,16 @@ class InternetManager(
             if (!isConnected.get() || !isAuthenticated.get()) return
             val pending = pendingControlFrames.first()
             while (pending.frames.isNotEmpty()) {
-                if (!rateLimiter.tryAcquire(System.currentTimeMillis())) return
+                if (!rateLimiter.tryAcquire(monotonicNowMs())) return
                 val frame = pending.frames.first()
                 val frameJson = frame.toString()
                 if (!ws.send(frameJson)) {
                     rateLimiter.refund()
+                    // Deliberately does NOT bump consecutiveSendFailures:
+                    // these frames are best-effort deltas, and a dead socket
+                    // fails data sends (which do bump it) and fires onFailure
+                    // anyway. Keeping the counter data-plane-only avoids a
+                    // teardown decision driven by best-effort traffic.
                     emitDiagnostic("warning", "Relay control frame dropped by socket", mapOf(
                         "controlOp" to pending.controlOp,
                         "frameType" to frame.optString("type")
@@ -1540,15 +1629,18 @@ class InternetManager(
                 Log.e(TAG, "Failed to fail-fast in-flight message $id", e)
             }
         }
-        // Never watch self: a malformed self-addressed frame's DeliveryError
-        // would otherwise occupy a rotation slot until the idle TTL.
+        // Never watch self, and never feed "self is offline" into the core:
+        // a malformed self-addressed frame's DeliveryError would otherwise
+        // occupy a rotation slot until the idle TTL and could surface a
+        // presence_updated(self, offline) to the app. (The core drops self
+        // presence too — this just keeps the bridge honest at the source.)
         if (recipient != deviceId) {
             presenceWatch.watch(recipient, now)
-        }
-        try {
-            protocol.internetPeerPresence(recipient, false, null)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to ingest offline presence for $recipient", e)
+            try {
+                protocol.internetPeerPresence(recipient, false, null)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to ingest offline presence for $recipient", e)
+            }
         }
         emitDiagnostic("warning", "Recipient unreachable", mapOf(
             "recipient" to recipient,
@@ -1585,7 +1677,7 @@ class InternetManager(
             for (peer in peers) {
                 // Presence queries yield to data traffic under rate
                 // pressure; skipped peers come around on a later rotation.
-                if (!rateLimiter.tryAcquire(now)) break
+                if (!rateLimiter.tryAcquire(monotonicNowMs())) break
                 val checkMessage = org.json.JSONObject().apply {
                     put("type", "CheckPresence")
                     put("username", peer)
@@ -1618,7 +1710,7 @@ class InternetManager(
     fun checkPresence(userId: String): Boolean {
         if (userId.isEmpty() || !isConnected.get() || !isAuthenticated.get()) return false
         val ws = webSocket ?: return false
-        if (!rateLimiter.tryAcquire(System.currentTimeMillis())) return false
+        if (!rateLimiter.tryAcquire(monotonicNowMs())) return false
         val checkMessage = org.json.JSONObject().apply {
             put("type", "CheckPresence")
             put("username", userId)
