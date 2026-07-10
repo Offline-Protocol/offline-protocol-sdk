@@ -2531,8 +2531,10 @@ export class OfflineProtocol {
    * app UI needs (last-seen display, pre-send checks).
    *
    * @param userId - Peer's user ID
-   * @returns true if the query was sent (internet transport connected and
-   *          authenticated), false otherwise
+   * @returns true if the query was written to the socket (internet transport
+   *          connected and authenticated); false otherwise — including when
+   *          the SDK's client-side rate limiter deferred it (safe to retry
+   *          after a short delay)
    * @throws when the internet transport was never initialized (enable it via
    *         `transports.internet` before calling)
    */
@@ -2560,7 +2562,10 @@ export class OfflineProtocol {
    *   `{"type":"CreateGroupInviteLink","group_id":"g1","expires_in_secs":604800,"request_id":"req_…"}`
    * @returns true once the socket accepted the command (write-confirmed on
    *          iOS, enqueue-confirmed on Android — the closest OkHttp offers);
-   *          false when not connected+authenticated or the JSON is invalid
+   *          false when not connected+authenticated, the JSON is invalid, or
+   *          the SDK's client-side rate limiter deferred it (the SDK mirrors
+   *          the relay's 30-burst/10-per-second budget — safe to retry after
+   *          a short delay)
    * @throws when the internet transport was never initialized (enable it via
    *         `transports.internet` before calling)
    */

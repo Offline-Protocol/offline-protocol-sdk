@@ -797,7 +797,15 @@ export interface WelcomeSendSucceededEvent extends BaseEvent {
 }
 
 /**
- * Welcome send failed event
+ * Welcome send failed event.
+ *
+ * Note: `welcome_send_succeeded → welcome_send_failed` is a LEGAL sequence
+ * for the same welcome over the internet transport. The bridge confirms on
+ * socket-write success, but the relay stores nothing for offline
+ * recipients — its later `DeliveryError` corrects the earlier success
+ * (reason_code `PEER_UNREACHABLE`, `retryable: true`). Recovery is
+ * automatic (presence-driven re-send); treat this event as state, not as a
+ * terminal verdict.
  */
 export interface WelcomeSendFailedEvent extends BaseEvent {
   type: 'welcome_send_failed';
