@@ -68,7 +68,7 @@ pub struct OfflineProtocol {
     retry_queue: RetryQueue,
 
     /// Deduplicator for preventing duplicates.
-    deduplicator: Deduplicator,
+    pub(crate) deduplicator: Deduplicator,
 
     /// Shared mutable state.
     shared_state: Arc<Mutex<SharedState>>,

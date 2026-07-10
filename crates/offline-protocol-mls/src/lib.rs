@@ -42,7 +42,7 @@ mod storage_adapter;
 pub mod types;
 
 pub use error::{MlsError, Result};
-pub use manager::MlsManager;
+pub use manager::{is_mls_framed, MlsManager};
 pub use storage::{MlsStorage, StorageError};
 pub use types::{
     EncryptedMessage, GroupId, GroupInfo, GroupMetadata, GroupRole, KeyPackageBundle,

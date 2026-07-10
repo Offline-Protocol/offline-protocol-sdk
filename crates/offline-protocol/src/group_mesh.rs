@@ -151,6 +151,12 @@ enum GroupDecryptOutcome {
     /// the message may decrypt after a Welcome or commit lands, so it is
     /// worth buffering for deferred retry.
     Retriable,
+    /// No local group state AND the payload is not MLS wire framing at
+    /// all — this is not a welcome-racing ciphertext. On the mesh path
+    /// that means garbage (dropped); on the relay path it means a legacy
+    /// relay-only group message whose plaintext happens to be valid
+    /// base64, which must be emitted raw rather than buffered and lost.
+    NotMlsCiphertext,
     /// Permanently failed; not worth retrying.
     Failed,
 }
@@ -607,7 +613,11 @@ impl OfflineProtocol {
                 self.drain_pending_group_messages(&payload.group_id);
                 InternalMessageResult::Consumed
             }
-            GroupDecryptOutcome::Failed => InternalMessageResult::Consumed,
+            // The mesh channel carries MLS ciphertext by protocol, so a
+            // payload that is not MLS framing is garbage, not legacy content.
+            GroupDecryptOutcome::NotMlsCiphertext | GroupDecryptOutcome::Failed => {
+                InternalMessageResult::Consumed
+            }
         }
     }
 
@@ -669,13 +679,30 @@ impl OfflineProtocol {
                 );
                 GroupDecryptOutcome::SecurityRejected
             }
-            Err(
-                e @ (offline_protocol_mls::MlsError::GroupNotFound(_)
-                | offline_protocol_mls::MlsError::Decryption(_)),
-            ) => {
-                // No local group state yet (Welcome still in flight) or an
-                // epoch-lagged ciphertext — may decrypt once local group
-                // state catches up.
+            Err(e @ offline_protocol_mls::MlsError::GroupNotFound(_)) => {
+                // No local group state yet. Only buffer what is actually MLS
+                // wire framing — a racing ciphertext parses, legacy relay
+                // plaintext that happens to be valid base64 does not.
+                // (`Decryption` failures below skip this check: decryption
+                // only runs after framing already parsed.)
+                if offline_protocol_mls::is_mls_framed(&encrypted.ciphertext) {
+                    warn!(
+                        group_id = %group_id,
+                        error = %e,
+                        "Failed to decrypt group message (may be out-of-order, buffering)"
+                    );
+                    GroupDecryptOutcome::Retriable
+                } else {
+                    debug!(
+                        group_id = %group_id,
+                        "Group message payload is not MLS framing and no local group state exists"
+                    );
+                    GroupDecryptOutcome::NotMlsCiphertext
+                }
+            }
+            Err(e @ offline_protocol_mls::MlsError::Decryption(_)) => {
+                // Epoch-lagged ciphertext — may decrypt once a commit
+                // advances local group state.
                 warn!(
                     group_id = %group_id,
                     error = %e,
@@ -1101,13 +1128,35 @@ impl OfflineProtocol {
         CommitOutcome::Success(payload.group_id)
     }
 
+    /// Releases every replay-protection record for a buffered entry dropped
+    /// undelivered (cap eviction or TTL expiry), so a sender-side redelivery
+    /// is accepted fresh instead of being rejected as a replay of a copy
+    /// that no longer exists anywhere.
+    ///
+    /// Two layers must be released. The group-level dedup table rejects
+    /// redeliveries inside the group handlers; the transport-level
+    /// deduplicator rejects them earlier, at the receive loop — on the mesh
+    /// path the envelope ID doubles as the group dedup key, so without this
+    /// release a redelivery would be swallowed (and re-ACKed as delivered)
+    /// for up to the deduplicator's retention window without ever reaching
+    /// the group handlers. Relay-path IDs are relay payload IDs that never
+    /// enter the transport deduplicator (the platform bridges mint a fresh
+    /// envelope UUID per injected message), so `from_str` fails or the
+    /// unmark is a no-op there — both harmless.
+    pub(crate) fn release_replay_protection(&mut self, message_id: &str) {
+        self.group_mesh.message_dedup.remove(message_id);
+        if let Ok(envelope_id) = MessageId::from_str(message_id) {
+            self.deduplicator.unmark_seen(&envelope_id);
+        }
+    }
+
     /// Buffers a failed commit for deferred retry.
     ///
     /// The commit's message ID is already in the dedup table, so this
     /// buffered copy is its only path to processing — whenever a buffered
     /// commit is dropped unprocessed (cap eviction here, TTL expiry at
-    /// drain), its dedup ID is released so a redelivery gets a fresh chance
-    /// instead of being permanently rejected, mirroring
+    /// drain), its replay protection is released so a redelivery gets a
+    /// fresh chance instead of being permanently rejected, mirroring
     /// `buffer_pending_group_message`.
     pub(crate) fn buffer_pending_commit(
         &mut self,
@@ -1141,33 +1190,37 @@ impl OfflineProtocol {
             );
             return;
         };
-        // An evicted commit was never processed — release its dedup ID so a
-        // sender-side redelivery is accepted fresh instead of being rejected
-        // as a replay of a copy that no longer exists anywhere.
+        // An evicted commit was never processed — release its replay
+        // protection so a sender-side redelivery is accepted fresh instead
+        // of being rejected as a replay of a copy that no longer exists.
         for entry in &evicted {
-            self.group_mesh.message_dedup.remove(&entry.message_id);
+            self.release_replay_protection(&entry.message_id);
         }
-        let group_mesh = &mut self.group_mesh;
-        let buf = group_mesh
-            .pending_commits
-            .entry(group_id.to_string())
-            .or_default();
-        if buf.len() < MAX_PENDING_COMMITS_PER_GROUP {
+        let displaced = {
+            let buf = self
+                .group_mesh
+                .pending_commits
+                .entry(group_id.to_string())
+                .or_default();
+            let displaced = if buf.len() >= MAX_PENDING_COMMITS_PER_GROUP {
+                warn!(
+                    group_id = %group_id,
+                    "Pending commit buffer full, dropping oldest"
+                );
+                buf.pop_front()
+            } else {
+                None
+            };
             buf.push_back(pending);
             debug!(
                 group_id = %group_id,
                 buffered_count = buf.len(),
                 "Buffered out-of-order commit for deferred retry"
             );
-        } else {
-            warn!(
-                group_id = %group_id,
-                "Pending commit buffer full, dropping oldest"
-            );
-            if let Some(evicted) = buf.pop_front() {
-                group_mesh.message_dedup.remove(&evicted.message_id);
-            }
-            buf.push_back(pending);
+            displaced
+        };
+        if let Some(displaced) = displaced {
+            self.release_replay_protection(&displaced.message_id);
         }
     }
 
@@ -1209,10 +1262,10 @@ impl OfflineProtocol {
                     if entry.retry_count > 0 {
                         retried_expired_count += 1;
                     }
-                    // Never processed — release the dedup ID so a redelivery
-                    // is accepted fresh even before the periodic dedup sweep
-                    // runs.
-                    self.group_mesh.message_dedup.remove(&entry.message_id);
+                    // Never processed — release replay protection so a
+                    // redelivery is accepted fresh even before the periodic
+                    // dedup sweep runs.
+                    self.release_replay_protection(&entry.message_id);
                     continue;
                 }
                 match self.process_commit_core(&entry.sender, &entry.data) {
@@ -1272,8 +1325,9 @@ impl OfflineProtocol {
     /// other transports are rejected there — this buffered copy is the
     /// message's only path to delivery, via `drain_pending_group_messages`.
     /// Correspondingly, whenever a buffered copy is dropped undelivered
-    /// (cap eviction here, TTL expiry at drain), its dedup ID is released so
-    /// a redelivery gets a fresh chance instead of being permanently lost.
+    /// (cap eviction here, TTL expiry at drain), its replay protection is
+    /// released so a redelivery gets a fresh chance instead of being
+    /// permanently lost.
     pub(crate) fn buffer_pending_group_message(
         &mut self,
         group_id: &str,
@@ -1297,32 +1351,38 @@ impl OfflineProtocol {
             );
             return;
         };
-        // An evicted message was never delivered — release its dedup ID so a
-        // sender-side redelivery is accepted fresh instead of being rejected
-        // as a replay of a copy that no longer exists anywhere.
+        // An evicted message was never delivered — release its replay
+        // protection so a sender-side redelivery is accepted fresh instead
+        // of being rejected as a replay of a copy that no longer exists.
         for entry in &evicted {
-            self.group_mesh.message_dedup.remove(&entry.message_id);
+            self.release_replay_protection(&entry.message_id);
         }
-        let group_mesh = &mut self.group_mesh;
-        let buf = group_mesh
-            .pending_group_messages
-            .entry(group_id.to_string())
-            .or_default();
-        if buf.len() >= MAX_PENDING_GROUP_MESSAGES_PER_GROUP {
-            warn!(
+        let displaced = {
+            let buf = self
+                .group_mesh
+                .pending_group_messages
+                .entry(group_id.to_string())
+                .or_default();
+            let displaced = if buf.len() >= MAX_PENDING_GROUP_MESSAGES_PER_GROUP {
+                warn!(
+                    group_id = %group_id,
+                    "Pending group message buffer full, dropping oldest"
+                );
+                buf.pop_front()
+            } else {
+                None
+            };
+            buf.push_back(pending);
+            debug!(
                 group_id = %group_id,
-                "Pending group message buffer full, dropping oldest"
+                buffered_count = buf.len(),
+                "Buffered out-of-order group message for deferred retry"
             );
-            if let Some(evicted) = buf.pop_front() {
-                group_mesh.message_dedup.remove(&evicted.message_id);
-            }
+            displaced
+        };
+        if let Some(displaced) = displaced {
+            self.release_replay_protection(&displaced.message_id);
         }
-        buf.push_back(pending);
-        debug!(
-            group_id = %group_id,
-            buffered_count = buf.len(),
-            "Buffered out-of-order group message for deferred retry"
-        );
     }
 
     /// Drains buffered group application messages after local MLS state for
@@ -1355,9 +1415,10 @@ impl OfflineProtocol {
                         msg_id = %entry.message_id,
                         "Dropping expired pending group message"
                     );
-                    // Never delivered — release the dedup ID so a redelivery is
-                    // accepted fresh even before the periodic dedup sweep runs.
-                    self.group_mesh.message_dedup.remove(&entry.message_id);
+                    // Never delivered — release replay protection so a
+                    // redelivery is accepted fresh even before the periodic
+                    // dedup sweep runs.
+                    self.release_replay_protection(&entry.message_id);
                     continue;
                 }
                 // Validated at buffer time; failure here is defensive only.
@@ -1401,7 +1462,9 @@ impl OfflineProtocol {
                     GroupDecryptOutcome::NonApplication => {
                         state_advanced = true;
                     }
-                    GroupDecryptOutcome::SecurityRejected | GroupDecryptOutcome::Failed => {}
+                    GroupDecryptOutcome::SecurityRejected
+                    | GroupDecryptOutcome::NotMlsCiphertext
+                    | GroupDecryptOutcome::Failed => {}
                 }
             }
 
@@ -2791,14 +2854,24 @@ impl OfflineProtocol {
 
         // Expire stale pending commits, tracking groups where retried commits
         // expired — these are strong epoch fork signals (same as drain_pending_commits).
+        // Expired IDs are collected for replay-protection release below: the
+        // group-level dedup entry is at least as old as the buffered copy and
+        // was already dropped by the retain above (same `now`, same TTL), but
+        // the transport-level deduplicator has a longer retention window and
+        // must be released explicitly or a redelivery is swallowed at the
+        // receive loop.
         let commit_ttl = StdDuration::from_secs(PENDING_COMMIT_TTL_SECS);
         let mut fork_candidates: Vec<String> = Vec::new();
+        let mut expired_ids: Vec<String> = Vec::new();
         self.group_mesh.pending_commits.retain(|group_id, commits| {
             let mut retried_expired = false;
             commits.retain(|c| {
                 let alive = now.saturating_duration_since(c.buffered_at) < commit_ttl;
-                if !alive && c.retry_count > 0 {
-                    retried_expired = true;
+                if !alive {
+                    if c.retry_count > 0 {
+                        retried_expired = true;
+                    }
+                    expired_ids.push(c.message_id.clone());
                 }
                 alive
             });
@@ -2817,15 +2890,24 @@ impl OfflineProtocol {
         }
 
         // Expire stale pending group messages — covers groups where no
-        // Welcome or commit ever arrives to trigger a drain. No dedup-ID
-        // release is needed here: a message's dedup entry was inserted
-        // before it was buffered, so it is at least as old, and the dedup
-        // retain above (same `now`, same TTL) has already dropped it.
+        // Welcome or commit ever arrives to trigger a drain.
         let msg_ttl = StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS);
         self.group_mesh.pending_group_messages.retain(|_, msgs| {
-            msgs.retain(|m| now.saturating_duration_since(m.buffered_at) < msg_ttl);
+            msgs.retain(|m| {
+                let alive = now.saturating_duration_since(m.buffered_at) < msg_ttl;
+                if !alive {
+                    expired_ids.push(m.message_id.clone());
+                }
+                alive
+            });
             !msgs.is_empty()
         });
+
+        // Entries that expired here were never processed/delivered — release
+        // their replay protection so a redelivery is accepted fresh.
+        for message_id in expired_ids {
+            self.release_replay_protection(&message_id);
+        }
     }
 
     // ========================================================================
@@ -3309,13 +3391,17 @@ impl OfflineProtocol {
     // RELAY INBOUND — MLS-AWARE ROUTING
     // ========================================================================
 
-    /// Handles an inbound relay group message by routing through MLS decryption
-    /// when the group has local MLS state.
+    /// Handles an inbound relay group message by routing through MLS
+    /// decryption.
     ///
-    /// Called from `process_internal_message` when a `__GROUP_MSG__` arrives
-    /// from the relay server for a group we have MLS state for. If MLS
-    /// decryption fails or the content is not ciphertext, falls back to
-    /// emitting the raw content.
+    /// Called from `process_internal_message` for every relay `__GROUP_MSG__`
+    /// when MLS is initialized (or when the group already has local MLS
+    /// state) — including groups we have not joined yet, because a relay
+    /// group message can outrun its Welcome exactly like a mesh one; such
+    /// messages are buffered for deferred retry. Content that is not MLS
+    /// ciphertext (base64-undecodable, or base64 that is not MLS wire
+    /// framing for a group without local state) is a legacy relay-only
+    /// group message and is emitted raw.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_relay_group_message_with_mls(
         &mut self,
@@ -3401,6 +3487,21 @@ impl OfflineProtocol {
                 // riding the message channel — group state may have advanced.
                 self.drain_pending_commits(group_id);
                 self.drain_pending_group_messages(group_id);
+            }
+            GroupDecryptOutcome::NotMlsCiphertext => {
+                // Valid base64 that is not MLS framing, for a group without
+                // local MLS state: a legacy relay-only group message whose
+                // plaintext happens to decode (e.g. a base64 media blob).
+                // Emit it raw, exactly like the base64-undecodable path.
+                self.emit_event(Event::group_message_received(
+                    group_id.to_string(),
+                    sender.to_string(),
+                    content.to_string(),
+                    timestamp.to_string(),
+                    message_id.to_string(),
+                    reply_to_msg,
+                    forward_info_event,
+                ));
             }
             GroupDecryptOutcome::SecurityRejected | GroupDecryptOutcome::Failed => {
                 warn!(
