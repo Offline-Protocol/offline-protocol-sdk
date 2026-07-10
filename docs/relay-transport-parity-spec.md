@@ -86,7 +86,7 @@ Also audit the non-welcome path: `report_send_failure` on the internet transport
 void internet_peer_presence(string peer_id, boolean online, i64? last_seen_ms);
 ```
 
-Implementation: if `online`, call `notify_neighbor_reachable(peer_id, "Internet", None)` (same path as `lib.rs:3000` — re-arms parked welcomes and flushes retry queues). Always emit `presence_updated {peer_id, status, timestamp, last_seen_ms?}` (add the optional `last_seen_ms` field to the event; TS type update in `types.ts`).
+Implementation: if `online`, call `notify_neighbor_reachable(peer_id, "Internet", None)` (same path as `lib.rs:3000` — re-arms parked welcomes and flushes retry queues). Emit `presence_updated {peer_id, status, timestamp, last_seen_ms?}` (add the optional `last_seen_ms` field to the event; TS type update in `types.ts`) — except for self, blocked, or empty peer ids, which the core drops without an event (an app awaiting `presence_updated` for a blocked peer will never see it).
 
 **Change (bridge).** The `PresenceStatus`/`PresenceStatusWithLastSeen` handler parses `user_id`, `online`, `last_seen` (ISO-8601 or epoch — reuse `parseTimestampToMs`) and calls `internet_peer_presence`.
 

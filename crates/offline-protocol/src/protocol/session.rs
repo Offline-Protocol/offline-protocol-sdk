@@ -924,8 +924,10 @@ impl OfflineProtocol {
     /// tick forever. A throttled online tick still flushes queued data-plane
     /// traffic for the peer.
     ///
-    /// Always emits `presence_updated` so the app sees one unified presence
-    /// stream regardless of source (peer-sent `__PRESENCE__` or relay).
+    /// Emits `presence_updated` so the app sees one unified presence stream
+    /// regardless of source (peer-sent `__PRESENCE__` or relay) — except for
+    /// self, blocked, or empty peer ids, which are dropped entirely: an app
+    /// waiting on `presence_updated` for a blocked peer will never see it.
     pub fn on_peer_presence(&mut self, peer_id: &str, online: bool, last_seen_ms: Option<i64>) {
         if peer_id.is_empty() || peer_id == self.config.user_id || self.is_user_blocked(peer_id) {
             return;

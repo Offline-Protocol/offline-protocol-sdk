@@ -4,8 +4,13 @@ Companion to `docs/relay-transport-parity-spec.md`. Spec validated against three
 `offline-protocol-sdk` (this repo), `../fernweh_v2` (JS relay client), `../relay-server` (relay source — full ground truth).
 
 > **Implementation status (2026-07-10, branch `feat/relay-parity-phase-a`):** Phase A (A0–A8) and
-> Phase B (B1–B4, B6, B7) are implemented and verified (802 Rust tests, clippy `-D warnings`, fmt,
-> Android CI-harness suite, `tsc`). B5 (WI-7 `MessageSent` reconciliation) dropped by design. Still
+> Phase B (B1–B4, B6, B7) are implemented and verified (807 Rust tests, clippy `-D warnings`, fmt,
+> Android CI-harness suite — 110 JVM tests, 42 Swift helper tests via SwiftPM harness, `tsc`). A
+> post-review hardening pass added: registration-ack correlation for `relay_synced` (a forged
+> `__GROUP_CREATED__` over ANY path is now rejected), a bridge-side server-plane prefix firewall on
+> peer-delivered frames, a clock-step-proof monotonic rate limiter, `MessageSent`-driven in-flight
+> pruning, and iOS main-confinement/lock coverage for the socket lifecycle.
+> B5 (WI-7 `MessageSent` reconciliation) dropped by design. Still
 > open: B8 integration verification against the production relay (needs devices/relay access), and
 > `npm run build:uniffi:all` to rebuild native libs before device testing (bindings are regenerated,
 > `.so`/`.a` are not). B3 step-0 checks resolved from relay source: `AddGroupMember` is admin-gated
@@ -102,15 +107,18 @@ hardcodes the literal — document the cross-layer contract at both sites). Add
 ### D3 — WI-3 presence ingestion closes the FCM hole
 
 The spec's `internet_peer_presence(peer_id, online, last_seen_ms)` UDL method, with one addition grounded
-in finding #3: **`online=false` parks pending welcomes for that peer** (`park_welcome_no_carrier` — rolls
-back the attempt, pushes TTL, schedules the 15s slow retry). Combined with the watch loop, this is what
-actually stops budget burn when FCM push "succeeds" against an offline peer: welcome confirm-timeout burns
-1–2 attempts (of default 10), the watch tick's `CheckPresence` says offline → parked; presence online →
-`on_neighbor_discovered` → immediate retry. Implement as one core entry point
+in finding #3: **`online=false` parks pending welcomes for that peer** (shipped as
+`park_welcome_peer_unreachable`: only `Created`/`Failed` records park, only when Internet is the sole live
+carrier, and the park is **edge-driven — `next_retry_at = None`, no timed retry**; the carrier is healthy,
+so a timer would just re-send into another failure). Combined with the watch loop, this is what actually
+stops budget burn when FCM push "succeeds" against an offline peer: welcome confirm-timeout burns 1–2
+attempts (of default 10), the watch tick's `CheckPresence` says offline → parked; presence online →
+`on_neighbor_discovered` → immediate retry (throttled per peer by the presence-rescue backoff, 40s
+doubling to a 10-min cap, for peers that stay online but never confirm). Implement as one core entry point
 `OfflineProtocol::on_peer_presence(peer_id, online, last_seen_ms)` that also emits `presence_updated`
-(single emission point, consistent with the inbound `__PRESENCE__` path). Skip the spec's bridge-only
-`__PRESENCE__`-injection fallback — it can't express offline-parking, and we're regenerating bindings in
-Phase A anyway.
+(single emission point, consistent with the inbound `__PRESENCE__` path; suppressed for self/blocked/empty
+peer ids). Skip the spec's bridge-only `__PRESENCE__`-injection fallback — it can't express
+offline-parking, and we're regenerating bindings in Phase A anyway.
 
 ### D4 — Watch-set sourcing
 
@@ -151,7 +159,10 @@ never revert it without also setting `group.relay_enabled=false`.
 
 **Risks**: (1) B2/B3 coupling — mitigated by shipping as one commit-set and keeping per-member fallback
 when `relay_synced` is false; (2) stale relay presence parking a welcome for a peer that's actually online
-— bounded at 15s (`WELCOME_NO_CARRIER_RETRY_SECS`) and inbound traffic re-arms instantly; (3) relay
+— the shipped park is edge-driven (no timed retry), so recovery rides the ~20s presence watch tick: the
+peer stays on the watchlist, the next `PresenceStatus(online)` answer re-arms immediately, and any inbound
+traffic or neighbor discovery re-arms instantly; the park also only happens when Internet is the sole live
+carrier (a mesh-visible peer keeps its timed retry track); (3) relay
 `AddGroupMember` admin-gating semantics unverified → possible `GroupError` noise from non-admin members'
 re-registrations — resolved by the B3 step-0 check against local relay source; (4) release vehicle: Phase A
 must ship in an npm release that includes the issue-#136 fix (on `main` post-v0.11.0 — verify by tag
@@ -186,14 +197,16 @@ failures as per-peer no-carrier`.*
 `events.rs`: `PresenceUpdated` += `last_seen_ms: Option<i64>` (`skip_serializing_if`), builder updated
 (internal call sites: `message_dispatch.rs:810` passes `None`, tests). `protocol/mod.rs`:
 `pub fn on_peer_presence(peer_id, online, last_seen_ms)` — online → `on_neighbor_discovered` (flushes
-outbox, re-arms welcome, key exchange; benign for unknown peers — all side effects self-guarding);
-offline → `park_welcome_no_carrier(peer_id)`; always emit `presence_updated`. Add
+outbox, re-arms welcome, key exchange; benign for unknown peers — all side effects self-guarding) plus the
+false-`Sent` rescue, both throttled per peer by the presence-rescue backoff; offline →
+`park_welcome_peer_unreachable(peer_id)` (edge-driven park, no timed retry, skipped when a mesh carrier is
+live); emit `presence_updated` (suppressed for self/blocked/empty ids). Add
 `pub fn welcome_pending_peers() -> Vec<String>` (shipped: every lifecycle peer whose session is
 unconfirmed — *including* `Sent`, whose false-Sent records only presence can rescue, and `Expired`,
 which the online edge rebuilds). Tests:
-offline parks (attempt rollback + TTL push + 15s retry), online re-arms an expired welcome (mirror
-:4611), event carries `last_seen_ms`. *Commit: `feat(protocol): ingest per-peer presence to park and
-re-arm welcomes`.*
+offline parks (TTL push, no timed retry), online re-arms an expired welcome (mirror
+:4611) and re-sends a false-`Sent` one, event carries `last_seen_ms`. *Commit: `feat(protocol): ingest
+per-peer presence to park and re-arm welcomes`.*
 
 **A3 — UDL Phase A + regen.**
 `offline_protocol.udl`: `void internet_peer_presence(string peer_id, boolean online, i64? last_seen_ms);`
@@ -234,11 +247,15 @@ round-trip) → delivered with no app involvement. Then release (include #136 fi
 ### Phase B — parity + surfaces
 
 **B1 — core control-op tagging + UDL.**
-Core helper `pub(crate) fn internet_control_op(recipient_is_self: bool, content: &str) ->
-Option<(&'static str, String)>`: `__CONN_REQ__`→`conn_req`, `__CONN_ACC__`→`conn_acc`,
-`__CONN_REJ__`→`conn_rej`, `__CONN_CAN__`→`conn_can` (any recipient);
-`__GRP_RELAY_REG__`→`group_relay_register`, `__GRP_RELAY_BCAST__`→`group_relay_broadcast` (self-addressed
-only). Unit-test in core. UDL `InternetMessage` += `string? control_op; string? control_payload;`;
+Core helper (shipped signature: `pub fn internet_control_op(&self, message: &Message) ->
+Option<(&'static str, String)>` — it needs the sender): `__CONN_REQ__`→`conn_req`,
+`__CONN_ACC__`→`conn_acc`, `__CONN_REJ__`→`conn_rej`, `__CONN_CAN__`→`conn_can` and
+`__GRP_MLS_LEAVE__`→`group_mls_leave` (**sender == self required** — a mesh-relayed third-party frame
+transiting our internet outbox must stay an opaque `SendMessage`, or the relay-native replacement would
+misattribute it to us); `__GRP_RELAY_REG__`→`group_relay_register`,
+`__GRP_RELAY_BCAST__`→`group_relay_broadcast` (sender AND recipient == self — that self-addressing is how
+the core marks them as hints). Unit-test in core. UDL `InternetMessage` += `string? control_op; string?
+control_payload;`;
 `internet_get_next_message` (lib.rs:3100, incl. the fallback-queue path) populates them from the
 already-deserialized `message.content`. Regen `build:uniffi:all`. Poll loops keep working untouched until
 B3 reads the new fields.
@@ -262,10 +279,11 @@ failure → `internetSendFailed`:
 | `conn_can` | `CancelConnectionRequest {recipient}` |
 | `group_relay_register` | `CreateGroup {group_id, name: group_name ?? group_id}` + per-group membership diff (bridge-tracked set, reset on reconnect) → `AddGroupMember`/`RemoveGroupMember {group_id, username}` |
 | `group_relay_broadcast` | `SendGroupMessage {group_id, content: ciphertext, reply_to_msg: reply_to}` (forward_info not representable — falls back to per-member for forwards is NOT automatic; accept the loss, note it) |
-Everything else — `__MLS_*`, `__TYPING__`, `__READ_RECEIPT__`, `__PRESENCE__`, `__GRP_MLS_*`,
-`__GROUP_MEMBER_REMOVED__`, `__GRP_RENAME__`, chat — continues verbatim as `SendMessage` (the inbound side
-already maps relay events back to the same prefixes, so the round-trip stays lossless). Extract
-`RelayControlOpTranslator` as a pure tested class per platform. *Commit-set: `feat(protocol+bindings):
+| `group_mls_leave` | **Tap, not replace**: the per-member leave notification still goes out verbatim as `SendMessage`, plus ONE relay-native `LeaveGroup {group_id}` (deduped per group by the translator) so the relay's group registry — which feeds invite links and broadcast fan-out — doesn't go stale |
+Everything else — `__MLS_*`, `__TYPING__`, `__READ_RECEIPT__`, `__PRESENCE__`, the other `__GRP_MLS_*`
+(msg/welcome/commit), `__GROUP_MEMBER_REMOVED__`, `__GRP_RENAME__`, chat — continues verbatim as
+`SendMessage` (the inbound side already maps relay events back to the same prefixes, so the round-trip
+stays lossless). Extract `RelayControlOpTranslator` as a pure tested class per platform. *Commit-set: `feat(protocol+bindings):
 relay-native translation for connection and group-registry ops` (B1+B2+B3 atomic).*
 
 **B4 — WI-6 raw channel + server-message event (both platforms).**
