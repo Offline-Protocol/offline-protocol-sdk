@@ -273,8 +273,14 @@ impl MeshServices {
 
     /// Removes expired discovery query dedup entries.
     pub fn cleanup_expired(&mut self) {
-        let cutoff = Instant::now() - Duration::from_secs(DISCOVERY_QUERY_DEDUP_TTL_SECS);
-        self.seen_discovery_queries.retain(|_, ts| *ts > cutoff);
+        // Ages are compared with `saturating_duration_since` rather than a
+        // precomputed `now - TTL` cutoff: on platforms where the monotonic
+        // clock starts at boot, that subtraction underflows (and panics)
+        // when the process is younger than the TTL.
+        let now = Instant::now();
+        let ttl = Duration::from_secs(DISCOVERY_QUERY_DEDUP_TTL_SECS);
+        self.seen_discovery_queries
+            .retain(|_, ts| now.saturating_duration_since(*ts) < ttl);
         self.seen_discovery_order
             .retain(|id| self.seen_discovery_queries.contains_key(id));
     }

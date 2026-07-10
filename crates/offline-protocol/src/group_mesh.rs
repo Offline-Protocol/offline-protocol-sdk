@@ -43,6 +43,8 @@ pub(super) const PENDING_COMMIT_TTL_SECS: u64 = GROUP_MESSAGE_DEDUP_TTL_SECS;
 pub(super) const MAX_PENDING_COMMITS_TOTAL: usize = 64;
 /// Global cap on buffered commit payload bytes across all groups (4 MiB).
 pub(super) const MAX_PENDING_COMMIT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+/// Global cap on distinct group IDs holding buffered pending commits.
+pub(super) const MAX_PENDING_COMMIT_GROUPS: usize = 16;
 /// Maximum number of buffered out-of-order group application messages per group.
 pub(super) const MAX_PENDING_GROUP_MESSAGES_PER_GROUP: usize = 16;
 /// TTL for buffered out-of-order group application messages. Must be at
@@ -55,6 +57,11 @@ pub(super) const MAX_PENDING_GROUP_MESSAGES_TOTAL: usize = 256;
 /// Global cap on buffered group application ciphertext bytes (base64 length)
 /// across all groups (8 MiB).
 pub(super) const MAX_PENDING_GROUP_MESSAGE_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+/// Global cap on distinct group IDs holding buffered group application
+/// messages. Bounds the width of a one-entry-per-fabricated-group spread
+/// flood and the map-key memory it retains (group IDs are wire-supplied,
+/// up to `GroupId::MAX_LEN` bytes each).
+pub(super) const MAX_PENDING_GROUP_MESSAGE_GROUPS: usize = 32;
 /// Timeout before the next eligible member re-elects itself for a leave
 /// remove-commit when the original elected remover fails (30 seconds).
 pub(super) const LEAVE_ELECTION_TIMEOUT_SECS: u64 = 30;
@@ -369,13 +376,38 @@ pub(crate) struct EpochForkState {
     pub(crate) resolution_attempted: bool,
 }
 
-/// Enforces a global bound — entry count and payload bytes — across all
-/// per-group pending buffers, evicting until an incoming entry of
-/// `incoming_bytes` fits. Returns `false` (evicting nothing) when the
-/// incoming entry alone exceeds the byte budget — the caller must drop it.
-/// Without that guard a single oversized entry would purge every buffered
-/// entry across all groups and then land anyway, blowing the cap it was
-/// meant to respect.
+/// Global limits enforced by [`enforce_global_buffer_bound`], grouped so the
+/// three same-typed caps cannot be transposed at a call site.
+struct GlobalBufferCaps {
+    /// Maximum distinct group IDs in the buffer map.
+    max_groups: usize,
+    /// Maximum buffered entries across all groups.
+    max_entries: usize,
+    /// Maximum buffered payload bytes across all groups.
+    max_bytes: usize,
+}
+
+const PENDING_COMMIT_CAPS: GlobalBufferCaps = GlobalBufferCaps {
+    max_groups: MAX_PENDING_COMMIT_GROUPS,
+    max_entries: MAX_PENDING_COMMITS_TOTAL,
+    max_bytes: MAX_PENDING_COMMIT_TOTAL_BYTES,
+};
+
+const PENDING_GROUP_MESSAGE_CAPS: GlobalBufferCaps = GlobalBufferCaps {
+    max_groups: MAX_PENDING_GROUP_MESSAGE_GROUPS,
+    max_entries: MAX_PENDING_GROUP_MESSAGES_TOTAL,
+    max_bytes: MAX_PENDING_GROUP_MESSAGE_TOTAL_BYTES,
+};
+
+/// Enforces a global bound — entry count, payload bytes, and distinct group
+/// count — across all per-group pending buffers, evicting until an incoming
+/// entry of `incoming_bytes` for `incoming_group` fits. Returns the entries
+/// evicted to make room so callers can release per-entry state (e.g. the
+/// replay-dedup ID that would otherwise keep rejecting a redelivery of the
+/// evicted message), or `None` (evicting nothing) when the incoming entry
+/// alone exceeds the byte budget — the caller must drop it. Without that
+/// guard a single oversized entry would purge every buffered entry across
+/// all groups and then land anyway, blowing the cap it was meant to respect.
 ///
 /// Group IDs on these buffers come straight off the wire, and the buffered
 /// case (`GroupNotFound`) is precisely the pre-join, unauthenticated one —
@@ -383,26 +415,36 @@ pub(crate) struct EpochForkState {
 /// attacker-chosen group IDs.
 ///
 /// Eviction takes the oldest entry of the *largest* per-group buffer
-/// (tie-broken by age) rather than the globally oldest entry: honest
-/// welcome-race entries are few per group and necessarily the oldest, while
-/// a flood concentrates in the flooder's own group IDs — globally-oldest
-/// eviction would flush the honest entries first.
+/// (tie-broken by age), so a flood that concentrates in a few group IDs is
+/// evicted before honest welcome-race entries, which are few per group. A
+/// flood that instead spreads one entry per fabricated group ID levels the
+/// buffer sizes and degrades eviction to globally-oldest; the group cap
+/// bounds how wide such a spread can reach (and the map-key memory it
+/// retains), but within it a sustained spread flood can still push out an
+/// honest entry. Callers mitigate that by releasing the evicted entry's
+/// dedup ID, turning the loss into a redelivery retry instead of a permanent
+/// one — full protection would need sender-level accounting, which none of
+/// these pre-join paths have.
 fn enforce_global_buffer_bound<T>(
     map: &mut HashMap<String, VecDeque<T>>,
-    max_entries: usize,
-    max_bytes: usize,
+    incoming_group: &str,
+    caps: &GlobalBufferCaps,
     incoming_bytes: usize,
     entry_bytes: impl Fn(&T) -> usize,
     buffered_at: impl Fn(&T) -> Instant,
-) -> bool {
-    if incoming_bytes > max_bytes {
-        return false;
+) -> Option<Vec<T>> {
+    if incoming_bytes > caps.max_bytes {
+        return None;
     }
     let (mut entries, mut bytes) = map
         .values()
         .flat_map(|buf| buf.iter())
         .fold((0usize, 0usize), |(n, b), e| (n + 1, b + entry_bytes(e)));
-    while entries >= max_entries || bytes + incoming_bytes > max_bytes {
+    let mut all_evicted = Vec::new();
+    while entries >= caps.max_entries
+        || bytes + incoming_bytes > caps.max_bytes
+        || (map.len() >= caps.max_groups && !map.contains_key(incoming_group))
+    {
         // Each deque is in arrival order, so its front is its oldest entry.
         // Rank groups by (buffer length, entry age): largest buffer first,
         // oldest front entry breaking ties.
@@ -415,7 +457,7 @@ fn enforce_global_buffer_bound<T>(
             .max_by_key(|(rank, _)| *rank)
             .map(|(_, gid)| gid.clone())
         else {
-            return true;
+            return Some(all_evicted);
         };
         warn!(
             group_id = %victim_group,
@@ -425,13 +467,14 @@ fn enforce_global_buffer_bound<T>(
             if let Some(evicted) = buf.pop_front() {
                 entries -= 1;
                 bytes -= entry_bytes(&evicted);
+                all_evicted.push(evicted);
             }
             if buf.is_empty() {
                 map.remove(&victim_group);
             }
         }
     }
-    true
+    Some(all_evicted)
 }
 
 impl OfflineProtocol {
@@ -1033,14 +1076,16 @@ impl OfflineProtocol {
             buffered_at: Instant::now(),
             retry_count: 0,
         };
-        if !enforce_global_buffer_bound(
+        if enforce_global_buffer_bound(
             &mut self.group_mesh.pending_commits,
-            MAX_PENDING_COMMITS_TOTAL,
-            MAX_PENDING_COMMIT_TOTAL_BYTES,
+            group_id,
+            &PENDING_COMMIT_CAPS,
             pending.data.len(),
             |c| c.data.len(),
             |c| c.buffered_at,
-        ) {
+        )
+        .is_none()
+        {
             // Only the ciphertext field is size-guarded at decode time; the
             // JSON around it is attacker-sized, so an oversized payload must
             // be dropped rather than allowed to purge the whole buffer.
@@ -1169,19 +1214,22 @@ impl OfflineProtocol {
     /// The message ID is already in the dedup table, so redeliveries via
     /// other transports are rejected there — this buffered copy is the
     /// message's only path to delivery, via `drain_pending_group_messages`.
+    /// Correspondingly, whenever a buffered copy is dropped undelivered
+    /// (cap eviction here, TTL expiry at drain), its dedup ID is released so
+    /// a redelivery gets a fresh chance instead of being permanently lost.
     pub(crate) fn buffer_pending_group_message(
         &mut self,
         group_id: &str,
         pending: PendingGroupMessage,
     ) {
-        if !enforce_global_buffer_bound(
+        let Some(evicted) = enforce_global_buffer_bound(
             &mut self.group_mesh.pending_group_messages,
-            MAX_PENDING_GROUP_MESSAGES_TOTAL,
-            MAX_PENDING_GROUP_MESSAGE_TOTAL_BYTES,
+            group_id,
+            &PENDING_GROUP_MESSAGE_CAPS,
             pending.ciphertext_b64.len(),
             |m| m.ciphertext_b64.len(),
             |m| m.buffered_at,
-        ) {
+        ) else {
             // Unreachable in practice — the ciphertext passed the 1 MiB
             // base64_decode guard on both inbound paths — but the invariant
             // belongs here, not in the callers.
@@ -1191,9 +1239,15 @@ impl OfflineProtocol {
                 "Pending group message exceeds the global byte budget, dropping"
             );
             return;
+        };
+        // An evicted message was never delivered — release its dedup ID so a
+        // sender-side redelivery is accepted fresh instead of being rejected
+        // as a replay of a copy that no longer exists anywhere.
+        for entry in &evicted {
+            self.group_mesh.message_dedup.remove(&entry.message_id);
         }
-        let buf = self
-            .group_mesh
+        let group_mesh = &mut self.group_mesh;
+        let buf = group_mesh
             .pending_group_messages
             .entry(group_id.to_string())
             .or_default();
@@ -1202,7 +1256,9 @@ impl OfflineProtocol {
                 group_id = %group_id,
                 "Pending group message buffer full, dropping oldest"
             );
-            buf.pop_front();
+            if let Some(evicted) = buf.pop_front() {
+                group_mesh.message_dedup.remove(&evicted.message_id);
+            }
         }
         buf.push_back(pending);
         debug!(
@@ -1231,6 +1287,9 @@ impl OfflineProtocol {
                     msg_id = %entry.message_id,
                     "Dropping expired pending group message"
                 );
+                // Never delivered — release the dedup ID so a redelivery is
+                // accepted fresh even before the periodic dedup sweep runs.
+                self.group_mesh.message_dedup.remove(&entry.message_id);
                 continue;
             }
             // Validated at buffer time; failure here is defensive only.
@@ -2631,10 +2690,15 @@ impl OfflineProtocol {
 
     /// Cleans up expired group message dedup entries and enforces size cap.
     pub(crate) fn cleanup_group_message_dedup(&mut self) {
-        let cutoff = Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS);
+        // Ages are compared with `saturating_duration_since` rather than a
+        // precomputed `now - TTL` cutoff: on platforms where the monotonic
+        // clock starts at boot, that subtraction underflows (and panics)
+        // when the process is younger than the TTL.
+        let now = Instant::now();
+        let dedup_ttl = StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS);
         self.group_mesh
             .message_dedup
-            .retain(|_, seen_at| *seen_at > cutoff);
+            .retain(|_, seen_at| now.saturating_duration_since(*seen_at) < dedup_ttl);
         // If still over cap after TTL cleanup, drop oldest entries using O(N) selection
         let len = self.group_mesh.message_dedup.len();
         if len > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
@@ -2649,12 +2713,12 @@ impl OfflineProtocol {
 
         // Expire stale pending commits, tracking groups where retried commits
         // expired — these are strong epoch fork signals (same as drain_pending_commits).
-        let commit_cutoff = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS);
+        let commit_ttl = StdDuration::from_secs(PENDING_COMMIT_TTL_SECS);
         let mut fork_candidates: Vec<String> = Vec::new();
         self.group_mesh.pending_commits.retain(|group_id, commits| {
             let mut retried_expired = false;
             commits.retain(|c| {
-                let alive = c.buffered_at > commit_cutoff;
+                let alive = now.saturating_duration_since(c.buffered_at) < commit_ttl;
                 if !alive && c.retry_count > 0 {
                     retried_expired = true;
                 }
@@ -2675,10 +2739,13 @@ impl OfflineProtocol {
         }
 
         // Expire stale pending group messages — covers groups where no
-        // Welcome or commit ever arrives to trigger a drain.
-        let msg_cutoff = Instant::now() - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS);
+        // Welcome or commit ever arrives to trigger a drain. No dedup-ID
+        // release is needed here: a message's dedup entry was inserted
+        // before it was buffered, so it is at least as old, and the dedup
+        // retain above (same `now`, same TTL) has already dropped it.
+        let msg_ttl = StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS);
         self.group_mesh.pending_group_messages.retain(|_, msgs| {
-            msgs.retain(|m| m.buffered_at > msg_cutoff);
+            msgs.retain(|m| now.saturating_duration_since(m.buffered_at) < msg_ttl);
             !msgs.is_empty()
         });
     }
