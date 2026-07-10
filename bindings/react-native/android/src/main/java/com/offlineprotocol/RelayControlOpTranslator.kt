@@ -23,9 +23,11 @@ import org.json.JSONObject
  *   members"): when the payload carries the core's `is_admin=false` hint the
  *   deltas are skipped up front (the admin's own device is the authoritative
  *   registrar), and without the hint a group's first admin-denied GroupError
- *   stops further deltas for it this connection — otherwise every reconnect
- *   would re-send N denied deltas whose group-scoped errors revoke the
- *   core's relay sync and surface as app-visible group_error events.
+ *   — recognized only while that group has member deltas awaiting an answer
+ *   (see [onGroupError]) — stops further deltas for it this connection;
+ *   otherwise every reconnect would re-send N denied deltas whose
+ *   group-scoped errors revoke the core's relay sync and surface as
+ *   app-visible group_error events.
  * - `group_relay_broadcast` — [Translation.Replace] with `SendGroupMessage`
  *   carrying the MLS ciphertext; the relay fans out `GroupMessageReceived`
  *   per member (bridged back as `__GROUP_MSG__`, MLS-decrypted in core).
@@ -59,10 +61,15 @@ class RelayControlOpTranslator(private val selfId: String) {
         /**
          * Cross-layer contract: substring of the relay server's admin-denial
          * GroupError reasons ("Only admins can add members" / "Only admins
-         * can remove members"). If the relay rewords these, non-admin devices
-         * without the core's `is_admin` hint fall back to re-learning the
-         * denial each connection — noisy but safe. Keep in sync with the
-         * relay source (see docs/relay-transport-parity-spec.md).
+         * can remove members"). The marker alone is NOT enough to suppress
+         * deltas — it only counts when the GroupError correlates to member
+         * deltas this translator actually has outstanding (see
+         * [onGroupError]), so an admin-denial answering some other actor's
+         * operation can never permanently silence membership sync. If the
+         * relay rewords these, non-admin devices without the core's
+         * `is_admin` hint fall back to re-learning the denial each
+         * connection — noisy but safe. Keep in sync with the relay source
+         * (see docs/relay-transport-parity-spec.md).
          */
         internal const val ADMIN_DENIED_REASON_MARKER = "Only admins"
 
@@ -133,6 +140,17 @@ class RelayControlOpTranslator(private val selfId: String) {
 
     /** Groups whose member deltas the relay denied (we are not the admin). */
     private val memberDeltasDenied = HashSet<String>()
+
+    /**
+     * Groups with member deltas outstanding: the window between a
+     * translation that produced AddGroupMember/RemoveGroupMember frames and
+     * the next group-scoped answer. Only a GroupError landing inside this
+     * window may be read as OUR admin denial — the translator never tags
+     * request_id, so a group-scoped error with no outstanding deltas belongs
+     * to some other actor (an app raw-channel op, another admin's edit).
+     * Mirrors ios/RelayControlOpTranslator.swift — keep the two in sync.
+     */
+    private val outstandingMemberDeltas = HashSet<String>()
 
     /** Groups for which a relay-native LeaveGroup was already committed. */
     private val leaveSent = HashSet<String>()
@@ -232,7 +250,15 @@ class RelayControlOpTranslator(private val selfId: String) {
         // The core's admin hint: explicitly-not-admin devices never send
         // member deltas (the relay would deny each with a group-scoped
         // GroupError). Absent hint = unknown, fall back to send-and-learn.
-        val notAdmin = payload.has("is_admin") && !payload.optBoolean("is_admin", true)
+        // serde emits a real boolean, but numeric 0/1 encodings are honored
+        // too, and anything else (strings included) is treated as absent —
+        // exactly NSNumber.boolValue semantics, so both bridges parse the
+        // frame identically. Keep in sync with the Swift translator.
+        val notAdmin = when (val isAdmin = payload.opt("is_admin")) {
+            is Boolean -> !isAdmin
+            is Number -> isAdmin.toDouble() == 0.0
+            else -> false
+        }
 
         val frames = ArrayList<JSONObject>()
         frames.add(JSONObject().apply {
@@ -262,6 +288,11 @@ class RelayControlOpTranslator(private val selfId: String) {
                     put("username", removed)
                 })
             }
+            // Deltas produced: open the group's outstanding-delta window so
+            // the next group-scoped GroupError may be read as our denial.
+            if (frames.size > 1) {
+                outstandingMemberDeltas.add(groupId)
+            }
             val gen = generation
             commit = { commitRegisteredMembers(gen, groupId, desired) }
         }
@@ -285,14 +316,32 @@ class RelayControlOpTranslator(private val selfId: String) {
             leaveSent.add(groupId)
             registeredMembers.remove(groupId)
             memberDeltasDenied.remove(groupId)
+            // A left group's answers are no longer ours to correlate; a
+            // stale window must not let a post-leave GroupError mark a
+            // future rejoin as admin-denied.
+            outstandingMemberDeltas.remove(groupId)
         }
     }
 
-    /** Feed relay GroupError answers so admin-denied groups stop producing member deltas. */
-    fun onGroupError(groupId: String, reason: String) {
+    /**
+     * Feed relay GroupError answers so admin-denied groups stop producing
+     * member deltas. The denial is honored ONLY when it correlates to
+     * member deltas this translator has outstanding: a `request_id`-carrying
+     * error answers an app raw-channel frame (this translator never tags
+     * request_id, so it cannot be ours), and without an open per-group
+     * delta window the error belongs to some other actor's operation —
+     * treating it as ours would permanently suppress membership sync for
+     * the group (e.g. an unrelated error quoting a user-authored group
+     * name that contains the phrase).
+     */
+    fun onGroupError(groupId: String, reason: String, requestId: String? = null) {
         if (groupId.isEmpty()) return
-        if (reason.contains(ADMIN_DENIED_REASON_MARKER, ignoreCase = true)) {
-            synchronized(lock) {
+        if (!requestId.isNullOrEmpty()) return
+        synchronized(lock) {
+            if (!outstandingMemberDeltas.contains(groupId)) return
+            // The next group-scoped answer closes the window, denial or not.
+            outstandingMemberDeltas.remove(groupId)
+            if (reason.contains(ADMIN_DENIED_REASON_MARKER, ignoreCase = true)) {
                 memberDeltasDenied.add(groupId)
                 // The membership snapshot was not applied server-side.
                 registeredMembers.remove(groupId)
@@ -323,6 +372,7 @@ class RelayControlOpTranslator(private val selfId: String) {
             registeredMembers.clear()
             memberDeltasDenied.clear()
             leaveSent.clear()
+            outstandingMemberDeltas.clear()
         }
     }
 }

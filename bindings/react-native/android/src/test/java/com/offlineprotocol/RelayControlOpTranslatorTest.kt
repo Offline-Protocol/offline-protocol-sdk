@@ -183,6 +183,44 @@ class RelayControlOpTranslatorTest {
     }
 
     @Test
+    fun numericAndStringIsAdminHintsMatchSwiftSemantics() {
+        val translator = RelayControlOpTranslator("bob")
+
+        // Numeric 0 is honored as not-admin (NSNumber.boolValue parity with
+        // the Swift translator) even though serde emits real booleans.
+        val numericZero = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"],"is_admin":0}""",
+                "bob"
+            )
+        )
+        assertEquals(1, numericZero.size)
+        assertEquals("CreateGroup", numericZero[0].getString("type"))
+
+        // Numeric 1 behaves like true: deltas flow.
+        val numericOne = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g2","members":["alice","bob"],"is_admin":1}""",
+                "bob"
+            )
+        )
+        assertEquals(2, numericOne.size)
+
+        // A string encoding is not boolean-like on either platform: treated
+        // as an absent hint (send-and-learn), not as a denial.
+        val stringFalse = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g3","members":["alice","bob"],"is_admin":"false"}""",
+                "bob"
+            )
+        )
+        assertEquals(2, stringFalse.size)
+    }
+
+    @Test
     fun leaveAfterRejoinSendsLeaveGroupAgain() {
         val translator = RelayControlOpTranslator("alice")
 
@@ -390,25 +428,41 @@ class RelayControlOpTranslatorTest {
     fun nonAdminReasonGroupErrorDoesNotSuppressDeltas() {
         val translator = RelayControlOpTranslator("alice")
 
-        // Only the relay's admin-denial wording flips the suppression; an
-        // unrelated group error (bad member id, transient state) must not
-        // silently stop membership sync.
-        translator.onGroupError("g1", "User not found")
-
-        val registration = frames(
+        // Only the relay's admin-denial wording flips the suppression, even
+        // when the error correlates to outstanding deltas; an unrelated
+        // group error (bad member id, transient state) must not silently
+        // stop membership sync.
+        commit(
             translator.translate(
                 "group_relay_register",
                 """{"group_id":"g1","members":["alice","bob"]}""",
                 "alice"
             )
         )
+        translator.onGroupError("g1", "User not found")
+
+        val registration = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob","carol"]}""",
+                "alice"
+            )
+        )
         assertEquals(2, registration.size)
         assertEquals("AddGroupMember", registration[1].getString("type"))
+        assertEquals("carol", registration[1].getString("username"))
     }
 
     @Test
     fun rolePromotionReenablesMemberDeltas() {
         val translator = RelayControlOpTranslator("bob")
+        // The denial answers an outstanding member delta (the correlation
+        // window — see onGroupError).
+        translator.translate(
+            "group_relay_register",
+            """{"group_id":"g1","members":["alice","bob"]}""",
+            "bob"
+        )
         translator.onGroupError("g1", "Only admins can add members")
 
         // Denied: registration is CreateGroup only.
@@ -447,6 +501,125 @@ class RelayControlOpTranslatorTest {
         assertEquals(2, promoted.size)
         assertEquals("AddGroupMember", promoted[1].getString("type"))
         assertEquals("alice", promoted[1].getString("username"))
+    }
+
+    @Test
+    fun uncorrelatedAdminDenialDoesNotSuppressDeltas() {
+        val translator = RelayControlOpTranslator("bob")
+
+        // An admin-denial GroupError with NO member deltas outstanding from
+        // this translator answers someone else's operation (an app
+        // raw-channel op, another admin's edit, an unrelated error quoting
+        // a user-authored group name) — honoring it would permanently
+        // silence membership sync for the group.
+        translator.onGroupError("g1", "Only admins can add members")
+
+        val registration = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "bob"
+            )
+        )
+        assertEquals(2, registration.size)
+        assertEquals("AddGroupMember", registration[1].getString("type"))
+        assertEquals("alice", registration[1].getString("username"))
+    }
+
+    @Test
+    fun requestIdCarryingDenialIsNeverOurs() {
+        val translator = RelayControlOpTranslator("bob")
+
+        // The translator never tags request_id, so a request_id-echoing
+        // GroupError answers an app raw-channel frame — even mid-window it
+        // must neither suppress deltas nor consume the window.
+        translator.translate(
+            "group_relay_register",
+            """{"group_id":"g1","members":["alice","bob"]}""",
+            "bob"
+        )
+        translator.onGroupError("g1", "Only admins can add members", "req-42")
+
+        // Not suppressed: the uncommitted registration re-sends its delta.
+        val retry = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "bob"
+            )
+        )
+        assertEquals(2, retry.size)
+        assertEquals("AddGroupMember", retry[1].getString("type"))
+
+        // The window survived the disowned error: a real (request_id-less)
+        // denial still lands.
+        translator.onGroupError("g1", "Only admins can add members")
+        assertEquals(
+            1,
+            frames(
+                translator.translate(
+                    "group_relay_register",
+                    """{"group_id":"g1","members":["alice","bob"]}""",
+                    "bob"
+                )
+            ).size
+        )
+    }
+
+    @Test
+    fun deltaWindowClosesOnFirstGroupScopedAnswer() {
+        val translator = RelayControlOpTranslator("bob")
+
+        // One answer per window: the first group-scoped GroupError closes
+        // it, so a later admin-denial with nothing outstanding is
+        // uncorrelated and falls back to send-and-learn (noisy but safe)
+        // instead of suppressing on someone else's error.
+        commit(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "bob"
+            )
+        )
+        translator.onGroupError("g1", "User not found")
+        translator.onGroupError("g1", "Only admins can add members")
+
+        val registration = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob","carol"]}""",
+                "bob"
+            )
+        )
+        assertEquals(2, registration.size)
+        assertEquals("AddGroupMember", registration[1].getString("type"))
+        assertEquals("carol", registration[1].getString("username"))
+    }
+
+    @Test
+    fun resetClosesTheDenialWindow() {
+        val translator = RelayControlOpTranslator("bob")
+
+        translator.translate(
+            "group_relay_register",
+            """{"group_id":"g1","members":["alice","bob"]}""",
+            "bob"
+        )
+        translator.reset()
+
+        // The outstanding delta died with the connection: a phrase-quoting
+        // error on the next connection is not its answer.
+        translator.onGroupError("g1", "Only admins can add members")
+
+        val after = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "bob"
+            )
+        )
+        assertEquals(2, after.size)
+        assertEquals("AddGroupMember", after[1].getString("type"))
     }
 
     @Test
