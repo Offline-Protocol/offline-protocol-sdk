@@ -29,6 +29,10 @@ pub type EventCallback = Arc<dyn Fn(Event) + Send + Sync>;
 pub enum WelcomeReasonCode {
     /// No transport was available or all transport sends failed.
     TransportUnavailable,
+    /// The transport is up but this specific peer is unreachable on it
+    /// (e.g. the internet relay reported the recipient offline). Treated as
+    /// per-peer no-carrier: the welcome parks instead of aging.
+    PeerUnreachable,
     /// Peer was disconnected or became unavailable during send.
     PeerDisconnected,
     /// Send operation timed out.
@@ -44,6 +48,7 @@ impl WelcomeReasonCode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::TransportUnavailable => "TRANSPORT_UNAVAILABLE",
+            Self::PeerUnreachable => "PEER_UNREACHABLE",
             Self::PeerDisconnected => "PEER_DISCONNECTED",
             Self::Timeout => "TIMEOUT",
             Self::InternalError => "INTERNAL_ERROR",

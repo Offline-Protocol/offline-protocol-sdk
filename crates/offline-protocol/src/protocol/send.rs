@@ -5,6 +5,7 @@ use super::{
     KeyPackagePayload, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
     OutboxEntry, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
     TypingIndicatorPayload, WelcomeDeliveryState, MAX_READ_RECEIPT_IDS,
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
 };
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
@@ -1747,11 +1748,25 @@ impl OfflineProtocol {
         let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
             return Ok(());
         };
-        let reason = crate::events::WelcomeReasonCode::TransportUnavailable;
-        // No raw error is available on this async path, so infer no-carrier from
-        // live connectivity: with no transport currently available the peer is
-        // simply unreachable and the Welcome must be kept alive, not aged.
-        let no_carrier = self.transport_manager.get_available_transports().is_empty();
+        // A reason tagged "recipient_unreachable" (the internet bridge's
+        // translation of the relay's DeliveryError / an offline presence
+        // answer) means the carrier is up but *this peer* is not on it —
+        // per-peer no-carrier. Without it, a relay-reported offline recipient
+        // would burn welcome attempts while the socket is healthy.
+        let peer_unreachable = transport_error
+            .as_deref()
+            .is_some_and(|r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
+        let reason = if peer_unreachable {
+            crate::events::WelcomeReasonCode::PeerUnreachable
+        } else {
+            crate::events::WelcomeReasonCode::TransportUnavailable
+        };
+        // Otherwise no raw error is available on this async path, so infer
+        // no-carrier from live connectivity: with no transport currently
+        // available the peer is simply unreachable and the Welcome must be
+        // kept alive, not aged.
+        let no_carrier = peer_unreachable
+            || self.transport_manager.get_available_transports().is_empty();
         let _ = self.apply_welcome_send_failure(
             &peer_id,
             reason,
