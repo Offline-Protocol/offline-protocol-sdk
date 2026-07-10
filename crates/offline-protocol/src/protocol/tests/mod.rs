@@ -10601,12 +10601,16 @@ fn test_forward_message_rejects_internal_prefix_content() {
     .build();
 
     let result = protocol.forward_message(&original, "bob", None);
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
+    let err = result.unwrap_err();
     assert!(
-        err_msg.contains("reserved internal prefix"),
+        matches!(err, crate::Error::InvalidArgument(_)),
+        "Prefix injection is a caller-input defect, got: {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("reserved internal prefix"),
         "Expected prefix injection error, got: {}",
-        err_msg
+        err
     );
 }
 
@@ -10641,12 +10645,16 @@ fn test_forward_message_rejects_excessive_forward_count() {
 
     // from_message will increment to MAX_FORWARD_COUNT + 1, which should be rejected
     let result = protocol.forward_message(&original, "charlie", None);
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
+    let err = result.unwrap_err();
     assert!(
-        err_msg.contains("exceeds maximum"),
+        matches!(err, crate::Error::InvalidArgument(_)),
+        "Forward-count cap is a caller-input defect, got: {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("exceeds maximum"),
         "Expected forward count cap error, got: {}",
-        err_msg
+        err
     );
 }
 

@@ -79,7 +79,7 @@ impl OfflineProtocol {
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the public API.
         if Self::is_internal_prefix(&content_str) {
-            return Err(Error::Other(
+            return Err(Error::InvalidArgument(
                 "Message content must not start with a reserved internal prefix".to_string(),
             ));
         }
@@ -88,7 +88,7 @@ impl OfflineProtocol {
         let reply_to_msg_id = reply_to_msg
             .map(|r| MessageId::from_str(&r.into()))
             .transpose()
-            .map_err(|e| Error::Other(format!("Invalid reply_to_msg: {}", e)))?;
+            .map_err(|e| Error::InvalidArgument(format!("Invalid reply_to_msg: {}", e)))?;
 
         let final_content = match self.prepare_outbound_content(
             &recipient_str,
@@ -193,7 +193,7 @@ impl OfflineProtocol {
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the forwarding API.
         if Self::is_internal_prefix(&original_message.content) {
-            return Err(Error::Other(
+            return Err(Error::InvalidArgument(
                 "Cannot forward a message with reserved internal prefix content".to_string(),
             ));
         }
@@ -202,7 +202,7 @@ impl OfflineProtocol {
         let forward_info = ForwardInfo::from_message(original_message);
 
         if forward_info.forward_count > MAX_FORWARD_COUNT {
-            return Err(Error::Other(format!(
+            return Err(Error::InvalidArgument(format!(
                 "Forward count {} exceeds maximum of {}",
                 forward_info.forward_count, MAX_FORWARD_COUNT,
             )));
@@ -421,7 +421,7 @@ impl OfflineProtocol {
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the public API.
         if Self::is_internal_prefix(&content_str) {
-            return Err(Error::Other(
+            return Err(Error::InvalidArgument(
                 "Message content must not start with a reserved internal prefix".to_string(),
             ));
         }
@@ -430,7 +430,7 @@ impl OfflineProtocol {
         let reply_to_msg_id = reply_to_msg
             .map(|r| MessageId::from_str(&r.into()))
             .transpose()
-            .map_err(|e| Error::Other(format!("Invalid reply_to_msg: {}", e)))?;
+            .map_err(|e| Error::InvalidArgument(format!("Invalid reply_to_msg: {}", e)))?;
 
         let final_content = match self.prepare_outbound_content(
             &recipient_str,
@@ -2177,7 +2177,9 @@ impl OfflineProtocol {
         status: PresenceStatus,
     ) -> Result<MessageId> {
         if recipient.is_empty() {
-            return Err(Error::Other("recipient must not be empty".to_string()));
+            return Err(Error::InvalidArgument(
+                "recipient must not be empty".to_string(),
+            ));
         }
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
@@ -2211,13 +2213,15 @@ impl OfflineProtocol {
         is_typing: bool,
     ) -> Result<MessageId> {
         if recipient.is_empty() {
-            return Err(Error::Other("recipient must not be empty".to_string()));
+            return Err(Error::InvalidArgument(
+                "recipient must not be empty".to_string(),
+            ));
         }
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
         if conversation_id.is_empty() {
-            return Err(Error::Other(
+            return Err(Error::InvalidArgument(
                 "conversation_id must not be empty".to_string(),
             ));
         }
@@ -2249,16 +2253,20 @@ impl OfflineProtocol {
         message_ids: Vec<String>,
     ) -> Result<MessageId> {
         if recipient.is_empty() {
-            return Err(Error::Other("recipient must not be empty".to_string()));
+            return Err(Error::InvalidArgument(
+                "recipient must not be empty".to_string(),
+            ));
         }
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
         if message_ids.is_empty() {
-            return Err(Error::Other("message_ids must not be empty".to_string()));
+            return Err(Error::InvalidArgument(
+                "message_ids must not be empty".to_string(),
+            ));
         }
         if message_ids.len() > MAX_READ_RECEIPT_IDS {
-            return Err(Error::Other(format!(
+            return Err(Error::InvalidArgument(format!(
                 "message_ids exceeds maximum of {MAX_READ_RECEIPT_IDS}"
             )));
         }
