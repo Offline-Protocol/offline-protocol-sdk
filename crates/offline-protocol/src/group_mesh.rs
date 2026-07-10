@@ -2917,8 +2917,15 @@ impl OfflineProtocol {
     /// Attempts to register (or update) a group with the relay server.
     ///
     /// Sends a `__GRP_RELAY_REG__` message to the user's own ID via Internet
-    /// transport. The relay server intercepts the prefix and records the
-    /// group membership for server-side fan-out.
+    /// transport, for a relay (or platform bridge acting as relay adapter)
+    /// that translates the prefix into a server-side group registration.
+    ///
+    /// Enqueueing this frame proves nothing about relay support: a relay
+    /// without prefix interception simply echoes a self-addressed message
+    /// back to the sender. `relay_synced` must therefore only be set by a
+    /// positive acknowledgment from the relay (an inbound `__GROUP_CREATED__`
+    /// for the group), never here — otherwise `send_group_message` takes the
+    /// O(1) broadcast path and the messages vanish into the echo.
     ///
     /// Fire-and-forget: returns `Ok(true)` if sent, `Ok(false)` if Internet
     /// is unavailable, `Err` on serialization failure.
@@ -2946,12 +2953,15 @@ impl OfflineProtocol {
             )))?
         );
 
-        // Send to self — the relay server intercepts messages with this prefix
+        // Send to self — a prefix-aware relay (or bridge adapter) translates it.
+        // Deliberately does NOT set `relay_synced`: Ok here only means the frame
+        // was queued locally, and a prefix-unaware relay echoes it back instead
+        // of registering anything. Sync is confirmed only by the relay's
+        // `__GROUP_CREATED__` acknowledgment.
         let self_id = self.config.user_id.clone();
         match self.send_internal_message(&self_id, content, MessagePriority::Medium) {
             Ok(_) => {
-                self.group_mesh.relay_synced.insert(group_id.to_string());
-                debug!(group_id = %group_id, "Registered group with relay server");
+                debug!(group_id = %group_id, "Sent group registration to relay server");
                 Ok(true)
             }
             Err(e) => {
