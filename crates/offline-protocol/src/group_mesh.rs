@@ -112,6 +112,16 @@ pub(crate) struct GroupMeshState {
     /// when connectivity returns.
     pub(crate) relay_synced: HashSet<String>,
 
+    /// Group IDs with a relay registration in flight (a `__GRP_RELAY_REG__`
+    /// frame enqueued, no relay answer yet). The `__GROUP_CREATED__` ack only
+    /// sets `relay_synced` for groups in this set: the relay forwards peer
+    /// message content verbatim, so without this correlation any peer that
+    /// knows a group id could forge the ack over the internet path and route
+    /// our broadcasts into a relay that never registered the group. Cleared
+    /// per group on ack or group-scoped `__GROUP_ERROR__`, and wholesale when
+    /// the Internet transport drops (the answer can never arrive).
+    pub(crate) relay_register_pending: HashSet<String>,
+
     /// Whether Internet transport was available on the last `process()` tick.
     /// Used for edge-detection: sync groups on 0→1 transition, clear on 1→0.
     pub(crate) internet_was_available: bool,
@@ -984,6 +994,9 @@ impl OfflineProtocol {
                     }
                     self.group_mesh.members.remove(&payload.group_id);
                     self.group_mesh.relay_synced.remove(&payload.group_id);
+                    self.group_mesh
+                        .relay_register_pending
+                        .remove(&payload.group_id);
                     self.group_mesh
                         .pending_group_messages
                         .remove(&payload.group_id);
@@ -2194,6 +2207,7 @@ impl OfflineProtocol {
         // would expire with retry_count > 0 and falsely flag an epoch fork.
         self.group_mesh.members.remove(group_id);
         self.group_mesh.relay_synced.remove(group_id);
+        self.group_mesh.relay_register_pending.remove(group_id);
         self.group_mesh.pending_group_messages.remove(group_id);
         self.group_mesh.pending_commits.remove(group_id);
 
@@ -2991,6 +3005,11 @@ impl OfflineProtocol {
         let self_id = self.config.user_id.clone();
         match self.send_internal_message(&self_id, content, MessagePriority::Medium) {
             Ok(_) => {
+                // Arm the ack correlation: only a `__GROUP_CREATED__` that
+                // answers an outstanding registration may set `relay_synced`.
+                self.group_mesh
+                    .relay_register_pending
+                    .insert(group_id.to_string());
                 debug!(group_id = %group_id, "Sent group registration to relay server");
                 Ok(true)
             }
@@ -3401,8 +3420,11 @@ impl OfflineProtocol {
             // Internet just became available — sync all groups
             self.sync_groups_to_relay();
         } else if !internet_available && was_available {
-            // Internet just went down — clear sync state
+            // Internet just went down — clear sync state. In-flight
+            // registration acks can never arrive on this connection, so the
+            // pending set goes too (re-armed by the 0→1 re-sync).
             self.group_mesh.relay_synced.clear();
+            self.group_mesh.relay_register_pending.clear();
         }
     }
 
