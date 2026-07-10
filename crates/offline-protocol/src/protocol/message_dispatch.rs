@@ -14,6 +14,7 @@ use chrono::Utc;
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_mls::{EncryptedMessage, WelcomeMessage};
 use offline_protocol_services::ServiceAction;
+use offline_protocol_transport::TransportType;
 use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {
@@ -870,7 +871,15 @@ impl OfflineProtocol {
     }
 
     /// Handles group relay messages (GROUP_CREATED through GROUP_ERROR).
-    pub(crate) fn handle_group_relay_message(&mut self, sender: &str, content: &str) {
+    ///
+    /// `arrival_transport` is the transport the frame was received on, when
+    /// known. Relay-server answers are only trusted from the Internet path.
+    pub(crate) fn handle_group_relay_message(
+        &mut self,
+        sender: &str,
+        content: &str,
+        arrival_transport: Option<TransportType>,
+    ) {
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_CREATED) {
             if let Ok(payload) = serde_json::from_str::<GroupCreatedPayload>(data) {
                 info!(group_id = %payload.group_id, "Group created");
@@ -880,7 +889,17 @@ impl OfflineProtocol {
                 // requires (enqueueing the registration frame proves nothing —
                 // see try_relay_register_group). Only now may
                 // send_group_message take the O(1) relay-broadcast path.
-                if self.group_mesh.members.contains_key(&payload.group_id) {
+                //
+                // The ack must also have arrived over the Internet transport:
+                // any mesh peer can craft a `__GROUP_CREATED__` frame, and a
+                // spoofed sync flag would route broadcasts into a relay that
+                // never registered the group — unrecoverable content loss on
+                // a store-less relay. (The group_created app event below is
+                // unchanged: spoofing it is cosmetic, gating it would hide
+                // legitimate relay answers from apps on unusual topologies.)
+                if arrival_transport == Some(TransportType::Internet)
+                    && self.group_mesh.members.contains_key(&payload.group_id)
+                {
                     self.group_mesh
                         .relay_synced
                         .insert(payload.group_id.clone());

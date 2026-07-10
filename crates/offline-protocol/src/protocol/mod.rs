@@ -1263,6 +1263,18 @@ impl OfflineProtocol {
         &mut self,
         message: &Message,
     ) -> Option<InternalMessageResult> {
+        self.process_internal_message_via(message, None)
+    }
+
+    /// [`Self::process_internal_message`] with the transport the frame
+    /// arrived on, when the caller knows it. Handlers that trust relay-server
+    /// answers (`__GROUP_CREATED__` setting `relay_synced`) require the
+    /// Internet transport; with `None` they treat the frame as untrusted.
+    pub(crate) fn process_internal_message_via(
+        &mut self,
+        message: &Message,
+        arrival_transport: Option<TransportType>,
+    ) -> Option<InternalMessageResult> {
         let content = &message.content;
 
         // Run the security gate for control messages (transport identity +
@@ -1397,7 +1409,7 @@ impl OfflineProtocol {
             || content.starts_with(internal_prefixes::USER_GROUPS)
             || content.starts_with(internal_prefixes::GROUP_ERROR)
         {
-            self.handle_group_relay_message(sender, content);
+            self.handle_group_relay_message(sender, content, arrival_transport);
             return Some(InternalMessageResult::Consumed);
         }
 
