@@ -2952,12 +2952,28 @@ fn test_relay_register_group_on_create() {
     let info = protocol.create_group("Auto Register Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    // Creation sends the self-addressed registration frame...
-    assert!(
-        internet_handle.sent_messages().iter().any(|m| m
-            .content
-            .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)),
-        "Registration frame should be sent on group creation with Internet available"
+    // Creation sends the self-addressed registration frame, carrying the
+    // admin hint (the creator is the admin) so the bridge translator knows
+    // it may send member deltas without being denied by the relay.
+    let register_frame = internet_handle
+        .sent_messages()
+        .iter()
+        .find(|m| {
+            m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)
+        })
+        .map(|m| m.content.clone())
+        .expect("Registration frame should be sent on group creation with Internet available");
+    let payload: serde_json::Value = serde_json::from_str(
+        register_frame
+            .strip_prefix(internal_prefixes::GROUP_RELAY_REGISTER)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        payload.get("is_admin").and_then(|v| v.as_bool()),
+        Some(true),
+        "Creator's registration frame must carry is_admin=true"
     );
     // ...but the group is only marked relay-synced by the relay's
     // __GROUP_CREATED__ acknowledgment, never on enqueue.

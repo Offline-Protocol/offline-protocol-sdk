@@ -278,6 +278,16 @@ pub(crate) struct RelayGroupRegistrationPayload {
     pub(crate) group_name: Option<String>,
     /// Current member user IDs.
     pub(crate) members: Vec<String>,
+    /// Whether the registering user is a group admin, when locally
+    /// determinable. The bridge translator uses this to skip the
+    /// `AddGroupMember`/`RemoveGroupMember` deltas a non-admin would be
+    /// denied (the relay restricts membership mutation to admins) — the
+    /// denial would otherwise arrive as a group-scoped `GroupError` that
+    /// revokes `relay_synced` and surfaces as an app-visible error on every
+    /// reconnect. Absent means unknown: the bridge falls back to
+    /// send-and-learn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) is_admin: Option<bool>,
 }
 
 /// Payload for a relay-broadcast of an MLS-encrypted group message.
@@ -2914,6 +2924,25 @@ impl OfflineProtocol {
     // RELAY OPTIMIZATION
     // ========================================================================
 
+    /// Best-effort admin hint for relay group registration: `Some` only when
+    /// role metadata (or the creator fallback) makes the answer definite,
+    /// `None` when it cannot be determined. Unlike [`Self::check_is_admin`],
+    /// this must not deny by default — a wrong `false` would make the bridge
+    /// silently skip member deltas the relay would have accepted, and the
+    /// relay registry would never learn the membership.
+    fn relay_registration_admin_hint(&self, group_id: &str) -> Option<bool> {
+        let mls_guard = self.read_mls_guard().ok()?;
+        let gid = offline_protocol_mls::GroupId::new(group_id).ok()?;
+        let metadata = Self::group_metadata_or_not_found(&mls_guard, &gid, group_id).ok()??;
+        if metadata.has_any_admin() {
+            return Some(metadata.get_role(&self.config.user_id) == GroupRole::Admin);
+        }
+        metadata
+            .created_by
+            .as_ref()
+            .map(|creator| creator == &self.config.user_id)
+    }
+
     /// Attempts to register (or update) a group with the relay server.
     ///
     /// Sends a `__GRP_RELAY_REG__` message to the user's own ID via Internet
@@ -2943,6 +2972,7 @@ impl OfflineProtocol {
             group_id: group_id.to_string(),
             group_name: group_name.map(|s| s.to_string()),
             members: members.to_vec(),
+            is_admin: self.relay_registration_admin_hint(group_id),
         };
         let content = format!(
             "{}{}",
