@@ -238,6 +238,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             return ("SendFailed", message)
         case let .InvalidState(message):
             return ("InvalidState", message)
+        case let .MlsNotInitialized(message):
+            return ("MlsNotInitialized", message)
         case let .TransportError(message):
             return ("TransportError", message)
         case let .SerializationError(message):
@@ -1059,7 +1061,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let requestId = try svc.sendServiceRequest(provider: provider, serviceId: serviceId, method: method, body: body)
             resolver(requestId)
         } catch {
-            rejecter("ERROR_SERVICE_REQUEST", "Failed to send service request: \(error.localizedDescription)", error)
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SERVICE_REQUEST", fallbackMessage: "Failed to send service request")
         }
     }
 
@@ -1078,7 +1080,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try svc.respondToServiceRequest(requestId: requestId, requester: requester, serviceId: serviceId, status: status, body: body)
             resolver(messageId)
         } catch {
-            rejecter("ERROR_SERVICE_RESPONSE", "Failed to respond to service request: \(error.localizedDescription)", error)
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SERVICE_RESPONSE", fallbackMessage: "Failed to respond to service request")
         }
     }
 
@@ -1180,7 +1182,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.sendPresenceUpdate(recipient: recipient, status: presenceStatus)
             resolver(messageId)
         } catch {
-            rejecter("ERROR_PRESENCE_UPDATE", "Failed to send presence update: \(error.localizedDescription)", error)
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_PRESENCE_UPDATE", fallbackMessage: "Failed to send presence update")
         }
     }
 
@@ -1197,7 +1199,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.sendTypingIndicator(recipient: recipient, conversationId: conversationId, isTyping: isTyping)
             resolver(messageId)
         } catch {
-            rejecter("ERROR_TYPING_INDICATOR", "Failed to send typing indicator: \(error.localizedDescription)", error)
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_TYPING_INDICATOR", fallbackMessage: "Failed to send typing indicator")
         }
     }
 
@@ -1213,7 +1215,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.sendReadReceipt(recipient: recipient, messageIds: messageIds)
             resolver(messageId)
         } catch {
-            rejecter("ERROR_READ_RECEIPT", "Failed to send read receipt: \(error.localizedDescription)", error)
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_READ_RECEIPT", fallbackMessage: "Failed to send read receipt")
         }
     }
 
@@ -1601,7 +1603,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let fileId = try proto.sendFile(recipient: recipient, fileData: Array(data), fileName: fileName)
             resolver(fileId)
         } catch {
-            rejecter("ERROR_SEND_FILE", "Failed to send file: \(error.localizedDescription)", error)
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_FILE", fallbackMessage: "Failed to send file")
         }
     }
     
@@ -1637,7 +1639,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             let fileId = try proto.sendMedia(recipient: recipient, fileData: Array(data), fileName: fileName, contentType: ct, mediaMetadata: meta)
             resolver(fileId)
         } catch {
-            rejecter("ERROR_SEND_MEDIA", "Failed to send media: \(error.localizedDescription)", error)
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_MEDIA", fallbackMessage: "Failed to send media")
         }
     }
     
@@ -2360,7 +2362,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             )
             resolver(nil)
         } catch {
-            rejecter("ERROR_FILE", "Failed to process file chunk: \(error.localizedDescription)", error)
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_FILE", fallbackMessage: "Failed to process file chunk")
         }
     }
     

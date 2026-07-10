@@ -5712,6 +5712,46 @@ fn test_admin_gated_ops_on_missing_group_return_group_not_found() {
 }
 
 #[test]
+fn test_role_getters_on_metadata_less_group_return_defaults() {
+    // A group whose MLS state exists but whose role metadata is absent
+    // (created before role tracking) must not be misreported as
+    // GroupNotFound: the getters fall back to the same defaults a
+    // metadata-holding group gives unrecorded users (Member; no explicit
+    // roles).
+    use crate::mls::MlsStorage;
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage.clone()).unwrap();
+
+    let info = protocol.create_group("Legacy Group").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    storage.delete("group_metadata", &group_id).unwrap();
+
+    let role = protocol.get_member_role(&group_id, "user123").unwrap();
+    assert_eq!(role, GroupRole::Member);
+    let roles = protocol.get_group_roles(&group_id).unwrap();
+    assert!(
+        roles.is_empty(),
+        "expected no explicit roles, got {:?}",
+        roles
+    );
+
+    // A group with no MLS state at all is still GroupNotFound.
+    let missing = protocol.get_member_role("group:missing", "user123");
+    assert!(
+        matches!(missing, Err(crate::Error::GroupNotFound(_))),
+        "get_member_role: expected GroupNotFound, got {:?}",
+        missing
+    );
+    let missing = protocol.get_group_roles("group:missing");
+    assert!(
+        matches!(missing, Err(crate::Error::GroupNotFound(_))),
+        "get_group_roles: expected GroupNotFound, got {:?}",
+        missing
+    );
+}
+
+#[test]
 fn test_legacy_roles_in_custom_map_are_migrated() {
     // Simulate a group created before the dedicated `roles` field existed:
     // roles are stored as "role:user_id" keys in the `custom` map.

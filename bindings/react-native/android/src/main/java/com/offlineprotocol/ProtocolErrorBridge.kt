@@ -42,6 +42,10 @@ internal fun mapProtocolBridgeError(error: Throwable): BridgeProtocolError? {
             code = "InvalidState",
             message = error.message ?: "Operation rejected by current state"
         )
+        is ProtocolException.MlsNotInitialized -> BridgeProtocolError(
+            code = "MlsNotInitialized",
+            message = error.message ?: "MLS not initialized"
+        )
         is ProtocolException.TransportException -> BridgeProtocolError(
             code = "TransportError",
             message = error.message ?: "Transport error"
