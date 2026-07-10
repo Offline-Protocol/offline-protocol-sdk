@@ -589,6 +589,10 @@ fn test_group_mls_message_with_spoofed_sender_not_surfaced() {
         received.is_none(),
         "a group message whose MLS-authenticated sender does not match the wire sender must not be surfaced"
     );
+    assert!(
+        bob.group_mesh.pending_group_messages.is_empty(),
+        "a security-rejected message is a permanent failure and must not be buffered for retry"
+    );
 }
 
 #[test]
@@ -7299,4 +7303,162 @@ fn test_pending_commit_global_cap() {
         .group_mesh
         .pending_commits
         .contains_key(&format!("commit-group-{}", total - 1)));
+}
+
+#[test]
+fn test_oversized_pending_commit_rejected_without_purging_buffer() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    protocol.buffer_pending_commit("honest-group", "alice", "small-commit");
+
+    // A single entry larger than the whole global byte budget must be
+    // rejected outright — not evict every buffered entry and land anyway.
+    let oversized = "x".repeat(MAX_PENDING_COMMIT_TOTAL_BYTES + 1);
+    protocol.buffer_pending_commit("attacker-group", "mallory", &oversized);
+
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_commits
+            .contains_key("attacker-group"),
+        "An entry exceeding the global byte budget must not be buffered"
+    );
+    assert_eq!(
+        protocol
+            .group_mesh
+            .pending_commits
+            .get("honest-group")
+            .map(|b| b.len()),
+        Some(1),
+        "Rejecting an oversized entry must not evict existing buffered commits"
+    );
+}
+
+#[test]
+fn test_global_eviction_prefers_largest_buffer_over_older_honest_entry() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // One old honest welcome-race entry, alone in its group.
+    protocol.buffer_pending_group_message(
+        "honest-group",
+        PendingGroupMessage {
+            sender: "alice".to_string(),
+            message_id: "honest-1".to_string(),
+            ciphertext_b64: base64_encode(b"x"),
+            timestamp: None,
+            reply_to: None,
+            forward_info: None,
+            buffered_at: Instant::now() - StdDuration::from_secs(60),
+        },
+    );
+
+    // An attacker floods attacker-chosen group IDs with newer entries, well
+    // past the global cap. Evictions must come from the flood's own (larger)
+    // buffers, never from the older-but-smaller honest one.
+    let flood_groups = MAX_PENDING_GROUP_MESSAGES_TOTAL / MAX_PENDING_GROUP_MESSAGES_PER_GROUP + 4;
+    for g in 0..flood_groups {
+        for i in 0..MAX_PENDING_GROUP_MESSAGES_PER_GROUP {
+            protocol.buffer_pending_group_message(
+                &format!("attacker-group-{}", g),
+                PendingGroupMessage {
+                    sender: "mallory".to_string(),
+                    message_id: format!("atk-{}-{}", g, i),
+                    ciphertext_b64: base64_encode(b"x"),
+                    timestamp: None,
+                    reply_to: None,
+                    forward_info: None,
+                    buffered_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    let buffered: usize = protocol
+        .group_mesh
+        .pending_group_messages
+        .values()
+        .map(|b| b.len())
+        .sum();
+    assert!(buffered <= MAX_PENDING_GROUP_MESSAGES_TOTAL);
+    assert_eq!(
+        protocol
+            .group_mesh
+            .pending_group_messages
+            .get("honest-group")
+            .map(|b| b.len()),
+        Some(1),
+        "The old honest entry must survive a flood of newer entries in larger buffers"
+    );
+}
+
+#[test]
+fn test_group_message_buffer_survives_failed_welcome_join() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+
+    // A Welcome whose join fails (garbage welcome_data) must not drain or
+    // drop the buffered message.
+    let bad_welcome_json = serde_json::json!({
+        "group_id": group_id,
+        "group_name": "Race Group",
+        "welcome_data": base64_encode(b"not-a-real-welcome"),
+        "member_list": ["alice", "bob"],
+    })
+    .to_string();
+    bob.handle_group_mls_welcome("bad-welcome", "alice", &bad_welcome_json);
+
+    assert!(group_messages_received(&events).is_empty());
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(1),
+        "A failed Welcome join must leave the buffered message in place"
+    );
+
+    // The real Welcome still delivers it.
+    bob.handle_group_mls_welcome("good-welcome", "alice", &welcome_json);
+    let received = group_messages_received(&events);
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].0, "hello race");
+}
+
+#[test]
+fn test_leave_group_clears_pending_buffers() {
+    let (mut protocol, _events) = setup_started_with_events();
+
+    let info = protocol.create_group("Leave Cleanup").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    protocol.buffer_pending_commit(&group_id, "alice", "stale-commit");
+    protocol.buffer_pending_group_message(
+        &group_id,
+        PendingGroupMessage {
+            sender: "alice".to_string(),
+            message_id: "stale-msg".to_string(),
+            ciphertext_b64: base64_encode(b"x"),
+            timestamp: None,
+            reply_to: None,
+            forward_info: None,
+            buffered_at: Instant::now(),
+        },
+    );
+
+    protocol.leave_group(&group_id).unwrap();
+
+    assert!(
+        !protocol.group_mesh.pending_commits.contains_key(&group_id),
+        "Leaving a group must drop its buffered commits"
+    );
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_group_messages
+            .contains_key(&group_id),
+        "Leaving a group must drop its buffered messages"
+    );
 }
