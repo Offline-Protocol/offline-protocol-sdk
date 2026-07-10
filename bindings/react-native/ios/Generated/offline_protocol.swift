@@ -890,6 +890,10 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func internetMessageReceived(senderId: String, data: [UInt8]) throws 
     
+    func internetPeerPresence(peerId: String, online: Bool, lastSeenMs: Int64?) 
+    
+    func internetPresenceWatchlist()  -> [String]
+    
     func internetSendFailed(messageId: String) 
     
     func internetSendFailedWithReason(messageId: String, reason: String?) 
@@ -1613,6 +1617,24 @@ open func internetMessageReceived(senderId: String, data: [UInt8])throws   {try 
         FfiConverterSequenceUInt8.lower(data),$0
     )
 }
+}
+    
+open func internetPeerPresence(peerId: String, online: Bool, lastSeenMs: Int64?)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),
+        FfiConverterBool.lower(online),
+        FfiConverterOptionInt64.lower(lastSeenMs),$0
+    )
+}
+}
+    
+open func internetPresenceWatchlist() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist(
+            self.uniffiCloneHandle(),$0
+    )
+})
 }
     
 open func internetSendFailed(messageId: String)  {try! rustCall() {
@@ -7881,6 +7903,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
+    typealias SwiftType = Int64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionFloat: FfiConverterRustBuffer {
     typealias SwiftType = Float?
 
@@ -8808,6 +8854,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence() != 1618) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 10876) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204) {

@@ -814,7 +814,18 @@ interface OfflineProtocol {
     void internet_send_failed(string message_id);
     
     void internet_send_failed_with_reason(string message_id, string? reason);
-    
+
+    // Internet: relay-sourced presence for a peer (PresenceStatus /
+    // PresenceStatusWithLastSeen answers). online=true re-arms parked
+    // welcomes and flushes queued traffic; online=false parks pending
+    // welcomes without burning retry budget. Always emits presence_updated.
+    void internet_peer_presence(string peer_id, boolean online, i64? last_seen_ms);
+
+    // Internet: peers the platform layer should watch via relay presence
+    // queries (CheckPresence) — every peer with an undelivered or
+    // session-unproven MLS welcome.
+    sequence<string> internet_presence_watchlist();
+
     // WiFi Direct transport operations
     [Throws=ProtocolError]
     void wifi_direct_status_changed(boolean is_connected);
