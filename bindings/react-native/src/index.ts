@@ -2533,6 +2533,8 @@ export class OfflineProtocol {
    * @param userId - Peer's user ID
    * @returns true if the query was sent (internet transport connected and
    *          authenticated), false otherwise
+   * @throws when the internet transport was never initialized (enable it via
+   *         `transports.internet` before calling)
    */
   async checkInternetPresence(userId: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.checkInternetPresence(userId);
@@ -2550,8 +2552,11 @@ export class OfflineProtocol {
    *
    * @param json - A complete relay frame, e.g.
    *   `{"type":"CreateGroupInviteLink","group_id":"g1","expires_in_secs":604800,"request_id":"req_…"}`
-   * @returns true if written to the socket (connected, authenticated, and
-   *          valid JSON), false otherwise
+   * @returns true once the socket accepted the command (write-confirmed on
+   *          iOS, enqueue-confirmed on Android — the closest OkHttp offers);
+   *          false when not connected+authenticated or the JSON is invalid
+   * @throws when the internet transport was never initialized (enable it via
+   *         `transports.internet` before calling)
    */
   async sendRawServerCommand(json: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.internetSendRawCommand(json);
