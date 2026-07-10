@@ -2530,6 +2530,11 @@ export class OfflineProtocol {
    * presence checks for peers with undelivered traffic; this method is for
    * app UI needs (last-seen display, pre-send checks).
    *
+   * Caveat: the core suppresses presence for blocked peers, your own user
+   * id, and empty ids — for those, this resolves `true` (the query was
+   * sent) but no `presence_updated` event will follow. Don't await the
+   * event unconditionally.
+   *
    * @param userId - Peer's user ID
    * @returns true if the query was written to the socket (internet transport
    *          connected and authenticated); false otherwise — including when
@@ -2563,9 +2568,10 @@ export class OfflineProtocol {
    * @returns true once the socket accepted the command (write-confirmed on
    *          iOS, enqueue-confirmed on Android — the closest OkHttp offers);
    *          false when not connected+authenticated, the JSON is invalid, or
-   *          the SDK's client-side rate limiter deferred it (the SDK mirrors
-   *          the relay's 30-burst/10-per-second budget — safe to retry after
-   *          a short delay)
+   *          the SDK's client-side rate limiter deferred it (the SDK's
+   *          mirror sits slightly under the relay's 30-burst/10-per-second
+   *          budget, at 28 burst / 9 per second — safe to retry after a
+   *          short delay)
    * @throws when the internet transport was never initialized (enable it via
    *         `transports.internet` before calling)
    */

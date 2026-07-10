@@ -3244,8 +3244,9 @@ impl OfflineProtocol {
     ///
     /// `online=true` drives the reachability machinery (welcome re-arm,
     /// outbox flush, auto key exchange); `online=false` parks pending
-    /// welcomes without burning retry budget. Always emits
-    /// `presence_updated` with the optional `last_seen_ms`.
+    /// welcomes without burning retry budget. Emits `presence_updated` with
+    /// the optional `last_seen_ms` — except for self, blocked, or empty peer
+    /// ids, which are dropped without an event.
     pub fn internet_peer_presence(&self, peer_id: String, online: bool, last_seen_ms: Option<i64>) {
         if peer_id.is_empty() {
             return;

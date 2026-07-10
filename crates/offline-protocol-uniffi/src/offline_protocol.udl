@@ -818,7 +818,8 @@ interface OfflineProtocol {
     // Internet: relay-sourced presence for a peer (PresenceStatus /
     // PresenceStatusWithLastSeen answers). online=true re-arms parked
     // welcomes and flushes queued traffic; online=false parks pending
-    // welcomes without burning retry budget. Always emits presence_updated.
+    // welcomes without burning retry budget. Emits presence_updated, except
+    // for self, blocked, or empty peer ids (dropped without an event).
     void internet_peer_presence(string peer_id, boolean online, i64? last_seen_ms);
 
     // Internet: peers the platform layer should watch via relay presence

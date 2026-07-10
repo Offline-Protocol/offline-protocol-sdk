@@ -51,7 +51,12 @@ pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
 /// reinstall, incompatible peer version) — without it the platform's 20s
 /// presence watch would re-send the multi-frame MLS welcome forever.
 pub(crate) const WELCOME_PRESENCE_RESCUE_BASE_SECS: i64 = 40;
-/// Cap for the presence-rescue backoff (10 minutes).
+/// Cap for the presence-rescue backoff (10 minutes). Deliberately not a
+/// terminal state: a peer that stays online but never confirms keeps getting
+/// one rescue per cap interval, forever. That steady state is cheap (one
+/// multi-frame welcome per 10 min per such peer) and self-resolving — the
+/// lifecycle disappears the moment the session confirms — so a give-up
+/// threshold would only add a way to strand a recoverable session.
 pub(crate) const WELCOME_PRESENCE_RESCUE_MAX_SECS: i64 = 600;
 /// Well-known prefix for transport send-failure reasons meaning "the carrier
 /// is up but this recipient is unreachable on it" (e.g. the internet relay
