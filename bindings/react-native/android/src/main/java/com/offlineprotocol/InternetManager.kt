@@ -646,7 +646,31 @@ class InternetManager(
                     "online" to online
                 ))
             }
-            
+
+            "TypingUpdate" -> {
+                // Bridge the relay's server-mediated typing event (produced by
+                // SetTyping/ClearTyping relay clients) into the SDK's __TYPING__
+                // path, so apps receive the same typing_indicator_received event
+                // regardless of which stack the sender uses.
+                val typingUserId = json.safeOptString("user_id")
+                val conversationId = json.safeOptString("conversation_id")
+                val typing = json.optBoolean("typing", false)
+                if (typingUserId.isEmpty() || conversationId.isEmpty()) {
+                    emitDiagnostic("warning", "Invalid TypingUpdate format: missing user_id/conversation_id")
+                    return
+                }
+                val typingPayload = org.json.JSONObject().apply {
+                    put("conversation_id", conversationId)
+                    put("is_typing", typing)
+                    put("timestamp_ms", System.currentTimeMillis())
+                }
+                injectGroupInternalMessage(typingUserId, "__TYPING__", typingPayload)
+                emitDiagnostic("debug", "Typing update bridged from relay", mapOf(
+                    "userId" to typingUserId,
+                    "typing" to typing
+                ))
+            }
+
             "ConnectionRequestReceived" -> {
                 // Forward connection request to JavaScript with full data so it emits connection_request_received
                 val senderId = json.safeOptString("sender")
