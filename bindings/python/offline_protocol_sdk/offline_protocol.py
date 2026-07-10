@@ -637,6 +637,10 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 8068:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence() != 35090:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 16210:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 58967:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() != 43325:
@@ -1638,6 +1642,19 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_mes
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.c_int8,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2408,6 +2425,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_intern
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed.restype = ctypes.c_uint16
@@ -7594,6 +7617,31 @@ class _UniffiFfiConverterOptionalTypeInternetMessage(_UniffiConverterRustBuffer)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
+class _UniffiFfiConverterOptionalInt64(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterInt64.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterInt64.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterInt64.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 class _UniffiFfiConverterSequenceTypeMlsKeyPackageBundle(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -8084,6 +8132,10 @@ class OfflineProtocolProtocol(typing.Protocol):
     def internet_get_next_message(self, ) -> typing.Optional[InternetMessage]:
         raise NotImplementedError
     def internet_message_received(self, sender_id: str,data: typing.List[int]) -> None:
+        raise NotImplementedError
+    def internet_peer_presence(self, peer_id: str,online: bool,last_seen_ms: typing.Optional[int]) -> None:
+        raise NotImplementedError
+    def internet_presence_watchlist(self, ) -> typing.List[str]:
         raise NotImplementedError
     def internet_send_failed(self, message_id: str) -> None:
         raise NotImplementedError
@@ -9121,6 +9173,39 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def internet_peer_presence(self, peer_id: str,online: bool,last_seen_ms: typing.Optional[int]) -> None:
+        
+        _UniffiFfiConverterString.check_lower(peer_id)
+        
+        _UniffiFfiConverterBoolean.check_lower(online)
+        
+        _UniffiFfiConverterOptionalInt64.check_lower(last_seen_ms)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(peer_id),
+            _UniffiFfiConverterBoolean.lower(online),
+            _UniffiFfiConverterOptionalInt64.lower(last_seen_ms),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def internet_presence_watchlist(self, ) -> typing.List[str]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterSequenceString.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
