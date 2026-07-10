@@ -576,7 +576,18 @@ public class InternetManager: NSObject, TransportManager {
                 return
             }
             let online = onlineNumber.boolValue
-            let lastSeenMs = (json["last_seen"] as? String).flatMap { parseTimestampToMsOrNull($0) }
+            // last_seen may arrive as an ISO-8601 string OR a numeric
+            // epoch-ms (the Android bridge coerces both; keep parity).
+            let lastSeenMs: Int64? = {
+                if let str = json["last_seen"] as? String {
+                    return parseTimestampToMsOrNull(str)
+                }
+                if let num = json["last_seen"] as? NSNumber,
+                   CFGetTypeID(num) != CFBooleanGetTypeID() {
+                    return num.int64Value
+                }
+                return nil
+            }()
             if online {
                 presenceWatch.unwatch(userId)
             }
@@ -1078,23 +1089,36 @@ public class InternetManager: NSObject, TransportManager {
         case .passThrough:
             sendMessage(messageId: messageId, recipientId: recipientId, data: data)
 
-        case .tap(let frames):
+        case .tap(let frames, let commit):
             // Verbatim delivery owns the message id outcome; the extra
-            // relay-native frames are best-effort.
+            // relay-native frames are best-effort. The translator's state
+            // commits only once every extra frame was written — a dropped
+            // frame must be re-sent by a later translation, not assumed
+            // applied.
             sendMessage(messageId: messageId, recipientId: recipientId, data: data)
-            sendRelayFramesBestEffort(frames, controlOp: controlOp)
+            sendRelayFramesBestEffort(frames, controlOp: controlOp, onAllSent: commit)
 
-        case .replace(let frames):
+        case .replace(let frames, let commit):
             guard isConnected, isAuthenticated, let task = webSocketTask else {
                 protocolInstance.internetSendFailed(messageId: messageId)
                 return
             }
-            guard let primary = frames.first,
-                  let primaryData = try? JSONSerialization.data(withJSONObject: primary),
-                  let primaryJson = String(data: primaryData, encoding: .utf8) else {
+            guard let primary = frames.first else {
                 // Nothing to send (fully deduped) — the intent is already
                 // reflected server-side; confirm so the core moves on.
+                commit?()
                 protocolInstance.internetConfirmSent(messageId: messageId)
+                return
+            }
+            guard let primaryData = try? JSONSerialization.data(withJSONObject: primary),
+                  let primaryJson = String(data: primaryData, encoding: .utf8) else {
+                // A non-empty frame that cannot serialize is a failure, not
+                // a dedup: never confirm a message nothing was written for.
+                protocolInstance.internetSendFailed(messageId: messageId)
+                emitDiagnostic("error", "Unserializable relay-native control op", context: [
+                    "controlOp": controlOp,
+                    "messageId": messageId
+                ])
                 return
             }
             task.send(.string(primaryJson)) { [weak self] error in
@@ -1123,7 +1147,11 @@ public class InternetManager: NSObject, TransportManager {
                         nowMs: Int64(Date().timeIntervalSince1970 * 1000)
                     )
                     self.protocolInstance.internetConfirmSent(messageId: messageId)
-                    self.sendRelayFramesBestEffort(Array(frames.dropFirst()), controlOp: controlOp)
+                    self.sendRelayFramesBestEffort(
+                        Array(frames.dropFirst()),
+                        controlOp: controlOp,
+                        onAllSent: commit
+                    )
                     self.emitDiagnostic("debug", "Control op sent relay-native", context: [
                         "controlOp": controlOp,
                         "messageId": messageId,
@@ -1134,20 +1162,42 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
 
-    private func sendRelayFramesBestEffort(_ frames: [[String: Any]], controlOp: String) {
-        guard !frames.isEmpty, isConnected, isAuthenticated, let task = webSocketTask else { return }
-        for frame in frames {
-            guard let frameData = try? JSONSerialization.data(withJSONObject: frame),
-                  let frameJson = String(data: frameData, encoding: .utf8) else { continue }
-            task.send(.string(frameJson)) { [weak self] error in
-                if let error = error {
-                    self?.emitDiagnostic("warning", "Best-effort relay frame dropped", context: [
-                        "controlOp": controlOp,
-                        "frameType": frame["type"] as? String ?? "unknown",
-                        "error": error.localizedDescription
-                    ])
-                }
+    /// Sends the frames sequentially; `onAllSent` runs only when every frame
+    /// was written (the translator's commit hook — see
+    /// `RelayControlOpTranslator.Translation`). A dropped or unserializable
+    /// frame aborts the chain WITHOUT committing, so the next translation
+    /// re-sends the missing state instead of assuming it applied.
+    private func sendRelayFramesBestEffort(
+        _ frames: [[String: Any]],
+        controlOp: String,
+        onAllSent: (() -> Void)? = nil
+    ) {
+        guard !frames.isEmpty else {
+            onAllSent?()
+            return
+        }
+        guard isConnected, isAuthenticated, let task = webSocketTask else { return }
+        var remaining = frames
+        let frame = remaining.removeFirst()
+        guard let frameData = try? JSONSerialization.data(withJSONObject: frame),
+              let frameJson = String(data: frameData, encoding: .utf8) else {
+            emitDiagnostic("warning", "Best-effort relay frame unserializable", context: [
+                "controlOp": controlOp,
+                "frameType": frame["type"] as? String ?? "unknown"
+            ])
+            return
+        }
+        task.send(.string(frameJson)) { [weak self] error in
+            guard let self = self else { return }
+            if let error = error {
+                self.emitDiagnostic("warning", "Best-effort relay frame dropped", context: [
+                    "controlOp": controlOp,
+                    "frameType": frame["type"] as? String ?? "unknown",
+                    "error": error.localizedDescription
+                ])
+                return
             }
+            self.sendRelayFramesBestEffort(remaining, controlOp: controlOp, onAllSent: onAllSent)
         }
     }
 

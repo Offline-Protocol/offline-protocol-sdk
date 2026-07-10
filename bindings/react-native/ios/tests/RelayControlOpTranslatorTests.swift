@@ -10,9 +10,18 @@ final class RelayControlOpTranslatorTests: XCTestCase {
 
     private func frames(_ t: RelayControlOpTranslator.Translation) -> [[String: Any]] {
         switch t {
-        case .replace(let frames): return frames
-        case .tap(let frames): return frames
+        case .replace(let frames, _): return frames
+        case .tap(let frames, _): return frames
         case .passThrough: return []
+        }
+    }
+
+    /// Simulates InternetManager writing every frame successfully.
+    private func commit(_ t: RelayControlOpTranslator.Translation) {
+        switch t {
+        case .replace(_, let commit): commit?()
+        case .tap(_, let commit): commit?()
+        case .passThrough: break
         }
     }
 
@@ -57,19 +66,22 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     func testRegisterTranslatesToCreateGroupPlusMemberDeltas() {
         let translator = RelayControlOpTranslator(selfId: "alice")
 
-        let first = frames(translator.translate(
+        let firstTranslation = translator.translate(
             controlOp: "group_relay_register",
             controlPayload: #"{"group_id":"g1","group_name":"Trip","members":["alice","bob","carol"]}"#,
             recipientId: "alice"
-        ))
+        )
+        let first = frames(firstTranslation)
         XCTAssertEqual(first[0]["type"] as? String, "CreateGroup")
         XCTAssertEqual(first[0]["group_id"] as? String, "g1")
         XCTAssertEqual(first[0]["name"] as? String, "Trip")
-        // Self never appears in deltas (the relay adds the creator itself).
-        let added = Set(first.dropFirst().map {
+        // Self never appears in deltas (the relay adds the creator itself),
+        // and deltas are sorted for a deterministic wire order.
+        let added = first.dropFirst().map {
             "\($0["type"] as? String ?? ""):\($0["username"] as? String ?? "")"
-        })
+        }
         XCTAssertEqual(added, ["AddGroupMember:bob", "AddGroupMember:carol"])
+        commit(firstTranslation)
 
         // Re-registration after a membership change sends only the deltas.
         let second = frames(translator.translate(
@@ -89,11 +101,11 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     func testAdminDeniedGroupsStopProducingMemberDeltas() {
         let translator = RelayControlOpTranslator(selfId: "bob")
 
-        _ = translator.translate(
+        commit(translator.translate(
             controlOp: "group_relay_register",
             controlPayload: #"{"group_id":"g1","members":["alice","bob","carol"]}"#,
             recipientId: "bob"
-        )
+        ))
         translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
 
         let after = frames(translator.translate(
@@ -129,12 +141,13 @@ final class RelayControlOpTranslatorTests: XCTestCase {
             controlPayload: #"{"group_id":"g1","leaving_member":"alice"}"#,
             recipientId: "bob"
         )
-        guard case .tap(let leaveFrames) = tap else {
+        guard case .tap(let leaveFrames, _) = tap else {
             return XCTFail("leave must be a tap")
         }
         XCTAssertEqual(leaveFrames.count, 1)
         XCTAssertEqual(leaveFrames[0]["type"] as? String, "LeaveGroup")
         XCTAssertEqual(leaveFrames[0]["group_id"] as? String, "g1")
+        commit(tap)
 
         // Second per-member leave notification: no duplicate LeaveGroup.
         let second = translator.translate(
@@ -166,13 +179,35 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         ))
     }
 
-    func testResetForgetsRegistrationDiffState() {
+    func testUncommittedRegistrationResendsDeltas() {
         let translator = RelayControlOpTranslator(selfId: "alice")
+
+        // The frames were produced but never fully written (a best-effort
+        // delta dropped): the commit must not run, so the next registration
+        // re-sends the missing deltas instead of assuming them applied.
         _ = translator.translate(
             controlOp: "group_relay_register",
             controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
             recipientId: "alice"
         )
+
+        let retry = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(retry.count, 2)
+        XCTAssertEqual(retry[1]["type"] as? String, "AddGroupMember")
+        XCTAssertEqual(retry[1]["username"] as? String, "bob")
+    }
+
+    func testResetForgetsRegistrationDiffState() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+        commit(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "alice"
+        ))
         translator.reset()
 
         // After reconnect the full membership registers again.

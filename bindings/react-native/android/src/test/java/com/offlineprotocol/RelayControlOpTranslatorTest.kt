@@ -13,6 +13,15 @@ class RelayControlOpTranslatorTest {
         is RelayControlOpTranslator.Translation.PassThrough -> emptyList()
     }
 
+    /** Simulates InternetManager writing every frame successfully. */
+    private fun commit(t: RelayControlOpTranslator.Translation) {
+        when (t) {
+            is RelayControlOpTranslator.Translation.Replace -> t.commit?.invoke()
+            is RelayControlOpTranslator.Translation.Tap -> t.commit?.invoke()
+            is RelayControlOpTranslator.Translation.PassThrough -> Unit
+        }
+    }
+
     @Test
     fun connectionOpsTranslateToRelayNativeFrames() {
         val translator = RelayControlOpTranslator("alice")
@@ -53,22 +62,23 @@ class RelayControlOpTranslatorTest {
     fun registerTranslatesToCreateGroupPlusMemberDeltas() {
         val translator = RelayControlOpTranslator("alice")
 
-        val first = frames(
-            translator.translate(
-                "group_relay_register",
-                """{"group_id":"g1","group_name":"Trip","members":["alice","bob","carol"]}""",
-                "alice"
-            )
+        val firstTranslation = translator.translate(
+            "group_relay_register",
+            """{"group_id":"g1","group_name":"Trip","members":["alice","bob","carol"]}""",
+            "alice"
         )
+        val first = frames(firstTranslation)
         assertEquals("CreateGroup", first[0].getString("type"))
         assertEquals("g1", first[0].getString("group_id"))
         assertEquals("Trip", first[0].getString("name"))
-        // Self never appears in deltas (the relay adds the creator itself).
+        // Self never appears in deltas (the relay adds the creator itself),
+        // and deltas are sorted for a deterministic wire order.
         val added = first.drop(1).map { it.getString("type") to it.getString("username") }
         assertEquals(
-            setOf("AddGroupMember" to "bob", "AddGroupMember" to "carol"),
-            added.toSet()
+            listOf("AddGroupMember" to "bob", "AddGroupMember" to "carol"),
+            added
         )
+        commit(firstTranslation)
 
         // Re-registration after a membership change sends only the deltas.
         val second = frames(
@@ -89,13 +99,42 @@ class RelayControlOpTranslatorTest {
     }
 
     @Test
+    fun uncommittedRegistrationResendsDeltas() {
+        val translator = RelayControlOpTranslator("alice")
+
+        // The frames were produced but never fully written (a best-effort
+        // delta dropped): the commit must not run, so the next registration
+        // re-sends the missing deltas instead of assuming them applied —
+        // otherwise that member is silently missing from relay fan-out for
+        // the rest of the connection.
+        translator.translate(
+            "group_relay_register",
+            """{"group_id":"g1","members":["alice","bob"]}""",
+            "alice"
+        )
+
+        val retry = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "alice"
+            )
+        )
+        assertEquals(2, retry.size)
+        assertEquals("AddGroupMember", retry[1].getString("type"))
+        assertEquals("bob", retry[1].getString("username"))
+    }
+
+    @Test
     fun adminDeniedGroupsStopProducingMemberDeltas() {
         val translator = RelayControlOpTranslator("bob")
 
-        translator.translate(
-            "group_relay_register",
-            """{"group_id":"g1","members":["alice","bob","carol"]}""",
-            "bob"
+        commit(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob","carol"]}""",
+                "bob"
+            )
         )
         translator.onGroupError("g1", "Only admins can add members")
 
@@ -141,6 +180,7 @@ class RelayControlOpTranslatorTest {
         val leave = frames(tap).single()
         assertEquals("LeaveGroup", leave.getString("type"))
         assertEquals("g1", leave.getString("group_id"))
+        commit(tap)
 
         // Second per-member leave notification: no duplicate LeaveGroup.
         val second = translator.translate(
@@ -180,10 +220,12 @@ class RelayControlOpTranslatorTest {
     @Test
     fun resetForgetsRegistrationDiffState() {
         val translator = RelayControlOpTranslator("alice")
-        translator.translate(
-            "group_relay_register",
-            """{"group_id":"g1","members":["alice","bob"]}""",
-            "alice"
+        commit(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "alice"
+            )
         )
         translator.reset()
 
