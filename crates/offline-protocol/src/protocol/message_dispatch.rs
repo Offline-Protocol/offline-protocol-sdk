@@ -1117,7 +1117,11 @@ impl OfflineProtocol {
                 // A group-scoped relay error (registration denied, not a
                 // member, ...) means relay-side fan-out cannot be trusted for
                 // this group: drop the sync flag so sends fall back to the
-                // always-correct per-member path.
+                // always-correct per-member path. Deliberately NOT gated on
+                // the Internet transport (unlike the GROUP_CREATED ack): a
+                // mesh-spoofed revocation only downgrades performance, while
+                // a real one missed on an unusual arrival path would keep
+                // routing content into a relay that disowned the group.
                 if let Some(group_id) = &payload.group_id {
                     self.group_mesh.relay_synced.remove(group_id);
                 }

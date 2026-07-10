@@ -1706,6 +1706,21 @@ impl OfflineProtocol {
             return Ok(());
         }
 
+        // A relay DeliveryError verdict outranks a late wire confirm: the
+        // socket write succeeded, but the relay saw the frame and dropped it
+        // (recipient offline). When the verdict raced ahead of this confirm,
+        // the record is already parked `Failed`/`PeerUnreachable`; letting
+        // the confirm proceed would resurrect the false `Sent` the verdict
+        // just corrected — and emit welcome_send_succeeded *after* the
+        // corrective welcome_send_failed. Any legitimate new send attempt
+        // moves the record to `SendAttempted` first, so `Failed` here means
+        // this confirm belongs to the very send the relay already failed.
+        if updated.state == WelcomeDeliveryState::Failed
+            && updated.last_reason_code == Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+        {
+            return Ok(());
+        }
+
         {
             let record = self.welcome_lifecycles.get_mut(&peer_id).ok_or_else(|| {
                 Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
@@ -1805,8 +1820,9 @@ impl OfflineProtocol {
     /// `__CONN_REQ__` from B to C transiting our internet outbox must stay
     /// an opaque `SendMessage` — a relay-native replacement would be issued
     /// on OUR authenticated connection and misattribute the request to us.
-    /// (The relay-hint ops are equivalently guarded by their self-addressed
-    /// recipient check.)
+    /// The relay-hint ops additionally require the self-addressed recipient
+    /// (that is how the core marks them as hints rather than traffic), so
+    /// they classify only when sender AND recipient are both this device.
     pub fn internet_control_op(&self, message: &Message) -> Option<(&'static str, String)> {
         let content = message.content.as_str();
         if message.sender.as_str() == self.config.user_id {
@@ -1826,7 +1842,9 @@ impl OfflineProtocol {
                 return Some(("group_mls_leave", payload.to_string()));
             }
         }
-        if message.recipient.as_str() == self.config.user_id {
+        if message.sender.as_str() == self.config.user_id
+            && message.recipient.as_str() == self.config.user_id
+        {
             if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_RELAY_REGISTER) {
                 return Some(("group_relay_register", payload.to_string()));
             }
