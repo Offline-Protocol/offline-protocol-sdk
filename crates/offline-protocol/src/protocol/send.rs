@@ -1749,24 +1749,25 @@ impl OfflineProtocol {
             return Ok(());
         };
         // A reason tagged "recipient_unreachable" (the internet bridge's
-        // translation of the relay's DeliveryError / an offline presence
-        // answer) means the carrier is up but *this peer* is not on it —
-        // per-peer no-carrier. Without it, a relay-reported offline recipient
-        // would burn welcome attempts while the socket is healthy.
+        // translation of the relay's DeliveryError) is authoritative proof
+        // the frame was dropped: the carrier is up but *this peer* is not on
+        // it. It must be handled even for records already wire-confirmed
+        // (`Sent`) — the bridge confirms on socket-write success, before the
+        // relay can answer, so the DeliveryError normally arrives when the
+        // record is already Sent and the plain failure path below would
+        // no-op on it, stranding a false `Sent`.
         let peer_unreachable = transport_error
             .as_deref()
             .is_some_and(|r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
-        let reason = if peer_unreachable {
-            crate::events::WelcomeReasonCode::PeerUnreachable
-        } else {
-            crate::events::WelcomeReasonCode::TransportUnavailable
-        };
-        // Otherwise no raw error is available on this async path, so infer
-        // no-carrier from live connectivity: with no transport currently
-        // available the peer is simply unreachable and the Welcome must be
-        // kept alive, not aged.
-        let no_carrier =
-            peer_unreachable || self.transport_manager.get_available_transports().is_empty();
+        if peer_unreachable {
+            return self.apply_recipient_unreachable_failure(&peer_id, transport_error);
+        }
+        let reason = crate::events::WelcomeReasonCode::TransportUnavailable;
+        // No raw error is available on this async path, so infer no-carrier
+        // from live connectivity: with no transport currently available the
+        // peer is simply unreachable and the Welcome must be kept alive, not
+        // aged.
+        let no_carrier = self.transport_manager.get_available_transports().is_empty();
         let _ = self.apply_welcome_send_failure(
             &peer_id,
             reason,

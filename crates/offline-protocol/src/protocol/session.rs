@@ -1,10 +1,12 @@
 //! Session confirmation, welcome lifecycle, and pending session reconciliation.
 
 use super::{
-    internal_prefixes, lock_shared_state, OfflineProtocol, SessionState, WelcomeDeliveryState,
-    WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS,
-    RECONCILIATION_THROTTLE_MS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
-    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_RETRY_BATCH_SIZE,
+    internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle, SessionState,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
+    CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS,
+    WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
+    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
+    WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO,
 };
 use crate::mls_observability::MlsOperationContext;
@@ -906,10 +908,19 @@ impl OfflineProtocol {
     /// re-send it: if the original did land, the receiver dedups by message
     /// id and the confirmation probe resolves the lifecycle.
     ///
-    /// `offline` parks retry-pending welcomes on the slow no-carrier interval
+    /// `offline` parks retry-pending welcomes pending a reachability edge,
     /// without burning budget. In-flight records (`SendAttempted`) are left
     /// to their confirm deadline — a `DeliveryError`-driven failure or the
     /// confirm timeout resolves them, after which the next offline tick parks.
+    ///
+    /// The welcome re-arm/re-send on the online edge is throttled per peer
+    /// with exponential backoff ([`WELCOME_PRESENCE_RESCUE_BASE_SECS`] ..
+    /// [`WELCOME_PRESENCE_RESCUE_MAX_SECS`]): presence answers arrive on the
+    /// platform's ~20s watch tick, and a peer that is online but can never
+    /// prove the session (stale key package after a reinstall, incompatible
+    /// version) must not be re-sent the multi-frame MLS welcome on every
+    /// tick forever. A throttled online tick still flushes queued data-plane
+    /// traffic for the peer.
     ///
     /// Always emits `presence_updated` so the app sees one unified presence
     /// stream regardless of source (peer-sent `__PRESENCE__` or relay).
@@ -918,8 +929,13 @@ impl OfflineProtocol {
             return;
         }
         if online {
-            self.on_neighbor_discovered(peer_id);
-            self.resend_unconfirmed_sent_welcome(peer_id, "peer_presence_online");
+            if self.welcome_rescue_permitted(peer_id) {
+                self.on_neighbor_discovered(peer_id);
+                self.resend_unconfirmed_sent_welcome(peer_id, "peer_presence_online");
+                self.note_welcome_rescue_attempt(peer_id);
+            } else {
+                self.flush_outbox_for_peer(peer_id);
+            }
         } else {
             self.park_welcome_peer_unreachable(peer_id);
         }
@@ -982,9 +998,85 @@ impl OfflineProtocol {
         }
     }
 
+    /// True when a presence-online rescue for this peer is currently allowed
+    /// by the per-peer backoff. Trivially true (and the throttle entry is
+    /// dropped) once the peer has no unconfirmed welcome — there is nothing
+    /// left to throttle.
+    fn welcome_rescue_permitted(&mut self, peer_id: &str) -> bool {
+        let pending = self.welcome_lifecycles.contains_key(peer_id)
+            && !self.confirmed_sessions.contains(peer_id);
+        if !pending {
+            self.welcome_presence_rescue.remove(peer_id);
+            return true;
+        }
+        self.welcome_presence_rescue
+            .get(peer_id)
+            .is_none_or(|throttle| throttle.next_allowed_at <= Utc::now())
+    }
+
+    /// Records that a presence-online tick ran the rescue actions for a peer
+    /// that still has an unconfirmed welcome, doubling the wait before the
+    /// next one (base 40s, capped at 10 minutes). The counter is per
+    /// convergence attempt: the entry is dropped (via
+    /// [`Self::welcome_rescue_permitted`]) as soon as the session confirms
+    /// or the lifecycle goes away.
+    fn note_welcome_rescue_attempt(&mut self, peer_id: &str) {
+        let pending = self.welcome_lifecycles.contains_key(peer_id)
+            && !self.confirmed_sessions.contains(peer_id);
+        if !pending {
+            self.welcome_presence_rescue.remove(peer_id);
+            return;
+        }
+        let throttle = self
+            .welcome_presence_rescue
+            .entry(peer_id.to_string())
+            .or_insert(PresenceRescueThrottle {
+                next_allowed_at: Utc::now(),
+                rescues: 0,
+            });
+        // Shift is clamped to 8, so 40 << 8 = 10240 max before the cap —
+        // no overflow risk.
+        let backoff_secs = (WELCOME_PRESENCE_RESCUE_BASE_SECS << throttle.rescues.min(8))
+            .min(WELCOME_PRESENCE_RESCUE_MAX_SECS);
+        throttle.next_allowed_at = Utc::now() + ChronoDuration::seconds(backoff_secs);
+        throttle.rescues = throttle.rescues.saturating_add(1);
+    }
+
+    /// Parks a welcome pending a peer-reachability edge: reason
+    /// `PeerUnreachable`, **no timed retry**. The carrier (relay socket) is
+    /// healthy — only this peer is unreachable on it — so a timer would just
+    /// re-send the welcome into another `DeliveryError` every interval,
+    /// forever. Recovery is edge-driven instead: `on_peer_presence(online)`
+    /// and `on_neighbor_discovered` re-arm via `rearm_welcome_for_peer`, and
+    /// the peer stays on the presence watchlist (`welcome_pending_peers`) so
+    /// the platform keeps polling for that edge. The TTL is pushed like a
+    /// no-carrier park: an unreachable peer must not age the welcome out.
+    fn park_welcome_awaiting_peer(&mut self, peer_id: &str) -> Result<()> {
+        let snapshot = {
+            let Some(record) = self.welcome_lifecycles.get_mut(peer_id) else {
+                return Ok(());
+            };
+            record.next_retry_at = None;
+            record.expires_at = Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
+            record.last_reason_code = Some(crate::events::WelcomeReasonCode::PeerUnreachable);
+            record.clone()
+        };
+        self.persist_welcome_lifecycle_entry(&snapshot)?;
+        debug!(
+            peer_id = %peer_id,
+            state = snapshot.state.as_str(),
+            "Welcome parked: peer unreachable on carrier, awaiting reachability edge"
+        );
+        Ok(())
+    }
+
     /// Parks a retry-pending welcome for a peer the relay reports offline.
     /// Only `Created`/`Failed` records park: `SendAttempted` keeps its
-    /// confirm deadline, and `Sent`/`Expired` are handled on the online edge.
+    /// confirm deadline, and `Sent`/`Expired` are handled on the online edge
+    /// (or corrected by an attributed `DeliveryError`). Skipped entirely when
+    /// a mesh carrier is also available — relay presence is only
+    /// authoritative for the internet path, and the data-plane retry track
+    /// may still deliver over BLE / WiFi-Direct.
     fn park_welcome_peer_unreachable(&mut self, peer_id: &str) {
         if self.confirmed_sessions.contains(peer_id) {
             return;
@@ -998,8 +1090,77 @@ impl OfflineProtocol {
         ) {
             return;
         }
-        let _ = self
-            .park_welcome_no_carrier(peer_id, crate::events::WelcomeReasonCode::PeerUnreachable);
+        if self
+            .transport_manager
+            .get_available_transports()
+            .keys()
+            .any(|transport| !matches!(transport, TransportType::Internet))
+        {
+            return;
+        }
+        let _ = self.park_welcome_awaiting_peer(peer_id);
+    }
+
+    /// Applies the relay's authoritative "recipient offline" verdict
+    /// (a `recipient_unreachable`-tagged transport failure) to a welcome
+    /// lifecycle.
+    ///
+    /// The bridge wire-confirms on socket-write success, so by the time the
+    /// relay's `DeliveryError` arrives the record is normally already `Sent`
+    /// — a *false* Sent: the store-less relay dropped the content. Correct
+    /// it back to `Failed` (emitting `welcome_send_failed` so the app's
+    /// earlier `welcome_send_succeeded` is superseded), refund the attempt
+    /// (the peer never saw the frame), and park pending a reachability edge.
+    /// `SendAttempted` (the failure raced ahead of the wire confirm) gets
+    /// the same treatment; `Created`/`Failed` records just park. Terminal
+    /// `Expired` records are left to the online edge, which rebuilds them.
+    pub(super) fn apply_recipient_unreachable_failure(
+        &mut self,
+        peer_id: &str,
+        transport_error: Option<String>,
+    ) -> Result<()> {
+        let Some(state) = self.welcome_lifecycles.get(peer_id).map(|r| r.state) else {
+            return Ok(());
+        };
+        match state {
+            WelcomeDeliveryState::Sent | WelcomeDeliveryState::SendAttempted => {
+                self.transition_welcome_state(
+                    peer_id,
+                    WelcomeDeliveryState::Failed,
+                    "recipient_unreachable",
+                )?;
+                if let Some(record) = self.welcome_lifecycles.get_mut(peer_id) {
+                    record.attempt = record.attempt.saturating_sub(1);
+                    record.last_transport_error = transport_error;
+                }
+            }
+            WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed => {
+                if let Some(record) = self.welcome_lifecycles.get_mut(peer_id) {
+                    record.last_transport_error = transport_error;
+                }
+            }
+            WelcomeDeliveryState::Expired => return Ok(()),
+        }
+        self.park_welcome_awaiting_peer(peer_id)?;
+
+        let Some(snapshot) = self.welcome_lifecycles.get(peer_id).cloned() else {
+            return Ok(());
+        };
+        if let Ok(shared) = lock_shared_state(&self.shared_state) {
+            shared.emit_event(Event::welcome_send_failed(
+                peer_id.to_string(),
+                snapshot.welcome_message.id.as_str().to_string(),
+                snapshot.group_id.clone(),
+                snapshot.attempt,
+                crate::events::WelcomeReasonCode::PeerUnreachable,
+                snapshot.last_transport_error.clone(),
+                // Retryable, but with no scheduled time: recovery is
+                // edge-driven (presence online / peer discovery).
+                true,
+                None,
+            ));
+        }
+        Ok(())
     }
 
     /// Records a Welcome send failure and decides whether to retry or expire.
@@ -1189,6 +1350,12 @@ impl OfflineProtocol {
                 )
                 | (WelcomeDeliveryState::Failed, WelcomeDeliveryState::Sent)
                 | (WelcomeDeliveryState::Failed, WelcomeDeliveryState::Expired)
+                // Sent is normally a sink, but the relay's DeliveryError is
+                // authoritative proof that a wire-confirmed frame was dropped
+                // (store-less relay, recipient offline). That correction is
+                // the one legal way back out of Sent — see
+                // `on_transport_send_failed`.
+                | (WelcomeDeliveryState::Sent, WelcomeDeliveryState::Failed)
         )
     }
 
