@@ -14150,12 +14150,9 @@ fn test_group_send_takes_broadcast_path_only_when_relay_synced() {
         .send_group_message(&group_id, "hello", None, None)
         .unwrap();
     assert!(ids.is_empty());
-    assert!(!internet_handle
-        .sent_messages()
-        .iter()
-        .any(|m| m
-            .content
-            .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)));
+    assert!(!internet_handle.sent_messages().iter().any(|m| m
+        .content
+        .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)));
 
     // Simulate the relay's GroupCreated acknowledgment: only now may the
     // O(1) broadcast path be taken.

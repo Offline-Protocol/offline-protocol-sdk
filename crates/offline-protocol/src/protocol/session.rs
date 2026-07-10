@@ -998,10 +998,8 @@ impl OfflineProtocol {
         ) {
             return;
         }
-        let _ = self.park_welcome_no_carrier(
-            peer_id,
-            crate::events::WelcomeReasonCode::PeerUnreachable,
-        );
+        let _ = self
+            .park_welcome_no_carrier(peer_id, crate::events::WelcomeReasonCode::PeerUnreachable);
     }
 
     /// Records a Welcome send failure and decides whether to retry or expire.

@@ -1765,8 +1765,8 @@ impl OfflineProtocol {
         // no-carrier from live connectivity: with no transport currently
         // available the peer is simply unreachable and the Welcome must be
         // kept alive, not aged.
-        let no_carrier = peer_unreachable
-            || self.transport_manager.get_available_transports().is_empty();
+        let no_carrier =
+            peer_unreachable || self.transport_manager.get_available_transports().is_empty();
         let _ = self.apply_welcome_send_failure(
             &peer_id,
             reason,
