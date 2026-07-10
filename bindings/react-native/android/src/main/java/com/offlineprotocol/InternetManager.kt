@@ -654,9 +654,12 @@ class InternetManager(
                 // regardless of which stack the sender uses.
                 val typingUserId = json.safeOptString("user_id")
                 val conversationId = json.safeOptString("conversation_id")
-                val typing = json.optBoolean("typing", false)
-                if (typingUserId.isEmpty() || conversationId.isEmpty()) {
-                    emitDiagnostic("warning", "Invalid TypingUpdate format: missing user_id/conversation_id")
+                // Strict "typing" check: if the relay renames or drops the
+                // field, that must surface as a diagnostic instead of silently
+                // degrading every event to typing=false.
+                val typing = json.opt("typing") as? Boolean
+                if (typingUserId.isEmpty() || conversationId.isEmpty() || typing == null) {
+                    emitDiagnostic("warning", "Invalid TypingUpdate format: missing user_id/conversation_id/typing")
                     return
                 }
                 val typingPayload = org.json.JSONObject().apply {
