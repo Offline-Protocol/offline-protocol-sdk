@@ -103,7 +103,9 @@ impl OfflineProtocol {
 
                     // Handle internal MLS messages
                     let mut was_decrypted = false;
-                    if let Some(result) = self.process_internal_message(&message) {
+                    if let Some(result) =
+                        self.process_internal_message_via(&message, Some(transport_used))
+                    {
                         match result {
                             InternalMessageResult::Consumed => {
                                 // Internal control messages are still delivery-sensitive for

@@ -669,6 +669,7 @@ impl OfflineProtocol {
         &mut self,
         peer_id: &str,
         reason: crate::events::WelcomeReasonCode,
+        transport_error: Option<String>,
     ) -> Result<bool> {
         let snapshot = {
             let Some(record) = self.welcome_lifecycles.get_mut(peer_id) else {
@@ -679,7 +680,7 @@ impl OfflineProtocol {
                 Some(now + ChronoDuration::seconds(WELCOME_NO_CARRIER_RETRY_SECS));
             record.expires_at = now + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
             record.last_reason_code = Some(reason);
-            record.last_transport_error = None;
+            record.last_transport_error = transport_error;
             record.clone()
         };
         self.persist_welcome_lifecycle_entry(&snapshot)?;
@@ -739,6 +740,7 @@ impl OfflineProtocol {
             return self.park_welcome_no_carrier(
                 peer_id,
                 crate::events::WelcomeReasonCode::TransportUnavailable,
+                None,
             );
         }
 
@@ -1114,6 +1116,12 @@ impl OfflineProtocol {
     /// `SendAttempted` (the failure raced ahead of the wire confirm) gets
     /// the same treatment; `Created`/`Failed` records just park. Terminal
     /// `Expired` records are left to the online edge, which rebuilds them.
+    ///
+    /// Relay presence is only authoritative for the internet path: when a
+    /// mesh carrier is also live the peer may still be reachable over BLE /
+    /// WiFi-Direct (DORS can pick internet even with mesh present), so the
+    /// record keeps a timed retry instead of parking edge-only — mirroring
+    /// the carrier guard in [`Self::park_welcome_peer_unreachable`].
     pub(super) fn apply_recipient_unreachable_failure(
         &mut self,
         peer_id: &str,
@@ -1131,17 +1139,30 @@ impl OfflineProtocol {
                 )?;
                 if let Some(record) = self.welcome_lifecycles.get_mut(peer_id) {
                     record.attempt = record.attempt.saturating_sub(1);
-                    record.last_transport_error = transport_error;
+                    record.last_transport_error = transport_error.clone();
                 }
             }
             WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed => {
                 if let Some(record) = self.welcome_lifecycles.get_mut(peer_id) {
-                    record.last_transport_error = transport_error;
+                    record.last_transport_error = transport_error.clone();
                 }
             }
             WelcomeDeliveryState::Expired => return Ok(()),
         }
-        self.park_welcome_awaiting_peer(peer_id)?;
+        let mesh_carrier_available = self
+            .transport_manager
+            .get_available_transports()
+            .keys()
+            .any(|transport| !matches!(transport, TransportType::Internet));
+        if mesh_carrier_available {
+            self.park_welcome_no_carrier(
+                peer_id,
+                crate::events::WelcomeReasonCode::PeerUnreachable,
+                transport_error,
+            )?;
+        } else {
+            self.park_welcome_awaiting_peer(peer_id)?;
+        }
 
         let Some(snapshot) = self.welcome_lifecycles.get(peer_id).cloned() else {
             return Ok(());
@@ -1154,10 +1175,11 @@ impl OfflineProtocol {
                 snapshot.attempt,
                 crate::events::WelcomeReasonCode::PeerUnreachable,
                 snapshot.last_transport_error.clone(),
-                // Retryable, but with no scheduled time: recovery is
-                // edge-driven (presence online / peer discovery).
+                // Retryable. A scheduled time exists only when a mesh
+                // carrier keeps the timed track alive; otherwise recovery
+                // is edge-driven (presence online / peer discovery).
                 true,
-                None,
+                snapshot.next_retry_at.map(|at| at.timestamp_millis()),
             ));
         }
         Ok(())

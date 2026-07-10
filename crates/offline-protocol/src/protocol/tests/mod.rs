@@ -14600,8 +14600,10 @@ fn test_group_created_ack_gates_relay_sync() {
     let group_id = group_info.group_id.as_str().to_string();
     assert!(!protocol.group_mesh.relay_synced.contains(&group_id));
 
-    // The relay's GroupCreated answer (bridged as __GROUP_CREATED__) is the
-    // registration acknowledgment: only now is broadcast fan-out trusted.
+    // A __GROUP_CREATED__ arriving over a mesh transport (or an unknown
+    // path) is spoofable by any peer and must NOT enable the broadcast
+    // path — a false sync flag black-holes group sends into a relay that
+    // never registered the group.
     let ack = Message::new(
         UserId::new("relay").unwrap(),
         UserId::new("user123").unwrap(),
@@ -14611,7 +14613,21 @@ fn test_group_created_ack_gates_relay_sync() {
             group_id
         ),
     );
+    protocol.process_internal_message_via(&ack, Some(TransportType::BLE));
+    assert!(
+        !protocol.group_mesh.relay_synced.contains(&group_id),
+        "mesh-arrived GroupCreated must not mark the group relay-synced"
+    );
     protocol.process_internal_message(&ack);
+    assert!(
+        !protocol.group_mesh.relay_synced.contains(&group_id),
+        "unknown-transport GroupCreated must not mark the group relay-synced"
+    );
+
+    // The relay's GroupCreated answer (bridged as __GROUP_CREATED__ over
+    // the internet path) is the registration acknowledgment: only now is
+    // broadcast fan-out trusted.
+    protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
     assert!(protocol.group_mesh.relay_synced.contains(&group_id));
 
     // An ack for a group we don't track locally must not create sync state.
@@ -14621,7 +14637,7 @@ fn test_group_created_ack_gates_relay_sync() {
         AppId::new("test-app").unwrap(),
         "__GROUP_CREATED__{\"group_id\":\"someone-elses-group\",\"name\":\"x\"}",
     );
-    protocol.process_internal_message(&foreign_ack);
+    protocol.process_internal_message_via(&foreign_ack, Some(TransportType::Internet));
     assert!(!protocol
         .group_mesh
         .relay_synced
@@ -14717,6 +14733,46 @@ fn test_delivery_error_after_wire_confirm_corrects_false_sent() {
         protocol.welcome_lifecycles.get("bob").unwrap().state,
         WelcomeDeliveryState::SendAttempted
     );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_delivery_error_with_mesh_carrier_keeps_timed_retry() {
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    // A live mesh carrier means the peer may still be reachable over BLE
+    // even though the relay reports it offline on the internet path (DORS
+    // can pick internet with mesh present).
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+
+    // The false Sent is still corrected and the attempt refunded, but the
+    // record keeps a timed retry instead of parking edge-only: relay
+    // presence is only authoritative for the internet path.
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(lifecycle.attempt, 0, "the peer never saw the frame");
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert!(
+        lifecycle.next_retry_at.is_some(),
+        "a live mesh carrier must keep the timed retry track alive"
+    );
+    assert!(lifecycle.last_transport_error.is_some());
 
     protocol.stop().unwrap();
 }
