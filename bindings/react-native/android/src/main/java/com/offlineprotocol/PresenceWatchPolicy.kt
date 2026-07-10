@@ -14,7 +14,9 @@ package com.offlineprotocol
  * (token bucket: burst 30, 10/s — one tick sends at most
  * [maxQueriesPerTick] frames every [DEFAULT_TICK_INTERVAL_MS] ms).
  *
- * Not thread-safe; InternetManager confines all calls to the main thread.
+ * Thread-safe: relay answers and inbound traffic mutate the watch set on
+ * OkHttp's reader thread while the tick runs on the main handler, so all
+ * state is guarded by an internal lock.
  */
 class PresenceWatchPolicy(
     private val idleTtlMs: Long = DEFAULT_IDLE_TTL_MS,
@@ -26,28 +28,33 @@ class PresenceWatchPolicy(
         const val DEFAULT_TICK_INTERVAL_MS = 20_000L
     }
 
+    private val lock = Any()
     private val lastRelevantAtMs = HashMap<String, Long>()
     private val rotation = ArrayDeque<String>()
 
     /** Adds a peer to the watch set (or refreshes its idle clock). */
     fun watch(peerId: String, nowMs: Long) {
         if (peerId.isEmpty()) return
-        if (lastRelevantAtMs.put(peerId, nowMs) == null) rotation.addLast(peerId)
+        synchronized(lock) {
+            if (lastRelevantAtMs.put(peerId, nowMs) == null) rotation.addLast(peerId)
+        }
     }
 
     /** Removes a peer (online answer or inbound traffic proved reachability). */
     fun unwatch(peerId: String) {
-        if (lastRelevantAtMs.remove(peerId) != null) rotation.remove(peerId)
+        synchronized(lock) {
+            if (lastRelevantAtMs.remove(peerId) != null) rotation.remove(peerId)
+        }
     }
 
-    fun watchedPeers(): Set<String> = lastRelevantAtMs.keys.toSet()
+    fun watchedPeers(): Set<String> = synchronized(lock) { lastRelevantAtMs.keys.toSet() }
 
     /**
      * Merges the core watchlist (authoritatively still-pending peers refresh
      * their idle clock), evicts idle entries, and returns up to
      * [maxQueriesPerTick] peers to query this tick, round-robin.
      */
-    fun peersToQuery(coreWatchlist: List<String>, nowMs: Long): List<String> {
+    fun peersToQuery(coreWatchlist: List<String>, nowMs: Long): List<String> = synchronized(lock) {
         for (peer in coreWatchlist) {
             watch(peer, nowMs)
         }
@@ -64,11 +71,13 @@ class PresenceWatchPolicy(
             rotation.addLast(peer)
             result.add(peer)
         }
-        return result
+        result
     }
 
     fun clear() {
-        lastRelevantAtMs.clear()
-        rotation.clear()
+        synchronized(lock) {
+            lastRelevantAtMs.clear()
+            rotation.clear()
+        }
     }
 }

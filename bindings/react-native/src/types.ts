@@ -768,6 +768,7 @@ export interface ConvergenceDiagEvent extends BaseEvent {
  */
 export type WelcomeReasonCode =
   | 'TRANSPORT_UNAVAILABLE'
+  | 'PEER_UNREACHABLE'
   | 'PEER_DISCONNECTED'
   | 'TIMEOUT'
   | 'INTERNAL_ERROR'

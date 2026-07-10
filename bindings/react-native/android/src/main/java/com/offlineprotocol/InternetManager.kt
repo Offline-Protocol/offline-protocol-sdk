@@ -1211,9 +1211,14 @@ class InternetManager(
 
             is RelayControlOpTranslator.Translation.Tap -> {
                 // Verbatim delivery owns the message id outcome; the extra
-                // relay-native frames are best-effort.
+                // relay-native frames are best-effort. The translator's state
+                // commits only once every extra frame was written — a dropped
+                // frame must be re-sent by a later translation, not assumed
+                // applied.
                 sendMessage(messageId, recipientId, data, replyToMsg)
-                sendRelayFramesBestEffort(translation.frames, controlOp)
+                if (sendRelayFramesBestEffort(translation.frames, controlOp)) {
+                    translation.commit?.invoke()
+                }
             }
 
             is RelayControlOpTranslator.Translation.Replace -> {
@@ -1226,6 +1231,7 @@ class InternetManager(
                 if (primary == null) {
                     // Nothing to send (fully deduped) — the intent is already
                     // reflected server-side; confirm so the core moves on.
+                    translation.commit?.invoke()
                     try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
                     return
                 }
@@ -1237,7 +1243,9 @@ class InternetManager(
                     messagesSent++
                     inFlightTracker.recordSent(recipientId, messageId, System.currentTimeMillis())
                     try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
-                    sendRelayFramesBestEffort(translation.frames.drop(1), controlOp)
+                    if (sendRelayFramesBestEffort(translation.frames.drop(1), controlOp)) {
+                        translation.commit?.invoke()
+                    }
                     emitDiagnostic("debug", "Control op sent relay-native", mapOf(
                         "controlOp" to controlOp,
                         "messageId" to messageId,
@@ -1259,18 +1267,21 @@ class InternetManager(
         }
     }
 
-    private fun sendRelayFramesBestEffort(frames: List<org.json.JSONObject>, controlOp: String) {
-        val ws = webSocket ?: return
+    /** Returns true only when every frame was written to the socket. */
+    private fun sendRelayFramesBestEffort(frames: List<org.json.JSONObject>, controlOp: String): Boolean {
+        if (frames.isEmpty()) return true
+        val ws = webSocket ?: return false
         for (frame in frames) {
-            if (!isConnected.get() || !isAuthenticated.get()) return
+            if (!isConnected.get() || !isAuthenticated.get()) return false
             if (!ws.send(frame.toString())) {
                 emitDiagnostic("warning", "Best-effort relay frame dropped", mapOf(
                     "controlOp" to controlOp,
                     "frameType" to frame.optString("type")
                 ))
-                return
+                return false
             }
         }
+        return true
     }
 
     // MARK: - Ping
