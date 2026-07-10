@@ -23,6 +23,7 @@ Pod::Spec.new do |s|
     "RelayControlOpTranslator.swift",
     "PresenceWatchPolicy.swift",
     "RecipientInFlightTracker.swift",
+    "RelayTimestamps.swift",
     "WifiDirectManager.swift",
     "NostrManager.swift",
     "ReticulumManager.swift",

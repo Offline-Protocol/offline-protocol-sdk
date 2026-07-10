@@ -643,7 +643,7 @@ public class InternetManager: NSObject, TransportManager {
             // epoch-ms (the Android bridge coerces both; keep parity).
             let lastSeenMs: Int64? = {
                 if let str = json["last_seen"] as? String {
-                    return parseTimestampToMsOrNull(str)
+                    return RelayTimestamps.parseToMsOrNull(str)
                 }
                 if let num = json["last_seen"] as? NSNumber,
                    CFGetTypeID(num) != CFBooleanGetTypeID() {
@@ -902,26 +902,6 @@ public class InternetManager: NSObject, TransportManager {
         emitter(raw)
     }
     
-    /// Like `parseTimestampToMs` but returns nil instead of now() when the
-    /// value is absent or unparseable — a last-seen display must not invent
-    /// a timestamp. Accepts ISO-8601 or epoch milliseconds.
-    private func parseTimestampToMsOrNull(_ timestampStr: String) -> Int64? {
-        guard !timestampStr.isEmpty else { return nil }
-        if let epochMs = Int64(timestampStr) {
-            return epochMs
-        }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: timestampStr) {
-            return Int64(date.timeIntervalSince1970 * 1000)
-        }
-        formatter.formatOptions = [.withInternetDateTime]
-        if let date = formatter.date(from: timestampStr) {
-            return Int64(date.timeIntervalSince1970 * 1000)
-        }
-        return nil
-    }
-
     /// Parse ISO-8601 timestamp string to Unix ms, or return current time if invalid.
     private func parseTimestampToMs(_ timestampStr: String) -> Int64 {
         guard !timestampStr.isEmpty else {
