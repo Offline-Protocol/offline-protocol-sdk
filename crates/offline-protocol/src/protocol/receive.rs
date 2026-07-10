@@ -95,8 +95,25 @@ impl OfflineProtocol {
 
                     self.deduplicator.mark_seen(message.id.clone());
 
-                    // Relay: if this message is not for us, forward it
+                    // Relay: if this message is not for us, forward it.
+                    // Never relay a frame claiming our own origin: a genuine
+                    // self-originated frame is never received inbound with a
+                    // foreign recipient (the send path does not loop back), so
+                    // this is a routing loop or a forgery aimed at
+                    // `internet_control_op`'s self-origination gate — re-issuing
+                    // it from our outbox would let a mesh peer drive
+                    // relay-native control ops on our authenticated relay
+                    // connection. (A sender==self frame addressed *to* us is the
+                    // legitimate relay echo and falls through unchanged.)
                     if message.recipient.as_str() != self.config.user_id {
+                        if message.sender.as_str() == self.config.user_id {
+                            debug!(
+                                message_id = %message.id,
+                                recipient = %message.recipient,
+                                "Dropping inbound frame forging our own origin"
+                            );
+                            continue;
+                        }
                         self.try_relay_message(&message);
                         continue;
                     }

@@ -1823,7 +1823,18 @@ impl OfflineProtocol {
     /// The relay-hint ops additionally require the self-addressed recipient
     /// (that is how the core marks them as hints rather than traffic), so
     /// they classify only when sender AND recipient are both this device.
+    ///
+    /// Self-origination is proven by `hop_count == 0`, not by the `sender`
+    /// field: `sender` is an unauthenticated wire field, so a mesh peer
+    /// could forge `sender == self` on a frame we then relay — but
+    /// `try_relay_message` increments the hop before re-sending, while every
+    /// locally-originated frame leaves `send_internal_message` at hop 0.
+    /// (Defense in depth: the receive loop also drops inbound frames
+    /// claiming our own origin before they can reach the relay path.)
     pub fn internet_control_op(&self, message: &Message) -> Option<(&'static str, String)> {
+        if message.hop_count.value() != 0 {
+            return None;
+        }
         let content = message.content.as_str();
         if message.sender.as_str() == self.config.user_id {
             if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_REQUEST) {

@@ -908,6 +908,7 @@ impl OfflineProtocol {
                         .group_mesh
                         .relay_register_pending
                         .remove(&payload.group_id)
+                        .is_some()
                 {
                     self.group_mesh
                         .relay_synced
@@ -1052,6 +1053,14 @@ impl OfflineProtocol {
                     }
                     self.group_mesh.members.remove(&payload.group_id);
                     self.group_mesh.relay_synced.remove(&payload.group_id);
+                    // The outstanding-registration correlation goes too, as
+                    // in every other membership-teardown path: a pending
+                    // entry surviving our removal could otherwise be claimed
+                    // by a stale or forged __GROUP_CREATED__ after a re-join
+                    // repopulates the member cache.
+                    self.group_mesh
+                        .relay_register_pending
+                        .remove(&payload.group_id);
                 } else {
                     // Another member was removed — just update the cache
                     if let Some(members) = self.group_mesh.members.get_mut(&payload.group_id) {

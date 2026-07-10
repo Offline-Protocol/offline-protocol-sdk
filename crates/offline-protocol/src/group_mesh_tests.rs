@@ -6356,6 +6356,18 @@ fn test_plaintext_removal_notification_from_admin_cleans_up() {
         events_clone.lock().unwrap().push(event);
     });
 
+    // Arm an in-flight relay registration for the group: the removal must
+    // clear it along with the member cache and sync flag — a surviving
+    // correlation entry could otherwise be claimed by a stale or forged
+    // __GROUP_CREATED__ after a re-join repopulates the member cache.
+    bob.group_mesh.relay_register_pending.insert(
+        group_id.clone(),
+        crate::group_mesh::RelayRegisterPending {
+            armed_at: chrono::Utc::now(),
+            attempts: 1,
+        },
+    );
+
     // Simulate Alice (admin) sending a plaintext removal notification to Bob
     let payload = crate::protocol::GroupMemberRemovedPayload {
         group_id: group_id.clone(),
@@ -6385,6 +6397,12 @@ fn test_plaintext_removal_notification_from_admin_cleans_up() {
     assert!(
         !bob.group_mesh.members.contains_key(&group_id),
         "Bob's group should be removed after plaintext removal notification"
+    );
+    assert!(
+        !bob.group_mesh
+            .relay_register_pending
+            .contains_key(&group_id),
+        "self-removal must clear the outstanding registration correlation"
     );
 }
 

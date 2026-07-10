@@ -14,7 +14,7 @@ use crate::protocol::{
     InternalMessageResult, OfflineProtocol,
 };
 use crate::{Error, Event, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use offline_protocol_core::{ForwardInfo, Message, MessageId, MessagePriority};
 use offline_protocol_mls::GroupRole;
 use offline_protocol_transport::TransportType;
@@ -29,6 +29,18 @@ pub(super) const GROUP_MESSAGE_DEDUP_TTL_SECS: u64 = 300;
 pub(super) const MAX_GROUP_MESSAGE_DEDUP_ENTRIES: usize = 10_000;
 /// Maximum allowed base64-encoded payload size for incoming group messages (1 MB).
 pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
+/// How long an outstanding relay group registration waits for its
+/// `__GROUP_CREATED__` answer before the correlation entry is expired. The
+/// relay answers within a round trip, so this is generous slack; what it
+/// bounds is the *forged-ack acceptance window* against a relay that never
+/// answers (prefix-unaware echo relay, legacy server).
+pub(super) const RELAY_REGISTER_ACK_TIMEOUT_SECS: i64 = 30;
+/// Registration sends per connection before giving up on relay sync for a
+/// group. An unanswered registration is re-sent on expiry (the frame may
+/// have been lost); past this budget the group simply stays unsynced and
+/// sends take the always-correct per-member fan-out path. Reset by the
+/// internet 0→1 re-sync, which re-registers from scratch.
+pub(super) const RELAY_REGISTER_MAX_ATTEMPTS: u32 = 3;
 /// Maximum number of buffered out-of-order commits per group.
 pub(super) const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits. Must be at least
@@ -81,6 +93,18 @@ pub(super) const LEAVE_ELECTION_MAX_LIFETIME_SECS: u64 = 300;
 /// to prevent spamming MLS operations on every process tick (5 seconds).
 pub(super) const LEAVE_ELECTION_ATTEMPT_COOLDOWN_SECS: u64 = 5;
 
+/// Correlation state for one in-flight relay group registration.
+#[derive(Debug, Clone)]
+pub(crate) struct RelayRegisterPending {
+    /// When the outstanding `__GRP_RELAY_REG__` frame was (last) sent;
+    /// entries older than [`RELAY_REGISTER_ACK_TIMEOUT_SECS`] are expired
+    /// on the process tick.
+    pub(crate) armed_at: DateTime<Utc>,
+    /// Registration sends on this connection, counted against
+    /// [`RELAY_REGISTER_MAX_ATTEMPTS`].
+    pub(crate) attempts: u32,
+}
+
 /// Bundled state for group messaging.
 ///
 /// Groups together the cached member lists, dedup table, pending commit
@@ -114,13 +138,18 @@ pub(crate) struct GroupMeshState {
 
     /// Group IDs with a relay registration in flight (a `__GRP_RELAY_REG__`
     /// frame enqueued, no relay answer yet). The `__GROUP_CREATED__` ack only
-    /// sets `relay_synced` for groups in this set: the relay forwards peer
+    /// sets `relay_synced` for groups in this map: the relay forwards peer
     /// message content verbatim, so without this correlation any peer that
     /// knows a group id could forge the ack over the internet path and route
     /// our broadcasts into a relay that never registered the group. Cleared
-    /// per group on ack or group-scoped `__GROUP_ERROR__`, and wholesale when
-    /// the Internet transport drops (the answer can never arrive).
-    pub(crate) relay_register_pending: HashSet<String>,
+    /// per group on ack, group-scoped `__GROUP_ERROR__`, leave/removal, and
+    /// wholesale when the Internet transport drops (the answer can never
+    /// arrive). Entries a relay never answers are expired on the process
+    /// tick ([`RELAY_REGISTER_ACK_TIMEOUT_SECS`]) and re-registered up to
+    /// [`RELAY_REGISTER_MAX_ATTEMPTS`] times — a relay that never acks
+    /// (prefix-unaware echo relay, legacy server) must not leave the
+    /// acceptance window armed indefinitely for a forged ack to claim.
+    pub(crate) relay_register_pending: HashMap<String, RelayRegisterPending>,
 
     /// Whether Internet transport was available on the last `process()` tick.
     /// Used for edge-detection: sync groups on 0→1 transition, clear on 1→0.
@@ -276,9 +305,15 @@ pub(crate) struct GroupRenamePayload {
 /// Payload for registering/updating a group with the relay server.
 ///
 /// Sent as a `__GRP_RELAY_REG__`-prefixed internal message to the user's
-/// own ID via Internet transport.  The relay server intercepts the prefix
-/// and records the group → member mapping so it can perform server-side
-/// fan-out for future `__GRP_RELAY_BCAST__` messages.
+/// own ID via Internet transport. The relay server does NOT intercept the
+/// prefix — a prefix-unaware relay just echoes the self-addressed frame
+/// back. It is the platform bridge translator (the relay adapter) that
+/// recognizes the frame via `internet_control_op` and replaces it with a
+/// relay-native `CreateGroup` plus admin-gated member deltas, so the relay
+/// learns the group → member mapping for server-side fan-out of future
+/// `__GRP_RELAY_BCAST__` messages. A transport without such an adapter
+/// leaves the group unsynced (per-member fan-out) — see
+/// `try_relay_register_group`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RelayGroupRegistrationPayload {
     /// MLS group identifier.
@@ -303,9 +338,13 @@ pub(crate) struct RelayGroupRegistrationPayload {
 /// Payload for a relay-broadcast of an MLS-encrypted group message.
 ///
 /// Sent as a `__GRP_RELAY_BCAST__`-prefixed internal message to the user's
-/// own ID via Internet transport.  The relay server looks up the group
-/// membership, wraps the ciphertext in individual `__GRP_MLS_MSG__`
-/// messages, and delivers to each member.
+/// own ID via Internet transport. The relay server does NOT intercept the
+/// prefix; the platform bridge translator replaces the frame with a
+/// relay-native `SendGroupMessage`, and the relay's fan-out arrives at each
+/// member as a `__GROUP_MSG__` frame injected by *their* bridge. This path
+/// is only taken once the relay has positively acknowledged the group's
+/// registration (`relay_synced`) — on any other relay the frame would be
+/// echoed back and the content silently lost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RelayGroupBroadcastPayload {
     /// MLS group identifier.
@@ -3007,10 +3046,21 @@ impl OfflineProtocol {
             Ok(_) => {
                 // Arm the ack correlation: only a `__GROUP_CREATED__` that
                 // answers an outstanding registration may set `relay_synced`.
-                self.group_mesh
+                // Attempts accumulate across re-sends on this connection so
+                // the expiry processor can give up on a relay that never
+                // answers; the counter resets whenever the entry is removed
+                // (ack, error, leave, internet drop).
+                let entry = self
+                    .group_mesh
                     .relay_register_pending
-                    .insert(group_id.to_string());
-                debug!(group_id = %group_id, "Sent group registration to relay server");
+                    .entry(group_id.to_string())
+                    .or_insert(RelayRegisterPending {
+                        armed_at: Utc::now(),
+                        attempts: 0,
+                    });
+                entry.armed_at = Utc::now();
+                entry.attempts = entry.attempts.saturating_add(1);
+                debug!(group_id = %group_id, attempts = entry.attempts, "Sent group registration to relay server");
                 Ok(true)
             }
             Err(e) => {
@@ -3023,8 +3073,11 @@ impl OfflineProtocol {
     /// Attempts to send a group message via relay broadcast.
     ///
     /// Sends a single `__GRP_RELAY_BCAST__` message to the user's own ID.
-    /// The relay server fans it out to all registered group members as
-    /// individual `__GRP_MLS_MSG__` messages.
+    /// The bridge translator (not the relay — see
+    /// [`RelayGroupBroadcastPayload`]) turns it into a relay-native
+    /// `SendGroupMessage`; the relay fans out to registered members, whose
+    /// bridges inject the delivery as `__GROUP_MSG__` frames. Callers must
+    /// only take this path for a `relay_synced` group.
     ///
     /// Returns the broadcast `MessageId` on success, or an error if the
     /// relay is unreachable.
@@ -3425,6 +3478,61 @@ impl OfflineProtocol {
             // pending set goes too (re-armed by the 0→1 re-sync).
             self.group_mesh.relay_synced.clear();
             self.group_mesh.relay_register_pending.clear();
+        }
+    }
+
+    /// Expires outstanding relay registrations the relay never answered.
+    ///
+    /// Called from the `process()` tick. An entry older than
+    /// [`RELAY_REGISTER_ACK_TIMEOUT_SECS`] either gets its registration
+    /// re-sent (the frame may have been lost) or, past
+    /// [`RELAY_REGISTER_MAX_ATTEMPTS`], is dropped so the ack-acceptance
+    /// window closes: against a relay that never answers (prefix-unaware
+    /// echo relay, legacy server, or a `__GROUP_ERROR__` that arrived
+    /// without a `group_id` and so could not consume the correlation) an
+    /// armed entry would otherwise sit indefinitely for a forged
+    /// `__GROUP_CREATED__` to claim. Giving up is safe — the group stays
+    /// unsynced and sends take the always-correct per-member fan-out path.
+    pub(crate) fn process_relay_register_retries(&mut self) {
+        if !self.config.group.relay_enabled
+            || self.group_mesh.relay_register_pending.is_empty()
+            || !self.is_internet_available()
+        {
+            return;
+        }
+        let cutoff = Utc::now() - chrono::Duration::seconds(RELAY_REGISTER_ACK_TIMEOUT_SECS);
+        let expired: Vec<(String, u32)> = self
+            .group_mesh
+            .relay_register_pending
+            .iter()
+            .filter(|(_, pending)| pending.armed_at <= cutoff)
+            .map(|(group_id, pending)| (group_id.clone(), pending.attempts))
+            .collect();
+        for (group_id, attempts) in expired {
+            if attempts >= RELAY_REGISTER_MAX_ATTEMPTS
+                || !self.group_mesh.members.contains_key(&group_id)
+                || self.group_mesh.relay_synced.contains(&group_id)
+            {
+                self.group_mesh.relay_register_pending.remove(&group_id);
+                debug!(
+                    group_id = %group_id,
+                    attempts,
+                    "Expired unanswered relay group registration"
+                );
+                continue;
+            }
+            // Re-send with membership refreshed from MLS, like the 0→1
+            // re-sync; try_relay_register_group re-arms the entry in place
+            // with the attempt count carried forward.
+            let members = self
+                .refresh_group_members(&group_id)
+                .ok()
+                .or_else(|| self.group_mesh.members.get(&group_id).cloned());
+            if let Some(members) = members {
+                let _ = self.try_relay_register_group(&group_id, None, &members);
+            } else {
+                self.group_mesh.relay_register_pending.remove(&group_id);
+            }
         }
     }
 

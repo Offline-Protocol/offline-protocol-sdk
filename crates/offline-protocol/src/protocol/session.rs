@@ -7,7 +7,7 @@ use super::{
     WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
     WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
-    WELCOME_RETRY_JITTER_RATIO,
+    WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
 };
 use crate::mls_observability::MlsOperationContext;
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
@@ -670,14 +670,14 @@ impl OfflineProtocol {
         peer_id: &str,
         reason: crate::events::WelcomeReasonCode,
         transport_error: Option<String>,
+        retry_in_secs: i64,
     ) -> Result<bool> {
         let snapshot = {
             let Some(record) = self.welcome_lifecycles.get_mut(peer_id) else {
                 return Ok(false);
             };
             let now = Utc::now();
-            record.next_retry_at =
-                Some(now + ChronoDuration::seconds(WELCOME_NO_CARRIER_RETRY_SECS));
+            record.next_retry_at = Some(now + ChronoDuration::seconds(retry_in_secs));
             record.expires_at = now + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
             record.last_reason_code = Some(reason);
             record.last_transport_error = transport_error;
@@ -687,7 +687,7 @@ impl OfflineProtocol {
         debug!(
             peer_id = %peer_id,
             state = snapshot.state.as_str(),
-            retry_in_secs = WELCOME_NO_CARRIER_RETRY_SECS,
+            retry_in_secs,
             "Welcome parked: no transport carrier, re-checking on slow interval"
         );
         Ok(false)
@@ -741,6 +741,7 @@ impl OfflineProtocol {
                 peer_id,
                 crate::events::WelcomeReasonCode::TransportUnavailable,
                 None,
+                WELCOME_NO_CARRIER_RETRY_SECS,
             );
         }
 
@@ -856,6 +857,10 @@ impl OfflineProtocol {
             WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed => {
                 if let Some(entry) = self.welcome_lifecycles.get_mut(peer_id) {
                     entry.attempt = 0;
+                    // A reachability edge resets the unreachable-park
+                    // escalation: the next relay verdict starts the interval
+                    // ladder over from its base.
+                    entry.unreachable_parks = 0;
                     entry.next_retry_at = Some(Utc::now());
                     entry.last_reason_code = None;
                     entry.last_transport_error = None;
@@ -961,11 +966,17 @@ impl OfflineProtocol {
     /// the internet presence watch set. Includes `Sent` records (wire-
     /// confirmed but never session-confirmed): only a presence signal can
     /// rescue those over a store-less relay.
+    /// Lifecycles older than [`WELCOME_WATCHLIST_MAX_AGE_SECS`] are excluded:
+    /// a permanently-dead peer must not occupy watch-rotation slots (and keep
+    /// its parked record alive via `expires_at` pushes) forever.
     pub fn welcome_pending_peers(&self) -> Vec<String> {
+        let watch_cutoff = Utc::now() - ChronoDuration::seconds(WELCOME_WATCHLIST_MAX_AGE_SECS);
         self.welcome_lifecycles
-            .keys()
-            .filter(|peer_id| !self.confirmed_sessions.contains(*peer_id))
-            .cloned()
+            .iter()
+            .filter(|(peer_id, record)| {
+                !self.confirmed_sessions.contains(*peer_id) && record.created_at > watch_cutoff
+            })
+            .map(|(peer_id, _)| peer_id.clone())
             .collect()
     }
 
@@ -1094,11 +1105,15 @@ impl OfflineProtocol {
         ) {
             return;
         }
+        // Local mesh carriers only (BLE / WiFi-Direct): Nostr and Reticulum
+        // are internet-dependent, so their availability must not veto the
+        // park — mirrors the carrier guard in
+        // `apply_recipient_unreachable_failure`.
         if self
             .transport_manager
             .get_available_transports()
             .keys()
-            .any(|transport| !matches!(transport, TransportType::Internet))
+            .any(|transport| matches!(transport, TransportType::BLE | TransportType::WiFiDirect))
         {
             return;
         }
@@ -1129,6 +1144,15 @@ impl OfflineProtocol {
         peer_id: &str,
         transport_error: Option<String>,
     ) -> Result<()> {
+        // A late relay verdict for a session that has since been proven (the
+        // welcome was rescued over another path and the peer confirmed) must
+        // not corrupt the converged lifecycle: without this guard the stale
+        // DeliveryError flips the record back to Failed, refunds an attempt,
+        // persists the stale state, and emits welcome_send_failed AFTER the
+        // app already saw secure_session_established.
+        if self.confirmed_sessions.contains(peer_id) {
+            return Ok(());
+        }
         let Some(state) = self.welcome_lifecycles.get(peer_id).map(|r| r.state) else {
             return Ok(());
         };
@@ -1151,16 +1175,41 @@ impl OfflineProtocol {
             }
             WelcomeDeliveryState::Expired => return Ok(()),
         }
+        // Only a *local* mesh carrier (BLE / WiFi-Direct) justifies keeping
+        // a timed retry: the peer may genuinely be a room away even though
+        // the relay reports it offline. Nostr and Reticulum are excluded —
+        // they are internet-dependent relay transports, so their adapter
+        // being "available" says nothing about local peer reachability and
+        // would keep the timed track alive on every internet-connected
+        // device. And adapter availability still is not peer reachability,
+        // so the interval escalates per consecutive unreachable park
+        // (15s → 600s cap): DORS may keep routing the retry to the internet
+        // path, where each round trips another budget-refunded
+        // DeliveryError — without escalation that is an unbounded resend
+        // loop into the relay. The counter resets on any reachability edge
+        // (`rearm_welcome_for_peer`).
         let mesh_carrier_available = self
             .transport_manager
             .get_available_transports()
             .keys()
-            .any(|transport| !matches!(transport, TransportType::Internet));
+            .any(|transport| matches!(transport, TransportType::BLE | TransportType::WiFiDirect));
         if mesh_carrier_available {
+            let parks = {
+                let Some(record) = self.welcome_lifecycles.get_mut(peer_id) else {
+                    return Ok(());
+                };
+                record.unreachable_parks = record.unreachable_parks.saturating_add(1);
+                record.unreachable_parks
+            };
+            // parks >= 1 here; shift clamped so 15 << 6 = 960 is the largest
+            // pre-cap value — no overflow risk.
+            let retry_in_secs = (WELCOME_NO_CARRIER_RETRY_SECS << (parks - 1).min(6))
+                .min(WELCOME_UNREACHABLE_RETRY_CAP_SECS);
             self.park_welcome_no_carrier(
                 peer_id,
                 crate::events::WelcomeReasonCode::PeerUnreachable,
                 transport_error,
+                retry_in_secs,
             )?;
         } else {
             self.park_welcome_awaiting_peer(peer_id)?;
@@ -1460,6 +1509,7 @@ impl OfflineProtocol {
             group_id: group_id.to_string(),
             state: WelcomeDeliveryState::Created,
             attempt: 0,
+            unreachable_parks: 0,
             welcome_message,
             next_retry_at: None,
             last_reason_code: None,

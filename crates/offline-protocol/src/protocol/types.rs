@@ -43,6 +43,27 @@ pub(crate) const WELCOME_MESH_CONFIRM_TIMEOUT_SECS: i64 = 15;
 /// carrier returning without a fresh discovery event, so it is deliberately far
 /// slower than the data-plane retry interval to keep an offline device quiet.
 pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
+/// Cap for the escalating retry interval of a welcome repeatedly parked
+/// `PeerUnreachable` while a mesh carrier is up (see
+/// `apply_recipient_unreachable_failure`). Each consecutive unreachable park
+/// doubles the interval from [`WELCOME_NO_CARRIER_RETRY_SECS`] up to this
+/// cap: DORS may keep selecting the internet path for the timed retry, and
+/// every such round trips another relay `DeliveryError` with the attempt
+/// refunded — without escalation that is an unbounded 15s resend loop into
+/// the relay for as long as the peer stays offline. At the cap the steady
+/// state matches the presence-rescue cadence (one send per 10 min), which is
+/// cheap and self-resolving.
+pub(crate) const WELCOME_UNREACHABLE_RETRY_CAP_SECS: i64 = 600;
+/// Age limit for a welcome lifecycle to keep its peer on the presence
+/// watchlist (`welcome_pending_peers`). Without it the watch set only ever
+/// grows: every offline presence answer re-parks the record and pushes its
+/// `expires_at`, so a permanently-dead peer (abandoned install) is watched —
+/// and its parked lifecycle persisted — forever, and each such peer occupies
+/// rotation slots that delay presence rescue for live peers. Once unwatched,
+/// offline answers stop, `expires_at` stops being pushed, and the record
+/// ages out through normal expiry; recovery degrades to peer-initiated
+/// contact or mesh discovery, both of which rebuild the lifecycle.
+pub(crate) const WELCOME_WATCHLIST_MAX_AGE_SECS: i64 = 14 * 24 * 60 * 60;
 /// Backoff base for presence-driven welcome rescue. The first rescue for a
 /// peer is immediate; each subsequent rescue that still fails to prove the
 /// session doubles the wait (40s, 80s, 160s, ...) up to
@@ -419,6 +440,13 @@ pub(crate) struct WelcomeLifecycleRecord {
     pub(crate) group_id: String,
     pub(crate) state: WelcomeDeliveryState,
     pub(crate) attempt: u32,
+    /// Consecutive `PeerUnreachable` parks (relay `DeliveryError` verdicts)
+    /// since the last reachability edge; drives the escalating retry
+    /// interval capped at [`WELCOME_UNREACHABLE_RETRY_CAP_SECS`]. Reset on
+    /// re-arm (presence online / neighbor discovered). Defaulted for
+    /// records persisted before the field existed.
+    #[serde(default)]
+    pub(crate) unreachable_parks: u32,
     pub(crate) welcome_message: Message,
     pub(crate) next_retry_at: Option<DateTime<Utc>>,
     pub(crate) last_reason_code: Option<crate::events::WelcomeReasonCode>,
