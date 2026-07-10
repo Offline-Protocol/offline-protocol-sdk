@@ -966,6 +966,10 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_inte
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason(
@@ -1347,6 +1351,10 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_g
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence(`ptr`: Long,`peerId`: RustBuffer.ByValue,`online`: Byte,`lastSeenMs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1848,6 +1856,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence() != 1618.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 10876.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204.toShort()) {
@@ -3145,6 +3159,10 @@ public interface OfflineProtocolInterface {
     
     fun `internetMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
     
+    fun `internetPeerPresence`(`peerId`: kotlin.String, `online`: kotlin.Boolean, `lastSeenMs`: kotlin.Long?)
+    
+    fun `internetPresenceWatchlist`(): List<kotlin.String>
+    
     fun `internetSendFailed`(`messageId`: kotlin.String)
     
     fun `internetSendFailedWithReason`(`messageId`: kotlin.String, `reason`: kotlin.String?)
@@ -4186,6 +4204,31 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    override fun `internetPeerPresence`(`peerId`: kotlin.String, `online`: kotlin.Boolean, `lastSeenMs`: kotlin.Long?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence(
+        it,
+        FfiConverterString.lower(`peerId`),FfiConverterBoolean.lower(`online`),FfiConverterOptionalLong.lower(`lastSeenMs`),_status)
+}
+    }
+    
+    
+
+    override fun `internetPresenceWatchlist`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     override fun `internetSendFailed`(`messageId`: kotlin.String)
@@ -9057,6 +9100,38 @@ public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
         } else {
             buf.put(1)
             FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalLong: FfiConverterRustBuffer<kotlin.Long?> {
+    override fun read(buf: ByteBuffer): kotlin.Long? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterLong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Long?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterLong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Long?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterLong.write(value, buf)
         }
     }
 }

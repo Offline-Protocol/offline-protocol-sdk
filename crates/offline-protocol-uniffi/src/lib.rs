@@ -3225,6 +3225,31 @@ impl OfflineProtocol {
         }
     }
 
+    /// Internet: Relay-sourced presence for a peer (the bridge's
+    /// `PresenceStatus` / `PresenceStatusWithLastSeen` handler).
+    ///
+    /// `online=true` drives the reachability machinery (welcome re-arm,
+    /// outbox flush, auto key exchange); `online=false` parks pending
+    /// welcomes without burning retry budget. Always emits
+    /// `presence_updated` with the optional `last_seen_ms`.
+    pub fn internet_peer_presence(&self, peer_id: String, online: bool, last_seen_ms: Option<i64>) {
+        if peer_id.is_empty() {
+            return;
+        }
+        let mut protocol = recover_mutex(&self.inner, "inner");
+        protocol.on_peer_presence(&peer_id, online, last_seen_ms);
+    }
+
+    /// Internet: Peers the platform layer should watch via relay
+    /// `CheckPresence` queries — every peer with an undelivered or
+    /// session-unproven MLS welcome. The platform polls this on its
+    /// presence-watch tick and unions it with its own signals
+    /// (`DeliveryError` recipients).
+    pub fn internet_presence_watchlist(&self) -> Vec<String> {
+        let protocol = recover_mutex(&self.inner, "inner");
+        protocol.welcome_pending_peers()
+    }
+
     // ========================================================================
     // WIFI DIRECT TRANSPORT OPERATIONS
     // ========================================================================

@@ -914,7 +914,7 @@ impl OfflineProtocol {
     /// Always emits `presence_updated` so the app sees one unified presence
     /// stream regardless of source (peer-sent `__PRESENCE__` or relay).
     pub fn on_peer_presence(&mut self, peer_id: &str, online: bool, last_seen_ms: Option<i64>) {
-        if peer_id.is_empty() || peer_id == self.config.user_id {
+        if peer_id.is_empty() || peer_id == self.config.user_id || self.is_user_blocked(peer_id) {
             return;
         }
         if online {
