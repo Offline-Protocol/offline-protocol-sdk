@@ -1,0 +1,3 @@
+# SwiftPM build artifacts from the swift-test harness (Package.swift)
+.build/
+.swiftpm/
