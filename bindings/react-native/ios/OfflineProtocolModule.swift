@@ -1246,8 +1246,17 @@ class OfflineProtocolModule: RCTEventEmitter {
             case "internet":
                 // Configure and start Internet transport via InternetManager
                 if internetManager == nil {
-                    // Create manager if not already created
-                    let newManager = InternetManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    // The manager's identity must be the real user id: the
+                    // control-op translator filters self out of member deltas
+                    // and gates LeaveGroup on it, so a placeholder would
+                    // silently corrupt relay group state. Mirrors the
+                    // Android module's guard.
+                    guard let userId = currentConfig?.userId else {
+                        throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [
+                            NSLocalizedDescriptionKey: "Cannot enable Internet transport before initialize(config)"
+                        ])
+                    }
+                    let newManager = InternetManager(protocol: proto, deviceId: userId)
                     newManager.delegate = self
                     newManager.serverMessageEmitter = { [weak self] rawJson in
                         self?.emitServerMessageEvent(rawJson)
