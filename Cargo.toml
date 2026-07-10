@@ -81,6 +81,16 @@ offline-protocol = { path = "crates/offline-protocol" }
 opt-level = 0
 debug = true
 
+# Dependencies are never stepped into during debugging; skipping their
+# debuginfo cuts target/debug size and compile/link I/O dramatically
+# (this repo's dev artifacts were ~49 GB with full dep debuginfo).
+[profile.dev.package."*"]
+debug = false
+
+# Same for build scripts and proc macros (serde_derive, uniffi, tls_codec_derive).
+[profile.dev.build-override]
+debug = false
+
 [profile.release]
 opt-level = 3
 debug = false

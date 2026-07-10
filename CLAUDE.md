@@ -9,20 +9,24 @@ Offline Protocol SDK: an offline-first messaging protocol in Rust with multi-tra
 ## Common Commands
 
 ```bash
-# Build
-cargo build --workspace
-cargo build --workspace --release
+# Verify loop (lint subsumes typecheck; don't run a separate `cargo build` first —
+# it only adds a third artifact set, including the expensive uniffi cdylib link)
+cargo clippy --workspace -- -D warnings
+cargo test --workspace --lib                    # all unit tests; skips the empty per-crate doctest passes
 
 # Test
-cargo test --workspace                          # all tests
+cargo test --workspace                          # full run incl. doctests (what CI runs)
 cargo test --package offline-protocol-core      # single crate
 cargo test test_message_creation                # single test
 cargo test -- --nocapture                       # with stdout
 
-# Lint & format (must pass before commits)
-cargo clippy --workspace -- -D warnings
-cargo fmt --workspace
-cargo fmt --workspace -- --check                # check only
+# Build (only when you need the compiled artifacts, e.g. the uniffi cdylib)
+cargo build --workspace
+cargo build --workspace --release
+
+# Format (must pass before commits; fmt takes --all, not --workspace)
+cargo fmt --all
+cargo fmt --all -- --check                      # check only
 
 # Docs
 cargo doc --workspace --no-deps
