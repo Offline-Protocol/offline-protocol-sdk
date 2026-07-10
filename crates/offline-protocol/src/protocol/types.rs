@@ -43,6 +43,16 @@ pub(crate) const WELCOME_MESH_CONFIRM_TIMEOUT_SECS: i64 = 15;
 /// carrier returning without a fresh discovery event, so it is deliberately far
 /// slower than the data-plane retry interval to keep an offline device quiet.
 pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
+/// Well-known prefix for transport send-failure reasons meaning "the carrier
+/// is up but this recipient is unreachable on it" (e.g. the internet relay
+/// answered `DeliveryError` for an offline peer). Classified in
+/// `on_transport_send_failed` as per-peer no-carrier so a welcome parks
+/// instead of burning a retry attempt.
+///
+/// Cross-layer contract: the React Native platform bridges
+/// (`InternetManager.kt` / `InternetManager.swift`) hardcode this literal when
+/// calling `internet_send_failed_with_reason` — keep them in sync.
+pub(crate) const SEND_FAIL_REASON_RECIPIENT_UNREACHABLE: &str = "recipient_unreachable";
 /// Minimum interval between session reconciliation scans (list_sessions I/O).
 /// Keeps the expensive Keychain/Keystore I/O out of the hot path so that
 /// sendMessage() is not blocked by Mutex contention on every process tick.

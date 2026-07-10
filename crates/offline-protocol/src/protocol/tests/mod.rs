@@ -14169,3 +14169,124 @@ fn test_group_send_takes_broadcast_path_only_when_relay_synced() {
 
     protocol.stop().unwrap();
 }
+
+#[test]
+fn test_recipient_unreachable_reason_parks_welcome_without_burning_budget() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    config.reliability.retry.max_retries = 1;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    let _ = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let welcome_id = lifecycle.welcome_message.id.as_str().to_string();
+    assert_eq!(lifecycle.attempt, 1);
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::SendAttempted);
+
+    // The internet transport is UP, and attempt == max_retries — a plain
+    // carrier-backed failure here would expire the welcome terminally. A
+    // recipient_unreachable-tagged reason (the bridge's translation of the
+    // relay's DeliveryError) must instead classify as per-peer no-carrier
+    // and park it.
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(lifecycle.attempt, 0, "speculative attempt must roll back");
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert!(lifecycle.next_retry_at.is_some());
+    assert!(lifecycle.expires_at > Utc::now() + ChronoDuration::seconds(60));
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_carrier_backed_failure_still_burns_welcome_budget() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    config.reliability.retry.max_retries = 1;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    let _ = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let welcome_id = protocol
+        .welcome_lifecycles
+        .get("bob")
+        .unwrap()
+        .welcome_message
+        .id
+        .as_str()
+        .to_string();
+
+    // Same conditions as the parking test, but an untagged carrier-backed
+    // failure: the budget (max_retries = 1, attempt = 1) is exhausted and
+    // the welcome must expire terminally — classification must not widen.
+    protocol
+        .on_transport_send_failed(&welcome_id, Some("socket write failed".to_string()))
+        .unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Expired);
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::RetryExhausted)
+    );
+
+    protocol.stop().unwrap();
+}
