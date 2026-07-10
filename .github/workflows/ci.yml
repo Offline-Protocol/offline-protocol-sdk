@@ -136,6 +136,20 @@ jobs:
         working-directory: bindings/react-native/android-ci-harness
         run: gradle :offlineprotocol:testDebugUnitTest --no-daemon --stacktrace
 
+  ios-unit-tests:
+    name: iOS Unit Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Runs the RN iOS module's standalone policy-class suites (the relay
+      # translator/rate-limiter/presence/in-flight-tracker/timestamp helpers
+      # that mirror the Android module) via the SwiftPM harness in
+      # bindings/react-native/ios/Package.swift, since the pod can't build
+      # on its own outside an app workspace.
+      - name: iOS unit tests
+        run: swift test --package-path bindings/react-native/ios
+
   coverage:
     name: Code Coverage
     if: github.event_name == 'push'
