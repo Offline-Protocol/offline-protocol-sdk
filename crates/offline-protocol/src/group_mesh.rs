@@ -33,10 +33,19 @@ pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 pub(super) const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits (2 minutes).
 pub(super) const PENDING_COMMIT_TTL_SECS: u64 = 120;
+/// Global cap on buffered pending commits across all groups.
+pub(super) const MAX_PENDING_COMMITS_TOTAL: usize = 64;
+/// Global cap on buffered commit payload bytes across all groups (4 MiB).
+pub(super) const MAX_PENDING_COMMIT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum number of buffered out-of-order group application messages per group.
 pub(super) const MAX_PENDING_GROUP_MESSAGES_PER_GROUP: usize = 16;
 /// TTL for buffered out-of-order group application messages (2 minutes).
 pub(super) const PENDING_GROUP_MESSAGE_TTL_SECS: u64 = 120;
+/// Global cap on buffered group application messages across all groups.
+pub(super) const MAX_PENDING_GROUP_MESSAGES_TOTAL: usize = 256;
+/// Global cap on buffered group application ciphertext bytes (base64 length)
+/// across all groups (8 MiB).
+pub(super) const MAX_PENDING_GROUP_MESSAGE_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 /// Timeout before the next eligible member re-elects itself for a leave
 /// remove-commit when the original elected remover fails (30 seconds).
 pub(super) const LEAVE_ELECTION_TIMEOUT_SECS: u64 = 30;
@@ -351,6 +360,52 @@ pub(crate) struct EpochForkState {
     pub(crate) resolution_attempted: bool,
 }
 
+/// Enforces a global bound — entry count and payload bytes — across all
+/// per-group pending buffers by evicting the globally oldest entry until an
+/// incoming entry of `incoming_bytes` fits.
+///
+/// Group IDs on these buffers come straight off the wire, and the buffered
+/// case (`GroupNotFound`) is precisely the pre-join, unauthenticated one —
+/// per-group caps alone leave total retention open-ended across
+/// attacker-chosen group IDs.
+fn enforce_global_buffer_bound<T>(
+    map: &mut HashMap<String, VecDeque<T>>,
+    max_entries: usize,
+    max_bytes: usize,
+    incoming_bytes: usize,
+    entry_bytes: impl Fn(&T) -> usize,
+    buffered_at: impl Fn(&T) -> Instant,
+) {
+    let (mut entries, mut bytes) = map
+        .values()
+        .flat_map(|buf| buf.iter())
+        .fold((0usize, 0usize), |(n, b), e| (n + 1, b + entry_bytes(e)));
+    while entries >= max_entries || bytes + incoming_bytes > max_bytes {
+        // Each deque is in arrival order, so its front is its oldest entry.
+        let Some(oldest_group) = map
+            .iter()
+            .filter_map(|(gid, buf)| buf.front().map(|e| (buffered_at(e), gid)))
+            .min_by_key(|(at, _)| *at)
+            .map(|(_, gid)| gid.clone())
+        else {
+            return;
+        };
+        warn!(
+            group_id = %oldest_group,
+            "Pending buffer at global capacity, evicting oldest entry"
+        );
+        if let Some(buf) = map.get_mut(&oldest_group) {
+            if let Some(evicted) = buf.pop_front() {
+                entries -= 1;
+                bytes -= entry_bytes(&evicted);
+            }
+            if buf.is_empty() {
+                map.remove(&oldest_group);
+            }
+        }
+    }
+}
+
 impl OfflineProtocol {
     /// Handles an incoming MLS-encrypted group message.
     ///
@@ -637,9 +692,12 @@ impl OfflineProtocol {
                 payload.group_name.clone(),
             ));
 
-            // A group message can race ahead of its Welcome (they are sent
-            // back-to-back and may take different paths); now that the group
-            // exists locally, retry anything that was buffered.
+            // A commit or group message can race ahead of its Welcome (they
+            // are sent back-to-back and may take different paths); now that
+            // the group exists locally, retry anything that was buffered.
+            // Commits first — an epoch-advancing commit may be exactly what
+            // a buffered message is waiting for.
+            self.drain_pending_commits(&group_id);
             self.drain_pending_group_messages(&group_id);
         }
     }
@@ -797,13 +855,16 @@ impl OfflineProtocol {
                 }
 
                 // Classify MLS errors: permanent failures should not be retried,
-                // only epoch-related decryption failures are worth buffering.
-                // A spoofed sender (SEC-M1) is permanent — retrying the same
-                // forged commit can never succeed.
+                // only failures caused by lagging local group state are worth
+                // buffering. GroupNotFound is NOT permanent — a commit can
+                // outrun our Welcome (they may take different transports), so
+                // it is buffered and retried after the join lands, exactly
+                // like application messages. A spoofed sender (SEC-M1) is
+                // permanent — retrying the same forged commit can never
+                // succeed.
                 let is_permanent = matches!(
                     e,
-                    offline_protocol_mls::MlsError::GroupNotFound(_)
-                        | offline_protocol_mls::MlsError::Deserialization(_)
+                    offline_protocol_mls::MlsError::Deserialization(_)
                         | offline_protocol_mls::MlsError::InvalidMessage(_)
                         | offline_protocol_mls::MlsError::Storage(_)
                         | offline_protocol_mls::MlsError::SenderIdentityMismatch { .. }
@@ -939,6 +1000,14 @@ impl OfflineProtocol {
             buffered_at: Instant::now(),
             retry_count: 0,
         };
+        enforce_global_buffer_bound(
+            &mut self.group_mesh.pending_commits,
+            MAX_PENDING_COMMITS_TOTAL,
+            MAX_PENDING_COMMIT_TOTAL_BYTES,
+            pending.data.len(),
+            |c| c.data.len(),
+            |c| c.buffered_at,
+        );
         let buf = self
             .group_mesh
             .pending_commits
@@ -1058,6 +1127,14 @@ impl OfflineProtocol {
         group_id: &str,
         pending: PendingGroupMessage,
     ) {
+        enforce_global_buffer_bound(
+            &mut self.group_mesh.pending_group_messages,
+            MAX_PENDING_GROUP_MESSAGES_TOTAL,
+            MAX_PENDING_GROUP_MESSAGE_TOTAL_BYTES,
+            pending.ciphertext_b64.len(),
+            |m| m.ciphertext_b64.len(),
+            |m| m.buffered_at,
+        );
         let buf = self
             .group_mesh
             .pending_group_messages

@@ -2247,10 +2247,13 @@ fn test_group_mls_invite_multiple_members_successively() {
 }
 
 #[test]
-fn test_group_mls_commit_group_not_found_is_rejected_not_retriable() {
+fn test_group_mls_commit_group_not_found_is_buffered_for_welcome_race() {
     let (mut protocol, _) = setup_started_with_events();
 
-    // Do NOT create any group — the group_id won't exist in MLS.
+    // Do NOT create any group — the group_id won't exist in MLS. This is
+    // exactly what a commit that outran its Welcome looks like, so it must
+    // be buffered for retry after the join, not rejected. Retention is
+    // bounded by the per-group/global caps and the TTL sweep.
     let commit_payload = GroupMlsCommitPayload {
         group_id: "group:does-not-exist".to_string(),
         commit_type: GroupCommitType::Add,
@@ -2268,13 +2271,14 @@ fn test_group_mls_commit_group_not_found_is_rejected_not_retriable() {
 
     let _ = protocol.process_internal_message(&message);
 
-    // GroupNotFound is permanent → should NOT be buffered
-    assert!(
-        !protocol
+    assert_eq!(
+        protocol
             .group_mesh
             .pending_commits
-            .contains_key("group:does-not-exist"),
-        "Commit for unknown group must be rejected, not buffered"
+            .get("group:does-not-exist")
+            .map(|b| b.len()),
+        Some(1),
+        "Commit for an unknown group may have outrun its Welcome and must be buffered"
     );
 }
 
@@ -7107,4 +7111,192 @@ fn test_drain_pending_group_messages_drops_expired() {
         "Expired entry should be dropped on drain"
     );
     assert!(group_messages_received(&events).is_empty());
+}
+
+#[test]
+fn test_commit_and_message_both_outrun_welcome() {
+    let (mut alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+
+    // Alice adds Charlie (advancing the epoch) while Bob's Welcome is still
+    // in flight — Bob is a member from Alice's view, so he receives the
+    // add-Charlie commit too.
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
+    charlie.initialize_mls(storage_c).unwrap();
+    let charlie_kp = {
+        let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
+        charlie_mls.generate_key_package().unwrap()
+    };
+    let commit = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        let (_welcome, commit) = alice_mls
+            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .unwrap();
+        commit
+    };
+    alice.refresh_group_members(&group_id).unwrap();
+
+    // Bob receives the commit BEFORE his own Welcome — it must be buffered
+    // (GroupNotFound is the commit-outran-Welcome case, not a permanent
+    // failure).
+    let commit_json = serde_json::json!({
+        "group_id": group_id,
+        "commit_type": "add",
+        "ciphertext": base64_encode(&commit.ciphertext),
+        "epoch": commit.epoch,
+        "affected_member": "charlie",
+    })
+    .to_string();
+    bob.handle_group_mls_commit("commit-before-welcome", "alice", &commit_json);
+    assert_eq!(
+        bob.group_mesh
+            .pending_commits
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(1),
+        "Commit arriving before the Welcome should be buffered"
+    );
+
+    // Alice's message at the post-add epoch also outruns the Welcome.
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "outran everything");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    assert!(group_messages_received(&events).is_empty());
+
+    // The Welcome finally lands: join, then the buffered commit advances the
+    // epoch, then the buffered message decrypts — all in one pass.
+    bob.handle_group_mls_welcome("welcome-after-commit", "alice", &welcome_json);
+
+    let received = group_messages_received(&events);
+    assert_eq!(
+        received.len(),
+        1,
+        "Buffered message should be delivered once the buffered commit is applied on join"
+    );
+    assert_eq!(received[0].0, "outran everything");
+    assert!(
+        !bob.group_mesh.pending_commits.contains_key(&group_id),
+        "Buffered commit should be consumed by the Welcome-path drain"
+    );
+    assert!(
+        !bob.group_mesh
+            .pending_group_messages
+            .contains_key(&group_id),
+        "Buffered message should be consumed by the Welcome-path drain"
+    );
+}
+
+#[test]
+fn test_pending_group_message_global_cap_evicts_oldest_across_groups() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let total = MAX_PENDING_GROUP_MESSAGES_TOTAL + 2;
+    for i in 0..total {
+        protocol.buffer_pending_group_message(
+            &format!("group-{}", i),
+            PendingGroupMessage {
+                sender: "alice".to_string(),
+                message_id: format!("m{}", i),
+                ciphertext_b64: base64_encode(b"x"),
+                timestamp: None,
+                reply_to: None,
+                forward_info: None,
+                // Stagger so eviction order is deterministic (earlier i = older).
+                buffered_at: Instant::now() - StdDuration::from_millis((total - i) as u64),
+            },
+        );
+    }
+
+    let buffered: usize = protocol
+        .group_mesh
+        .pending_group_messages
+        .values()
+        .map(|b| b.len())
+        .sum();
+    assert_eq!(buffered, MAX_PENDING_GROUP_MESSAGES_TOTAL);
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_group_messages
+            .contains_key("group-0"),
+        "Globally oldest entry should be evicted first"
+    );
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_group_messages
+            .contains_key("group-1"),
+        "Second-oldest entry should be evicted next"
+    );
+    assert!(protocol
+        .group_mesh
+        .pending_group_messages
+        .contains_key(&format!("group-{}", total - 1)));
+}
+
+#[test]
+fn test_pending_group_message_global_byte_cap() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // ~1 MiB of valid-base64 characters per entry; enough entries to exceed
+    // the global byte cap while staying far below the entry cap.
+    let big = "A".repeat(1024 * 1024);
+    let n = MAX_PENDING_GROUP_MESSAGE_TOTAL_BYTES / big.len() + 2;
+    for i in 0..n {
+        protocol.buffer_pending_group_message(
+            &format!("big-group-{}", i),
+            PendingGroupMessage {
+                sender: "alice".to_string(),
+                message_id: format!("big{}", i),
+                ciphertext_b64: big.clone(),
+                timestamp: None,
+                reply_to: None,
+                forward_info: None,
+                buffered_at: Instant::now() - StdDuration::from_millis((n - i) as u64),
+            },
+        );
+    }
+
+    let bytes: usize = protocol
+        .group_mesh
+        .pending_group_messages
+        .values()
+        .flat_map(|b| b.iter())
+        .map(|m| m.ciphertext_b64.len())
+        .sum();
+    assert!(
+        bytes <= MAX_PENDING_GROUP_MESSAGE_TOTAL_BYTES,
+        "Total buffered ciphertext bytes ({}) must stay within the global cap",
+        bytes
+    );
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_group_messages
+            .contains_key("big-group-0"),
+        "Oldest oversized entry should be evicted"
+    );
+}
+
+#[test]
+fn test_pending_commit_global_cap() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let total = MAX_PENDING_COMMITS_TOTAL + 2;
+    for i in 0..total {
+        protocol.buffer_pending_commit(&format!("commit-group-{}", i), "alice", "commit-data");
+    }
+
+    let buffered: usize = protocol
+        .group_mesh
+        .pending_commits
+        .values()
+        .map(|b| b.len())
+        .sum();
+    assert_eq!(buffered, MAX_PENDING_COMMITS_TOTAL);
+    assert!(protocol
+        .group_mesh
+        .pending_commits
+        .contains_key(&format!("commit-group-{}", total - 1)));
 }
