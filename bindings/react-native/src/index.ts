@@ -2522,6 +2522,23 @@ export class OfflineProtocol {
   }
 
   /**
+   * Asks the internet relay for a peer's presence (one-shot CheckPresence).
+   *
+   * Fire-and-event: the answer arrives as a `presence_updated` event
+   * (including `last_seen_ms` when the relay knows it) rather than in the
+   * returned promise — matching relay semantics. The SDK also self-drives
+   * presence checks for peers with undelivered traffic; this method is for
+   * app UI needs (last-seen display, pre-send checks).
+   *
+   * @param userId - Peer's user ID
+   * @returns true if the query was sent (internet transport connected and
+   *          authenticated), false otherwise
+   */
+  async checkInternetPresence(userId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.checkInternetPresence(userId);
+  }
+
+  /**
    * Sends a typing indicator to a peer.
    *
    * @param recipient - Recipient's user ID

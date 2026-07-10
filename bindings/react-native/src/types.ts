@@ -1056,13 +1056,20 @@ export interface ServiceResponseReceivedEvent extends BaseEvent {
 export type PresenceStatus = 'online' | 'away' | 'offline';
 
 /**
- * Presence updated event — a peer sent a presence update
+ * Presence updated event — one unified stream for both sources: a peer-sent
+ * `__PRESENCE__` update, or the internet relay's presence answer (driven by
+ * the SDK's automatic watch loop or an explicit `checkInternetPresence`).
  */
 export interface PresenceUpdatedEvent extends BaseEvent {
   type: 'presence_updated';
   peer_id: string;
   status: PresenceStatus;
   timestamp: number;
+  /**
+   * When the peer was last seen (Unix ms), if the source knows it —
+   * relay-sourced presence only; absent for peer-sent updates.
+   */
+  last_seen_ms?: number;
 }
 
 /**
