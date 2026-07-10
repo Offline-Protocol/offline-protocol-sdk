@@ -31,16 +31,25 @@ pub(super) const MAX_GROUP_MESSAGE_DEDUP_ENTRIES: usize = 10_000;
 pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 /// Maximum number of buffered out-of-order commits per group.
 pub(super) const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
-/// TTL for buffered pending commits (2 minutes).
-pub(super) const PENDING_COMMIT_TTL_SECS: u64 = 120;
+/// TTL for buffered pending commits. Must be at least
+/// `GROUP_MESSAGE_DEDUP_TTL_SECS`: the commit's message ID is already in the
+/// dedup table, so the buffered copy is its only path to processing — a
+/// shorter TTL would open a window where the buffer has given up while the
+/// dedup entry still rejects every redelivery, losing the commit for good.
+/// Matching the dedup TTL means that by the time the buffer expires, a
+/// sender-side redelivery can be accepted fresh.
+pub(super) const PENDING_COMMIT_TTL_SECS: u64 = GROUP_MESSAGE_DEDUP_TTL_SECS;
 /// Global cap on buffered pending commits across all groups.
 pub(super) const MAX_PENDING_COMMITS_TOTAL: usize = 64;
 /// Global cap on buffered commit payload bytes across all groups (4 MiB).
 pub(super) const MAX_PENDING_COMMIT_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum number of buffered out-of-order group application messages per group.
 pub(super) const MAX_PENDING_GROUP_MESSAGES_PER_GROUP: usize = 16;
-/// TTL for buffered out-of-order group application messages (2 minutes).
-pub(super) const PENDING_GROUP_MESSAGE_TTL_SECS: u64 = 120;
+/// TTL for buffered out-of-order group application messages. Must be at
+/// least `GROUP_MESSAGE_DEDUP_TTL_SECS` — same reasoning as
+/// `PENDING_COMMIT_TTL_SECS`: the buffered copy is the message's only path
+/// to delivery while its dedup entry blocks redelivery.
+pub(super) const PENDING_GROUP_MESSAGE_TTL_SECS: u64 = GROUP_MESSAGE_DEDUP_TTL_SECS;
 /// Global cap on buffered group application messages across all groups.
 pub(super) const MAX_PENDING_GROUP_MESSAGES_TOTAL: usize = 256;
 /// Global cap on buffered group application ciphertext bytes (base64 length)
@@ -361,13 +370,23 @@ pub(crate) struct EpochForkState {
 }
 
 /// Enforces a global bound — entry count and payload bytes — across all
-/// per-group pending buffers by evicting the globally oldest entry until an
-/// incoming entry of `incoming_bytes` fits.
+/// per-group pending buffers, evicting until an incoming entry of
+/// `incoming_bytes` fits. Returns `false` (evicting nothing) when the
+/// incoming entry alone exceeds the byte budget — the caller must drop it.
+/// Without that guard a single oversized entry would purge every buffered
+/// entry across all groups and then land anyway, blowing the cap it was
+/// meant to respect.
 ///
 /// Group IDs on these buffers come straight off the wire, and the buffered
 /// case (`GroupNotFound`) is precisely the pre-join, unauthenticated one —
 /// per-group caps alone leave total retention open-ended across
 /// attacker-chosen group IDs.
+///
+/// Eviction takes the oldest entry of the *largest* per-group buffer
+/// (tie-broken by age) rather than the globally oldest entry: honest
+/// welcome-race entries are few per group and necessarily the oldest, while
+/// a flood concentrates in the flooder's own group IDs — globally-oldest
+/// eviction would flush the honest entries first.
 fn enforce_global_buffer_bound<T>(
     map: &mut HashMap<String, VecDeque<T>>,
     max_entries: usize,
@@ -375,35 +394,44 @@ fn enforce_global_buffer_bound<T>(
     incoming_bytes: usize,
     entry_bytes: impl Fn(&T) -> usize,
     buffered_at: impl Fn(&T) -> Instant,
-) {
+) -> bool {
+    if incoming_bytes > max_bytes {
+        return false;
+    }
     let (mut entries, mut bytes) = map
         .values()
         .flat_map(|buf| buf.iter())
         .fold((0usize, 0usize), |(n, b), e| (n + 1, b + entry_bytes(e)));
     while entries >= max_entries || bytes + incoming_bytes > max_bytes {
         // Each deque is in arrival order, so its front is its oldest entry.
-        let Some(oldest_group) = map
+        // Rank groups by (buffer length, entry age): largest buffer first,
+        // oldest front entry breaking ties.
+        let Some(victim_group) = map
             .iter()
-            .filter_map(|(gid, buf)| buf.front().map(|e| (buffered_at(e), gid)))
-            .min_by_key(|(at, _)| *at)
+            .filter_map(|(gid, buf)| {
+                buf.front()
+                    .map(|e| ((buf.len(), std::cmp::Reverse(buffered_at(e))), gid))
+            })
+            .max_by_key(|(rank, _)| *rank)
             .map(|(_, gid)| gid.clone())
         else {
-            return;
+            return true;
         };
         warn!(
-            group_id = %oldest_group,
-            "Pending buffer at global capacity, evicting oldest entry"
+            group_id = %victim_group,
+            "Pending buffer at global capacity, evicting oldest entry of largest group buffer"
         );
-        if let Some(buf) = map.get_mut(&oldest_group) {
+        if let Some(buf) = map.get_mut(&victim_group) {
             if let Some(evicted) = buf.pop_front() {
                 entries -= 1;
                 bytes -= entry_bytes(&evicted);
             }
             if buf.is_empty() {
-                map.remove(&oldest_group);
+                map.remove(&victim_group);
             }
         }
     }
+    true
 }
 
 impl OfflineProtocol {
@@ -846,6 +874,11 @@ impl OfflineProtocol {
                     self.group_mesh
                         .pending_group_messages
                         .remove(&payload.group_id);
+                    // Also drop buffered commits: they can never apply now,
+                    // and a stale one retried after a rapid re-invite would
+                    // expire with retry_count > 0 and falsely flag an epoch
+                    // fork.
+                    self.group_mesh.pending_commits.remove(&payload.group_id);
                     self.emit_event(Event::group_member_removed(
                         payload.group_id.clone(),
                         self_id,
@@ -1000,14 +1033,24 @@ impl OfflineProtocol {
             buffered_at: Instant::now(),
             retry_count: 0,
         };
-        enforce_global_buffer_bound(
+        if !enforce_global_buffer_bound(
             &mut self.group_mesh.pending_commits,
             MAX_PENDING_COMMITS_TOTAL,
             MAX_PENDING_COMMIT_TOTAL_BYTES,
             pending.data.len(),
             |c| c.data.len(),
             |c| c.buffered_at,
-        );
+        ) {
+            // Only the ciphertext field is size-guarded at decode time; the
+            // JSON around it is attacker-sized, so an oversized payload must
+            // be dropped rather than allowed to purge the whole buffer.
+            warn!(
+                group_id = %group_id,
+                size = pending.data.len(),
+                "Pending commit exceeds the global byte budget, dropping"
+            );
+            return;
+        }
         let buf = self
             .group_mesh
             .pending_commits
@@ -1033,6 +1076,10 @@ impl OfflineProtocol {
     /// Drains and retries buffered pending commits for a group after a
     /// successful commit advanced the epoch. Each successful retry triggers
     /// another drain pass (at most `MAX_PENDING_COMMITS_PER_GROUP` iterations).
+    ///
+    /// Call-site contract: a commit success inside this drain can unblock
+    /// buffered application messages, but this function does not drain them —
+    /// every caller must follow with `drain_pending_group_messages`.
     ///
     /// Uses `process_commit_core` (not `handle_group_mls_commit`) to avoid
     /// double-buffering: this method owns the retry lifecycle and re-buffers
@@ -1127,14 +1174,24 @@ impl OfflineProtocol {
         group_id: &str,
         pending: PendingGroupMessage,
     ) {
-        enforce_global_buffer_bound(
+        if !enforce_global_buffer_bound(
             &mut self.group_mesh.pending_group_messages,
             MAX_PENDING_GROUP_MESSAGES_TOTAL,
             MAX_PENDING_GROUP_MESSAGE_TOTAL_BYTES,
             pending.ciphertext_b64.len(),
             |m| m.ciphertext_b64.len(),
             |m| m.buffered_at,
-        );
+        ) {
+            // Unreachable in practice — the ciphertext passed the 1 MiB
+            // base64_decode guard on both inbound paths — but the invariant
+            // belongs here, not in the callers.
+            warn!(
+                group_id = %group_id,
+                size = pending.ciphertext_b64.len(),
+                "Pending group message exceeds the global byte budget, dropping"
+            );
+            return;
+        }
         let buf = self
             .group_mesh
             .pending_group_messages
@@ -1922,10 +1979,13 @@ impl OfflineProtocol {
         mls_guard.leave_group(&gid)?;
         drop(mls_guard);
 
-        // Remove from caches
+        // Remove from caches. Buffered commits go too — they can never apply
+        // after we leave, and a stale one retried after a rapid re-invite
+        // would expire with retry_count > 0 and falsely flag an epoch fork.
         self.group_mesh.members.remove(group_id);
         self.group_mesh.relay_synced.remove(group_id);
         self.group_mesh.pending_group_messages.remove(group_id);
+        self.group_mesh.pending_commits.remove(group_id);
 
         info!(group_id = %group_id, "Left group");
         Ok(())
