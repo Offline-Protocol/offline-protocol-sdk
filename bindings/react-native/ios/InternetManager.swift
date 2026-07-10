@@ -60,6 +60,14 @@ public class InternetManager: NSObject, TransportManager {
     private var consecutiveSendFailures: Int = 0
     private var consecutivePingFailures: Int = 0
     private let MAX_CONSECUTIVE_FAILURES = 2  // Trigger disconnect after 2 consecutive failures
+
+    // Correlates the relay's recipient-keyed failure signals (DeliveryError /
+    // ConnectionRequestError carry no message_id) back to in-flight sends.
+    private let inFlightTracker = RecipientInFlightTracker()
+
+    // Which peers to query via CheckPresence, and how many per tick.
+    private let presenceWatch = PresenceWatchPolicy()
+    private var presenceWatchTimer: DispatchSourceTimer?
     
     // Metrics
     private var bytesSent: UInt64 = 0
@@ -286,10 +294,11 @@ public class InternetManager: NSObject, TransportManager {
         // Notify protocol - this will trigger outbox flush for pending messages
         try? protocolInstance.internetStatusChanged(isConnected: true)
         
-        // Start polling and pinging
+        // Start polling, pinging, and the presence watch
         startMessagePolling()
         startPingTimer()
-        
+        startPresenceWatch()
+
         // Immediately poll for messages to flush outbox after reconnection
         // This ensures messages queued during disconnection are sent promptly
         messageQueue.async { [weak self] in
@@ -312,6 +321,10 @@ public class InternetManager: NSObject, TransportManager {
         // Stop polling and pinging immediately to prevent sending on dead connection
         stopMessagePolling()
         stopPingTimer()
+        stopPresenceWatch()
+        // Wire outcomes for anything in flight are now owned by the
+        // transport layer (fail_all_pending on disconnect).
+        inFlightTracker.clear()
         
         // Always notify protocol of disconnection so DORS excludes Internet from
         // available transports and can switch to BLE (or WiFi Direct). Without this,
@@ -509,7 +522,12 @@ public class InternetManager: NSObject, TransportManager {
                     
                     let bytes = [UInt8](messageData)
                     try self.protocolInstance.internetMessageReceived(senderId: senderId, data: bytes)
-                    
+
+                    // Inbound traffic proves the peer reachable — stop
+                    // presence-polling them (core re-arms via the
+                    // internetMessageReceived → reachability path).
+                    self.presenceWatch.unwatch(senderId)
+
                     self.emitDiagnostic("debug", "Message received from relay", context: [
                         "senderId": senderId,
                         "messageId": messageId ?? "none",
@@ -525,21 +543,35 @@ public class InternetManager: NSObject, TransportManager {
             }
             
         case "DeliveryError":
-            // Handle delivery error
-            let recipient = json["recipient"] as? String ?? "unknown"
+            // The relay's authoritative "recipient offline" signal. It
+            // arrives well before the SDK's confirm timeout, so fail-fast
+            // every in-flight message to this recipient with the
+            // recipient_unreachable reason (parks welcomes instead of
+            // burning their retry budget) and start watching presence.
+            let recipient = json["recipient"] as? String ?? ""
             let reason = json["reason"] as? String ?? "Unknown error"
-            emitDiagnostic("warning", "Message delivery failed", context: [
-                "recipient": recipient,
-                "reason": reason
-            ])
-            
+            handleRecipientUnreachable(recipient: recipient, reason: reason, source: "DeliveryError")
+
         case "PresenceStatus", "PresenceStatusWithLastSeen":
-            // Handle presence updates (optional logging)
-            let userId = json["user_id"] as? String ?? "unknown"
-            let online = json["online"] as? Bool ?? false
+            // Relay presence answer: feed core (re-arms parked welcomes and
+            // flushes queues on online; parks pending welcomes on offline)
+            // and maintain the watch set.
+            guard let userId = json["user_id"] as? String, !userId.isEmpty,
+                  let onlineNumber = json["online"] as? NSNumber,
+                  CFGetTypeID(onlineNumber) == CFBooleanGetTypeID() else {
+                emitDiagnostic("warning", "Invalid presence format: missing user_id/online", context: [:])
+                return
+            }
+            let online = onlineNumber.boolValue
+            let lastSeenMs = (json["last_seen"] as? String).flatMap { parseTimestampToMsOrNull($0) }
+            if online {
+                presenceWatch.unwatch(userId)
+            }
+            protocolInstance.internetPeerPresence(peerId: userId, online: online, lastSeenMs: lastSeenMs)
             emitDiagnostic("debug", "Presence update", context: [
                 "userId": userId,
-                "online": online
+                "online": online,
+                "lastSeenMs": lastSeenMs ?? "none"
             ])
 
         case "TypingUpdate":
@@ -671,13 +703,12 @@ public class InternetManager: NSObject, TransportManager {
             }
             
         case "ConnectionRequestError":
+            // Same authoritative offline signal as DeliveryError, for
+            // relay-native connection-request ops (the relay does not store
+            // requests for offline recipients).
             let recipient = json["recipient"] as? String ?? ""
             let reason = json["reason"] as? String ?? "Unknown error"
-            emitDiagnostic("debug", "Received relay message", context: [
-                "type": messageType,
-                "recipient": recipient,
-                "reason": reason
-            ])
+            handleRecipientUnreachable(recipient: recipient, reason: reason, source: "ConnectionRequestError")
             
         case "GroupCreated":
             guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
@@ -736,6 +767,26 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
     
+    /// Like `parseTimestampToMs` but returns nil instead of now() when the
+    /// value is absent or unparseable — a last-seen display must not invent
+    /// a timestamp. Accepts ISO-8601 or epoch milliseconds.
+    private func parseTimestampToMsOrNull(_ timestampStr: String) -> Int64? {
+        guard !timestampStr.isEmpty else { return nil }
+        if let epochMs = Int64(timestampStr) {
+            return epochMs
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: timestampStr) {
+            return Int64(date.timeIntervalSince1970 * 1000)
+        }
+        formatter.formatOptions = [.withInternetDateTime]
+        if let date = formatter.date(from: timestampStr) {
+            return Int64(date.timeIntervalSince1970 * 1000)
+        }
+        return nil
+    }
+
     /// Parse ISO-8601 timestamp string to Unix ms, or return current time if invalid.
     private func parseTimestampToMs(_ timestampStr: String) -> Int64 {
         guard !timestampStr.isEmpty else {
@@ -813,7 +864,9 @@ public class InternetManager: NSObject, TransportManager {
         guard isConnected, isAuthenticated else {
             return
         }
-        
+
+        inFlightTracker.prune(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+
         // Timer already runs on messageQueue, no need for extra dispatch
         // Poll for next message from protocol - batch send up to 10 messages per poll
         // to efficiently flush the outbox after reconnection
@@ -929,6 +982,13 @@ public class InternetManager: NSObject, TransportManager {
                 self.consecutiveSendFailures = 0
                 self.bytesSent += UInt64(jsonData.count)
                 self.messagesSent += 1
+                // Track for recipient-keyed failure correlation: a later
+                // DeliveryError for this recipient fails-fast this message id.
+                self.inFlightTracker.recordSent(
+                    recipient: recipientId,
+                    messageId: messageId,
+                    nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+                )
                 self.protocolInstance.internetConfirmSent(messageId: messageId)
                 
                 self.emitDiagnostic("debug", "Message sent via relay", context: [
@@ -940,8 +1000,106 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
     
+    // MARK: - Presence Watch
+
+    /// Fail-fast handler for the relay's recipient-keyed offline signals
+    /// (DeliveryError / ConnectionRequestError). Fails every live in-flight
+    /// message to the recipient with the recipient_unreachable reason (the
+    /// core classifies it as per-peer no-carrier and parks welcomes without
+    /// burning budget), ingests an authoritative offline presence, and adds
+    /// the recipient to the presence watch set.
+    private func handleRecipientUnreachable(recipient: String, reason: String, source: String) {
+        guard !recipient.isEmpty else {
+            emitDiagnostic("warning", "Recipient-unreachable signal without recipient", context: [
+                "source": source,
+                "reason": reason
+            ])
+            return
+        }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let failedIds = inFlightTracker.drainRecipient(recipient, nowMs: now)
+        for id in failedIds {
+            protocolInstance.internetSendFailedWithReason(
+                messageId: id,
+                reason: "recipient_unreachable: \(reason)"
+            )
+        }
+        presenceWatch.watch(recipient, nowMs: now)
+        protocolInstance.internetPeerPresence(peerId: recipient, online: false, lastSeenMs: nil)
+        emitDiagnostic("warning", "Recipient unreachable", context: [
+            "recipient": recipient,
+            "reason": reason,
+            "source": source,
+            "failedInFlight": failedIds.count
+        ])
+    }
+
+    private func startPresenceWatch() {
+        stopPresenceWatch()
+
+        let timer = DispatchSource.makeTimerSource(queue: messageQueue)
+        timer.schedule(
+            deadline: .now() + PresenceWatchPolicy.defaultTickInterval,
+            repeating: PresenceWatchPolicy.defaultTickInterval
+        )
+        timer.setEventHandler { [weak self] in
+            self?.presenceWatchTick()
+        }
+        timer.resume()
+        presenceWatchTimer = timer
+    }
+
+    private func stopPresenceWatch() {
+        presenceWatchTimer?.cancel()
+        presenceWatchTimer = nil
+    }
+
+    private func presenceWatchTick() {
+        guard isConnected, isAuthenticated, let task = webSocketTask else { return }
+
+        let coreWatchlist = protocolInstance.internetPresenceWatchlist()
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let peers = presenceWatch.peersToQuery(coreWatchlist: coreWatchlist, nowMs: now)
+            .filter { $0 != deviceId }
+        guard !peers.isEmpty else { return }
+
+        for peer in peers {
+            let checkMessage: [String: Any] = [
+                "type": "CheckPresence",
+                "username": peer
+            ]
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: checkMessage),
+                  let jsonString = String(data: jsonData, encoding: .utf8) else { continue }
+            task.send(.string(jsonString)) { _ in }
+        }
+        emitDiagnostic("debug", "Presence watch tick", context: [
+            "queried": peers.count,
+            "watched": presenceWatch.watchedPeers().count
+        ])
+    }
+
+    /// App-facing one-shot presence query (RN `checkInternetPresence`). The
+    /// answer arrives as the SDK's `presence_updated` event — fire-and-event,
+    /// matching relay semantics. Returns true if the query was written to
+    /// the socket.
+    public func checkPresence(userId: String) -> Bool {
+        guard !userId.isEmpty, isConnected, isAuthenticated, let task = webSocketTask else {
+            return false
+        }
+        let checkMessage: [String: Any] = [
+            "type": "CheckPresence",
+            "username": userId
+        ]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: checkMessage),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            return false
+        }
+        task.send(.string(jsonString)) { _ in }
+        return true
+    }
+
     // MARK: - Ping/Pong
-    
+
     private func startPingTimer() {
         stopPingTimer()
         

@@ -508,6 +508,10 @@ RCT_EXTERN_METHOD(meshRenameGroup:(NSString *)groupId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(checkInternetPresence:(NSString *)userId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Presence, Typing, Read Receipts
 RCT_EXTERN_METHOD(sendPresenceUpdate:(NSString *)recipient
                   status:(nonnull NSNumber *)status
