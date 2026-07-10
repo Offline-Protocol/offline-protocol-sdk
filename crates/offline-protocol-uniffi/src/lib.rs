@@ -407,8 +407,16 @@ impl From<offline_protocol::Error> for ProtocolError {
 /// `SendFailed`; every other error keeps its class from the `From` impl.
 /// Non-send paths (start/stop, inbound data processing) map transport
 /// failures to `TransportError` instead.
+///
+/// A transport-layer `SendFailed` is unwrapped to its detail message —
+/// `ProtocolError::SendFailed`'s own display prefix already says the send
+/// failed, and stacking the transport prefix on top would read
+/// "Failed to send message: Send failed: ...".
 fn map_send_error(err: offline_protocol::Error) -> ProtocolError {
     match err {
+        offline_protocol::Error::Transport(offline_protocol_transport::Error::SendFailed(msg)) => {
+            ProtocolError::SendFailed(msg)
+        }
         offline_protocol::Error::Transport(e) => ProtocolError::SendFailed(e.to_string()),
         other => other.into(),
     }
@@ -5146,6 +5154,12 @@ mod error_mapping_tests {
             "All transports failed".into(),
         )));
         assert!(matches!(sent, ProtocolError::SendFailed(_)));
+        // The transport-layer "Send failed: " prefix is unwrapped — the
+        // FFI variant's own display already announces the send failure.
+        assert_eq!(
+            sent.to_string(),
+            "Failed to send message: All transports failed"
+        );
 
         // Any transport-layer failure on a send path becomes SendFailed,
         // not just TransportErr::SendFailed.
