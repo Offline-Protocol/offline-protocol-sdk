@@ -3339,6 +3339,21 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * One-shot relay presence query for a peer (last-seen display, pre-send
+     * checks). Fire-and-event: resolves true if the query was sent; the
+     * answer arrives as the SDK's `presence_updated` event.
+     */
+    @ReactMethod
+    fun checkInternetPresence(userId: String, promise: Promise) {
+        try {
+            val manager = internetManager ?: throw IllegalStateException("Internet transport not initialized")
+            promise.resolve(manager.checkPresence(userId))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_INTERNET", "Failed to query presence")
+        }
+    }
+
+    /**
      * Wire event-driven transport callbacks using direct typed UniFFI calls.
      * Each callback fires when Rust enqueues outgoing data, replacing timer-based polling.
      * Falls back to polling if bindings are stale (logged as warning).

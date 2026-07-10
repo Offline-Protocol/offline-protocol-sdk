@@ -78,6 +78,19 @@ class InternetManager(
             }
         }
     }
+
+    // Presence watch runnable: periodically asks the relay about peers with
+    // undelivered traffic (CheckPresence), so parked welcomes re-arm the
+    // moment a peer comes back — the relay never stores content, so presence
+    // is the only authoritative recovery signal for offline recipients.
+    private val presenceWatchRunnable = object : Runnable {
+        override fun run() {
+            presenceWatchTick()
+            if (state == TransportState.RUNNING && isConnected.get()) {
+                mainHandler.postDelayed(this, PresenceWatchPolicy.DEFAULT_TICK_INTERVAL_MS)
+            }
+        }
+    }
     
     // Connection state
     private val isConnected = AtomicBoolean(false)
@@ -90,6 +103,13 @@ class InternetManager(
     
     // Failure tracking for DORS
     private var consecutiveSendFailures = AtomicInteger(0)
+
+    // Correlates the relay's recipient-keyed failure signals (DeliveryError /
+    // ConnectionRequestError carry no message_id) back to in-flight sends.
+    private val inFlightTracker = RecipientInFlightTracker()
+
+    // Which peers to query via CheckPresence, and how many per tick.
+    private val presenceWatch = PresenceWatchPolicy()
     
     // Metrics
     private var bytesSent: Long = 0
@@ -354,11 +374,12 @@ class InternetManager(
             Log.e(TAG, "Error notifying protocol of connect", e)
         }
         
-        // Start polling and pinging
+        // Start polling, pinging, and the presence watch
         mainHandler.post {
             startMessagePolling()
             startPingTimer()
-            
+            startPresenceWatch()
+
             // Immediately poll for messages to flush outbox after reconnection
             // This ensures messages queued during disconnection are sent promptly
             pollAndSendMessages()
@@ -379,6 +400,10 @@ class InternetManager(
         mainHandler.post {
             stopMessagePolling()
             stopPingTimer()
+            stopPresenceWatch()
+            // Wire outcomes for anything in flight are now owned by the
+            // transport layer (fail_all_pending on disconnect).
+            inFlightTracker.clear()
         }
         
         // Always notify protocol of disconnection so DORS excludes Internet from
@@ -613,7 +638,12 @@ class InternetManager(
                     
                     val bytes = messageBytes.map { it.toUByte() }
                     protocol.internetMessageReceived(senderId, bytes)
-                    
+
+                    // Inbound traffic proves the peer reachable — stop
+                    // presence-polling them (core re-arms via the
+                    // internetMessageReceived → reachability path).
+                    presenceWatch.unwatch(senderId)
+
                     emitDiagnostic("debug", "Message received from relay", mapOf(
                         "senderId" to senderId,
                         "messageId" to (messageId ?: "none"),
@@ -628,22 +658,39 @@ class InternetManager(
             }
             
             "DeliveryError" -> {
-                // Handle delivery error
-                val recipient = json.safeOptString("recipient", "unknown")
+                // The relay's authoritative "recipient offline" signal. It
+                // arrives well before the SDK's confirm timeout, so fail-fast
+                // every in-flight message to this recipient with the
+                // recipient_unreachable reason (parks welcomes instead of
+                // burning their retry budget) and start watching presence.
+                val recipient = json.safeOptString("recipient")
                 val reason = json.safeOptString("reason", "Unknown error")
-                emitDiagnostic("warning", "Message delivery failed", mapOf(
-                    "recipient" to recipient,
-                    "reason" to reason
-                ))
+                handleRecipientUnreachable(recipient, reason, "DeliveryError")
             }
-            
+
             "PresenceStatus", "PresenceStatusWithLastSeen" -> {
-                // Handle presence updates (optional logging)
-                val userId = json.safeOptString("user_id", "unknown")
-                val online = json.optBoolean("online", false)
+                // Relay presence answer: feed core (re-arms parked welcomes
+                // and flushes queues on online; parks pending welcomes on
+                // offline) and maintain the watch set.
+                val userId = json.safeOptString("user_id")
+                val online = json.opt("online") as? Boolean
+                if (userId.isEmpty() || online == null) {
+                    emitDiagnostic("warning", "Invalid presence format: missing user_id/online")
+                    return
+                }
+                val lastSeenMs = json.optNullableString("last_seen")?.let { parseTimestampToMsOrNull(it) }
+                if (online) {
+                    presenceWatch.unwatch(userId)
+                }
+                try {
+                    protocol.internetPeerPresence(userId, online, lastSeenMs)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to ingest presence for $userId", e)
+                }
                 emitDiagnostic("debug", "Presence update", mapOf(
                     "userId" to userId,
-                    "online" to online
+                    "online" to online,
+                    "lastSeenMs" to (lastSeenMs ?: "none")
                 ))
             }
 
@@ -771,13 +818,12 @@ class InternetManager(
             }
             
             "ConnectionRequestError" -> {
+                // Same authoritative offline signal as DeliveryError, for
+                // relay-native connection-request ops (the relay does not
+                // store requests for offline recipients).
                 val recipient = json.safeOptString("recipient")
                 val reason = json.safeOptString("reason", "Unknown error")
-                emitDiagnostic("debug", "Received relay message", mapOf(
-                    "type" to messageType,
-                    "recipient" to recipient,
-                    "reason" to reason
-                ))
+                handleRecipientUnreachable(recipient, reason, "ConnectionRequestError")
             }
             
             "GroupCreated" -> {
@@ -907,6 +953,21 @@ class InternetManager(
             System.currentTimeMillis()
         }
     }
+
+    /**
+     * Like [parseTimestampToMs] but returns null instead of now() when the
+     * value is absent or unparseable — a last-seen display must not invent a
+     * timestamp. Accepts ISO-8601 or epoch milliseconds.
+     */
+    private fun parseTimestampToMsOrNull(timestampStr: String): Long? {
+        if (timestampStr.isEmpty()) return null
+        timestampStr.toLongOrNull()?.let { return it }
+        return try {
+            java.time.Instant.parse(timestampStr).toEpochMilli()
+        } catch (e: Exception) {
+            null
+        }
+    }
     
     /** Build serialized Message JSON bytes for an internal (relay) message, same shape as MessageReceived. */
     private fun buildInternalMessageBytes(senderId: String, content: String): ByteArray {
@@ -952,7 +1013,9 @@ class InternetManager(
         // Double-check connection state to handle race conditions
         // This prevents sending messages right after transport disconnect
         if (!isConnected.get() || !isAuthenticated.get()) return
-        
+
+        inFlightTracker.prune(System.currentTimeMillis())
+
         try {
             // Poll for next message from protocol - batch send up to 10 messages per poll
             // to efficiently flush the outbox after reconnection
@@ -1024,6 +1087,9 @@ class InternetManager(
             consecutiveSendFailures.set(0)
             bytesSent += jsonString.length
             messagesSent++
+            // Track for recipient-keyed failure correlation: a later
+            // DeliveryError for this recipient fails-fast this message id.
+            inFlightTracker.recordSent(recipientId, messageId, System.currentTimeMillis())
             try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
             
             emitDiagnostic("debug", "Message sent via relay", mapOf(
@@ -1066,7 +1132,105 @@ class InternetManager(
         // OkHttp handles ping/pong automatically with pingInterval
         // This is just for manual pings if needed
     }
-    
+
+    // MARK: - Presence Watch
+
+    /**
+     * Fail-fast handler for the relay's recipient-keyed offline signals
+     * (DeliveryError / ConnectionRequestError). Fails every live in-flight
+     * message to the recipient with the recipient_unreachable reason (the
+     * core classifies it as per-peer no-carrier and parks welcomes without
+     * burning budget), ingests an authoritative offline presence, and adds
+     * the recipient to the presence watch set.
+     */
+    private fun handleRecipientUnreachable(recipient: String, reason: String, source: String) {
+        if (recipient.isEmpty()) {
+            emitDiagnostic("warning", "Recipient-unreachable signal without recipient", mapOf(
+                "source" to source,
+                "reason" to reason
+            ))
+            return
+        }
+        val now = System.currentTimeMillis()
+        val failedIds = inFlightTracker.drainRecipient(recipient, now)
+        for (id in failedIds) {
+            try {
+                protocol.internetSendFailedWithReason(id, "recipient_unreachable: $reason")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fail-fast in-flight message $id", e)
+            }
+        }
+        presenceWatch.watch(recipient, now)
+        try {
+            protocol.internetPeerPresence(recipient, false, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to ingest offline presence for $recipient", e)
+        }
+        emitDiagnostic("warning", "Recipient unreachable", mapOf(
+            "recipient" to recipient,
+            "reason" to reason,
+            "source" to source,
+            "failedInFlight" to failedIds.size
+        ))
+    }
+
+    private fun startPresenceWatch() {
+        stopPresenceWatch()
+        mainHandler.postDelayed(presenceWatchRunnable, PresenceWatchPolicy.DEFAULT_TICK_INTERVAL_MS)
+    }
+
+    private fun stopPresenceWatch() {
+        mainHandler.removeCallbacks(presenceWatchRunnable)
+    }
+
+    private fun presenceWatchTick() {
+        if (!isConnected.get() || !isAuthenticated.get()) return
+        val ws = webSocket ?: return
+        try {
+            val coreWatchlist = try {
+                protocol.internetPresenceWatchlist()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to read presence watchlist", e)
+                emptyList()
+            }
+            val now = System.currentTimeMillis()
+            val peers = presenceWatch.peersToQuery(coreWatchlist, now).filter { it != deviceId }
+            for (peer in peers) {
+                val checkMessage = org.json.JSONObject().apply {
+                    put("type", "CheckPresence")
+                    put("username", peer)
+                }
+                ws.send(checkMessage.toString())
+            }
+            if (peers.isNotEmpty()) {
+                emitDiagnostic("debug", "Presence watch tick", mapOf(
+                    "queried" to peers.size,
+                    "watched" to presenceWatch.watchedPeers().size
+                ))
+            }
+        } catch (e: Exception) {
+            emitDiagnostic("error", "Presence watch tick failed", mapOf(
+                "error" to (e.message ?: "unknown")
+            ))
+        }
+    }
+
+    /**
+     * App-facing one-shot presence query (RN `checkInternetPresence`). The
+     * answer arrives as the SDK's `presence_updated` event — fire-and-event,
+     * matching relay semantics. Returns true if the query was written to the
+     * socket.
+     */
+    fun checkPresence(userId: String): Boolean {
+        if (userId.isEmpty() || !isConnected.get() || !isAuthenticated.get()) return false
+        val ws = webSocket ?: return false
+        val checkMessage = org.json.JSONObject().apply {
+            put("type", "CheckPresence")
+            put("username", userId)
+        }
+        return ws.send(checkMessage.toString())
+    }
+
     // MARK: - State Management
     
     private fun updateState(newState: TransportState) {
