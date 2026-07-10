@@ -512,6 +512,10 @@ RCT_EXTERN_METHOD(checkInternetPresence:(NSString *)userId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(internetSendRawCommand:(NSString *)json
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Presence, Typing, Read Receipts
 RCT_EXTERN_METHOD(sendPresenceUpdate:(NSString *)recipient
                   status:(nonnull NSNumber *)status

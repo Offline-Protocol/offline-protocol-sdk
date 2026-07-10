@@ -1225,6 +1225,21 @@ export interface TofuResetEvent extends BaseEvent {
 }
 
 /**
+ * A raw relay server frame that is an app/server concern rather than an SDK
+ * concern — invite-link lifecycle responses (`GroupInviteLinkCreated`,
+ * `GroupJoinedViaInvite`, `GroupInviteJoinPending`, …), `GroupRoleChanged`,
+ * `GroupDeleted`, `RateLimited`, `GroupError` (dual-emitted so `request_id`
+ * correlation works), and any future/unknown relay message types.
+ *
+ * `json` is the verbatim relay frame; parse it and dispatch on its `type`
+ * field. Pair with `sendRawServerCommand` for request/response flows.
+ */
+export interface InternetServerMessageEvent extends BaseEvent {
+  type: 'internet_server_message';
+  json: string;
+}
+
+/**
  * Union type of all events
  */
 export type ProtocolEvent =
@@ -1275,6 +1290,7 @@ export type ProtocolEvent =
   | ServiceRequestReceivedEvent
   | ServiceResponseReceivedEvent
   | PresenceUpdatedEvent
+  | InternetServerMessageEvent
   | TypingIndicatorReceivedEvent
   | ReadReceiptReceivedEvent
   | MessageRelayedEvent

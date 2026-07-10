@@ -393,6 +393,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             if config.internetEnabled {
                 internetManager = InternetManager(protocol: proto, deviceId: config.userId)
                 internetManager?.delegate = self
+                internetManager?.serverMessageEmitter = { [weak self] rawJson in
+                    self?.emitServerMessageEvent(rawJson)
+                }
                 print("[OfflineProtocolModule] Internet Manager initialized for user: \(config.userId)")
                 
                 // Extract and store internet config for use during start()
@@ -524,6 +527,21 @@ class OfflineProtocolModule: RCTEventEmitter {
                let jsonString = String(data: data, encoding: .utf8) {
                 sendEventToJS(Events.onEvent, body: ["eventJson": jsonString])
             }
+        }
+    }
+
+    /// Forwards a raw relay frame that is an app/server concern (invite
+    /// links, role changes, rate limiting, unknown types) to JS as the
+    /// `internet_server_message` event.
+    fileprivate func emitServerMessageEvent(_ rawJson: String) {
+        guard hasListeners else { return }
+        let payload: [String: Any] = [
+            "type": "internet_server_message",
+            "json": rawJson
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+           let jsonString = String(data: data, encoding: .utf8) {
+            sendEventToJS(Events.onEvent, body: ["eventJson": jsonString])
         }
     }
 
@@ -1231,6 +1249,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                     // Create manager if not already created
                     let newManager = InternetManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
                     newManager.delegate = self
+                    newManager.serverMessageEmitter = { [weak self] rawJson in
+                        self?.emitServerMessageEvent(rawJson)
+                    }
                     internetManager = newManager
                     emitDiagnostic(level: "info", message: "Internet manager created on demand")
                 }
@@ -3273,6 +3294,20 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         resolver(manager.checkPresence(userId: userId))
+    }
+
+    /// Sends a raw, caller-built relay command verbatim over the SDK's
+    /// socket (invite-link lifecycle and other server-plane ops). Resolves
+    /// true when written; false when invalid JSON or not connected and
+    /// authenticated. Responses arrive as `internet_server_message` events.
+    @objc func internetSendRawCommand(_ json: String,
+                                      resolver: @escaping RCTPromiseResolveBlock,
+                                      rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let manager = internetManager else {
+            rejecter("ERROR_INTERNET", "Internet transport not initialized", nil)
+            return
+        }
+        resolver(manager.sendRawCommand(json: json))
     }
 
     // MARK: - Helpers

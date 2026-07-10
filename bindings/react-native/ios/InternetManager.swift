@@ -68,6 +68,15 @@ public class InternetManager: NSObject, TransportManager {
     // Which peers to query via CheckPresence, and how many per tick.
     private let presenceWatch = PresenceWatchPolicy()
     private var presenceWatchTimer: DispatchSourceTimer?
+
+    // Translates core-tagged server-plane control frames (controlOp on
+    // InternetMessage) into relay-native ops.
+    private lazy var controlOpTranslator = RelayControlOpTranslator(selfId: deviceId)
+
+    /// Receives raw relay frames that are app/server concerns rather than SDK
+    /// concerns (invite links, role changes, rate limiting, unknown types) —
+    /// the module forwards them to JS as the `internet_server_message` event.
+    public var serverMessageEmitter: ((String) -> Void)?
     
     // Metrics
     private var bytesSent: UInt64 = 0
@@ -325,6 +334,10 @@ public class InternetManager: NSObject, TransportManager {
         // Wire outcomes for anything in flight are now owned by the
         // transport layer (fail_all_pending on disconnect).
         inFlightTracker.clear()
+        // Registration diffs are per-connection: a reconnect re-registers
+        // groups from scratch (sync_groups_to_relay re-sends on the
+        // internet 0→1 transition).
+        controlOpTranslator.reset()
         
         // Always notify protocol of disconnection so DORS excludes Internet from
         // available transports and can switch to BLE (or WiFi Direct). Without this,
@@ -758,13 +771,46 @@ public class InternetManager: NSObject, TransportManager {
             
         case "GroupError":
             let reason = json["reason"] as? String ?? "Unknown error"
-            injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_ERROR__", payload: ["reason": reason])
-            
+            let groupId = json["group_id"] as? String ?? ""
+            // Admin-denied registration must stop member-delta attempts.
+            controlOpTranslator.onGroupError(groupId: groupId, reason: reason)
+            var payload: [String: Any] = ["reason": reason]
+            // group_id lets the core revoke relay_synced so group sends fall
+            // back to per-member delivery.
+            if !groupId.isEmpty {
+                payload["group_id"] = groupId
+            }
+            injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_ERROR__", payload: payload)
+            // Dual-emit: apps correlating request_id-carrying errors
+            // (invite-link ops ride the raw channel) need the full frame.
+            emitServerMessage(json)
+
+        // Server-plane frames that are app concerns, not SDK concerns —
+        // forwarded verbatim as the internet_server_message event so the
+        // invite-link lifecycle and misc server events can ride the SDK's
+        // socket without a second WebSocket in the app.
+        case "GroupInviteLinkCreated", "GroupInviteLinkRevoked", "GroupJoinedViaInvite",
+             "GroupInviteJoinPending", "GroupRoleChanged", "GroupDeleted", "RateLimited":
+            emitServerMessage(json)
+            emitDiagnostic("debug", "Relay server message forwarded", context: [
+                "type": messageType
+            ])
+
         default:
+            // Unknown types are forwarded too — future relay additions
+            // surface to the app instead of being silently dropped.
+            emitServerMessage(json)
             emitDiagnostic("debug", "Received relay message", context: [
                 "type": messageType
             ])
         }
+    }
+
+    private func emitServerMessage(_ json: [String: Any]) {
+        guard let emitter = serverMessageEmitter,
+              let data = try? JSONSerialization.data(withJSONObject: json),
+              let raw = String(data: data, encoding: .utf8) else { return }
+        emitter(raw)
     }
     
     /// Like `parseTimestampToMs` but returns nil instead of now() when the
@@ -885,8 +931,18 @@ public class InternetManager: NSObject, TransportManager {
             guard let message = self.protocolInstance.internetGetNextMessage() else {
                 break
             }
-            
-            self.sendMessage(messageId: message.messageId, recipientId: message.recipientId, data: Data(message.data))
+
+            if let controlOp = message.controlOp {
+                self.sendControlOp(
+                    messageId: message.messageId,
+                    recipientId: message.recipientId,
+                    controlOp: controlOp,
+                    controlPayload: message.controlPayload ?? "",
+                    data: Data(message.data)
+                )
+            } else {
+                self.sendMessage(messageId: message.messageId, recipientId: message.recipientId, data: Data(message.data))
+            }
             messagesSent += 1
         }
         
@@ -1000,6 +1056,116 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
     
+    // MARK: - Control-Op Translation
+
+    /// Sends a core-tagged server-plane control frame via the relay-native
+    /// protocol (see RelayControlOpTranslator). Wire-outcome contract is the
+    /// same as sendMessage: the original message id is confirmed on the
+    /// primary frame's socket-write success, failed otherwise.
+    private func sendControlOp(
+        messageId: String,
+        recipientId: String,
+        controlOp: String,
+        controlPayload: String,
+        data: Data
+    ) {
+        let translation = controlOpTranslator.translate(
+            controlOp: controlOp,
+            controlPayload: controlPayload,
+            recipientId: recipientId
+        )
+        switch translation {
+        case .passThrough:
+            sendMessage(messageId: messageId, recipientId: recipientId, data: data)
+
+        case .tap(let frames):
+            // Verbatim delivery owns the message id outcome; the extra
+            // relay-native frames are best-effort.
+            sendMessage(messageId: messageId, recipientId: recipientId, data: data)
+            sendRelayFramesBestEffort(frames, controlOp: controlOp)
+
+        case .replace(let frames):
+            guard isConnected, isAuthenticated, let task = webSocketTask else {
+                protocolInstance.internetSendFailed(messageId: messageId)
+                return
+            }
+            guard let primary = frames.first,
+                  let primaryData = try? JSONSerialization.data(withJSONObject: primary),
+                  let primaryJson = String(data: primaryData, encoding: .utf8) else {
+                // Nothing to send (fully deduped) — the intent is already
+                // reflected server-side; confirm so the core moves on.
+                protocolInstance.internetConfirmSent(messageId: messageId)
+                return
+            }
+            task.send(.string(primaryJson)) { [weak self] error in
+                guard let self = self else { return }
+                if let error = error {
+                    self.consecutiveSendFailures += 1
+                    self.protocolInstance.internetSendFailed(messageId: messageId)
+                    self.emitDiagnostic("error", "Failed to send relay-native control op", context: [
+                        "controlOp": controlOp,
+                        "messageId": messageId,
+                        "error": error.localizedDescription,
+                        "consecutiveFailures": self.consecutiveSendFailures
+                    ])
+                    if self.consecutiveSendFailures >= self.MAX_CONSECUTIVE_FAILURES {
+                        DispatchQueue.main.async {
+                            self.handleConnectionClosed(error: error)
+                        }
+                    }
+                } else {
+                    self.consecutiveSendFailures = 0
+                    self.bytesSent += UInt64(primaryData.count)
+                    self.messagesSent += 1
+                    self.inFlightTracker.recordSent(
+                        recipient: recipientId,
+                        messageId: messageId,
+                        nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+                    )
+                    self.protocolInstance.internetConfirmSent(messageId: messageId)
+                    self.sendRelayFramesBestEffort(Array(frames.dropFirst()), controlOp: controlOp)
+                    self.emitDiagnostic("debug", "Control op sent relay-native", context: [
+                        "controlOp": controlOp,
+                        "messageId": messageId,
+                        "frames": frames.count
+                    ])
+                }
+            }
+        }
+    }
+
+    private func sendRelayFramesBestEffort(_ frames: [[String: Any]], controlOp: String) {
+        guard !frames.isEmpty, isConnected, isAuthenticated, let task = webSocketTask else { return }
+        for frame in frames {
+            guard let frameData = try? JSONSerialization.data(withJSONObject: frame),
+                  let frameJson = String(data: frameData, encoding: .utf8) else { continue }
+            task.send(.string(frameJson)) { [weak self] error in
+                if let error = error {
+                    self?.emitDiagnostic("warning", "Best-effort relay frame dropped", context: [
+                        "controlOp": controlOp,
+                        "frameType": frame["type"] as? String ?? "unknown",
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
+        }
+    }
+
+    /// Sends a raw, caller-built relay command verbatim (RN
+    /// `internetSendRawCommand`). The JSON must parse; returns false when
+    /// invalid or not connected+authenticated. Responses the SDK doesn't
+    /// consume arrive as `internet_server_message` events.
+    public func sendRawCommand(json: String) -> Bool {
+        guard isConnected, isAuthenticated, let task = webSocketTask else { return false }
+        guard let data = json.data(using: .utf8),
+              (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] != nil else {
+            emitDiagnostic("warning", "Rejected invalid raw server command", context: [:])
+            return false
+        }
+        task.send(.string(json)) { _ in }
+        return true
+    }
+
     // MARK: - Presence Watch
 
     /// Fail-fast handler for the relay's recipient-keyed offline signals
