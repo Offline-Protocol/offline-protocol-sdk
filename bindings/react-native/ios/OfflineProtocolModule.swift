@@ -1269,11 +1269,13 @@ class OfflineProtocolModule: RCTEventEmitter {
                     throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create Internet manager"])
                 }
                 
-                // Stop the manager first if it's running (to ensure clean restart)
-                if manager.state == .running {
+                // Stop the manager first if it's running or still connecting
+                // (to ensure a clean restart — start() rejects .starting, and
+                // stop() releases the previous session either way)
+                if manager.state == .running || manager.state == .starting {
                     manager.stop()
                 }
-                
+
                 try configureAndStartInternet(manager: manager, config: config)
                 emitDiagnostic(level: "info", message: "Internet transport enabled")
                 

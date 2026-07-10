@@ -365,22 +365,140 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     func testNonAdminReasonGroupErrorDoesNotSuppressDeltas() {
         let translator = RelayControlOpTranslator(selfId: "alice")
 
-        // Only the relay's admin-denial wording flips the suppression; an
-        // unrelated group error (bad member id, transient state) must not
-        // silently stop membership sync.
-        translator.onGroupError(groupId: "g1", reason: "User not found")
-
-        let registration = frames(translator.translate(
+        // Only the relay's admin-denial wording flips the suppression, even
+        // when the error correlates to outstanding deltas; an unrelated group
+        // error (bad member id, transient state) must not silently stop
+        // membership sync.
+        commit(translator.translate(
             controlOp: "group_relay_register",
             controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
             recipientId: "alice"
         ))
+        translator.onGroupError(groupId: "g1", reason: "User not found")
+
+        let registration = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob","carol"]}"#,
+            recipientId: "alice"
+        ))
         XCTAssertEqual(registration.count, 2)
         XCTAssertEqual(registration[1]["type"] as? String, "AddGroupMember")
+        XCTAssertEqual(registration[1]["username"] as? String, "carol")
+    }
+
+    func testUncorrelatedAdminDenialDoesNotSuppressDeltas() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+
+        // An admin-denial GroupError with NO member deltas outstanding from
+        // this translator answers someone else's operation (an app
+        // raw-channel op, another admin's edit) — honoring it would
+        // permanently silence membership sync for the group.
+        translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
+
+        let registration = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(registration.count, 2)
+        XCTAssertEqual(registration[1]["type"] as? String, "AddGroupMember")
+        XCTAssertEqual(registration[1]["username"] as? String, "alice")
+    }
+
+    func testRequestIdCarryingDenialIsNeverOurs() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+
+        // The translator never tags request_id, so a request_id-echoing
+        // GroupError answers an app raw-channel frame — even mid-window it
+        // must neither suppress deltas nor consume the window.
+        _ = translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        )
+        translator.onGroupError(
+            groupId: "g1",
+            reason: "Only admins can add members",
+            requestId: "req-42"
+        )
+
+        // Not suppressed: the uncommitted registration re-sends its delta.
+        let retry = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(retry.count, 2)
+        XCTAssertEqual(retry[1]["type"] as? String, "AddGroupMember")
+
+        // The window survived the disowned error: a real (request_id-less)
+        // denial still lands.
+        translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
+        XCTAssertEqual(
+            frames(translator.translate(
+                controlOp: "group_relay_register",
+                controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+                recipientId: "bob"
+            )).count,
+            1
+        )
+    }
+
+    func testDeltaWindowClosesOnFirstGroupScopedAnswer() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+
+        // One answer per window: the first group-scoped GroupError closes it,
+        // so a later admin-denial with nothing outstanding is uncorrelated
+        // and falls back to send-and-learn (noisy but safe) instead of
+        // suppressing on someone else's error.
+        commit(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
+        translator.onGroupError(groupId: "g1", reason: "User not found")
+        translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
+
+        let registration = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob","carol"]}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(registration.count, 2)
+        XCTAssertEqual(registration[1]["type"] as? String, "AddGroupMember")
+        XCTAssertEqual(registration[1]["username"] as? String, "carol")
+    }
+
+    func testIsAdminHintAcceptsNumericEncoding() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+
+        // JSON 0/1 arrive as NSNumber integers; the hint must behave like
+        // the boolean encoding on both platforms (NSNumber boolValue).
+        let hinted = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"],"is_admin":0}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(hinted.count, 1)
+        XCTAssertEqual(hinted[0]["type"] as? String, "CreateGroup")
+
+        let admin = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g2","members":["alice","bob"],"is_admin":1}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(admin.count, 2)
+        XCTAssertEqual(admin[1]["type"] as? String, "AddGroupMember")
     }
 
     func testRolePromotionReenablesMemberDeltas() {
         let translator = RelayControlOpTranslator(selfId: "bob")
+        // The denial must correlate to deltas this translator sent.
+        commit(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
         translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
 
         // Denied: registration is CreateGroup only.

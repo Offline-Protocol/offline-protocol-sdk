@@ -29,10 +29,14 @@ final class RelayControlOpTranslator {
 
     /// Cross-layer contract: substring of the relay server's admin-denial
     /// GroupError reasons ("Only admins can add members" / "Only admins can
-    /// remove members"). If the relay rewords these, non-admin devices
-    /// without the core's `is_admin` hint fall back to re-learning the
-    /// denial each connection — noisy but safe. Keep in sync with the relay
-    /// source (see docs/relay-transport-parity-spec.md).
+    /// remove members"). The marker alone is NOT enough to suppress deltas —
+    /// it only counts when the GroupError correlates to member deltas this
+    /// translator actually has outstanding (see `onGroupError`), so an
+    /// admin-denial answering some other actor's operation can never
+    /// permanently silence membership sync. If the relay rewords these,
+    /// non-admin devices without the core's `is_admin` hint fall back to
+    /// re-learning the denial each connection — noisy but safe. Keep in sync
+    /// with the relay source (see docs/relay-transport-parity-spec.md).
     static let adminDeniedReasonMarker = "Only admins"
 
     /// SDK content prefixes only the relay server (bridged by
@@ -86,6 +90,13 @@ final class RelayControlOpTranslator {
     private var registeredMembers: [String: Set<String>] = [:]
     /// Groups whose member deltas the relay denied (we are not the admin).
     private var memberDeltasDenied: Set<String> = []
+    /// Groups with member deltas outstanding: the window between a
+    /// translation that produced AddGroupMember/RemoveGroupMember frames and
+    /// the next group-scoped answer. Only a GroupError landing inside this
+    /// window may be read as OUR admin denial — the translator never tags
+    /// request_id, so a group-scoped error with no outstanding deltas belongs
+    /// to some other actor (an app raw-channel op, another admin's edit).
+    private var outstandingMemberDeltas: Set<String> = []
     /// Groups for which a relay-native LeaveGroup was already committed.
     private var leaveSent: Set<String> = []
     private let lock = NSLock()
@@ -180,11 +191,21 @@ final class RelayControlOpTranslator {
         }
     }
 
-    /// Feed relay GroupError answers so admin-denied groups stop producing member deltas.
-    func onGroupError(groupId: String, reason: String) {
+    /// Feed relay GroupError answers so admin-denied groups stop producing
+    /// member deltas. The denial is honored ONLY when it correlates to member
+    /// deltas this translator has outstanding: a `request_id`-carrying error
+    /// answers an app raw-channel frame (this translator never tags
+    /// request_id, so it cannot be ours), and without an open per-group delta
+    /// window the error belongs to some other actor's operation — treating it
+    /// as ours would permanently suppress membership sync for the group.
+    func onGroupError(groupId: String, reason: String, requestId: String? = nil) {
         guard !groupId.isEmpty else { return }
+        if let requestId = requestId, !requestId.isEmpty { return }
         lock.lock()
         defer { lock.unlock() }
+        guard outstandingMemberDeltas.contains(groupId) else { return }
+        // The next group-scoped answer closes the window, denial or not.
+        outstandingMemberDeltas.remove(groupId)
         if reason.range(of: Self.adminDeniedReasonMarker, options: .caseInsensitive) != nil {
             memberDeltasDenied.insert(groupId)
             // The optimistic membership snapshot was not applied server-side.
@@ -213,6 +234,7 @@ final class RelayControlOpTranslator {
         generation += 1
         registeredMembers.removeAll()
         memberDeltasDenied.removeAll()
+        outstandingMemberDeltas.removeAll()
         leaveSent.removeAll()
     }
 
@@ -230,7 +252,16 @@ final class RelayControlOpTranslator {
         // The core's admin hint: explicitly-not-admin devices never send
         // member deltas (the relay would deny each with a group-scoped
         // GroupError). Absent hint = unknown, fall back to send-and-learn.
-        let notAdmin = (payload["is_admin"] as? Bool) == false
+        // Read via NSNumber boolValue, not `as? Bool`: JSONSerialization
+        // hands back NSNumber for both JSON booleans and 0/1 integers, and
+        // the SE-0170 bridge's number handling must not decide whether a 0/1
+        // encoding of the hint is honored — boolValue treats them uniformly.
+        let notAdmin: Bool
+        if let adminNumber = payload["is_admin"] as? NSNumber {
+            notAdmin = !adminNumber.boolValue
+        } else {
+            notAdmin = false
+        }
 
         var frames: [[String: Any]] = [[
             "type": "CreateGroup",
@@ -258,6 +289,11 @@ final class RelayControlOpTranslator {
                     "group_id": groupId,
                     "username": removed
                 ])
+            }
+            // Deltas produced: open the group's outstanding-delta window so
+            // the next group-scoped GroupError may be read as our denial.
+            if frames.count > 1 {
+                outstandingMemberDeltas.insert(groupId)
             }
             // Committed only after the frames are actually written.
             let gen = generation
@@ -290,6 +326,10 @@ final class RelayControlOpTranslator {
         leaveSent.insert(groupId)
         registeredMembers.removeValue(forKey: groupId)
         memberDeltasDenied.remove(groupId)
+        // A left group's answers are no longer ours to correlate; a stale
+        // window must not let a post-leave GroupError mark a future rejoin
+        // as admin-denied.
+        outstandingMemberDeltas.remove(groupId)
     }
 
     private func parseJson(_ string: String) -> [String: Any]? {
