@@ -25,8 +25,7 @@ class InternetManager(
     
     override val transportId = "internet"
     override val transportName = "Internet (WebSocket)"
-    // Volatile: written on main (updateState) but read from the OkHttp
-    // reader thread (handleConnectionClosed) and RN threads.
+    // Volatile: written on main (updateState) but read from RN threads.
     @Volatile override var state: TransportState = TransportState.UNAVAILABLE
         private set
     override var listener: TransportManagerListener? = null
@@ -45,6 +44,7 @@ class InternetManager(
         private const val PING_INTERVAL_MS = 10000L  // Reduced from 30s for faster failure detection
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val MAX_CONSECUTIVE_FAILURES = 2  // Trigger disconnect after 2 consecutive failures
+        private const val AUTH_RESPONSE_TIMEOUT_MS = 10_000L
     }
     
     // MARK: - Properties
@@ -56,10 +56,10 @@ class InternetManager(
     
     // OkHttp components
     private var okHttpClient: OkHttpClient? = null
-    // Written ONLY on main (connect/disconnect/teardownSocket — the AuthError
-    // teardown posts to main); read from the OkHttp reader thread and RN
-    // bridge threads (sendRawCommand, checkPresence). Volatile for those
-    // reads; the single-writer rule is what makes teardownSocket's
+    // Written ONLY on main (connect/disconnect/terminateSocket — every
+    // terminal signal posts to main); read from the OkHttp reader thread and
+    // RN bridge threads (sendRawCommand, checkPresence). Volatile for those
+    // reads; the single-writer rule is what makes terminateSocket's
     // compare-then-detach race-free.
     @Volatile private var webSocket: WebSocket? = null
     
@@ -107,11 +107,16 @@ class InternetManager(
     // restart the poll/ping/presence timers the app paused.
     @Volatile private var isPaused = false
     private var reconnectAttempts = AtomicInteger(0)
-    // Atomic: grown on main (scheduleReconnect), reset on the OkHttp reader
-    // thread (handleAuthenticated).
+    // Atomic for cross-thread reads; written only on main (scheduleReconnect
+    // grows it, handleAuthenticated's posted reaction resets it).
     private val currentReconnectDelay =
         java.util.concurrent.atomic.AtomicLong(RECONNECT_INITIAL_DELAY_MS)
     private var reconnectRunnable: Runnable? = null
+    // Watchdog for a relay that opens the socket but never answers
+    // Authenticate: with isConnected already true, connect() short-circuits
+    // and no timer ever starts — a permanently wedged transport without
+    // this. Main-thread only.
+    private var authTimeoutRunnable: Runnable? = null
     private var transportStartAt: Long = 0L
     
     // Failure tracking for DORS
@@ -134,10 +139,14 @@ class InternetManager(
     private val rateLimiter = RelayRateLimiter()
 
     /**
-     * Time source for the rate limiter: monotonic (and sleep-inclusive), so
-     * a wall-clock step (NTP correction, manual change) can never freeze or
-     * over-mint token refill. Every rateLimiter call must use this — mixing
-     * time sources per call site would look like clock jumps to the bucket.
+     * Time source for the rate limiter, the in-flight tracker, and the
+     * presence watch policy: monotonic (and sleep-inclusive), so a
+     * wall-clock step (NTP correction, manual change) can never freeze or
+     * over-mint token refill, mass-expire in-flight sends, or evict the
+     * whole watch set. Every call into those three must use this — mixing
+     * time sources per call site would look like clock jumps to their
+     * state. Timestamps that leave the process (conn-request timestamp_ms,
+     * relay frames) stay wall-clock.
      */
     private fun monotonicNowMs(): Long = android.os.SystemClock.elapsedRealtime()
 
@@ -299,16 +308,23 @@ class InternetManager(
     }
     
     private fun stopUnsafe() {
-        if (state != TransportState.RUNNING && state != TransportState.STARTING) {
-            return
+        // Even a transport that already stopped itself (e.g. after
+        // max-reconnect-attempts set STOPPED) still holds an OkHttp client
+        // plus per-connection state; stop() must always release those
+        // instead of early-returning and leaking the client's threads until
+        // process exit.
+        val wasActive = state == TransportState.RUNNING || state == TransportState.STARTING
+
+        if (wasActive) {
+            updateState(TransportState.STOPPING)
         }
-        
-        updateState(TransportState.STOPPING)
-        
+
         // Cancel reconnect attempts
         reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
         reconnectRunnable = null
-        
+
+        cancelAuthTimeout()
+
         // Stop timers
         stopMessagePolling()
         stopPingTimer()
@@ -330,18 +346,22 @@ class InternetManager(
         // tokens on the previous session's peers.
         presenceWatch.clear()
 
-        // Notify protocol
-        try {
-            protocol.internetStatusChanged(false)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error notifying protocol of disconnect", e)
+        if (wasActive) {
+            // Notify protocol
+            try {
+                protocol.internetStatusChanged(false)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying protocol of disconnect", e)
+            }
         }
-        
+
         // Shutdown OkHttp
         okHttpClient?.dispatcher?.executorService?.shutdown()
         okHttpClient = null
-        
-        updateState(TransportState.STOPPED)
+
+        if (wasActive) {
+            updateState(TransportState.STOPPED)
+        }
         emitDiagnostic("info", "Internet transport stopped")
     }
     
@@ -422,7 +442,7 @@ class InternetManager(
         isAuthenticated.set(false)
     }
     
-    private fun handleConnectionOpened() {
+    private fun handleConnectionOpened(ws: WebSocket) {
         isConnected.set(true)
         isConnecting.set(false)
         isAuthenticated.set(false)
@@ -432,13 +452,48 @@ class InternetManager(
         // connect → AuthError → teardown at the initial 1s delay forever,
         // hammering the relay.
         consecutiveSendFailures.set(0)
-        
+
         emitDiagnostic("info", "WebSocket connected, authenticating...", mapOf(
             "serverUrl" to (serverUrl ?: "unknown")
         ))
-        
+
+        // A relay that opens the socket but never answers must not wedge
+        // the transport (isConnected=true short-circuits connect() and the
+        // timers only start on Authenticated).
+        scheduleAuthTimeout(ws)
+
         // Authenticate with the relay server using deviceId as the user ID
         sendAuthentication()
+    }
+
+    /**
+     * Arms the auth watchdog for [ws]. Fires through the terminal funnel;
+     * cancelled on Authenticated and by any teardown of the socket (the
+     * funnel itself cancels it).
+     */
+    private fun scheduleAuthTimeout(ws: WebSocket) {
+        mainHandler.post {
+            if (ws !== webSocket) return@post
+            cancelAuthTimeout()
+            val runnable = object : Runnable {
+                override fun run() {
+                    if (authTimeoutRunnable === this) authTimeoutRunnable = null
+                    if (ws !== webSocket || isAuthenticated.get()) return
+                    emitDiagnostic("error", "No auth response from relay within timeout", mapOf(
+                        "timeoutMs" to AUTH_RESPONSE_TIMEOUT_MS
+                    ))
+                    teardownSocket(ws, "Auth response timeout")
+                }
+            }
+            authTimeoutRunnable = runnable
+            mainHandler.postDelayed(runnable, AUTH_RESPONSE_TIMEOUT_MS)
+        }
+    }
+
+    /** Main-thread only. */
+    private fun cancelAuthTimeout() {
+        authTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
+        authTimeoutRunnable = null
     }
     
     private fun sendAuthentication() {
@@ -461,66 +516,80 @@ class InternetManager(
         }
     }
     
-    private fun handleAuthenticated(userId: String, username: String) {
-        isAuthenticated.set(true)
-        // The relay accepted us — this, not the TCP open, is what proves the
-        // connection good and earns a backoff reset.
-        reconnectAttempts.set(0)
-        currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
-
+    private fun handleAuthenticated(ws: WebSocket, userId: String, username: String) {
+        // The whole reaction is ONE main-posted block gated on the socket
+        // still being current and the transport not stopping: reacting on
+        // the reader thread would race stopUnsafe() — the core would be told
+        // internet is up and route to a transport whose poll loop never
+        // starts, and the unguarded RUNNING write would wedge state so the
+        // next start() throws AlreadyRunning.
         mainHandler.post {
+            if (ws !== webSocket) return@post
+            if (state == TransportState.STOPPING || state == TransportState.STOPPED) return@post
+
+            isAuthenticated.set(true)
+            // The relay accepted us — this, not the TCP open, is what proves
+            // the connection good and earns a backoff reset.
+            reconnectAttempts.set(0)
+            currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
+            cancelAuthTimeout()
+
             updateState(TransportState.RUNNING)
-        }
 
-        // Notify protocol - this will trigger outbox flush for pending messages
-        try {
-            protocol.internetStatusChanged(true)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error notifying protocol of connect", e)
-        }
+            // Notify protocol - this will trigger outbox flush for pending messages
+            try {
+                protocol.internetStatusChanged(true)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying protocol of connect", e)
+            }
 
-        // Start polling, pinging, and the presence watch — unless the app
-        // paused the transport; a background reconnect must stay quiet and
-        // resume() restarts the timers.
-        mainHandler.post {
-            if (isPaused) return@post
-            startMessagePolling()
-            startPingTimer()
-            startPresenceWatch()
+            // Start polling, pinging, and the presence watch — unless the app
+            // paused the transport; a background reconnect must stay quiet and
+            // resume() restarts the timers.
+            if (!isPaused) {
+                startMessagePolling()
+                startPingTimer()
+                startPresenceWatch()
 
-            // Immediately poll for messages to flush outbox after reconnection
-            // This ensures messages queued during disconnection are sent promptly
-            pollAndSendMessages()
+                // Immediately poll for messages to flush outbox after reconnection
+                // This ensures messages queued during disconnection are sent promptly
+                pollAndSendMessages()
+            }
+
+            emitDiagnostic("info", "Authenticated with relay server", mapOf(
+                "userId" to userId,
+                "username" to username
+            ))
         }
-        
-        emitDiagnostic("info", "Authenticated with relay server", mapOf(
-            "userId" to userId,
-            "username" to username
-        ))
     }
     
+    /**
+     * The transport's reaction to a dead socket. Only reachable through
+     * [terminateSocket]'s detach-first funnel, so it runs on main and at
+     * most once per socket — a queued send-failure teardown racing an
+     * organic onFailure used to run it twice, double-incrementing the
+     * reconnect attempt and double-doubling the backoff.
+     */
     private fun handleConnectionClosed(code: Int, reason: String?) {
         val wasConnected = isConnected.getAndSet(false)
         val wasAuthenticated = isAuthenticated.getAndSet(false)
         isConnecting.set(false)
-        
+
         // Stop polling and pinging immediately to prevent sending on dead connection
-        mainHandler.post {
-            stopMessagePolling()
-            stopPingTimer()
-            stopPresenceWatch()
-            // Wire outcomes for anything in flight are now owned by the
-            // transport layer (fail_all_pending on disconnect).
-            inFlightTracker.clear()
-            // Registration diffs are per-connection: a reconnect re-registers
-            // groups from scratch (sync_groups_to_relay re-sends on the
-            // internet 0→1 transition).
-            controlOpTranslator.reset()
-            // Deferred frames belong to the dead connection; their commits
-            // are generation-dead after the reset above.
-            pendingControlFrames.clear()
-        }
-        
+        stopMessagePolling()
+        stopPingTimer()
+        stopPresenceWatch()
+        // Wire outcomes for anything in flight are now owned by the
+        // transport layer (fail_all_pending on disconnect).
+        inFlightTracker.clear()
+        // Registration diffs are per-connection: a reconnect re-registers
+        // groups from scratch (sync_groups_to_relay re-sends on the
+        // internet 0→1 transition).
+        controlOpTranslator.reset()
+        // Deferred frames belong to the dead connection; their commits
+        // are generation-dead after the reset above.
+        pendingControlFrames.clear()
+
         // Always notify protocol of disconnection so DORS excludes Internet from
         // available transports and can switch to BLE (or WiFi Direct).
         try {
@@ -531,32 +600,21 @@ class InternetManager(
                 "error" to (e.message ?: "unknown")
             ))
         }
-        
+
         emitDiagnostic("warning", "WebSocket disconnected", mapOf(
             "code" to code,
             "reason" to (reason ?: "none"),
             "wasConnected" to wasConnected,
             "wasAuthenticated" to wasAuthenticated
         ))
-        
+
         // Attempt reconnection if enabled
         // Messages in outbox will be flushed on successful reconnection
         if (autoReconnect && state != TransportState.STOPPING && state != TransportState.STOPPED) {
-            mainHandler.post { scheduleReconnect() }
+            scheduleReconnect()
         } else {
-            mainHandler.post { updateState(TransportState.STOPPED) }
+            updateState(TransportState.STOPPED)
         }
-    }
-    
-    private fun handleConnectionFailure(t: Throwable) {
-        isConnecting.set(false)
-        
-        emitDiagnostic("error", "WebSocket connection failed", mapOf(
-            "error" to (t.message ?: "unknown"),
-            "exception" to t.javaClass.simpleName
-        ))
-        
-        handleConnectionClosed(-1, t.message)
     }
     
     private fun scheduleReconnect() {
@@ -609,7 +667,7 @@ class InternetManager(
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
             if (isStale(webSocket)) return
-            handleConnectionOpened()
+            handleConnectionOpened(webSocket)
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -628,33 +686,48 @@ class InternetManager(
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             if (isStale(webSocket)) return
-            handleConnectionClosed(code, reason)
+            terminateSocket(webSocket, code, reason)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (isStale(webSocket)) return
-            handleConnectionFailure(t)
+            emitDiagnostic("error", "WebSocket connection failed", mapOf(
+                "error" to (t.message ?: "unknown"),
+                "exception" to t.javaClass.simpleName
+            ))
+            terminateSocket(webSocket, -1, t.message)
         }
     }
 
     /**
-     * Cancels and detaches [expected] IF it is still the current socket,
-     * then runs the closed handler exactly once for it. Detaching before
-     * cancel makes the cancel-triggered onFailure/onClosed no-ops (the
-     * listener ignores stale sockets), so a dead socket can never tear down
-     * the connection rebuilt after it. Scoping the teardown to the socket
-     * that observed the failure — and running it on main, the only thread
-     * that writes [webSocket] — closes the reverse race too: a stale path
-     * (late AuthError, queued send-failure teardown) can never cancel a
-     * newer, healthy socket.
+     * The single terminal funnel: onClosed, onFailure, and every local
+     * teardown ([teardownSocket]) end a socket's life here. Detaching [ws]
+     * BEFORE the closed handler — on main, the only thread that writes
+     * [webSocket] — makes [handleConnectionClosed] unreachable twice for
+     * the same socket: whichever signal wins the post detaches it and every
+     * later signal fails the identity check. The identity scope also closes
+     * the reverse race: a stale path (late AuthError, queued send-failure
+     * teardown) can never cancel a newer, healthy socket.
+     */
+    private fun terminateSocket(ws: WebSocket, code: Int, reason: String?, cancel: Boolean = false) {
+        mainHandler.post {
+            if (ws !== webSocket) return@post
+            webSocket = null
+            cancelAuthTimeout()
+            if (cancel) ws.cancel()
+            handleConnectionClosed(code, reason)
+        }
+    }
+
+    /**
+     * Locally ends [expected]'s life (auth failure, send-failure threshold,
+     * auth timeout). Unlike the organic callbacks the socket may still be
+     * open, so it is cancelled — after the funnel's detach, which makes the
+     * cancel-triggered onFailure/onClosed no-ops (the listener ignores
+     * stale sockets).
      */
     private fun teardownSocket(expected: WebSocket, reason: String) {
-        mainHandler.post {
-            if (expected !== webSocket) return@post
-            webSocket = null
-            expected.cancel()
-            handleConnectionClosed(-1, reason)
-        }
+        terminateSocket(expected, -1, reason, cancel = true)
     }
     
     // MARK: - Message Handling
@@ -695,7 +768,7 @@ class InternetManager(
                 // Handle authentication success
                 val userId = json.safeOptString("user_id", deviceId)
                 val username = json.safeOptString("username", deviceId)
-                handleAuthenticated(userId, username)
+                handleAuthenticated(ws, userId, username)
             }
             
             "AuthError" -> {
@@ -727,7 +800,7 @@ class InternetManager(
                     inFlightTracker.resolveOnRelayAccepted(
                         recipient,
                         messageId?.takeIf { it.isNotEmpty() },
-                        System.currentTimeMillis()
+                        monotonicNowMs()
                     )
                 }
 
@@ -871,7 +944,10 @@ class InternetManager(
                 // burning their retry budget) and start watching presence.
                 val recipient = json.safeOptString("recipient")
                 val reason = json.safeOptString("reason", "Unknown error")
-                handleRecipientUnreachable(recipient, reason, "DeliveryError")
+                handleRecipientUnreachable(
+                    recipient, reason, "DeliveryError",
+                    RecipientInFlightTracker.Plane.DATA
+                )
             }
 
             "PresenceStatus", "PresenceStatusWithLastSeen" -> {
@@ -1039,7 +1115,10 @@ class InternetManager(
                 // store requests for offline recipients).
                 val recipient = json.safeOptString("recipient")
                 val reason = json.safeOptString("reason", "Unknown error")
-                handleRecipientUnreachable(recipient, reason, "ConnectionRequestError")
+                handleRecipientUnreachable(
+                    recipient, reason, "ConnectionRequestError",
+                    RecipientInFlightTracker.Plane.CONN_REQ
+                )
             }
             
             "GroupCreated" -> {
@@ -1152,8 +1231,16 @@ class InternetManager(
             "GroupError" -> {
                 val reason = json.safeOptString("reason", "Unknown error")
                 val groupId = json.safeOptString("group_id")
-                // Admin-denied registration must stop member-delta attempts.
-                controlOpTranslator.onGroupError(groupId, reason)
+                // Admin-denied registration must stop member-delta attempts —
+                // but only when the error is ours: the request_id (echoed for
+                // app raw-channel ops, never tagged by the translator) lets
+                // the translator disown errors that answer someone else's
+                // frame.
+                controlOpTranslator.onGroupError(
+                    groupId,
+                    reason,
+                    json.optNullableString("request_id")
+                )
                 val payloadJson = org.json.JSONObject().apply {
                     put("reason", reason)
                     // group_id lets the core revoke relay_synced so group
@@ -1310,7 +1397,7 @@ class InternetManager(
         // This prevents sending messages right after transport disconnect
         if (!isConnected.get() || !isAuthenticated.get()) return
 
-        inFlightTracker.prune(System.currentTimeMillis())
+        inFlightTracker.prune(monotonicNowMs())
 
         // Deferred control frames first: they are older than anything the
         // queue will hand us and their commits are still pending.
@@ -1340,7 +1427,14 @@ class InternetManager(
                 // Out of tokens: leave the rest queued in the core.
                 if (!rateLimiter.tryAcquire(monotonicNowMs())) break
 
-                val message = protocol.internetGetNextMessage()
+                val message = try {
+                    protocol.internetGetNextMessage()
+                } catch (e: Exception) {
+                    // The token was taken for a frame that will never exist —
+                    // refund before the error reaches the catch below.
+                    rateLimiter.refund()
+                    throw e
+                }
                 if (message == null) {
                     rateLimiter.refund()
                     break
@@ -1417,7 +1511,10 @@ class InternetManager(
             messagesSent.incrementAndGet()
             // Track for recipient-keyed failure correlation: a later
             // DeliveryError for this recipient fails-fast this message id.
-            inFlightTracker.recordSent(recipientId, messageId, System.currentTimeMillis())
+            inFlightTracker.recordSent(
+                recipientId, messageId,
+                RecipientInFlightTracker.Plane.DATA, monotonicNowMs()
+            )
             try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
             
             emitDiagnostic("debug", "Message sent via relay", mapOf(
@@ -1500,7 +1597,21 @@ class InternetManager(
                     consecutiveSendFailures.set(0)
                     bytesSent.addAndGet(primaryJson.toByteArray(Charsets.UTF_8).size.toLong())
                     messagesSent.incrementAndGet()
-                    inFlightTracker.recordSent(recipientId, messageId, System.currentTimeMillis())
+                    // Only connection-request primaries are tracked: their
+                    // failure channel is the recipient-keyed
+                    // ConnectionRequestError. Group primaries (CreateGroup /
+                    // SendGroupMessage / LeaveGroup) answer on the
+                    // group-scoped GroupError channel instead — tracked
+                    // here, one would absorb a data frame's MessageSent (the
+                    // oldest-first fallback) and leave the delivered message
+                    // for a later DeliveryError to false-fail.
+                    when (controlOp) {
+                        "conn_req", "conn_acc", "conn_rej", "conn_can" ->
+                            inFlightTracker.recordSent(
+                                recipientId, messageId,
+                                RecipientInFlightTracker.Plane.CONN_REQ, monotonicNowMs()
+                            )
+                    }
                     try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
                     enqueueControlFrames(controlOp, translation.frames.drop(1), translation.commit)
                     emitDiagnostic("debug", "Control op sent relay-native", mapOf(
@@ -1607,12 +1718,18 @@ class InternetManager(
     /**
      * Fail-fast handler for the relay's recipient-keyed offline signals
      * (DeliveryError / ConnectionRequestError). Fails every live in-flight
-     * message to the recipient with the recipient_unreachable reason (the
-     * core classifies it as per-peer no-carrier and parks welcomes without
-     * burning budget), ingests an authoritative offline presence, and adds
-     * the recipient to the presence watch set.
+     * message of the signal's [plane] to the recipient with the
+     * recipient_unreachable reason (the core classifies it as per-peer
+     * no-carrier and parks welcomes without burning budget), ingests an
+     * authoritative offline presence, and adds the recipient to the
+     * presence watch set.
      */
-    private fun handleRecipientUnreachable(recipient: String, reason: String, source: String) {
+    private fun handleRecipientUnreachable(
+        recipient: String,
+        reason: String,
+        source: String,
+        plane: RecipientInFlightTracker.Plane
+    ) {
         if (recipient.isEmpty()) {
             emitDiagnostic("warning", "Recipient-unreachable signal without recipient", mapOf(
                 "source" to source,
@@ -1620,8 +1737,8 @@ class InternetManager(
             ))
             return
         }
-        val now = System.currentTimeMillis()
-        val failedIds = inFlightTracker.drainRecipient(recipient, now)
+        val now = monotonicNowMs()
+        val failedIds = inFlightTracker.drainRecipient(recipient, plane, now)
         for (id in failedIds) {
             try {
                 protocol.internetSendFailedWithReason(id, "recipient_unreachable: $reason")
@@ -1669,7 +1786,7 @@ class InternetManager(
                 Log.e(TAG, "Failed to read presence watchlist", e)
                 emptyList()
             }
-            val now = System.currentTimeMillis()
+            val now = monotonicNowMs()
             // Self is filtered BEFORE the merge so it can never enter the
             // watch set and pin a rotation slot until the idle TTL.
             val peers = presenceWatch.peersToQuery(coreWatchlist.filter { it != deviceId }, now)
