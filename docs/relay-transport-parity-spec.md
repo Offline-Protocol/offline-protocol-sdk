@@ -138,6 +138,11 @@ Everything else — `__MLS_*`, `__TYPING__`, `__READ_RECEIPT__`, `__PRESENCE__`,
 
 Match the exact payload field names against the core's control-message builders (grep the prefix constants in `crates/offline-protocol/src/`) — the table above reflects the relay-side field names from fernweh's client (`useWebSocketRelay.ts:1902-1975, 1714-1835`).
 
+**Admin gating of member deltas (implemented).** The relay denies `AddGroupMember`/`RemoveGroupMember` from non-admins with a group-scoped `GroupError`, which would revoke the core's `relay_synced` and surface as app-visible `group_error` events on every reconnect. Two cross-layer contracts prevent that:
+
+- The core's `__GRP_RELAY_REG__` payload carries an `is_admin` hint (`RelayGroupRegistrationPayload.is_admin`, `Option<bool>` — omitted when role metadata can't decide). Translators skip member deltas up front when it is explicitly `false`; absent falls back to send-and-learn.
+- The learned denial matches the relay's reason prose via the `"Only admins"` marker — `RelayControlOpTranslator.ADMIN_DENIED_REASON_MARKER` (Kotlin) / `adminDeniedReasonMarker` (Swift). If the relay rewords its admin-denial messages, update both; the failure mode is per-connection re-learning noise, not data loss.
+
 ### WI-6 (bridge + TS) — Generic server-command channel
 
 **Problem.** The invite-link lifecycle (10 message types: `CreateGroupInviteLink`, `RevokeGroupInviteLink`, `JoinGroupViaInvite`, `GetGroupInviteLinkPreview`, `AckGroupInviteJoin`, and their responses/pendings) plus misc server events (`GroupRoleChanged`, `GroupRenamed`, `GroupDeleted`, legacy `TypingUpdate`, …) are app/server concerns that don't belong as first-class SDK APIs — but they must ride the SDK's socket or fernweh keeps a second one.
