@@ -736,6 +736,7 @@ fn test_mls_observability_session_ready_emits_once_for_idempotent_confirm() {
             group_id: "session:user123:bob".to_string(),
             state: WelcomeDeliveryState::Sent,
             attempt: 1,
+            unreachable_parks: 0,
             welcome_message: Message::new(
                 UserId::new("user123").unwrap(),
                 UserId::new("bob").unwrap(),
@@ -14587,6 +14588,95 @@ fn test_internet_control_op_classification() {
 }
 
 #[test]
+fn test_relayed_frame_with_hops_never_classifies() {
+    let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // A mesh peer can forge `sender == self` on a frame we then relay —
+    // `sender` is an unauthenticated wire field. The relay path increments
+    // the hop before re-sending, while every locally-originated frame
+    // leaves send_internal_message at hop 0, so a nonzero hop count must
+    // veto classification no matter what the sender field claims.
+    for (recipient, content) in [
+        ("carol", "__CONN_REQ__{\"sender_name\":\"Mallory\"}"),
+        ("carol", "__CONN_ACC__{}"),
+        ("carol", "__CONN_REJ__"),
+        ("carol", "__CONN_CAN__"),
+        ("carol", "__GRP_MLS_LEAVE__{\"group_id\":\"g1\"}"),
+        ("user123", "__GRP_RELAY_REG__{\"group_id\":\"g1\"}"),
+        ("user123", "__GRP_RELAY_BCAST__{\"group_id\":\"g1\"}"),
+    ] {
+        let mut msg = Message::new(
+            UserId::new("user123").unwrap(),
+            UserId::new(recipient).unwrap(),
+            AppId::new("test-app").unwrap(),
+            content,
+        );
+        assert!(
+            protocol.internet_control_op(&msg).is_some(),
+            "sanity: {:?} classifies at hop 0",
+            content
+        );
+        msg.increment_hop().unwrap();
+        assert_eq!(
+            protocol.internet_control_op(&msg),
+            None,
+            "forged self-frame {:?} with hops must not classify",
+            content
+        );
+    }
+}
+
+#[test]
+fn test_inbound_frame_forging_our_origin_is_not_relayed() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let relay_events_clone = relay_events.clone();
+    protocol.on_event(move |event| {
+        if matches!(event, Event::MessageRelayed { .. }) {
+            relay_events_clone.lock().unwrap().push(event);
+        }
+    });
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let mock_handle = mock.clone();
+
+    // A frame claiming OUR origin, addressed to a third party, arriving
+    // inbound: a genuine self-originated frame is never received this way
+    // (the send path does not loop back), so it is a routing loop or a
+    // forgery aimed at internet_control_op's self-origination gate.
+    // Relaying it would put a sender==self frame in our own outbox, where
+    // the bridge would execute it as a relay-native op on our
+    // authenticated connection.
+    let msg = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new("carol").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "__CONN_CAN__",
+    );
+    mock.queue_message(msg);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    let received = protocol.receive_message();
+    assert!(received.is_none(), "forged-origin frame must not surface");
+    assert!(
+        relay_events.lock().unwrap().is_empty(),
+        "forged-origin frame must not be relayed"
+    );
+    assert!(
+        mock_handle.sent_messages().is_empty(),
+        "forged-origin frame must not be re-sent"
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
 fn test_group_created_ack_gates_relay_sync() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
@@ -14638,13 +14728,13 @@ fn test_group_created_ack_gates_relay_sync() {
     assert!(protocol
         .group_mesh
         .relay_register_pending
-        .contains(&group_id));
+        .contains_key(&group_id));
     protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
     assert!(protocol.group_mesh.relay_synced.contains(&group_id));
     assert!(!protocol
         .group_mesh
         .relay_register_pending
-        .contains(&group_id));
+        .contains_key(&group_id));
 
     // An ack for a group we don't track locally must not create sync state.
     let foreign_ack = Message::new(
@@ -14686,12 +14776,128 @@ fn test_group_created_ack_gates_relay_sync() {
 
     // A genuine re-registration re-arms the correlation, after which the
     // relay's answer is accepted again.
+    protocol.group_mesh.relay_register_pending.insert(
+        group_id.clone(),
+        crate::group_mesh::RelayRegisterPending {
+            armed_at: chrono::Utc::now(),
+            attempts: 1,
+        },
+    );
+    protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
+    assert!(protocol.group_mesh.relay_synced.contains(&group_id));
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_unanswered_relay_registration_expires_and_retries() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let group_info = protocol.create_group("ack-timeout-group").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+    let register_frames = |handle: &MockTransport| {
+        handle
+            .sent_messages()
+            .iter()
+            .filter(|m| {
+                m.content
+                    .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)
+            })
+            .count()
+    };
+    assert_eq!(
+        protocol
+            .group_mesh
+            .relay_register_pending
+            .get(&group_id)
+            .map(|p| p.attempts),
+        Some(1)
+    );
+    let initial_frames = register_frames(&internet_handle);
+
+    // Not yet due — the correlation is left armed untouched.
+    protocol.process_relay_register_retries();
+    assert_eq!(register_frames(&internet_handle), initial_frames);
+    assert_eq!(
+        protocol
+            .group_mesh
+            .relay_register_pending
+            .get(&group_id)
+            .map(|p| p.attempts),
+        Some(1)
+    );
+
+    // Past the ack deadline the registration is re-sent (the frame may
+    // have been lost) and the correlation re-armed with the attempt count
+    // carried forward.
     protocol
         .group_mesh
         .relay_register_pending
-        .insert(group_id.clone());
-    protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
-    assert!(protocol.group_mesh.relay_synced.contains(&group_id));
+        .get_mut(&group_id)
+        .unwrap()
+        .armed_at = Utc::now() - ChronoDuration::seconds(31);
+    protocol.process_relay_register_retries();
+    assert_eq!(register_frames(&internet_handle), initial_frames + 1);
+    assert_eq!(
+        protocol
+            .group_mesh
+            .relay_register_pending
+            .get(&group_id)
+            .map(|p| p.attempts),
+        Some(2)
+    );
+
+    // Past the attempt budget the correlation closes for good: against a
+    // relay that never answers (prefix-unaware echo relay, legacy server)
+    // an armed entry would otherwise sit indefinitely for a forged ack to
+    // claim. The group just stays unsynced — per-member fan-out.
+    {
+        let pending = protocol
+            .group_mesh
+            .relay_register_pending
+            .get_mut(&group_id)
+            .unwrap();
+        pending.armed_at = Utc::now() - ChronoDuration::seconds(31);
+        pending.attempts = 3;
+    }
+    protocol.process_relay_register_retries();
+    assert!(!protocol
+        .group_mesh
+        .relay_register_pending
+        .contains_key(&group_id));
+    assert_eq!(
+        register_frames(&internet_handle),
+        initial_frames + 1,
+        "an exhausted registration must not be re-sent"
+    );
+
+    let forged_ack = Message::new(
+        UserId::new("relay").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "__GROUP_CREATED__{{\"group_id\":\"{}\",\"name\":\"ack-timeout-group\"}}",
+            group_id
+        ),
+    );
+    protocol.process_internal_message_via(&forged_ack, Some(TransportType::Internet));
+    assert!(
+        !protocol.group_mesh.relay_synced.contains(&group_id),
+        "a forged ack after the window closes must not sync the group"
+    );
 
     protocol.stop().unwrap();
 }
@@ -14866,6 +15072,169 @@ fn test_delivery_error_with_mesh_carrier_keeps_timed_retry() {
         "a live mesh carrier must keep the timed retry track alive"
     );
     assert!(lifecycle.last_transport_error.is_some());
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_unreachable_parks_escalate_and_reset_on_presence() {
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+
+    // Each consecutive relay verdict doubles the timed-retry interval:
+    // adapter availability is not peer reachability, and DORS may keep
+    // routing the retry to the internet path, where every round trips
+    // another budget-refunded DeliveryError. Without escalation that is an
+    // unbounded 15-second welcome-resend loop into the relay.
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    for (round, expected_secs) in [(1u32, 15i64), (2, 30), (3, 60)] {
+        protocol
+            .on_transport_send_failed(
+                &welcome_id,
+                Some("recipient_unreachable: Recipient is offline".to_string()),
+            )
+            .unwrap();
+        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(lifecycle.unreachable_parks, round);
+        let delay = (lifecycle.next_retry_at.unwrap() - Utc::now()).num_seconds();
+        assert!(
+            (expected_secs - 2..=expected_secs).contains(&delay),
+            "park {} should retry in ~{}s, got {}s",
+            round,
+            expected_secs,
+            delay
+        );
+    }
+
+    // A reachability edge resets the ladder...
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(
+        protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .unreachable_parks,
+        0
+    );
+
+    // ...so the next verdict starts over from the base interval.
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.unreachable_parks, 1);
+    let delay = (lifecycle.next_retry_at.unwrap() - Utc::now()).num_seconds();
+    assert!(
+        (13..=15).contains(&delay),
+        "post-reset park should retry from the base interval, got {}s",
+        delay
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_internet_dependent_carrier_does_not_keep_timed_retry() {
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    // Nostr is "available" on every internet-connected device, but it is an
+    // internet-dependent relay transport: its adapter status says nothing
+    // about local peer reachability. The relay's offline verdict must
+    // edge-park (no timer) exactly as if the internet path were the sole
+    // carrier — only BLE / WiFi-Direct justify the timed retry track.
+    let nostr = MockTransport::new(TransportType::Nostr);
+    nostr.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Nostr, Box::new(nostr));
+
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert!(
+        lifecycle.next_retry_at.is_none(),
+        "an internet-dependent transport must not keep the timed retry alive"
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_delivery_error_after_session_confirmed_is_ignored() {
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+
+    // The welcome was rescued over another path and the peer proved the
+    // session. A late relay verdict for the original internet copy must not
+    // corrupt the converged lifecycle — flipping it to Failed, refunding an
+    // attempt, and emitting welcome_send_failed AFTER the app already saw
+    // secure_session_established.
+    protocol.confirmed_sessions.insert("bob".to_string());
+
+    let events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let events_clone = events.clone();
+    protocol.on_event(move |event| {
+        if matches!(event, Event::WelcomeSendFailed { .. }) {
+            events_clone.lock().unwrap().push(event);
+        }
+    });
+
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.state,
+        WelcomeDeliveryState::Sent,
+        "a stale verdict must not flip a proven session's welcome to Failed"
+    );
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "no welcome_send_failed may contradict secure_session_established"
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_watchlist_excludes_stale_welcome_lifecycles() {
+    let (mut protocol, _internet, _welcome_id) = setup_internet_protocol_with_pending_welcome();
+    assert_eq!(protocol.welcome_pending_peers(), vec!["bob".to_string()]);
+
+    // A permanently-dead peer must not hold a watch-rotation slot forever:
+    // past the age limit the peer drops off the watchlist, offline answers
+    // stop pushing expires_at, and the record ages out through normal
+    // expiry. Recovery degrades to peer-initiated contact or mesh
+    // discovery, both of which rebuild the lifecycle.
+    protocol
+        .welcome_lifecycles
+        .get_mut("bob")
+        .unwrap()
+        .created_at = Utc::now() - ChronoDuration::days(15);
+    assert!(protocol.welcome_pending_peers().is_empty());
 
     protocol.stop().unwrap();
 }
