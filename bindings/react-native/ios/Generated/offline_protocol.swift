@@ -3118,14 +3118,18 @@ public struct InternetMessage: Equatable, Hashable {
     public var recipientId: String
     public var data: [UInt8]
     public var replyToMsg: String?
+    public var controlOp: String?
+    public var controlPayload: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(messageId: String, recipientId: String, data: [UInt8], replyToMsg: String?) {
+    public init(messageId: String, recipientId: String, data: [UInt8], replyToMsg: String?, controlOp: String?, controlPayload: String?) {
         self.messageId = messageId
         self.recipientId = recipientId
         self.data = data
         self.replyToMsg = replyToMsg
+        self.controlOp = controlOp
+        self.controlPayload = controlPayload
     }
 
     
@@ -3145,7 +3149,9 @@ public struct FfiConverterTypeInternetMessage: FfiConverterRustBuffer {
                 messageId: FfiConverterString.read(from: &buf), 
                 recipientId: FfiConverterString.read(from: &buf), 
                 data: FfiConverterSequenceUInt8.read(from: &buf), 
-                replyToMsg: FfiConverterOptionString.read(from: &buf)
+                replyToMsg: FfiConverterOptionString.read(from: &buf), 
+                controlOp: FfiConverterOptionString.read(from: &buf), 
+                controlPayload: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -3154,6 +3160,8 @@ public struct FfiConverterTypeInternetMessage: FfiConverterRustBuffer {
         FfiConverterString.write(value.recipientId, into: &buf)
         FfiConverterSequenceUInt8.write(value.data, into: &buf)
         FfiConverterOptionString.write(value.replyToMsg, into: &buf)
+        FfiConverterOptionString.write(value.controlOp, into: &buf)
+        FfiConverterOptionString.write(value.controlPayload, into: &buf)
     }
 }
 

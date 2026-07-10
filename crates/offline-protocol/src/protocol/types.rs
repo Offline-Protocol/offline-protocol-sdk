@@ -290,6 +290,11 @@ pub(crate) struct UserGroupsPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GroupErrorPayload {
     pub(crate) reason: String,
+    /// Group the error concerns, when the relay scoped it (e.g. a
+    /// registration sync denial). Used to drop the group from
+    /// `relay_synced` so sends fall back to per-member delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group_id: Option<String>,
 }
 
 /// A received key package awaiting use for session creation.

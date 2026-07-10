@@ -1254,12 +1254,20 @@ dictionary BleFragment {
     sequence<u8> data;
 };
 
-// Internet message for outgoing data
+// Internet message for outgoing data. control_op tags server-plane control
+// frames the platform bridge must translate to (or mirror as) relay-native
+// messages instead of an opaque SendMessage: conn_req / conn_acc / conn_rej /
+// conn_can (replace), group_relay_register / group_relay_broadcast (replace),
+// group_mls_leave (send verbatim AND send one relay-native LeaveGroup).
+// control_payload is the JSON after the internal prefix (empty for
+// payload-less ops). Null control_op = normal traffic, send verbatim.
 dictionary InternetMessage {
     string message_id;
     string recipient_id;
     sequence<u8> data;
     string? reply_to_msg;
+    string? control_op;
+    string? control_payload;
 };
 
 // WiFi Direct message for outgoing data
