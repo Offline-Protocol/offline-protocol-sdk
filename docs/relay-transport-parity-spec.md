@@ -100,7 +100,7 @@ Implementation: if `online`, call `notify_neighbor_reachable(peer_id, "Internet"
 
 - Watch set: peers added on `DeliveryError` (WI-2) and (optionally) peers with parked welcomes; removed on `online` presence, on any inbound traffic from the peer, or after ~10 min idle.
 - Every ~20s while connected+authenticated, send `{"type":"CheckPresence","username":"<peer>"}` for each watched peer (batch cap ~10/tick). Response flows through WI-3.
-- App-facing query for UI (last-seen display): RN method `checkInternetPresence(userId: string): void` on the module → sends one `CheckPresence`; result arrives as the `presence_updated` event. (Fire-and-event, not request/response — matches relay semantics and fernweh's existing throttling model.)
+- App-facing query for UI (last-seen display): RN method `checkInternetPresence(userId: string): Promise<boolean>` on the module → sends one `CheckPresence`; `true` means the query was written to the socket (`false`: invalid id, not connected+authenticated, or deferred by the client-side rate limiter — retry later). The result arrives as the `presence_updated` event. (Fire-and-event, not request/response — matches relay semantics and fernweh's existing throttling model.)
 
 ### WI-5 (core + bridge) — Outbound control-op translation
 
@@ -119,22 +119,21 @@ dictionary InternetMessage {
 };
 ```
 
-`internet_get_next_message` (`lib.rs:3009`) already deserializes the Message; detect the known prefixes there. Bridge translation table (send relay-native instead of `SendMessage` when `control_op` matches; still `confirmSent(messageId)` on socket-write success):
+`internet_get_next_message` (`lib.rs`) already deserializes the Message; the core classifies the known prefixes there (`internet_control_op` in `protocol/send.rs`). Implemented translation table (the bridge sends relay-native instead of `SendMessage` when `control_op` is set; the original message id is still confirmed on socket-write success of the primary frame):
 
-| control_op (content prefix) | Relay-native op sent |
-|---|---|
-| `__CONN_REQ__{sender_name, key_package?, initial_message?}` | `SendConnectionRequest {recipient, sender_name, key_package?, initial_message?}` |
-| `__CONN_ACC__{accepter_name, key_package?}` | `AcceptConnectionRequest {requester_id: recipient, accepter_name, key_package?}` |
-| `__CONN_REJ__` | `RejectConnectionRequest {requester_id: recipient}` |
-| `__CONN_CAN__` | `CancelConnectionRequest {recipient}` |
-| `__GROUP_CREATED__{group_id, name}` | `CreateGroup {group_id, name}` |
-| `__GROUP_MEMBER_ADDED__{group_id, user_id}` | `AddGroupMember {group_id, username: user_id}` |
-| `__GROUP_MEMBER_REMOVED__{group_id, user_id}` | `RemoveGroupMember {group_id, username: user_id}` |
-| (leave) | `LeaveGroup {group_id}` |
+| control_op | Content prefix (classification guard) | Relay-native frames sent |
+|---|---|---|
+| `conn_req` | `__CONN_REQ__{sender_name, key_package?}` (self-originated) | `SendConnectionRequest {recipient, sender_name, key_package?}` |
+| `conn_acc` | `__CONN_ACC__{accepted_by_name, key_package?}` (self-originated) | `AcceptConnectionRequest {requester_id: recipient, accepter_name, key_package?}` |
+| `conn_rej` | `__CONN_REJ__` (self-originated) | `RejectConnectionRequest {requester_id: recipient}` |
+| `conn_can` | `__CONN_CAN__` (self-originated) | `CancelConnectionRequest {recipient}` |
+| `group_relay_register` | `__GRP_RELAY_REG__{group_id, group_name?, members, is_admin?}` (self-originated AND self-addressed) | `CreateGroup {group_id, name}` + admin-gated `AddGroupMember`/`RemoveGroupMember` deltas against the last committed membership |
+| `group_relay_broadcast` | `__GRP_RELAY_BCAST__{group_id, ciphertext, reply_to?}` (self-originated AND self-addressed) | `SendGroupMessage {group_id, content, reply_to_msg?}` |
+| `group_mls_leave` | `__GRP_MLS_LEAVE__{group_id, leaving_member}` (self-originated) | tap: the verbatim per-member notification, plus one `LeaveGroup {group_id}` (deduped per group per connection) |
 
-Everything else — `__MLS_*`, `__TYPING__`, `__READ_RECEIPT__`, `__PRESENCE__`, `__MLS_ENC__`, plain chat — continues verbatim as `SendMessage` (verified working carrier today; the round-trip is lossless because the inbound side already maps relay-native events back to the same prefixes).
+Everything else — `__MLS_*`, `__TYPING__`, `__READ_RECEIPT__`, `__PRESENCE__`, `__GROUP_MSG__`, plain chat — continues verbatim as `SendMessage` (verified working carrier today; the round-trip is lossless because the inbound side already maps relay-native events back to the same prefixes). Third-party frames transiting this device's outbox (mesh relaying) never classify — a relay-native replacement would misattribute the op to this device's authenticated connection.
 
-**Group content messages: do NOT translate.** `meshSendGroupMessage` emits one `__GROUP_MSG__` Message *per member*; translating each to relay-native `SendGroupMessage` would multiply fan-out (N members × server fan-out). Keep per-member delivery for v1. Membership/registry ops *must* translate (above) because invite links require the relay to know the group and its admins — this replaces fernweh's manual "mesh-first group sync" (`useWebSocketRelay.ts:1723-1770`).
+**Group content messages: two paths, ack-gated.** `send_group_message` takes the O(1) relay path (`__GRP_RELAY_BCAST__` → `SendGroupMessage`) **only after** the relay has positively acknowledged the group registration — an inbound `GroupCreated` for a locally-tracked group, arriving on the Internet transport, sets `relay_synced`; any group-scoped `GroupError` revokes it. Until then (and after any revocation) sends stay per-member `__GROUP_MSG__` fan-out, the always-correct path. (An earlier draft of this spec said "do NOT translate group content for v1" — that predates the ack-gating; a broadcast is never routed into a relay that has not proven it owns the group's registry.) The registry translation replaces fernweh's manual "mesh-first group sync" (`useWebSocketRelay.ts:1723-1770`).
 
 Match the exact payload field names against the core's control-message builders (grep the prefix constants in `crates/offline-protocol/src/`) — the table above reflects the relay-side field names from fernweh's client (`useWebSocketRelay.ts:1902-1975, 1714-1835`).
 

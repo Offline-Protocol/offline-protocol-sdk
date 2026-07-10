@@ -96,7 +96,7 @@ them; fernweh's `sdkControlPrefixes` drop-list already defends, and core drops u
 Reason-prefix string, as the spec proposed. `pub(crate) const SEND_FAIL_REASON_RECIPIENT_UNREACHABLE:
 &str = "recipient_unreachable"` in `protocol/types.rs` (every const there is `pub(crate)`; the bridge side
 hardcodes the literal — document the cross-layer contract at both sites). Add
-`WelcomeReasonCode::PeerUnreachable` (`events.rs:29-53`, stable `as_str` = `"peer_unreachable"`) so
+`WelcomeReasonCode::PeerUnreachable` (`events.rs:29-53`, stable `as_str` = `"PEER_UNREACHABLE"`) so
 `welcome_send_failed` events are truthful; events cross FFI as JSON, so this is additive with no regen.
 
 ### D3 — WI-3 presence ingestion closes the FCM hole
@@ -115,8 +115,9 @@ Phase A anyway.
 ### D4 — Watch-set sourcing
 
 Bridge-observed signals (`DeliveryError`, `ConnectionRequestError` recipients) alone miss the FCM case, so
-add a core-owned source: UDL `sequence<string> internet_presence_watchlist()` returning peers with a live,
-un-Sent welcome lifecycle. The bridge unions it into the watch set each 20s tick (poll-as-reconciliation —
+add a core-owned source: UDL `sequence<string> internet_presence_watchlist()` returning peers with an
+unconfirmed welcome lifecycle — including wire-confirmed `Sent` records, which only a presence signal can
+rescue over a store-less relay (the shipped semantics; an earlier draft excluded `Sent`). The bridge unions it into the watch set each 20s tick (poll-as-reconciliation —
 no missed-event risk, trivially testable). Removal: peer went online, inbound traffic from peer, or ~10 min
 idle.
 
@@ -187,7 +188,9 @@ failures as per-peer no-carrier`.*
 `pub fn on_peer_presence(peer_id, online, last_seen_ms)` — online → `on_neighbor_discovered` (flushes
 outbox, re-arms welcome, key exchange; benign for unknown peers — all side effects self-guarding);
 offline → `park_welcome_no_carrier(peer_id)`; always emit `presence_updated`. Add
-`pub fn welcome_pending_peers() -> Vec<String>` (lifecycle records with state ∉ {Sent, Expired}). Tests:
+`pub fn welcome_pending_peers() -> Vec<String>` (shipped: every lifecycle peer whose session is
+unconfirmed — *including* `Sent`, whose false-Sent records only presence can rescue, and `Expired`,
+which the online edge rebuilds). Tests:
 offline parks (attempt rollback + TTL push + 15s retry), online re-arms an expired welcome (mirror
 :4611), event carries `last_seen_ms`. *Commit: `feat(protocol): ingest per-peer presence to park and
 re-arm welcomes`.*
