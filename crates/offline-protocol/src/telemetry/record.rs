@@ -629,6 +629,7 @@ mod tests {
                 peer_id: String::new(),
                 status: PresenceStatus::Online,
                 timestamp: 0,
+                last_seen_ms: None,
             },
             Event::TypingIndicatorReceived {
                 sender: String::new(),

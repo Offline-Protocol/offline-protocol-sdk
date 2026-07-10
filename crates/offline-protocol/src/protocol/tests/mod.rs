@@ -1694,10 +1694,12 @@ fn test_process_internal_message_presence_update_event() {
             peer_id,
             status,
             timestamp,
+            last_seen_ms,
         } => {
             assert_eq!(peer_id, "alice");
             assert_eq!(*status, PresenceStatus::Online);
             assert_eq!(*timestamp, 12345);
+            assert_eq!(*last_seen_ms, None);
         }
         _ => panic!("Wrong event type"),
     }
@@ -14287,6 +14289,174 @@ fn test_carrier_backed_failure_still_burns_welcome_budget() {
         lifecycle.last_reason_code,
         Some(crate::events::WelcomeReasonCode::RetryExhausted)
     );
+
+    protocol.stop().unwrap();
+}
+
+fn setup_internet_protocol_with_pending_welcome() -> (OfflineProtocol, MockTransport, String) {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    config.reliability.retry.max_retries = 3;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    let _ = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let welcome_id = protocol
+        .welcome_lifecycles
+        .get("bob")
+        .unwrap()
+        .welcome_message
+        .id
+        .as_str()
+        .to_string();
+    (protocol, internet_handle, welcome_id)
+}
+
+#[test]
+fn test_peer_presence_offline_parks_failed_welcome() {
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    // A carrier-backed failure leaves the welcome Failed on the data-plane
+    // retry track, budget burned (attempt = 1 of 3).
+    protocol
+        .on_transport_send_failed(&welcome_id, Some("network blip".to_string()))
+        .unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(lifecycle.attempt, 1);
+
+    // The relay says bob is offline: park on the slow interval with the
+    // truthful reason, without touching the burned-budget counter.
+    protocol.on_peer_presence("bob", false, Some(1_000));
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(lifecycle.attempt, 1);
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert!(lifecycle.next_retry_at.is_some());
+    assert!(lifecycle.expires_at > Utc::now() + ChronoDuration::seconds(60));
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_peer_presence_online_resends_unconfirmed_sent_welcome() {
+    let (mut protocol, internet_handle, welcome_id) =
+        setup_internet_protocol_with_pending_welcome();
+
+    // Wire-confirm marks the welcome Sent — but over a store-less relay the
+    // content may have been dropped (recipient offline, push-only delivery).
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::Sent
+    );
+    let welcomes_before = internet_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| {
+            m.recipient.as_str() == "bob" && m.content.starts_with(internal_prefixes::WELCOME)
+        })
+        .count();
+
+    // The peer is provably online and the session was never proven: rebuild
+    // and re-send (receiver dedups by message id if the original landed).
+    protocol.on_peer_presence("bob", true, None);
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::SendAttempted);
+    assert_eq!(lifecycle.attempt, 1);
+    let welcomes_after = internet_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| {
+            m.recipient.as_str() == "bob" && m.content.starts_with(internal_prefixes::WELCOME)
+        })
+        .count();
+    assert_eq!(welcomes_after, welcomes_before + 1);
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_peer_presence_emits_unified_event_with_last_seen() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    protocol.on_peer_presence("carol", false, Some(98_765));
+
+    let captured = events.lock().unwrap();
+    let presence = captured
+        .iter()
+        .find_map(|e| match e {
+            Event::PresenceUpdated {
+                peer_id,
+                status,
+                last_seen_ms,
+                ..
+            } => Some((peer_id.clone(), *status, *last_seen_ms)),
+            _ => None,
+        })
+        .expect("presence_updated event must be emitted");
+    assert_eq!(presence.0, "carol");
+    assert_eq!(presence.1, PresenceStatus::Offline);
+    assert_eq!(presence.2, Some(98_765));
+
+    // Self and empty peer ids are ignored entirely.
+    drop(captured);
+    events.lock().unwrap().clear();
+    protocol.on_peer_presence("user123", true, None);
+    protocol.on_peer_presence("", true, None);
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn test_welcome_pending_peers_tracks_unconfirmed_sessions() {
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    assert_eq!(protocol.welcome_pending_peers(), vec!["bob".to_string()]);
+
+    // Still pending after wire-confirm: Sent is not session-proven, and only
+    // presence can rescue a false Sent over a store-less relay.
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    assert_eq!(protocol.welcome_pending_peers(), vec!["bob".to_string()]);
+
+    // The peer proving the session ends the watch.
+    protocol
+        .confirm_session_state("bob", "confirmation_ack_received")
+        .unwrap();
+    assert!(protocol.welcome_pending_peers().is_empty());
 
     protocol.stop().unwrap();
 }

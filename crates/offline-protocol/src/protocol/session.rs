@@ -663,7 +663,11 @@ impl OfflineProtocol {
     /// re-polls it on [`WELCOME_NO_CARRIER_RETRY_SECS`]; `on_neighbor_discovered`
     /// re-arms it immediately when a carrier surfaces the peer. Returns
     /// `Ok(false)` (not sent).
-    fn park_welcome_no_carrier(&mut self, peer_id: &str) -> Result<bool> {
+    fn park_welcome_no_carrier(
+        &mut self,
+        peer_id: &str,
+        reason: crate::events::WelcomeReasonCode,
+    ) -> Result<bool> {
         let snapshot = {
             let Some(record) = self.welcome_lifecycles.get_mut(peer_id) else {
                 return Ok(false);
@@ -672,7 +676,7 @@ impl OfflineProtocol {
             record.next_retry_at =
                 Some(now + ChronoDuration::seconds(WELCOME_NO_CARRIER_RETRY_SECS));
             record.expires_at = now + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
-            record.last_reason_code = Some(crate::events::WelcomeReasonCode::TransportUnavailable);
+            record.last_reason_code = Some(reason);
             record.last_transport_error = None;
             record.clone()
         };
@@ -730,7 +734,10 @@ impl OfflineProtocol {
         // surfaces the peer. This keeps an offline device quiet rather than
         // spinning storage I/O + app events at the data-plane retry rate.
         if !carrier_available {
-            return self.park_welcome_no_carrier(peer_id);
+            return self.park_welcome_no_carrier(
+                peer_id,
+                crate::events::WelcomeReasonCode::TransportUnavailable,
+            );
         }
 
         record.attempt = record.attempt.saturating_add(1);
@@ -884,6 +891,117 @@ impl OfflineProtocol {
                 }
             }
         }
+    }
+
+    /// Ingests an authoritative per-peer presence signal (the internet relay's
+    /// `PresenceStatusWithLastSeen` answer, bridged by the platform layer).
+    ///
+    /// `online` drives the same reachability machinery as a transport-level
+    /// discovery — outbox flush, welcome re-arm, auto key exchange — plus a
+    /// rescue for the store-less-relay hole: a welcome whose wire send was
+    /// confirmed (`Sent`) while the peer was actually offline was dropped by
+    /// the relay (it forwards or pushes, never stores), and
+    /// [`Self::rearm_welcome_for_peer`] deliberately never touches `Sent`.
+    /// The peer being provably online is the safe moment to rebuild and
+    /// re-send it: if the original did land, the receiver dedups by message
+    /// id and the confirmation probe resolves the lifecycle.
+    ///
+    /// `offline` parks retry-pending welcomes on the slow no-carrier interval
+    /// without burning budget. In-flight records (`SendAttempted`) are left
+    /// to their confirm deadline — a `DeliveryError`-driven failure or the
+    /// confirm timeout resolves them, after which the next offline tick parks.
+    ///
+    /// Always emits `presence_updated` so the app sees one unified presence
+    /// stream regardless of source (peer-sent `__PRESENCE__` or relay).
+    pub fn on_peer_presence(&mut self, peer_id: &str, online: bool, last_seen_ms: Option<i64>) {
+        if peer_id.is_empty() || peer_id == self.config.user_id {
+            return;
+        }
+        if online {
+            self.on_neighbor_discovered(peer_id);
+            self.resend_unconfirmed_sent_welcome(peer_id, "peer_presence_online");
+        } else {
+            self.park_welcome_peer_unreachable(peer_id);
+        }
+
+        let status = if online {
+            crate::events::PresenceStatus::Online
+        } else {
+            crate::events::PresenceStatus::Offline
+        };
+        self.emit_event(Event::presence_updated_with_last_seen(
+            peer_id.to_string(),
+            status,
+            Utc::now().timestamp_millis(),
+            last_seen_ms,
+        ));
+    }
+
+    /// Peers with a welcome lifecycle whose session has not been proven —
+    /// the internet presence watch set. Includes `Sent` records (wire-
+    /// confirmed but never session-confirmed): only a presence signal can
+    /// rescue those over a store-less relay.
+    pub fn welcome_pending_peers(&self) -> Vec<String> {
+        self.welcome_lifecycles
+            .keys()
+            .filter(|peer_id| !self.confirmed_sessions.contains(*peer_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Rebuilds and re-sends a `Sent`-but-session-unconfirmed welcome (see
+    /// [`Self::on_peer_presence`]). No-op for any other state.
+    fn resend_unconfirmed_sent_welcome(&mut self, peer_id: &str, source_event: &str) {
+        if self.confirmed_sessions.contains(peer_id) {
+            return;
+        }
+        let Some(record) = self.welcome_lifecycles.get(peer_id) else {
+            return;
+        };
+        if !matches!(record.state, WelcomeDeliveryState::Sent) {
+            return;
+        }
+        let welcome_message = record.welcome_message.clone();
+        let group_id = record.group_id.clone();
+        if let Err(err) =
+            self.upsert_welcome_lifecycle(peer_id, &group_id, welcome_message, source_event)
+        {
+            warn!(
+                peer_id = %peer_id,
+                error = %err,
+                "Failed to rebuild unconfirmed sent welcome on presence"
+            );
+            return;
+        }
+        if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+            warn!(
+                peer_id = %peer_id,
+                error = %err,
+                "Failed to re-send unconfirmed welcome on presence"
+            );
+        }
+    }
+
+    /// Parks a retry-pending welcome for a peer the relay reports offline.
+    /// Only `Created`/`Failed` records park: `SendAttempted` keeps its
+    /// confirm deadline, and `Sent`/`Expired` are handled on the online edge.
+    fn park_welcome_peer_unreachable(&mut self, peer_id: &str) {
+        if self.confirmed_sessions.contains(peer_id) {
+            return;
+        }
+        let Some(record) = self.welcome_lifecycles.get(peer_id) else {
+            return;
+        };
+        if !matches!(
+            record.state,
+            WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed
+        ) {
+            return;
+        }
+        let _ = self.park_welcome_no_carrier(
+            peer_id,
+            crate::events::WelcomeReasonCode::PeerUnreachable,
+        );
     }
 
     /// Records a Welcome send failure and decides whether to retry or expire.
