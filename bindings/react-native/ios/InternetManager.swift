@@ -15,7 +15,15 @@ public class InternetManager: NSObject, TransportManager {
     
     public let transportId = "internet"
     public let transportName = "Internet (WebSocket)"
-    public private(set) var state: TransportState = .unavailable
+    // Lock-guarded (stateLock) like the Kotlin bridge's @Volatile state:
+    // written on main (updateState) but read from messageQueue, the
+    // URLSession delegate queue, and RN threads (the module reads it in
+    // enableTransport).
+    private var _state: TransportState = .unavailable
+    public private(set) var state: TransportState {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _state }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _state = newValue }
+    }
     public weak var delegate: TransportManagerDelegate?
     
     // MARK: - Constants
@@ -31,8 +39,27 @@ public class InternetManager: NSObject, TransportManager {
     
     private let protocolInstance: OfflineProtocol
     private let deviceId: String
-    private var authToken: String? = nil
-    private var serverUrl: URL?
+
+    // Connection/configuration state. Kotlin marks the equivalents
+    // AtomicBoolean/@Volatile; Swift has no volatile, and an unsynchronized
+    // cross-thread read of even a trivial var is a data race — so each field
+    // is a lock-guarded accessor over a private stored var (same pattern as
+    // webSocketTask below). Writes stay on main (the lifecycle entry points
+    // and the close funnel); reads are safe from messageQueue, the URLSession
+    // delegate queue, and RN threads. stateLock is never held across a call
+    // out (delegate, protocol, socket), only around the raw load/store.
+    private let stateLock = NSLock()
+
+    private var _authToken: String? = nil
+    private var authToken: String? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _authToken }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _authToken = newValue }
+    }
+    private var _serverUrl: URL?
+    private var serverUrl: URL? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _serverUrl }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _serverUrl = newValue }
+    }
     
     // WebSocket components.
     // Written ONLY on main (connect/disconnect via runOnMainSync, plus
@@ -62,20 +89,48 @@ public class InternetManager: NSObject, TransportManager {
     private var pingTimer: DispatchSourceTimer?
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.internet.messages")
     
-    // Reconnection
-    private var reconnectAttempts: Int = 0
+    // Reconnection. reconnectAttempts is lock-guarded (stateLock): written
+    // on main, read by getMetrics() from the caller's thread — mirrors the
+    // Kotlin bridge's AtomicInteger. currentReconnectDelay stays a plain var:
+    // unlike Kotlin (whose handleAuthenticated runs on the reader thread),
+    // every touch here is on main.
+    private var _reconnectAttempts: Int = 0
+    private var reconnectAttempts: Int {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _reconnectAttempts }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _reconnectAttempts = newValue }
+    }
     private var currentReconnectDelay: TimeInterval = 1.0
     private var reconnectWorkItem: DispatchWorkItem?
     private var maxReconnectAttempts: Int = 0 // 0 = infinite
     private var autoReconnect: Bool = true
-    
-    // State tracking
-    private var isConnected = false
-    private var isConnecting = false
-    private var isAuthenticated = false
+
+    // State tracking. Lock-guarded (stateLock) like the Kotlin bridge's
+    // AtomicBoolean/@Volatile fields: written on main (open/close/lifecycle),
+    // read from messageQueue (poll ticks, drains), the URLSession delegate
+    // queue (send completions), and RN threads (sendRawCommand,
+    // checkPresence, getMetrics).
+    private var _isConnected = false
+    private var isConnected: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnected }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isConnected = newValue }
+    }
+    private var _isConnecting = false
+    private var isConnecting: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnecting }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isConnecting = newValue }
+    }
+    private var _isAuthenticated = false
+    private var isAuthenticated: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isAuthenticated }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isAuthenticated = newValue }
+    }
     // True between pause() and resume(): a background reconnect must not
     // restart the poll/ping/presence timers the app paused.
-    private var isPaused = false
+    private var _isPaused = false
+    private var isPaused: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isPaused }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isPaused = newValue }
+    }
     private var transportStartAt: Date?
     
     // Failure tracking for DORS. Atomic (lock-guarded): send/ping completions
@@ -111,12 +166,30 @@ public class InternetManager: NSObject, TransportManager {
     // a "successful" local write is invisible to the sender).
     private let rateLimiter = RelayRateLimiter()
 
-    /// Time source for the rate limiter: monotonic, so a wall-clock step
-    /// (NTP correction, manual change) can never freeze or over-mint token
-    /// refill. Every rateLimiter call must use this — mixing time sources
-    /// per call site would look like clock jumps to the bucket.
+    /// Cached mach timebase for monotonicNowMs (constant for the process).
+    private static let machTimebase: mach_timebase_info_data_t = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return info
+    }()
+
+    /// Time source for the rate limiter: monotonic AND sleep-inclusive
+    /// (mach_continuous_time — the true analogue of the Kotlin bridge's
+    /// SystemClock.elapsedRealtime), so a wall-clock step (NTP correction,
+    /// manual change) can never freeze or over-mint token refill, and a
+    /// device-sleep interval still refills the bucket instead of pausing it
+    /// (mach_absolute_time-based clocks stop ticking during sleep). Every
+    /// rateLimiter call must use this — mixing time sources per call site
+    /// would look like clock jumps to the bucket.
     private func monotonicNowMs() -> Int64 {
-        return Int64(DispatchTime.now().uptimeNanoseconds / 1_000_000)
+        let timebase = Self.machTimebase
+        let ticks = mach_continuous_time()
+        // Split multiply-then-divide so ticks * numer can't overflow UInt64;
+        // the sub-tick truncation is nanoseconds-scale, irrelevant at ms.
+        let numer = UInt64(timebase.numer)
+        let denom = UInt64(timebase.denom)
+        let nanos = (ticks / denom) * numer + (ticks % denom) * numer / denom
+        return Int64(nanos / 1_000_000)
     }
 
     /// Control-op frames deferred by the rate limiter, drained (oldest
@@ -144,6 +217,17 @@ public class InternetManager: NSObject, TransportManager {
     /// poll loop must not pull new messages mid-chain. messageQueue-confined.
     private var isDrainingControlFrames = false
 
+    /// Count of `.replace` primary sends whose completion is outstanding.
+    /// Their delta frames and commit are handed off only from the SUCCESS
+    /// completion (Kotlin's synchronous send gets that ordering for free),
+    /// so until the completion lands the poll loop must not pull more
+    /// messages: a same-group re-register would translate against an
+    /// uncommitted diff base. A counter, not a flag: the disconnect paths
+    /// never touch it, and URLSession always fires the completion (even for
+    /// a cancelled task), so it can never wedge — a stale completion cannot
+    /// falsely release a newer primary's hold. messageQueue-confined.
+    private var inFlightControlPrimaries = 0
+
     /// Receives raw relay frames that are app/server concerns rather than SDK
     /// concerns (invite links, role changes, rate limiting, unknown types) —
     /// the module forwards them to JS as the `internet_server_message` event.
@@ -165,7 +249,9 @@ public class InternetManager: NSObject, TransportManager {
         self.deviceId = deviceId
         self.controlOpTranslator = RelayControlOpTranslator(selfId: deviceId)
         if let urlString = serverUrl, let url = URL(string: urlString) {
-            self.serverUrl = url
+            // Stored var, not the guarded accessor: computed setters cannot
+            // run before super.init(), and no other thread can see self yet.
+            self._serverUrl = url
         }
         super.init()
     }
@@ -237,9 +323,23 @@ public class InternetManager: NSObject, TransportManager {
     }
 
     private func startOnMain() throws {
-        guard state != .running else {
+        // .starting rejects too: a second start mid-connect would otherwise
+        // replace urlSession below and orphan the connecting session (which
+        // strongly retains self as its delegate) until process exit.
+        guard state != .running && state != .starting else {
             throw TransportError.alreadyRunning
         }
+        guard state != .stopping else {
+            throw TransportError.invalidState("Transport is stopping")
+        }
+
+        // Self-stop paths (max-reconnect-attempts, autoReconnect=false close)
+        // set .stopped WITHOUT releasing the session — only stop() does — and
+        // a push-triggered re-enable skips stop() for a non-running manager.
+        // Always release the previous session before minting a new one, or
+        // the orphan retains this manager until process exit.
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
 
         guard let url = serverUrl else {
             throw TransportError.notAvailable("Server URL not configured. Call configure(serverUrl:) first.")
@@ -898,7 +998,12 @@ public class InternetManager: NSObject, TransportManager {
             // burning their retry budget) and start watching presence.
             let recipient = json["recipient"] as? String ?? ""
             let reason = json["reason"] as? String ?? "Unknown error"
-            handleRecipientUnreachable(recipient: recipient, reason: reason, source: "DeliveryError")
+            handleRecipientUnreachable(
+                recipient: recipient,
+                reason: reason,
+                plane: .data,
+                source: "DeliveryError"
+            )
 
         case "PresenceStatus", "PresenceStatusWithLastSeen":
             // Relay presence answer: feed core (re-arms parked welcomes and
@@ -1070,7 +1175,12 @@ public class InternetManager: NSObject, TransportManager {
             // requests for offline recipients).
             let recipient = json["recipient"] as? String ?? ""
             let reason = json["reason"] as? String ?? "Unknown error"
-            handleRecipientUnreachable(recipient: recipient, reason: reason, source: "ConnectionRequestError")
+            handleRecipientUnreachable(
+                recipient: recipient,
+                reason: reason,
+                plane: .connReq,
+                source: "ConnectionRequestError"
+            )
             
         case "GroupCreated":
             guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
@@ -1132,8 +1242,15 @@ public class InternetManager: NSObject, TransportManager {
         case "GroupError":
             let reason = json["reason"] as? String ?? "Unknown error"
             let groupId = json["group_id"] as? String ?? ""
-            // Admin-denied registration must stop member-delta attempts.
-            controlOpTranslator.onGroupError(groupId: groupId, reason: reason)
+            // Admin-denied registration must stop member-delta attempts —
+            // but only when the error is ours: the request_id (echoed for
+            // app raw-channel ops, never tagged by the translator) lets the
+            // translator disown errors that answer someone else's frame.
+            controlOpTranslator.onGroupError(
+                groupId: groupId,
+                reason: reason,
+                requestId: json["request_id"] as? String
+            )
             var payload: [String: Any] = ["reason": reason]
             // group_id lets the core revoke relay_synced so group sends fall
             // back to per-member delivery.
@@ -1305,13 +1422,15 @@ public class InternetManager: NSObject, TransportManager {
         // queue will hand us and their commits are still pending.
         drainPendingControlFrames()
         // The drain settles asynchronously (iOS send completions); until the
-        // spill queue is empty AND the in-flight frame resolved, pulling
-        // more messages could interleave frames into a register's delta
-        // chain — or translate a same-group re-register against an
-        // uncommitted diff base and permanently miss a RemoveGroupMember.
-        // The next 100ms tick retries. (The Kotlin bridge gets this ordering
-        // for free from OkHttp's synchronous enqueue.)
-        guard pendingControlFrames.isEmpty, !isDrainingControlFrames else { return }
+        // spill queue is empty AND the in-flight frame resolved AND no
+        // primary's outcome is pending, pulling more messages could
+        // interleave frames into a register's delta chain — or translate a
+        // same-group re-register against an uncommitted diff base and
+        // permanently miss a RemoveGroupMember. The next 100ms tick retries.
+        // (The Kotlin bridge gets this ordering for free from OkHttp's
+        // synchronous enqueue.)
+        guard pendingControlFrames.isEmpty, !isDrainingControlFrames,
+              inFlightControlPrimaries == 0 else { return }
 
         // Timer already runs on messageQueue, no need for extra dispatch
         // Poll for next message from protocol - batch send up to 10 messages per poll
@@ -1364,9 +1483,11 @@ public class InternetManager: NSObject, TransportManager {
             batchSent += 1
 
             // A control op may have spilled extra frames into the pending
-            // queue; stop pulling until its chain settles (same reasoning
-            // as the guard above the batch).
-            if !pendingControlFrames.isEmpty || isDrainingControlFrames {
+            // queue or have a primary outcome outstanding; stop pulling
+            // until its chain settles (same reasoning as the guard above
+            // the batch).
+            if !pendingControlFrames.isEmpty || isDrainingControlFrames
+                || inFlightControlPrimaries > 0 {
                 break
             }
         }
@@ -1425,19 +1546,36 @@ public class InternetManager: NSObject, TransportManager {
             return
         }
 
+        // Track for recipient-keyed failure correlation BEFORE the write: a
+        // fast relay DeliveryError can be processed on the delegate queue
+        // before this send's completion runs, and it must find the entry —
+        // otherwise the message silently degrades to the slow core
+        // confirm-timeout. (Kotlin records synchronously with the write.)
+        // The failure completion un-records this exact entry.
+        inFlightTracker.recordSent(
+            recipient: recipientId,
+            messageId: messageId,
+            plane: .data,
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+        )
+
         task.send(.string(jsonString)) { [weak self] error in
             guard let self = self else { return }
             // A stale task's send outcome must not increment the failure
             // counter, report internetSendFailed for the message (the
             // disconnect path's fail_all_pending already owned it), or
             // trigger a teardown of the connection rebuilt after it
-            // (see isStale).
+            // (see isStale). Its optimistic tracker entry died with the
+            // connection (handleConnectionClosed/stop clear the tracker).
             guard !self.isStale(task) else { return }
 
             if let error = error {
                 // Failed completion: the frame never hit the wire — return
-                // its token (matches the presence/raw/drain paths).
+                // its token (matches the presence/raw/drain paths) and take
+                // back the optimistic in-flight entry (this path owns the
+                // failure outcome).
                 self.rateLimiter.refund()
+                self.inFlightTracker.unrecord(recipient: recipientId, messageId: messageId)
                 let failures = self.consecutiveSendFailures.increment()
                 self.protocolInstance.internetSendFailed(messageId: messageId)
                 self.emitDiagnostic("error", "Failed to send WebSocket message", context: [
@@ -1460,15 +1598,8 @@ public class InternetManager: NSObject, TransportManager {
                 self.consecutiveSendFailures.set(0)
                 self.bytesSent.add(Int64(jsonData.count))
                 self.messagesSent.increment()
-                // Track for recipient-keyed failure correlation: a later
-                // DeliveryError for this recipient fails-fast this message id.
-                self.inFlightTracker.recordSent(
-                    recipient: recipientId,
-                    messageId: messageId,
-                    nowMs: Int64(Date().timeIntervalSince1970 * 1000)
-                )
                 self.protocolInstance.internetConfirmSent(messageId: messageId)
-                
+
                 self.emitDiagnostic("debug", "Message sent via relay", context: [
                     "messageId": messageId,
                     "recipientId": recipientId,
@@ -1541,49 +1672,88 @@ public class InternetManager: NSObject, TransportManager {
                 ])
                 return
             }
+            // Plane tag: connection-request primaries are answered by the
+            // relay's recipient-keyed ConnectionRequestError, so they are
+            // tracked (CONN_REQ, recorded BEFORE the write — same fast-answer
+            // race as sendMessage). Group-scoped primaries (CreateGroup /
+            // SendGroupMessage) answer on the group-scoped GroupError channel
+            // and are never recorded here.
+            let isConnectionRequestOp: Bool
+            switch controlOp {
+            case "conn_req", "conn_acc", "conn_rej", "conn_can":
+                isConnectionRequestOp = true
+            default:
+                isConnectionRequestOp = false
+            }
+            if isConnectionRequestOp {
+                inFlightTracker.recordSent(
+                    recipient: recipientId,
+                    messageId: messageId,
+                    plane: .connReq,
+                    nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+                )
+            }
+            // Hold the poll loop until the primary's outcome lands: the
+            // extra frames and the commit are handed off only from the
+            // SUCCESS completion below.
+            inFlightControlPrimaries += 1
             task.send(.string(primaryJson)) { [weak self] error in
                 guard let self = self else { return }
-                // A stale task's send outcome must not touch failure
-                // counters, fail the message id (fail_all_pending owned it),
-                // or trigger teardown (see isStale).
-                guard !self.isStale(task) else { return }
-                if let error = error {
-                    // Never hit the wire — return the token.
-                    self.rateLimiter.refund()
-                    let failures = self.consecutiveSendFailures.increment()
-                    self.protocolInstance.internetSendFailed(messageId: messageId)
-                    self.emitDiagnostic("error", "Failed to send relay-native control op", context: [
-                        "controlOp": controlOp,
-                        "messageId": messageId,
-                        "error": error.localizedDescription,
-                        "consecutiveFailures": failures
-                    ])
-                    if failures >= self.MAX_CONSECUTIVE_FAILURES {
-                        self.teardownSocket(ifCurrent: task, reason: "Send failures exceeded threshold")
+                // Hop to messageQueue: the primary counter, the spill queue,
+                // and enqueueControlFrames are messageQueue-confined.
+                self.messageQueue.async {
+                    self.inFlightControlPrimaries -= 1
+                    // A stale task's send outcome must not touch failure
+                    // counters, fail the message id (fail_all_pending owned
+                    // it), or trigger teardown (see isStale); its deltas and
+                    // commit die with the connection (the disconnect reset
+                    // generation-kills the commit).
+                    guard !self.isStale(task) else { return }
+                    if let error = error {
+                        // Never hit the wire — return the token, take back
+                        // the optimistic in-flight entry. No deltas and no
+                        // commit either (Kotlin only enqueues inside
+                        // `if (sent)`): a failed CreateGroup followed by
+                        // succeeding AddGroupMember deltas would send
+                        // out-of-order registration state, and committing
+                        // would record membership the relay never saw.
+                        self.rateLimiter.refund()
+                        if isConnectionRequestOp {
+                            self.inFlightTracker.unrecord(recipient: recipientId, messageId: messageId)
+                        }
+                        let failures = self.consecutiveSendFailures.increment()
+                        self.protocolInstance.internetSendFailed(messageId: messageId)
+                        self.emitDiagnostic("error", "Failed to send relay-native control op", context: [
+                            "controlOp": controlOp,
+                            "messageId": messageId,
+                            "error": error.localizedDescription,
+                            "consecutiveFailures": failures
+                        ])
+                        if failures >= self.MAX_CONSECUTIVE_FAILURES {
+                            self.teardownSocket(ifCurrent: task, reason: "Send failures exceeded threshold")
+                        }
+                    } else {
+                        self.consecutiveSendFailures.set(0)
+                        self.bytesSent.add(Int64(primaryData.count))
+                        self.messagesSent.increment()
+                        self.protocolInstance.internetConfirmSent(messageId: messageId)
+                        // Only now, with the primary provably written, may
+                        // the deltas chase it and the commit arm — keeping
+                        // the wire order primary-then-deltas and the
+                        // translator's diff base honest.
+                        self.enqueueControlFrames(
+                            controlOp: controlOp,
+                            frames: Array(frames.dropFirst()),
+                            commit: commit
+                        )
+                        self.emitDiagnostic("debug", "Control op sent relay-native", context: [
+                            "controlOp": controlOp,
+                            "messageId": messageId,
+                            "frames": frames.count
+                        ])
                     }
-                } else {
-                    self.consecutiveSendFailures.set(0)
-                    self.bytesSent.add(Int64(primaryData.count))
-                    self.messagesSent.increment()
-                    self.inFlightTracker.recordSent(
-                        recipient: recipientId,
-                        messageId: messageId,
-                        nowMs: Int64(Date().timeIntervalSince1970 * 1000)
-                    )
-                    self.protocolInstance.internetConfirmSent(messageId: messageId)
-                    self.emitDiagnostic("debug", "Control op sent relay-native", context: [
-                        "controlOp": controlOp,
-                        "messageId": messageId,
-                        "frames": frames.count
-                    ])
                 }
             }
-            // Extra frames are queued NOW, on messageQueue, so the poll loop
-            // sees a non-empty spill queue and holds further pulls until the
-            // chain settles. Submission order keeps them behind the primary
-            // on the wire; if the primary's write fails, theirs fail too and
-            // the drain drops everything pending without committing.
-            enqueueControlFrames(controlOp: controlOp, frames: Array(frames.dropFirst()), commit: commit)
         }
     }
 
@@ -1708,11 +1878,18 @@ public class InternetManager: NSObject, TransportManager {
 
     /// Fail-fast handler for the relay's recipient-keyed offline signals
     /// (DeliveryError / ConnectionRequestError). Fails every live in-flight
-    /// message to the recipient with the recipient_unreachable reason (the
+    /// message to the recipient ON THE SIGNAL'S PLANE (DeliveryError answers
+    /// data frames, ConnectionRequestError answers conn ops — neither may
+    /// sweep the other's entries) with the recipient_unreachable reason (the
     /// core classifies it as per-peer no-carrier and parks welcomes without
     /// burning budget), ingests an authoritative offline presence, and adds
     /// the recipient to the presence watch set.
-    private func handleRecipientUnreachable(recipient: String, reason: String, source: String) {
+    private func handleRecipientUnreachable(
+        recipient: String,
+        reason: String,
+        plane: RecipientInFlightTracker.Plane,
+        source: String
+    ) {
         guard !recipient.isEmpty else {
             emitDiagnostic("warning", "Recipient-unreachable signal without recipient", context: [
                 "source": source,
@@ -1721,7 +1898,7 @@ public class InternetManager: NSObject, TransportManager {
             return
         }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        let failedIds = inFlightTracker.drainRecipient(recipient, nowMs: now)
+        let failedIds = inFlightTracker.drainRecipient(recipient, plane: plane, nowMs: now)
         for id in failedIds {
             protocolInstance.internetSendFailedWithReason(
                 messageId: id,
