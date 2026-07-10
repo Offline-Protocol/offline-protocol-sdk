@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Relay `TypingUpdate` events are bridged into the SDK event stream.** The relay server's server-mediated typing event (produced by `SetTyping`/`ClearTyping` relay clients) was only logged as a diagnostic by the platform `InternetManager`s; it is now converted into the SDK's internal `__TYPING__` message and fed through `internetMessageReceived`, so apps receive the same `typing_indicator_received` event regardless of whether the sender used the SDK or a JS-layer relay client. (Read receipts need no bridge: the relay server has no server-mediated read event, and SDK-native `__READ_RECEIPT__` messages already flow through the generic `MessageReceived` relay path.)
 - **`MessageReceived` events now carry `encrypted: bool`.** `true` when the content arrived MLS-encrypted and was decrypted by this node (including delayed decryption after session establishment), `false` for plaintext accepted under the `require_encryption = false` opt-out. The React Native `MessageReceivedEvent.encrypted?: boolean` field existed but was never populated by the core — apps (including the in-repo demo) reading it always saw `undefined`; it is now live. JSON consumers unaware of the field are unaffected (additive).
 
 - **Transport trait seam redesign: platform-bridge lifecycle on the trait, `&self` start/stop, lock-free transport handles (CQ-H4, CQ-H5)**

@@ -541,7 +541,30 @@ public class InternetManager: NSObject, TransportManager {
                 "userId": userId,
                 "online": online
             ])
-            
+
+        case "TypingUpdate":
+            // Bridge the relay's server-mediated typing event (produced by
+            // SetTyping/ClearTyping relay clients) into the SDK's __TYPING__
+            // path, so apps receive the same typing_indicator_received event
+            // regardless of which stack the sender uses.
+            let typingUserId = json["user_id"] as? String ?? ""
+            let conversationId = json["conversation_id"] as? String ?? ""
+            let typing = json["typing"] as? Bool ?? false
+            guard !typingUserId.isEmpty, !conversationId.isEmpty else {
+                emitDiagnostic("warning", "Invalid TypingUpdate format: missing user_id/conversation_id", context: [:])
+                return
+            }
+            let typingPayload: [String: Any] = [
+                "conversation_id": conversationId,
+                "is_typing": typing,
+                "timestamp_ms": Int64(Date().timeIntervalSince1970 * 1000)
+            ]
+            injectGroupInternalMessage(senderId: typingUserId, prefix: "__TYPING__", payload: typingPayload)
+            emitDiagnostic("debug", "Typing update bridged from relay", context: [
+                "userId": typingUserId,
+                "typing": typing
+            ])
+
         case "ConnectionRequestReceived":
             // Process like MessageReceived: build internal message and feed to protocol so it emits connection_request_received
             let senderId = json["sender"] as? String ?? ""
