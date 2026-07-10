@@ -17,6 +17,7 @@ class ProtocolErrorBridgeTest {
             ProtocolException.MediaTransferLimit("bob") to "MediaTransferLimit",
             ProtocolException.SendFailed("all transports failed") to "SendFailed",
             ProtocolException.InvalidState("cannot demote the last admin") to "InvalidState",
+            ProtocolException.MlsNotInitialized("MLS not initialized") to "MlsNotInitialized",
             ProtocolException.TransportException("ble unavailable") to "TransportError",
             ProtocolException.SerializationException("bad json") to "SerializationError",
             ProtocolException.ServiceException("no provider") to "ServiceError",

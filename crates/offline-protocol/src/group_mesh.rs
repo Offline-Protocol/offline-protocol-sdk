@@ -2020,23 +2020,25 @@ impl OfflineProtocol {
     }
 
     /// Gets a member's role in a group.
+    ///
+    /// A group that exists but has no role metadata (created before role
+    /// tracking) reports the same default an unrecorded user gets: `Member`.
     pub fn get_member_role(&self, group_id: &str, user_id: &str) -> Result<GroupRole> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id)?;
-        let metadata = mls_guard
-            .get_group_metadata(&gid)?
-            .ok_or_else(|| Error::GroupNotFound(group_id.to_string()))?;
-        Ok(metadata.get_role(user_id))
+        let metadata = Self::group_metadata_or_not_found(&mls_guard, &gid, group_id)?;
+        Ok(metadata.map(|m| m.get_role(user_id)).unwrap_or_default())
     }
 
     /// Gets all member roles in a group.
+    ///
+    /// A group that exists but has no role metadata (created before role
+    /// tracking) reports no explicit roles.
     pub fn get_group_roles(&self, group_id: &str) -> Result<HashMap<String, GroupRole>> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id)?;
-        let metadata = mls_guard
-            .get_group_metadata(&gid)?
-            .ok_or_else(|| Error::GroupNotFound(group_id.to_string()))?;
-        Ok(metadata.get_all_roles())
+        let metadata = Self::group_metadata_or_not_found(&mls_guard, &gid, group_id)?;
+        Ok(metadata.map(|m| m.get_all_roles()).unwrap_or_default())
     }
 
     /// Handles an incoming group role change notification.

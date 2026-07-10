@@ -1198,7 +1198,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.sendPresenceUpdate(recipient, presenceStatus)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            promise.reject("ERROR_PRESENCE_UPDATE", "Failed to send presence update: ${e.message}", e)
+            rejectWithProtocolError(promise, e, "ERROR_PRESENCE_UPDATE", "Failed to send presence update")
         }
     }
 
@@ -1209,7 +1209,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.sendTypingIndicator(recipient, conversationId, isTyping)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            promise.reject("ERROR_TYPING_INDICATOR", "Failed to send typing indicator: ${e.message}", e)
+            rejectWithProtocolError(promise, e, "ERROR_TYPING_INDICATOR", "Failed to send typing indicator")
         }
     }
 
@@ -1226,7 +1226,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.sendReadReceipt(recipient, msgIds)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            promise.reject("ERROR_READ_RECEIPT", "Failed to send read receipt: ${e.message}", e)
+            rejectWithProtocolError(promise, e, "ERROR_READ_RECEIPT", "Failed to send read receipt")
         }
     }
 
@@ -1279,7 +1279,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val requestId = svc.sendServiceRequest(provider, serviceId, method, body)
             promise.resolve(requestId)
         } catch (e: Exception) {
-            promise.reject("ERROR_SERVICE_REQUEST", "Failed to send service request: ${e.message}", e)
+            rejectWithProtocolError(promise, e, "ERROR_SERVICE_REQUEST", "Failed to send service request")
         }
     }
 
@@ -1290,7 +1290,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = svc.respondToServiceRequest(requestId, requester, serviceId, status, body)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            promise.reject("ERROR_SERVICE_RESPONSE", "Failed to respond to service request: ${e.message}", e)
+            rejectWithProtocolError(promise, e, "ERROR_SERVICE_RESPONSE", "Failed to respond to service request")
         }
     }
 
@@ -1827,10 +1827,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val bytes = android.util.Base64.decode(fileData, android.util.Base64.DEFAULT)
             val id = proto.sendFile(recipient, bytes.map { it.toUByte() }, fileName)
             promise.resolve(id)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_SEND_FILE", "Failed to send file: ${e.message}", e)
         } catch (e: Exception) {
-            promise.reject("ERROR_SEND_FILE", "Failed to send file: ${e.message}", e)
+            rejectWithProtocolError(promise, e, "ERROR_SEND_FILE", "Failed to send file")
         }
     }
 
@@ -1853,10 +1851,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             val id = proto.sendMedia(recipient, bytes.map { it.toUByte() }, fileName, ct, meta)
             promise.resolve(id)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_SEND_MEDIA", "Failed to send media: ${e.message}", e)
         } catch (e: Exception) {
-            promise.reject("ERROR_SEND_MEDIA", "Failed to send media: ${e.message}", e)
+            rejectWithProtocolError(promise, e, "ERROR_SEND_MEDIA", "Failed to send media")
         }
     }
 
@@ -2435,10 +2431,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             proto.processFileChunk(fileId, chunkIndex.toUInt(), totalChunks.toUInt(), fileSize.toULong(), fileName, fileChecksum, bytes)
             promise.resolve(null)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_FILE", "Failed to process file chunk: ${e.message}", e)
         } catch (e: Exception) {
-            promise.reject("ERROR_FILE", "Failed to process file chunk: ${e.message}", e)
+            rejectWithProtocolError(promise, e, "ERROR_FILE", "Failed to process file chunk")
         }
     }
 
