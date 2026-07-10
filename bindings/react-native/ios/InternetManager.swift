@@ -549,9 +549,12 @@ public class InternetManager: NSObject, TransportManager {
             // regardless of which stack the sender uses.
             let typingUserId = json["user_id"] as? String ?? ""
             let conversationId = json["conversation_id"] as? String ?? ""
-            let typing = json["typing"] as? Bool ?? false
-            guard !typingUserId.isEmpty, !conversationId.isEmpty else {
-                emitDiagnostic("warning", "Invalid TypingUpdate format: missing user_id/conversation_id", context: [:])
+            // Strict "typing" check: if the relay renames or drops the
+            // field, that must surface as a diagnostic instead of silently
+            // degrading every event to typing=false.
+            guard !typingUserId.isEmpty, !conversationId.isEmpty,
+                  let typing = json["typing"] as? Bool else {
+                emitDiagnostic("warning", "Invalid TypingUpdate format: missing user_id/conversation_id/typing", context: [:])
                 return
             }
             let typingPayload: [String: Any] = [
