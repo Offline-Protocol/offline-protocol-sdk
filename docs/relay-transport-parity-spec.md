@@ -53,17 +53,14 @@ When the relay socket is up but the *recipient* is offline, `no_carrier=false`, 
 pub const SEND_FAIL_REASON_RECIPIENT_UNREACHABLE: &str = "recipient_unreachable";
 ```
 
-In `on_transport_send_failed`, treat a reason starting with that marker as per-peer no-carrier:
+In `on_transport_send_failed`, a reason starting with that marker is the relay's *authoritative* verdict that the frame was dropped, and it must handle the record's real state at arrival time. **Ordering caveat (found in review):** the bridge calls `internet_confirm_sent` on socket-write success, *before* the relay can answer — so when the `DeliveryError` arrives the welcome is normally already `Sent` (a false Sent: the store-less relay dropped the content). Implemented as `apply_recipient_unreachable_failure`:
 
-```rust
-let peer_unreachable = transport_error
-    .as_deref()
-    .map_or(false, |r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
-let no_carrier = peer_unreachable
-    || self.transport_manager.get_available_transports().is_empty();
-```
+- `Sent` / `SendAttempted` → transition to `Failed` (the one legal exit from `Sent`, added to the state machine for this), refund the attempt, emit a corrective retryable `welcome_send_failed` superseding the earlier `welcome_send_succeeded`.
+- Then park pending a **reachability edge**: `next_retry_at = None`, TTL pushed. No timed retry — the carrier is healthy, so a timer would re-send into another `DeliveryError` every interval, forever. Recovery is edge-driven: `on_peer_presence(online)` / `on_neighbor_discovered` re-arm, and the peer stays on the presence watchlist so the platform keeps polling for that edge.
 
-**Acceptance.** Welcome sent to an offline peer over a connected relay: `welcome_send_failed` fires with unchanged `attempt`, `expires_at` pushed forward, welcome stays parked; peer comes online → delivered.
+The presence-online rescue itself is backed off per peer (base 40s, doubling, 10 min cap — `welcome_presence_rescue`) so an online-but-never-confirming peer (stale key package after a reinstall) is not re-sent the multi-frame welcome on every 20s watch tick. A relay-offline answer only parks when Internet is the *sole* available carrier — relay presence is not authoritative for mesh reachability.
+
+**Acceptance.** Welcome wire-confirmed then `DeliveryError` received: lifecycle corrected to parked-`Failed` with attempt refunded and no timed retry; the retry queue does not re-send over the healthy socket; peer comes online → re-armed and delivered.
 
 Also audit the non-welcome path: `report_send_failure` on the internet transport after `confirm_sent` already removed the id from `pending_confirmation` may be a no-op for regular messages — acceptable (the e2e ACK timeout re-queues via the reliability layer), but verify no double-retry.
 
@@ -180,7 +177,7 @@ Every bridge WI (2, 4, 5, 6, 7 + the WI-3 handler) must be mirrored in `bindings
 1. **Carrier check:** two SDK-only clients (no JS relay socket): authenticate, establish MLS session (`__MLS_WELCOME__` through `SendMessage`), exchange messages, receipts, typing. Evidence says this works today (online welcomes deliver via the SDK socket); make it a repeatable integration test.
 2. **DeliveryError timing:** send to an offline recipient; confirm the relay emits `DeliveryError` promptly and note whether it *also* queues the message server-side (mailbox). This determines how much client-side parking carries the offline-delivery UX.
 3. **Welcome budget:** with WI-1+2, welcome to an offline peer leaves `attempt` unchanged; peer online + `CheckPresence` roundtrip → delivery without app involvement.
-4. **Offline connection requests:** verify the relay stores `SendConnectionRequest` for offline recipients and replays on connect (the JS flow implies it does) — this is what makes WI-5 translation strictly better than opaque passthrough.
+4. **Offline connection requests:** the validated ground truth (relay source) is that the relay does **not** store connection requests for offline recipients — it answers `ConnectionRequestError`. The SDK does not re-send them either: the presence watch surfaces the recipient's return as a `presence_updated` event, and re-sending the request on that signal is the app's decision. Verify this end-to-end against the production relay and confirm the legacy JS client behaves the same (parity, not regression).
 5. **Invite links over the raw channel** against the production relay, including the admin-approval (`AckGroupInviteJoin`) flow.
 6. **Legacy interop during rollout:** a JS-relay sender's `SendGroupMessage` reaches an SDK-only client via `GroupMessageReceived → __GROUP_MSG__` (already implemented), and vice versa.
 
