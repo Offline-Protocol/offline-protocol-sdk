@@ -11,6 +11,14 @@
 // is just echoed back — so this translator is the "relay adapter" the core's
 // relay-optimized group path was designed against.
 //
+// State commits are deferred: a translation's commit must be invoked by the
+// caller ONLY after every frame was written to the socket. Commits are
+// additionally generation-guarded: a commit whose translation predates a
+// reset() is a no-op, so a chain that settles after a disconnect (or
+// RateLimited) cannot write a phantom snapshot into the next connection's
+// diff base. A GroupRoleChanged promotion of this device (onRoleChanged)
+// re-enables member deltas an earlier admin denial suppressed.
+//
 // Known v1 limitation: a group rename re-registers, but the relay's
 // idempotent sync never updates the stored name (ON CONFLICT DO NOTHING).
 //
@@ -44,6 +52,11 @@ final class RelayControlOpTranslator {
     }
 
     private let selfId: String
+    /// Bumped by reset(). Commit closures capture the generation of their
+    /// translation and no-op if it moved: state written after a reset would
+    /// describe frames sent on a connection (or inside a rate budget) the
+    /// relay already discarded.
+    private var generation: Int64 = 0
     /// Last membership committed as registered with the relay, per group.
     private var registeredMembers: [String: Set<String>] = [:]
     /// Groups whose member deltas the relay denied (we are not the admin).
@@ -129,10 +142,13 @@ final class RelayControlOpTranslator {
                   !leaveSent.contains(groupId) else {
                 return .tap([], nil)
             }
+            let gen = generation
             return .tap([[
                 "type": "LeaveGroup",
                 "group_id": groupId
-            ]], { [weak self] in self?.commitLeave(groupId: groupId) })
+            ]], { [weak self] in
+                self?.commitLeave(generationAtTranslate: gen, groupId: groupId)
+            })
 
         default:
             return .passThrough
@@ -151,10 +167,25 @@ final class RelayControlOpTranslator {
         }
     }
 
+    /// Feed relay `GroupRoleChanged` frames: a promotion of this device to
+    /// admin re-enables member deltas an earlier denial suppressed —
+    /// otherwise a mid-connection promotion keeps membership edits away from
+    /// the relay until the next reconnect. (The denial already dropped the
+    /// group's committed snapshot, so the next register recomputes the full
+    /// delta set.)
+    func onRoleChanged(groupId: String, userId: String, newRole: String) {
+        guard !groupId.isEmpty, userId == selfId else { return }
+        guard newRole.caseInsensitiveCompare("admin") == .orderedSame else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        memberDeltasDenied.remove(groupId)
+    }
+
     /// Per-connection state: call on disconnect.
     func reset() {
         lock.lock()
         defer { lock.unlock() }
+        generation += 1
         registeredMembers.removeAll()
         memberDeltasDenied.removeAll()
         leaveSent.removeAll()
@@ -204,16 +235,22 @@ final class RelayControlOpTranslator {
                 ])
             }
             // Committed only after the frames are actually written.
+            let gen = generation
             commit = { [weak self] in
-                self?.commitRegisteredMembers(groupId: groupId, members: desired)
+                self?.commitRegisteredMembers(
+                    generationAtTranslate: gen,
+                    groupId: groupId,
+                    members: desired
+                )
             }
         }
         return .replace(frames, commit)
     }
 
-    private func commitRegisteredMembers(groupId: String, members: Set<String>) {
+    private func commitRegisteredMembers(generationAtTranslate: Int64, groupId: String, members: Set<String>) {
         lock.lock()
         defer { lock.unlock() }
+        guard generationAtTranslate == generation else { return }
         // A GroupError may have marked the group admin-denied while the
         // frames were in flight; the denial wins.
         if !memberDeltasDenied.contains(groupId) {
@@ -221,9 +258,10 @@ final class RelayControlOpTranslator {
         }
     }
 
-    private func commitLeave(groupId: String) {
+    private func commitLeave(generationAtTranslate: Int64, groupId: String) {
         lock.lock()
         defer { lock.unlock() }
+        guard generationAtTranslate == generation else { return }
         leaveSent.insert(groupId)
         registeredMembers.removeValue(forKey: groupId)
         memberDeltasDenied.remove(groupId)

@@ -3293,8 +3293,8 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
 
     /// One-shot relay presence query for a peer (last-seen display, pre-send
-    /// checks). Fire-and-event: resolves true if the query was sent; the
-    /// answer arrives as the SDK's `presence_updated` event.
+    /// checks). Fire-and-event: resolves true if the query was written to
+    /// the socket; the answer arrives as the SDK's `presence_updated` event.
     @objc func checkInternetPresence(_ userId: String,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
@@ -3303,7 +3303,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_INTERNET", "Failed to query presence: Internet transport not initialized", nil)
             return
         }
-        resolver(manager.checkPresence(userId: userId))
+        manager.checkPresence(userId: userId) { written in
+            resolver(written)
+        }
     }
 
     /// Sends a raw, caller-built relay command verbatim over the SDK's

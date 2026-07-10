@@ -25,7 +25,9 @@ class InternetManager(
     
     override val transportId = "internet"
     override val transportName = "Internet (WebSocket)"
-    override var state: TransportState = TransportState.UNAVAILABLE
+    // Volatile: written on main (updateState) but read from the OkHttp
+    // reader thread (handleConnectionClosed) and RN threads.
+    @Volatile override var state: TransportState = TransportState.UNAVAILABLE
         private set
     override var listener: TransportManagerListener? = null
     
@@ -54,10 +56,11 @@ class InternetManager(
     
     // OkHttp components
     private var okHttpClient: OkHttpClient? = null
-    // Written on main (connect/disconnect) and on the OkHttp reader thread
-    // (AuthError teardown); read from RN bridge threads (sendRawCommand,
-    // checkPresence). Volatile so those reads don't depend on an incidental
-    // happens-before chain through the connection-state atomics.
+    // Written ONLY on main (connect/disconnect/teardownSocket — the AuthError
+    // teardown posts to main); read from the OkHttp reader thread and RN
+    // bridge threads (sendRawCommand, checkPresence). Volatile for those
+    // reads; the single-writer rule is what makes teardownSocket's
+    // compare-then-detach race-free.
     @Volatile private var webSocket: WebSocket? = null
     
     // Handler for main thread operations
@@ -100,8 +103,14 @@ class InternetManager(
     private val isConnected = AtomicBoolean(false)
     private val isConnecting = AtomicBoolean(false)
     private val isAuthenticated = AtomicBoolean(false)
+    // True between pause() and resume(): a background reconnect must not
+    // restart the poll/ping/presence timers the app paused.
+    @Volatile private var isPaused = false
     private var reconnectAttempts = AtomicInteger(0)
-    private var currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
+    // Atomic: grown on main (scheduleReconnect), reset on the OkHttp reader
+    // thread (handleAuthenticated).
+    private val currentReconnectDelay =
+        java.util.concurrent.atomic.AtomicLong(RECONNECT_INITIAL_DELAY_MS)
     private var reconnectRunnable: Runnable? = null
     private var transportStartAt: Long = 0L
     
@@ -118,6 +127,26 @@ class InternetManager(
     // Translates core-tagged server-plane control frames (control_op on
     // InternetMessage) into relay-native ops.
     private val controlOpTranslator = RelayControlOpTranslator(deviceId)
+
+    // Client-side mirror of the relay's token bucket: every relay-bound
+    // frame takes a token before the socket write (a server-side drop after
+    // a "successful" local write is invisible to the sender).
+    private val rateLimiter = RelayRateLimiter()
+
+    /**
+     * Control-op frames deferred by the rate limiter, drained (oldest first)
+     * at the start of each poll tick. A translation's commit closure runs
+     * only after its LAST frame is written. Main-thread only; cleared on
+     * disconnect/stop/RateLimited — the frames are per-connection and their
+     * commits are generation-guarded anyway.
+     */
+    private class PendingControlFrames(
+        val controlOp: String,
+        val frames: ArrayDeque<org.json.JSONObject>,
+        val commit: (() -> Unit)?
+    )
+
+    private val pendingControlFrames = ArrayDeque<PendingControlFrames>()
 
     /**
      * Receives raw relay frames that are app/server concerns rather than SDK
@@ -269,7 +298,15 @@ class InternetManager(
 
         // Close WebSocket
         disconnect()
-        
+
+        // Per-connection state must not survive a stop()/start() cycle:
+        // disconnect() detaches the socket before closing it, so the
+        // listener's onClosed is suppressed as stale and
+        // handleConnectionClosed's clear/reset never runs for this path.
+        inFlightTracker.clear()
+        controlOpTranslator.reset()
+        pendingControlFrames.clear()
+
         // Notify protocol
         try {
             protocol.internetStatusChanged(false)
@@ -287,6 +324,10 @@ class InternetManager(
     
     override fun pause() {
         runOnMainSync {
+            // The flag makes the pause durable: a background network blip
+            // reconnects and re-authenticates, and handleAuthenticated must
+            // not restart the timers the app paused.
+            isPaused = true
             stopMessagePolling()
             stopPingTimer()
             // A backgrounded app must not keep spending battery and relay
@@ -298,6 +339,7 @@ class InternetManager(
 
     override fun resume() {
         runOnMainSync {
+            isPaused = false
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
                 startPingTimer()
@@ -323,16 +365,21 @@ class InternetManager(
     private fun connect() {
         val url = serverUrl ?: return
         if (isConnecting.get() || isConnected.get()) return
-        
+        // stop() may have run between a reconnect being scheduled and firing.
+        // The client null-check must precede the isConnecting latch: with no
+        // socket there is no callback to ever clear the flag, and every
+        // future connect() would early-return — a wedged transport.
+        val client = okHttpClient ?: return
+
         isConnecting.set(true)
-        
+
         val request = Request.Builder()
             .url(url)
             .addHeader("X-Device-ID", deviceId)
             .build()
-        
-        webSocket = okHttpClient?.newWebSocket(request, webSocketListener)
-        
+
+        webSocket = client.newWebSocket(request, webSocketListener)
+
         emitDiagnostic("info", "Connecting to WebSocket", mapOf(
             "url" to url
         ))
@@ -350,8 +397,11 @@ class InternetManager(
         isConnected.set(true)
         isConnecting.set(false)
         isAuthenticated.set(false)
-        reconnectAttempts.set(0)
-        currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
+        // Backoff deliberately NOT reset here: only a full authenticate
+        // proves the connection good (handleAuthenticated). Resetting on TCP
+        // open would let a persistently bad token cycle
+        // connect → AuthError → teardown at the initial 1s delay forever,
+        // hammering the relay.
         consecutiveSendFailures.set(0)
         
         emitDiagnostic("info", "WebSocket connected, authenticating...", mapOf(
@@ -384,20 +434,27 @@ class InternetManager(
     
     private fun handleAuthenticated(userId: String, username: String) {
         isAuthenticated.set(true)
-        
+        // The relay accepted us — this, not the TCP open, is what proves the
+        // connection good and earns a backoff reset.
+        reconnectAttempts.set(0)
+        currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
+
         mainHandler.post {
             updateState(TransportState.RUNNING)
         }
-        
+
         // Notify protocol - this will trigger outbox flush for pending messages
         try {
             protocol.internetStatusChanged(true)
         } catch (e: Exception) {
             Log.e(TAG, "Error notifying protocol of connect", e)
         }
-        
-        // Start polling, pinging, and the presence watch
+
+        // Start polling, pinging, and the presence watch — unless the app
+        // paused the transport; a background reconnect must stay quiet and
+        // resume() restarts the timers.
         mainHandler.post {
+            if (isPaused) return@post
             startMessagePolling()
             startPingTimer()
             startPresenceWatch()
@@ -430,6 +487,9 @@ class InternetManager(
             // groups from scratch (sync_groups_to_relay re-sends on the
             // internet 0→1 transition).
             controlOpTranslator.reset()
+            // Deferred frames belong to the dead connection; their commits
+            // are generation-dead after the reset above.
+            pendingControlFrames.clear()
         }
         
         // Always notify protocol of disconnection so DORS excludes Internet from
@@ -472,7 +532,11 @@ class InternetManager(
     
     private fun scheduleReconnect() {
         if (!autoReconnect) return
-        
+        // A close can race stop(): its posted scheduleReconnect must not
+        // revive a transport the app already stopped (the delayed connect()
+        // would find okHttpClient nulled and leave the transport wedged).
+        if (state == TransportState.STOPPING || state == TransportState.STOPPED) return
+
         val attempts = reconnectAttempts.incrementAndGet()
         if (maxReconnectAttempts > 0 && attempts > maxReconnectAttempts) {
             emitDiagnostic("error", "Max reconnect attempts reached", mapOf(
@@ -482,11 +546,13 @@ class InternetManager(
             updateState(TransportState.STOPPED)
             return
         }
-        
-        val delay = currentReconnectDelay
-        currentReconnectDelay = minOf(
-            (currentReconnectDelay * RECONNECT_BACKOFF_MULTIPLIER).toLong(),
-            RECONNECT_MAX_DELAY_MS
+
+        val delay = currentReconnectDelay.get()
+        currentReconnectDelay.set(
+            minOf(
+                (delay * RECONNECT_BACKOFF_MULTIPLIER).toLong(),
+                RECONNECT_MAX_DELAY_MS
+            )
         )
         
         emitDiagnostic("info", "Scheduling reconnect", mapOf(
@@ -519,12 +585,12 @@ class InternetManager(
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             if (isStale(webSocket)) return
-            processReceivedData(text.toByteArray(Charsets.UTF_8))
+            processReceivedData(webSocket, text.toByteArray(Charsets.UTF_8))
         }
 
         override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
             if (isStale(webSocket)) return
-            processReceivedData(bytes.toByteArray())
+            processReceivedData(webSocket, bytes.toByteArray())
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -543,26 +609,33 @@ class InternetManager(
     }
 
     /**
-     * Cancels and detaches the current socket, then runs the closed handler
-     * exactly once for it. Detaching before cancel makes the cancel-triggered
-     * onFailure/onClosed no-ops (the listener ignores stale sockets), so a
-     * dead socket can never tear down the connection rebuilt after it.
+     * Cancels and detaches [expected] IF it is still the current socket,
+     * then runs the closed handler exactly once for it. Detaching before
+     * cancel makes the cancel-triggered onFailure/onClosed no-ops (the
+     * listener ignores stale sockets), so a dead socket can never tear down
+     * the connection rebuilt after it. Scoping the teardown to the socket
+     * that observed the failure — and running it on main, the only thread
+     * that writes [webSocket] — closes the reverse race too: a stale path
+     * (late AuthError, queued send-failure teardown) can never cancel a
+     * newer, healthy socket.
      */
-    private fun teardownCurrentSocket(reason: String) {
-        val socket = webSocket
-        webSocket = null
-        socket?.cancel()
-        handleConnectionClosed(-1, reason)
+    private fun teardownSocket(expected: WebSocket, reason: String) {
+        mainHandler.post {
+            if (expected !== webSocket) return@post
+            webSocket = null
+            expected.cancel()
+            handleConnectionClosed(-1, reason)
+        }
     }
     
     // MARK: - Message Handling
     
-    private fun processReceivedData(data: ByteArray) {
+    private fun processReceivedData(ws: WebSocket, data: ByteArray) {
         bytesReceived.addAndGet(data.size.toLong())
-        
+
         val json: org.json.JSONObject
         val messageType: String
-        
+
         try {
             json = org.json.JSONObject(String(data, Charsets.UTF_8))
             messageType = json.safeOptString("type")
@@ -572,7 +645,22 @@ class InternetManager(
             ))
             return
         }
-        
+
+        try {
+            dispatchRelayFrame(ws, json, messageType)
+        } catch (e: Exception) {
+            // One malformed frame must degrade to a diagnostic, never
+            // propagate: an exception escaping OkHttp's onMessage fails the
+            // whole WebSocket, turning a single bad field into a
+            // transport-wide reconnect cycle.
+            emitDiagnostic("error", "Failed to process relay frame", mapOf(
+                "type" to messageType,
+                "error" to (e.message ?: e.javaClass.simpleName)
+            ))
+        }
+    }
+
+    private fun dispatchRelayFrame(ws: WebSocket, json: org.json.JSONObject, messageType: String) {
         when (messageType) {
             "Authenticated" -> {
                 // Handle authentication success
@@ -591,7 +679,7 @@ class InternetManager(
                 // its eventual onClosed would race the reconnect's fresh
                 // connection (the teardown detaches it first, so the
                 // cancel-triggered callbacks are ignored as stale).
-                teardownCurrentSocket(reason)
+                teardownSocket(ws, reason)
             }
             
             "MessageSent" -> {
@@ -739,7 +827,7 @@ class InternetManager(
                 // getString but the JVM org.json (unit tests) throws, and the
                 // relay may send epoch numbers directly.
                 val lastSeenMs = when (val rawLastSeen = json.opt("last_seen")) {
-                    is Number -> rawLastSeen.toLong()
+                    is Number -> RelayTimestamps.normalizeEpochToMs(rawLastSeen.toLong())
                     is String -> RelayTimestamps.parseToMsOrNull(rawLastSeen)
                     else -> null
                 }
@@ -956,7 +1044,10 @@ class InternetManager(
                 val membersJson = org.json.JSONArray()
                 if (membersArray != null) {
                     for (i in 0 until membersArray.length()) {
-                        val m = membersArray.getJSONObject(i)
+                        // Per-entry tolerance: one non-object element must
+                        // not throw away the frame (or, uncaught, the whole
+                        // connection).
+                        val m = membersArray.optJSONObject(i) ?: continue
                         val memberId = m.safeOptString("user_id")
                         if (memberId.isEmpty()) continue
                         membersJson.put(org.json.JSONObject().apply {
@@ -981,7 +1072,7 @@ class InternetManager(
                 if (groupsArray == null) return
                 val groupsJson = org.json.JSONArray()
                 for (i in 0 until groupsArray.length()) {
-                    val g = groupsArray.getJSONObject(i)
+                    val g = groupsArray.optJSONObject(i) ?: continue
                     val gId = g.safeOptString("group_id")
                     if (gId.isEmpty()) continue
                     groupsJson.put(org.json.JSONObject().apply {
@@ -1013,13 +1104,30 @@ class InternetManager(
 
             "RateLimited" -> {
                 // The relay dropped whatever exceeded the bucket — possibly a
-                // best-effort member delta whose membership snapshot the
-                // translator has already committed. Reset so the next
-                // register re-derives deltas from scratch; the worst case is
-                // an idempotent re-registration.
+                // member delta whose membership snapshot a commit is about to
+                // record. Reset so in-flight commits die (generation guard)
+                // and the next register re-derives deltas from scratch; the
+                // worst case is an idempotent re-registration. Drain the
+                // local bucket too: it was clearly too optimistic.
                 controlOpTranslator.reset()
+                rateLimiter.drain(System.currentTimeMillis())
+                mainHandler.post { pendingControlFrames.clear() }
                 serverMessageEmitter?.invoke(json.toString())
                 emitDiagnostic("warning", "Relay rate limit hit — translator state reset")
+            }
+
+            "GroupRoleChanged" -> {
+                // A promotion of this device to admin re-enables member
+                // deltas an earlier denial suppressed.
+                controlOpTranslator.onRoleChanged(
+                    json.safeOptString("group_id"),
+                    json.safeOptString("user_id"),
+                    json.safeOptString("new_role", json.safeOptString("role"))
+                )
+                serverMessageEmitter?.invoke(json.toString())
+                emitDiagnostic("debug", "Relay server message forwarded", mapOf(
+                    "type" to messageType
+                ))
             }
 
             // Server-plane frames that are app concerns, not SDK concerns —
@@ -1027,7 +1135,7 @@ class InternetManager(
             // invite-link lifecycle and misc server events can ride the
             // SDK's socket without a second WebSocket in the app.
             "GroupInviteLinkCreated", "GroupInviteLinkRevoked", "GroupJoinedViaInvite",
-            "GroupInviteJoinPending", "GroupRoleChanged", "GroupDeleted" -> {
+            "GroupInviteJoinPending", "GroupDeleted" -> {
                 serverMessageEmitter?.invoke(json.toString())
                 emitDiagnostic("debug", "Relay server message forwarded", mapOf(
                     "type" to messageType
@@ -1048,13 +1156,18 @@ class InternetManager(
     /**
      * Sends a raw, caller-built relay command verbatim (RN
      * `internetSendRawCommand`). The JSON must parse; returns false when
-     * invalid or not connected+authenticated. Responses the SDK doesn't
+     * invalid, not connected+authenticated, or deferred by the client-side
+     * rate limiter (the caller may retry). Responses the SDK doesn't
      * consume arrive as `internet_server_message` events.
      */
     fun sendRawCommand(json: String): Boolean {
         if (!isConnected.get() || !isAuthenticated.get()) return false
         val ws = webSocket ?: return false
-        val validated = try {
+        try {
+            // Parse purely as validation — the ORIGINAL string is what goes
+            // out. Re-serializing (org.json reorders keys and canonicalizes
+            // numbers, e.g. 25.0 -> 25) would alter app-authored frames and
+            // diverge from iOS, which sends verbatim.
             org.json.JSONObject(json)
         } catch (e: Exception) {
             emitDiagnostic("warning", "Rejected invalid raw server command", mapOf(
@@ -1062,7 +1175,10 @@ class InternetManager(
             ))
             return false
         }
-        return ws.send(validated.toString())
+        if (!rateLimiter.tryAcquire(System.currentTimeMillis())) return false
+        val sent = ws.send(json)
+        if (!sent) rateLimiter.refund()
+        return sent
     }
     
     /** Parse ISO-8601 timestamp string to Unix ms, or return current time if invalid. */
@@ -1122,6 +1238,10 @@ class InternetManager(
 
         inFlightTracker.prune(System.currentTimeMillis())
 
+        // Deferred control frames first: they are older than anything the
+        // queue will hand us and their commits are still pending.
+        drainPendingControlFrames()
+
         try {
             // Poll for next message from protocol - batch send up to 10 messages per poll
             // to efficiently flush the outbox after reconnection.
@@ -1139,7 +1259,18 @@ class InternetManager(
                     break
                 }
 
-                val message = protocol.internetGetNextMessage() ?: break
+                // Every relay-bound frame takes a token (see
+                // RelayRateLimiter): the poll cadence alone could burst 100
+                // frames/s at the relay's 10/s bucket, and over-budget frames
+                // are dropped server-side AFTER the local write "succeeded".
+                // Out of tokens: leave the rest queued in the core.
+                if (!rateLimiter.tryAcquire(System.currentTimeMillis())) break
+
+                val message = protocol.internetGetNextMessage()
+                if (message == null) {
+                    rateLimiter.refund()
+                    break
+                }
                 val controlOp = message.controlOp
                 if (controlOp != null) {
                     sendControlOp(
@@ -1232,7 +1363,7 @@ class InternetManager(
                 emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect for DORS", mapOf(
                     "failures" to failures
                 ))
-                mainHandler.post { teardownCurrentSocket("Send failures exceeded threshold") }
+                teardownSocket(ws, "Send failures exceeded threshold")
             }
         }
     }
@@ -1261,11 +1392,10 @@ class InternetManager(
                 // relay-native frames are best-effort. The translator's state
                 // commits only once every extra frame was written — a dropped
                 // frame must be re-sent by a later translation, not assumed
-                // applied.
+                // applied. Frames the rate limiter defers spill to the next
+                // poll tick with the commit still attached.
                 sendMessage(messageId, recipientId, data, replyToMsg)
-                if (sendRelayFramesBestEffort(translation.frames, controlOp)) {
-                    translation.commit?.invoke()
-                }
+                enqueueControlFrames(controlOp, translation.frames, translation.commit)
             }
 
             is RelayControlOpTranslator.Translation.Replace -> {
@@ -1290,9 +1420,7 @@ class InternetManager(
                     messagesSent.incrementAndGet()
                     inFlightTracker.recordSent(recipientId, messageId, System.currentTimeMillis())
                     try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
-                    if (sendRelayFramesBestEffort(translation.frames.drop(1), controlOp)) {
-                        translation.commit?.invoke()
-                    }
+                    enqueueControlFrames(controlOp, translation.frames.drop(1), translation.commit)
                     emitDiagnostic("debug", "Control op sent relay-native", mapOf(
                         "controlOp" to controlOp,
                         "messageId" to messageId,
@@ -1307,28 +1435,66 @@ class InternetManager(
                         "consecutiveFailures" to failures
                     ))
                     if (failures >= MAX_CONSECUTIVE_FAILURES) {
-                        mainHandler.post { teardownCurrentSocket("Send failures exceeded threshold") }
+                        teardownSocket(ws, "Send failures exceeded threshold")
                     }
                 }
             }
         }
     }
 
-    /** Returns true only when every frame was written to the socket. */
-    private fun sendRelayFramesBestEffort(frames: List<org.json.JSONObject>, controlOp: String): Boolean {
-        if (frames.isEmpty()) return true
-        val ws = webSocket ?: return false
-        for (frame in frames) {
-            if (!isConnected.get() || !isAuthenticated.get()) return false
-            if (!ws.send(frame.toString())) {
-                emitDiagnostic("warning", "Best-effort relay frame dropped", mapOf(
-                    "controlOp" to controlOp,
-                    "frameType" to frame.optString("type")
-                ))
-                return false
-            }
+    /**
+     * Queues a translation's extra frames for token-gated delivery and
+     * drains immediately (the common small case goes out in the same tick).
+     * The commit runs only after the translation's last frame is written.
+     * Main-thread only.
+     */
+    private fun enqueueControlFrames(
+        controlOp: String,
+        frames: List<org.json.JSONObject>,
+        commit: (() -> Unit)?
+    ) {
+        if (frames.isEmpty()) {
+            commit?.invoke()
+            return
         }
-        return true
+        pendingControlFrames.addLast(
+            PendingControlFrames(controlOp, ArrayDeque(frames), commit)
+        )
+        drainPendingControlFrames()
+    }
+
+    /**
+     * Sends deferred control frames, oldest first, as tokens allow. A socket
+     * write failure drops everything pending: the frames are per-connection,
+     * their commits stay uninvoked (and are generation-dead after the
+     * disconnect reset), and the reconnect's re-register re-derives them.
+     * Main-thread only.
+     */
+    private fun drainPendingControlFrames() {
+        if (pendingControlFrames.isEmpty()) return
+        val ws = webSocket ?: return
+        while (pendingControlFrames.isNotEmpty()) {
+            if (!isConnected.get() || !isAuthenticated.get()) return
+            val pending = pendingControlFrames.first()
+            while (pending.frames.isNotEmpty()) {
+                if (!rateLimiter.tryAcquire(System.currentTimeMillis())) return
+                val frame = pending.frames.first()
+                val frameJson = frame.toString()
+                if (!ws.send(frameJson)) {
+                    rateLimiter.refund()
+                    emitDiagnostic("warning", "Relay control frame dropped by socket", mapOf(
+                        "controlOp" to pending.controlOp,
+                        "frameType" to frame.optString("type")
+                    ))
+                    pendingControlFrames.clear()
+                    return
+                }
+                bytesSent.addAndGet(frameJson.toByteArray(Charsets.UTF_8).size.toLong())
+                pending.frames.removeFirst()
+            }
+            pending.commit?.invoke()
+            pendingControlFrames.removeFirst()
+        }
     }
 
     // MARK: - Ping
@@ -1412,17 +1578,27 @@ class InternetManager(
                 emptyList()
             }
             val now = System.currentTimeMillis()
-            val peers = presenceWatch.peersToQuery(coreWatchlist, now).filter { it != deviceId }
+            // Self is filtered BEFORE the merge so it can never enter the
+            // watch set and pin a rotation slot until the idle TTL.
+            val peers = presenceWatch.peersToQuery(coreWatchlist.filter { it != deviceId }, now)
+            var queried = 0
             for (peer in peers) {
+                // Presence queries yield to data traffic under rate
+                // pressure; skipped peers come around on a later rotation.
+                if (!rateLimiter.tryAcquire(now)) break
                 val checkMessage = org.json.JSONObject().apply {
                     put("type", "CheckPresence")
                     put("username", peer)
                 }
-                ws.send(checkMessage.toString())
+                if (!ws.send(checkMessage.toString())) {
+                    rateLimiter.refund()
+                    break
+                }
+                queried++
             }
-            if (peers.isNotEmpty()) {
+            if (queried > 0) {
                 emitDiagnostic("debug", "Presence watch tick", mapOf(
-                    "queried" to peers.size,
+                    "queried" to queried,
                     "watched" to presenceWatch.watchedPeers().size
                 ))
             }
@@ -1442,11 +1618,14 @@ class InternetManager(
     fun checkPresence(userId: String): Boolean {
         if (userId.isEmpty() || !isConnected.get() || !isAuthenticated.get()) return false
         val ws = webSocket ?: return false
+        if (!rateLimiter.tryAcquire(System.currentTimeMillis())) return false
         val checkMessage = org.json.JSONObject().apply {
             put("type", "CheckPresence")
             put("username", userId)
         }
-        return ws.send(checkMessage.toString())
+        val sent = ws.send(checkMessage.toString())
+        if (!sent) rateLimiter.refund()
+        return sent
     }
 
     // MARK: - State Management

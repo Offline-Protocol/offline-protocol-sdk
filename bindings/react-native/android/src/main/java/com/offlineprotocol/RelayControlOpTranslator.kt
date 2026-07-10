@@ -39,7 +39,11 @@ import org.json.JSONObject
  * frame was written to the socket. A dropped best-effort delta with an
  * optimistically committed snapshot would silently leave that member out of
  * relay fan-out for the rest of the connection; deferring the commit makes
- * the next register/leave re-send the missing frames instead.
+ * the next register/leave re-send the missing frames instead. Commits are
+ * additionally generation-guarded: a commit whose translation predates a
+ * [reset] is a no-op, so a chain that settles after a disconnect (or
+ * RateLimited) cannot write a phantom snapshot into the next connection's
+ * diff base.
  *
  * Known v1 limitation: a group rename re-registers, but the relay's
  * idempotent sync never updates the stored name (`ON CONFLICT DO NOTHING`).
@@ -87,6 +91,14 @@ class RelayControlOpTranslator(private val selfId: String) {
     }
 
     private val lock = Any()
+
+    /**
+     * Bumped by [reset]. Commit closures capture the generation of their
+     * translation and no-op if it moved: state written after a reset would
+     * describe frames sent on a connection (or inside a rate budget) the
+     * relay already discarded.
+     */
+    private var generation = 0L
 
     /** Last membership committed as registered with the relay, per group. */
     private val registeredMembers = HashMap<String, Set<String>>()
@@ -156,12 +168,13 @@ class RelayControlOpTranslator(private val selfId: String) {
                     if (groupId.isEmpty() || leavingMember != selfId || leaveSent.contains(groupId)) {
                         Translation.Tap(emptyList())
                     } else {
+                        val gen = generation
                         Translation.Tap(
                             listOf(JSONObject().apply {
                                 put("type", "LeaveGroup")
                                 put("group_id", groupId)
                             }),
-                            commit = { commitLeave(groupId) }
+                            commit = { commitLeave(gen, groupId) }
                         )
                     }
                 }
@@ -221,13 +234,15 @@ class RelayControlOpTranslator(private val selfId: String) {
                     put("username", removed)
                 })
             }
-            commit = { commitRegisteredMembers(groupId, desired) }
+            val gen = generation
+            commit = { commitRegisteredMembers(gen, groupId, desired) }
         }
         return Translation.Replace(frames, commit)
     }
 
-    private fun commitRegisteredMembers(groupId: String, members: Set<String>) {
+    private fun commitRegisteredMembers(generationAtTranslate: Long, groupId: String, members: Set<String>) {
         synchronized(lock) {
+            if (generationAtTranslate != generation) return
             // A GroupError may have marked the group admin-denied while the
             // frames were in flight; the denial wins.
             if (!memberDeltasDenied.contains(groupId)) {
@@ -236,8 +251,9 @@ class RelayControlOpTranslator(private val selfId: String) {
         }
     }
 
-    private fun commitLeave(groupId: String) {
+    private fun commitLeave(generationAtTranslate: Long, groupId: String) {
         synchronized(lock) {
+            if (generationAtTranslate != generation) return
             leaveSent.add(groupId)
             registeredMembers.remove(groupId)
             memberDeltasDenied.remove(groupId)
@@ -256,9 +272,26 @@ class RelayControlOpTranslator(private val selfId: String) {
         }
     }
 
+    /**
+     * Feed relay `GroupRoleChanged` frames: a promotion of this device to
+     * admin re-enables member deltas an earlier denial suppressed —
+     * otherwise a mid-connection promotion keeps membership edits away from
+     * the relay until the next reconnect. (The denial already dropped the
+     * group's committed snapshot, so the next register recomputes the full
+     * delta set.)
+     */
+    fun onRoleChanged(groupId: String, userId: String, newRole: String) {
+        if (groupId.isEmpty() || userId != selfId) return
+        if (!newRole.equals("admin", ignoreCase = true)) return
+        synchronized(lock) {
+            memberDeltasDenied.remove(groupId)
+        }
+    }
+
     /** Per-connection state: call on disconnect. */
     fun reset() {
         synchronized(lock) {
+            generation++
             registeredMembers.clear()
             memberDeltasDenied.clear()
             leaveSent.clear()
