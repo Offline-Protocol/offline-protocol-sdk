@@ -14557,6 +14557,12 @@ fn test_internet_control_op_classification() {
     // prefix is not a relay hint).
     let msg = make("bob", "__GRP_RELAY_BCAST__{\"group_id\":\"g1\"}");
     assert_eq!(protocol.internet_control_op(&msg), None);
+    // ...and never for a third-party frame addressed to us: only frames this
+    // device both originated and self-addressed are relay hints.
+    let msg = make_from("bea", "user123", "__GRP_RELAY_REG__{\"group_id\":\"g1\"}");
+    assert_eq!(protocol.internet_control_op(&msg), None);
+    let msg = make_from("bea", "user123", "__GRP_RELAY_BCAST__{\"group_id\":\"g1\"}");
+    assert_eq!(protocol.internet_control_op(&msg), None);
 
     // Normal traffic — including MLS/e2e frames — is never classified.
     for content in [
@@ -14728,6 +14734,62 @@ fn test_delivery_error_after_wire_confirm_corrects_false_sent() {
     assert_eq!(welcomes_after, welcomes_before);
 
     // The presence-online edge is what re-arms it.
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::SendAttempted
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_late_wire_confirm_does_not_resurrect_unreachable_verdict() {
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    // The reverse race of the false-Sent correction: the relay's
+    // DeliveryError beats the bridge's socket-write confirm, so the
+    // unreachable verdict lands while the record is still SendAttempted.
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert!(lifecycle.next_retry_at.is_none());
+
+    // The late confirm belongs to the very send the relay already failed.
+    // It must not resurrect the false Sent (Failed -> Sent is otherwise
+    // legal) nor emit a welcome_send_succeeded contradicting the corrective
+    // welcome_send_failed the app already saw.
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::WelcomeSendSucceeded { .. })),
+        "a stale confirm must not report success for a relay-failed send"
+    );
+
+    // The peer stays rescuable: the presence-online edge re-arms as usual.
     protocol.on_peer_presence("bob", true, None);
     assert_eq!(
         protocol.welcome_lifecycles.get("bob").unwrap().state,
