@@ -14461,16 +14461,18 @@ fn test_welcome_pending_peers_tracks_unconfirmed_sessions() {
 #[test]
 fn test_internet_control_op_classification() {
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let make = |recipient: &str, content: &str| {
+    let make_from = |sender: &str, recipient: &str, content: &str| {
         Message::new(
-            UserId::new("user123").unwrap(),
+            UserId::new(sender).unwrap(),
             UserId::new(recipient).unwrap(),
             AppId::new("test-app").unwrap(),
             content,
         )
     };
+    let make = |recipient: &str, content: &str| make_from("user123", recipient, content);
 
-    // Connection ops classify for any recipient, payload = JSON after prefix.
+    // Self-originated connection ops classify for any recipient,
+    // payload = JSON after prefix.
     let msg = make("bob", "__CONN_REQ__{\"sender_name\":\"Alice\"}");
     assert_eq!(
         protocol.internet_control_op(&msg),
@@ -14498,6 +14500,27 @@ fn test_internet_control_op_classification() {
         protocol.internet_control_op(&msg),
         Some(("group_mls_leave", "{\"group_id\":\"g1\"}".to_string()))
     );
+
+    // A relayed third-party frame (mesh forwarding puts other users'
+    // messages in our internet outbox verbatim) must NOT classify: a
+    // relay-native replacement would be issued on OUR authenticated
+    // connection and misattribute the op to us. It stays an opaque
+    // SendMessage.
+    for content in [
+        "__CONN_REQ__{\"sender_name\":\"Bea\"}",
+        "__CONN_ACC__{\"accepted_by_name\":\"Bea\"}",
+        "__CONN_REJ__",
+        "__CONN_CAN__",
+        "__GRP_MLS_LEAVE__{\"group_id\":\"g1\"}",
+    ] {
+        let msg = make_from("bea", "carol", content);
+        assert_eq!(
+            protocol.internet_control_op(&msg),
+            None,
+            "relayed third-party frame {:?} must not classify",
+            content
+        );
+    }
 
     // Relay hints classify only when self-addressed...
     let msg = make("user123", "__GRP_RELAY_REG__{\"group_id\":\"g1\"}");

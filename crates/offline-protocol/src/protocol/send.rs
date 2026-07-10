@@ -1798,22 +1798,32 @@ impl OfflineProtocol {
     ///   notification must still be delivered verbatim, but the bridge also
     ///   sends one relay-native `LeaveGroup` so the relay's group registry
     ///   (which feeds invite links and broadcast fan-out) doesn't go stale.
+    ///
+    /// Only frames *originated by this device* classify. The mesh relays
+    /// third-party messages verbatim (`try_relay_message`), and a relayed
+    /// `__CONN_REQ__` from B to C transiting our internet outbox must stay
+    /// an opaque `SendMessage` — a relay-native replacement would be issued
+    /// on OUR authenticated connection and misattribute the request to us.
+    /// (The relay-hint ops are equivalently guarded by their self-addressed
+    /// recipient check.)
     pub fn internet_control_op(&self, message: &Message) -> Option<(&'static str, String)> {
         let content = message.content.as_str();
-        if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_REQUEST) {
-            return Some(("conn_req", payload.to_string()));
-        }
-        if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_ACCEPT) {
-            return Some(("conn_acc", payload.to_string()));
-        }
-        if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_REJECT) {
-            return Some(("conn_rej", payload.to_string()));
-        }
-        if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_CANCEL) {
-            return Some(("conn_can", payload.to_string()));
-        }
-        if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_MLS_LEAVE) {
-            return Some(("group_mls_leave", payload.to_string()));
+        if message.sender.as_str() == self.config.user_id {
+            if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_REQUEST) {
+                return Some(("conn_req", payload.to_string()));
+            }
+            if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_ACCEPT) {
+                return Some(("conn_acc", payload.to_string()));
+            }
+            if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_REJECT) {
+                return Some(("conn_rej", payload.to_string()));
+            }
+            if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_CANCEL) {
+                return Some(("conn_can", payload.to_string()));
+            }
+            if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_MLS_LEAVE) {
+                return Some(("group_mls_leave", payload.to_string()));
+            }
         }
         if message.recipient.as_str() == self.config.user_id {
             if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_RELAY_REGISTER) {
