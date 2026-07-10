@@ -2633,10 +2633,9 @@ fn test_relay_sync_on_internet_available_transition() {
 
     // The registration frame goes out on the transition...
     assert!(
-        internet_handle
-            .sent_messages()
-            .iter()
-            .any(|m| m.content.starts_with(internal_prefixes::GROUP_RELAY_REGISTER)),
+        internet_handle.sent_messages().iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)),
         "Registration frame should be sent when Internet becomes available"
     );
     // ...but enqueueing proves nothing about relay support: sync is only set
@@ -2955,10 +2954,9 @@ fn test_relay_register_group_on_create() {
 
     // Creation sends the self-addressed registration frame...
     assert!(
-        internet_handle
-            .sent_messages()
-            .iter()
-            .any(|m| m.content.starts_with(internal_prefixes::GROUP_RELAY_REGISTER)),
+        internet_handle.sent_messages().iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)),
         "Registration frame should be sent on group creation with Internet available"
     );
     // ...but the group is only marked relay-synced by the relay's
