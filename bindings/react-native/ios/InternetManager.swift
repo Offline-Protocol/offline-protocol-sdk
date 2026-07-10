@@ -34,10 +34,16 @@ public class InternetManager: NSObject, TransportManager {
     private var authToken: String? = nil
     private var serverUrl: URL?
     
-    // WebSocket components
+    // WebSocket components.
+    // Written ONLY on main (connect/disconnect via runOnMainSync, plus
+    // teardownSocket and the terminal close callbacks, which all hop to
+    // main); read from the URLSession delegate queue, messageQueue, and RN
+    // threads (sendRawCommand, checkPresence). The single-writer rule is
+    // what makes the compare-then-detach in teardownSocket and the close
+    // funnel race-free — mirrors the Kotlin bridge's `webSocket` property.
     private var webSocketTask: URLSessionWebSocketTask?
     private var urlSession: URLSession?
-    
+
     // Message polling
     private var messageTimer: DispatchSourceTimer?
     private var pingTimer: DispatchSourceTimer?
@@ -54,6 +60,9 @@ public class InternetManager: NSObject, TransportManager {
     private var isConnected = false
     private var isConnecting = false
     private var isAuthenticated = false
+    // True between pause() and resume(): a background reconnect must not
+    // restart the poll/ping/presence timers the app paused.
+    private var isPaused = false
     private var transportStartAt: Date?
     
     // Failure tracking for DORS. Atomic (lock-guarded): send/ping completions
@@ -70,13 +79,49 @@ public class InternetManager: NSObject, TransportManager {
     // Which peers to query via CheckPresence, and how many per tick.
     private let presenceWatch = PresenceWatchPolicy()
     private var presenceWatchTimer: DispatchSourceTimer?
-    private let presenceWatchTimerLock = NSLock()
+
+    // Timer lifecycles are invoked from several contexts (the URLSession
+    // delegate queue via handleAuthenticated, RN threads via
+    // stop/pause/resume, main via handleConnectionClosed); the lock makes
+    // each swap atomic so two concurrent starts can't leak a live timer.
+    // One lock covers all three timers.
+    private let timerLock = NSLock()
 
     // Translates core-tagged server-plane control frames (controlOp on
     // InternetMessage) into relay-native ops. `let`, not `lazy var`: first
     // touch could otherwise race between messageQueue (translate) and the
     // URLSession delegate queue (onGroupError) — lazy init is unsynchronized.
     private let controlOpTranslator: RelayControlOpTranslator
+
+    // Client-side mirror of the relay's token bucket: every relay-bound
+    // frame takes a token before the socket write (a server-side drop after
+    // a "successful" local write is invisible to the sender).
+    private let rateLimiter = RelayRateLimiter()
+
+    /// Control-op frames deferred by the rate limiter, drained (oldest
+    /// first) at the start of each poll tick. A translation's commit closure
+    /// runs only after its LAST frame's send completion succeeded (iOS
+    /// completions are async — the drain sends one frame at a time).
+    /// messageQueue-confined; cleared on disconnect/stop/RateLimited — the
+    /// frames are per-connection and their commits are generation-guarded
+    /// anyway.
+    private final class PendingControlFrames {
+        let controlOp: String
+        var frames: [[String: Any]]
+        let commit: (() -> Void)?
+
+        init(controlOp: String, frames: [[String: Any]], commit: (() -> Void)?) {
+            self.controlOp = controlOp
+            self.frames = frames
+            self.commit = commit
+        }
+    }
+
+    private var pendingControlFrames: [PendingControlFrames] = []
+
+    /// True while a deferred frame's send completion is outstanding — the
+    /// poll loop must not pull new messages mid-chain. messageQueue-confined.
+    private var isDrainingControlFrames = false
 
     /// Receives raw relay frames that are app/server concerns rather than SDK
     /// concerns (invite links, role changes, rate limiting, unknown types) —
@@ -179,16 +224,21 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     public func stop() {
-        guard state == .running || state == .starting else {
-            return
+        // Even a transport that already stopped itself (e.g. after
+        // max-reconnect-attempts set .stopped) still holds a URLSession that
+        // retains its delegate (self) plus per-connection state; stop() must
+        // always release those instead of early-returning and leaking the
+        // session until process exit.
+        let wasActive = state == .running || state == .starting
+
+        if wasActive {
+            updateState(.stopping)
         }
-        
-        updateState(.stopping)
-        
+
         // Cancel reconnect attempts
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
-        
+
         // Stop timers
         stopMessagePolling()
         stopPingTimer()
@@ -201,8 +251,20 @@ public class InternetManager: NSObject, TransportManager {
         // Close WebSocket
         disconnect()
 
-        // Notify protocol
-        try? protocolInstance.internetStatusChanged(isConnected: false)
+        // Per-connection state must not survive a stop()/start() cycle:
+        // disconnect() detaches the task before cancelling it, so the close
+        // callbacks are suppressed as stale and handleConnectionClosed's
+        // clear/reset never runs for this path.
+        inFlightTracker.clear()
+        controlOpTranslator.reset()
+        messageQueue.async { [weak self] in
+            self?.pendingControlFrames.removeAll()
+        }
+
+        if wasActive {
+            // Notify protocol
+            try? protocolInstance.internetStatusChanged(isConnected: false)
+        }
 
         // URLSession retains its delegate (self) until invalidated; without
         // this, deinit is unreachable and every start() after stop() leaks a
@@ -210,11 +272,17 @@ public class InternetManager: NSObject, TransportManager {
         urlSession?.invalidateAndCancel()
         urlSession = nil
 
-        updateState(.stopped)
+        if wasActive {
+            updateState(.stopped)
+        }
         emitDiagnostic("info", "Internet transport stopped")
     }
 
     public func pause() {
+        // The flag makes the pause durable: a background network blip
+        // reconnects and re-authenticates, and handleAuthenticated must not
+        // restart the timers the app paused.
+        isPaused = true
         stopMessagePolling()
         stopPingTimer()
         // A backgrounded app must not keep spending battery and relay
@@ -224,13 +292,14 @@ public class InternetManager: NSObject, TransportManager {
     }
 
     public func resume() {
+        isPaused = false
         if state == .running && isConnected {
             startMessagePolling()
             startPingTimer()
             startPresenceWatch()
         }
     }
-    
+
     public func getMetrics() -> [String: Any] {
         return [
             "bytes_sent": bytesSent.get(),
@@ -238,78 +307,115 @@ public class InternetManager: NSObject, TransportManager {
             "messages_sent": messagesSent.get(),
             "messages_received": messagesReceived.get(),
             "is_connected": isConnected,
+            "is_authenticated": isAuthenticated,
             "reconnect_attempts": reconnectAttempts
         ]
     }
     
     // MARK: - Connection Management
-    
-    private func connect() {
-        guard let url = serverUrl else { return }
-        guard !isConnecting && !isConnected else { return }
-        
-        isConnecting = true
-        
-        // Create WebSocket task
-        var request = URLRequest(url: url)
-        request.timeoutInterval = CONNECTION_TIMEOUT
-        // Add device ID header for identification
-        request.setValue(deviceId, forHTTPHeaderField: "X-Device-ID")
-        
-        webSocketTask = urlSession?.webSocketTask(with: request)
-        webSocketTask?.resume()
-        
-        emitDiagnostic("info", "Connecting to WebSocket", context: [
-            "url": url.absoluteString
-        ])
-        
-        // Start receiving messages
-        receiveMessage()
+
+    /// Runs `action` on main, synchronously. webSocketTask is written only
+    /// on main; lifecycle entry points (start/stop via RN threads) hop here
+    /// so every write honors the single-writer rule — and stop() must
+    /// observe the detach before invalidating the session. Mirrors the
+    /// Kotlin bridge's runOnMainSync.
+    private func runOnMainSync(_ action: () -> Void) {
+        if Thread.isMainThread {
+            action()
+        } else {
+            DispatchQueue.main.sync(execute: action)
+        }
     }
-    
+
+    private func connect() {
+        runOnMainSync {
+            guard let url = serverUrl else { return }
+            guard !isConnecting && !isConnected else { return }
+            // stop() may have run between a reconnect being scheduled and
+            // firing. The session null-check must precede the isConnecting
+            // latch: with no session there is no callback to ever clear the
+            // flag, and every future connect() would early-return — a wedged
+            // transport.
+            guard let session = urlSession else { return }
+
+            isConnecting = true
+
+            // Create WebSocket task
+            var request = URLRequest(url: url)
+            request.timeoutInterval = CONNECTION_TIMEOUT
+            // Add device ID header for identification
+            request.setValue(deviceId, forHTTPHeaderField: "X-Device-ID")
+
+            let task = session.webSocketTask(with: request)
+            webSocketTask = task
+            task.resume()
+
+            emitDiagnostic("info", "Connecting to WebSocket", context: [
+                "url": url.absoluteString
+            ])
+
+            // Start receiving messages
+            receiveMessage()
+        }
+    }
+
     private func disconnect() {
-        // Detach before cancel so the cancel-triggered delegate/receive
-        // callbacks see a stale task and no-op (see isStale).
-        let task = webSocketTask
-        webSocketTask = nil
-        task?.cancel(with: .goingAway, reason: nil)
-        isConnected = false
-        isConnecting = false
-        isAuthenticated = false
+        runOnMainSync {
+            // Detach before cancel so the cancel-triggered delegate/receive
+            // callbacks see a stale task and no-op (see isStale).
+            let task = webSocketTask
+            webSocketTask = nil
+            task?.cancel(with: .goingAway, reason: nil)
+            isConnected = false
+            isConnecting = false
+            isAuthenticated = false
+        }
     }
 
     /// True when the callback belongs to a socket task that is no longer the
     /// manager's current one (replaced by a reconnect or detached by a
-    /// teardown). A stale task's terminal callbacks must not clear the
+    /// teardown/close). A stale task's terminal callbacks must not clear the
     /// in-flight tracker, reset the translator, or report the transport down
-    /// while a newer, healthy connection is live. Mirrors the Kotlin
-    /// listener's stale-socket guard.
+    /// while a newer, healthy connection is live; a stale task's send/ping
+    /// outcomes must not touch failure counters or trigger teardown.
+    /// webSocketTask is written only on main (single-writer rule); reads
+    /// from other queues are the same best-effort compare the Kotlin
+    /// listener's stale-socket guard does.
     private func isStale(_ task: URLSessionTask) -> Bool {
         return task !== webSocketTask
     }
 
-    /// Cancels and detaches the current socket task, then runs the closed
-    /// handler exactly once for it. Detaching before cancel makes the
-    /// cancel-triggered delegate/receive callbacks no-ops (the stale-task
-    /// guard), so a dead socket can never tear down the connection rebuilt
-    /// after it. Mirrors the Kotlin bridge's teardownCurrentSocket.
-    private func teardownCurrentSocket(reason: String) {
-        let task = webSocketTask
-        webSocketTask = nil
-        task?.cancel(with: .goingAway, reason: nil)
-        handleConnectionClosed(error: NSError(
-            domain: "OfflineProtocol.InternetManager",
-            code: -1,
-            userInfo: [NSLocalizedDescriptionKey: reason]
-        ))
+    /// Cancels and detaches `task` IF it is still the current socket, then
+    /// runs the closed handler exactly once for it. Detaching before cancel
+    /// makes the cancel-triggered delegate/receive callbacks no-ops (the
+    /// stale-task guard), so a dead socket can never tear down the
+    /// connection rebuilt after it. Scoping the teardown to the task that
+    /// observed the failure — and running it on main, the only thread that
+    /// writes webSocketTask — closes the reverse race too: a stale path
+    /// (late AuthError, queued send-failure teardown) can never cancel a
+    /// newer, healthy socket. Mirrors the Kotlin bridge's teardownSocket.
+    private func teardownSocket(ifCurrent task: URLSessionWebSocketTask, reason: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, task === self.webSocketTask else { return }
+            self.webSocketTask = nil
+            task.cancel(with: .goingAway, reason: nil)
+            self.handleConnectionClosed(error: NSError(
+                domain: "OfflineProtocol.InternetManager",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: reason]
+            ))
+        }
     }
-    
+
     private func handleConnectionOpened() {
         isConnected = true
         isConnecting = false
         isAuthenticated = false
-        reconnectAttempts = 0
-        currentReconnectDelay = RECONNECT_INITIAL_DELAY
+        // Backoff deliberately NOT reset here: only a full authenticate
+        // proves the connection good (handleAuthenticated). Resetting on
+        // TCP open would let a persistently bad token cycle
+        // connect → AuthError → teardown at the initial 1s delay forever,
+        // hammering the relay.
         consecutiveSendFailures.set(0)
         consecutivePingFailures.set(0)
         
@@ -351,23 +457,31 @@ public class InternetManager: NSObject, TransportManager {
     
     private func handleAuthenticated(userId: String, username: String) {
         isAuthenticated = true
-        
+        // The relay accepted us — this, not the TCP open, is what proves the
+        // connection good and earns a backoff reset.
+        reconnectAttempts = 0
+        currentReconnectDelay = RECONNECT_INITIAL_DELAY
+
         updateState(.running)
-        
+
         // Notify protocol - this will trigger outbox flush for pending messages
         try? protocolInstance.internetStatusChanged(isConnected: true)
-        
-        // Start polling, pinging, and the presence watch
-        startMessagePolling()
-        startPingTimer()
-        startPresenceWatch()
 
-        // Immediately poll for messages to flush outbox after reconnection
-        // This ensures messages queued during disconnection are sent promptly
-        messageQueue.async { [weak self] in
-            self?.pollAndSendMessages()
+        // Start polling, pinging, and the presence watch — unless the app
+        // paused the transport; a background reconnect must stay quiet and
+        // resume() restarts the timers.
+        if !isPaused {
+            startMessagePolling()
+            startPingTimer()
+            startPresenceWatch()
+
+            // Immediately poll for messages to flush outbox after reconnection
+            // This ensures messages queued during disconnection are sent promptly
+            messageQueue.async { [weak self] in
+                self?.pollAndSendMessages()
+            }
         }
-        
+
         emitDiagnostic("info", "Authenticated with relay server", context: [
             "userId": userId,
             "username": username
@@ -392,7 +506,12 @@ public class InternetManager: NSObject, TransportManager {
         // groups from scratch (sync_groups_to_relay re-sends on the
         // internet 0→1 transition).
         controlOpTranslator.reset()
-        
+        // Deferred frames belong to the dead connection; their commits are
+        // generation-dead after the reset above.
+        messageQueue.async { [weak self] in
+            self?.pendingControlFrames.removeAll()
+        }
+
         // Always notify protocol of disconnection so DORS excludes Internet from
         // available transports and can switch to BLE (or WiFi Direct). Without this,
         // the core would keep Internet in the available set and keep selecting it.
@@ -421,6 +540,10 @@ public class InternetManager: NSObject, TransportManager {
     
     private func scheduleReconnect() {
         guard autoReconnect else { return }
+        // A close can race stop(): its scheduled reconnect must not revive a
+        // transport the app already stopped (the delayed connect() would
+        // find urlSession nilled and leave the transport wedged).
+        guard state != .stopping && state != .stopped else { return }
         guard maxReconnectAttempts == 0 || reconnectAttempts < maxReconnectAttempts else {
             emitDiagnostic("error", "Max reconnect attempts reached", context: [
                 "attempts": reconnectAttempts,
@@ -461,32 +584,47 @@ public class InternetManager: NSObject, TransportManager {
 
             switch result {
             case .success(let message):
-                self.handleReceivedMessage(message)
+                self.handleReceivedMessage(message, task: task)
                 // Continue receiving
                 self.receiveMessage()
 
             case .failure(let error):
-                self.handleConnectionClosed(error: error)
+                self.handleSocketTerminated(task, error: error)
             }
         }
     }
-    
-    private func handleReceivedMessage(_ message: URLSessionWebSocketTask.Message) {
+
+    /// The single task-scoped close funnel. URLSession fires 2-3 terminal
+    /// signals per disconnect (receive-loop failure, didCloseWith,
+    /// didCompleteWithError); each hops to main, checks the task is still
+    /// current, detaches FIRST, then runs handleConnectionClosed. After the
+    /// first entry detaches, the later duplicates fail the identity check
+    /// and become no-ops — otherwise every disconnect would inflate
+    /// reconnectAttempts (and the backoff delay) 2-3x.
+    private func handleSocketTerminated(_ task: URLSessionTask, error: Error?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, task === self.webSocketTask else { return }
+            self.webSocketTask = nil
+            self.handleConnectionClosed(error: error)
+        }
+    }
+
+    private func handleReceivedMessage(_ message: URLSessionWebSocketTask.Message, task: URLSessionWebSocketTask) {
         switch message {
         case .data(let data):
-            processReceivedData(data)
+            processReceivedData(data, task: task)
         case .string(let text):
             if let data = text.data(using: .utf8) {
-                processReceivedData(data)
+                processReceivedData(data, task: task)
             }
         @unknown default:
             emitDiagnostic("warning", "Unknown WebSocket message type")
         }
     }
-    
-    private func processReceivedData(_ data: Data) {
+
+    private func processReceivedData(_ data: Data, task: URLSessionWebSocketTask) {
         bytesReceived.add(Int64(data.count))
-        
+
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let messageType = json["type"] as? String else {
             emitDiagnostic("warning", "Received non-JSON or invalid message", context: [
@@ -494,7 +632,16 @@ public class InternetManager: NSObject, TransportManager {
             ])
             return
         }
-        
+
+        // One malformed frame must degrade to a diagnostic, never propagate.
+        // The Kotlin bridge wraps this dispatch in a catch; Swift dictionary
+        // casts return nil instead of throwing, so the per-field guards (and
+        // per-entry compactMaps) inside the dispatch are the equivalent
+        // containment.
+        dispatchRelayFrame(json, messageType: messageType, task: task)
+    }
+
+    private func dispatchRelayFrame(_ json: [String: Any], messageType: String, task: URLSessionWebSocketTask) {
         switch messageType {
         case "Authenticated":
             // Handle authentication success
@@ -512,7 +659,7 @@ public class InternetManager: NSObject, TransportManager {
             // its eventual close callback would race the reconnect's fresh
             // connection (the teardown detaches it first, so the
             // cancel-triggered callbacks are ignored as stale).
-            teardownCurrentSocket(reason: reason)
+            teardownSocket(ifCurrent: task, reason: reason)
             
         case "MessageSent":
             // Handle MessageSent event from WebSocket server
@@ -535,13 +682,15 @@ public class InternetManager: NSObject, TransportManager {
             }
             
         case "MessageReceived":
-            // Handle incoming direct message
-            guard let senderId = json["sender"] as? String,
-                  let content = json["content"] as? String else {
+            // Handle incoming direct message. Only the sender is required;
+            // a missing content degrades to "" (Kotlin parity) instead of
+            // dropping the frame.
+            guard let senderId = json["sender"] as? String, !senderId.isEmpty else {
                 emitDiagnostic("warning", "Invalid MessageReceived format")
                 return
             }
-            
+            let content = json["content"] as? String ?? ""
+
             let replyToMsg = json["reply_to_msg"] as? String
             let messageId = json["message_id"] as? String
             
@@ -647,7 +796,7 @@ public class InternetManager: NSObject, TransportManager {
                 }
                 if let num = json["last_seen"] as? NSNumber,
                    CFGetTypeID(num) != CFBooleanGetTypeID() {
-                    return num.int64Value
+                    return RelayTimestamps.normalizeEpochToMs(num.int64Value)
                 }
                 return nil
             }()
@@ -830,20 +979,26 @@ public class InternetManager: NSObject, TransportManager {
             let name = json["name"] as? String ?? ""
             let createdBy = json["created_by"] as? String ?? ""
             let createdAt = json["created_at"] as? String ?? ""
-            let membersRaw = json["members"] as? [[String: Any]] ?? []
-            // Skip entries without a user_id (parity with the Kotlin bridge —
-            // apps must not see phantom members).
-            let members: [[String: String]] = membersRaw.compactMap { m in
-                guard let memberId = m["user_id"] as? String, !memberId.isEmpty else { return nil }
+            let membersRaw = json["members"] as? [Any] ?? []
+            // Per-entry tolerance (parity with the Kotlin bridge): one
+            // non-object element or an entry without a user_id is skipped,
+            // never allowed to throw away the whole member list — and apps
+            // must not see phantom members.
+            let members: [[String: String]] = membersRaw.compactMap { raw in
+                guard let m = raw as? [String: Any],
+                      let memberId = m["user_id"] as? String, !memberId.isEmpty else { return nil }
                 return ["user_id": memberId, "role": m["role"] as? String ?? "member", "joined_at": m["joined_at"] as? String ?? ""]
             }
             injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_INFO__", payload: ["group_id": groupId, "name": name, "created_by": createdBy, "created_at": createdAt, "members": members])
             
         case "UserGroups":
-            guard let groupsRaw = json["groups"] as? [[String: Any]] else { return }
-            // Skip entries without a group_id (parity with the Kotlin bridge).
-            let groups: [[String: String]] = groupsRaw.compactMap { g in
-                guard let gId = g["group_id"] as? String, !gId.isEmpty else { return nil }
+            guard let groupsRaw = json["groups"] as? [Any] else { return }
+            // Per-entry tolerance (parity with the Kotlin bridge): a
+            // malformed element or one without a group_id is skipped, never
+            // allowed to nuke the whole groups array.
+            let groups: [[String: String]] = groupsRaw.compactMap { raw in
+                guard let g = raw as? [String: Any],
+                      let gId = g["group_id"] as? String, !gId.isEmpty else { return nil }
                 return ["group_id": gId, "name": g["name"] as? String ?? "", "created_at": g["created_at"] as? String ?? ""]
             }
             injectGroupInternalMessage(senderId: "relay", prefix: "__USER_GROUPS__", payload: ["groups": groups])
@@ -866,20 +1021,38 @@ public class InternetManager: NSObject, TransportManager {
 
         case "RateLimited":
             // The relay dropped whatever exceeded the bucket — possibly a
-            // best-effort member delta whose membership snapshot the
-            // translator has already committed. Reset so the next register
-            // re-derives deltas from scratch; the worst case is an
-            // idempotent re-registration.
+            // member delta whose membership snapshot a commit is about to
+            // record. Reset so in-flight commits die (generation guard) and
+            // the next register re-derives deltas from scratch; the worst
+            // case is an idempotent re-registration. Drain the local bucket
+            // too: it was clearly too optimistic.
             controlOpTranslator.reset()
+            rateLimiter.drain(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+            messageQueue.async { [weak self] in
+                self?.pendingControlFrames.removeAll()
+            }
             emitServerMessage(json)
             emitDiagnostic("warning", "Relay rate limit hit — translator state reset")
+
+        case "GroupRoleChanged":
+            // A promotion of this device to admin re-enables member deltas
+            // an earlier denial suppressed.
+            controlOpTranslator.onRoleChanged(
+                groupId: json["group_id"] as? String ?? "",
+                userId: json["user_id"] as? String ?? "",
+                newRole: json["new_role"] as? String ?? json["role"] as? String ?? ""
+            )
+            emitServerMessage(json)
+            emitDiagnostic("debug", "Relay server message forwarded", context: [
+                "type": messageType
+            ])
 
         // Server-plane frames that are app concerns, not SDK concerns —
         // forwarded verbatim as the internet_server_message event so the
         // invite-link lifecycle and misc server events can ride the SDK's
         // socket without a second WebSocket in the app.
         case "GroupInviteLinkCreated", "GroupInviteLinkRevoked", "GroupJoinedViaInvite",
-             "GroupInviteJoinPending", "GroupRoleChanged", "GroupDeleted":
+             "GroupInviteJoinPending", "GroupDeleted":
             emitServerMessage(json)
             emitDiagnostic("debug", "Relay server message forwarded", context: [
                 "type": messageType
@@ -956,21 +1129,28 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
     
+    // Same lock-guarded swap as the presence watch timer (see timerLock):
+    // two concurrent starts must not leak a live timer.
     private func startMessagePolling() {
-        stopMessagePolling()
-        
         let timer = DispatchSource.makeTimerSource(queue: messageQueue)
         timer.schedule(deadline: .now(), repeating: MESSAGE_POLL_INTERVAL)
         timer.setEventHandler { [weak self] in
             self?.pollAndSendMessages()
         }
-        timer.resume()
+        timerLock.lock()
+        let previous = messageTimer
         messageTimer = timer
+        timerLock.unlock()
+        previous?.cancel()
+        timer.resume()
     }
-    
+
     private func stopMessagePolling() {
-        messageTimer?.cancel()
+        timerLock.lock()
+        let timer = messageTimer
         messageTimer = nil
+        timerLock.unlock()
+        timer?.cancel()
     }
     
     private func pollAndSendMessages() {
@@ -981,6 +1161,18 @@ public class InternetManager: NSObject, TransportManager {
         }
 
         inFlightTracker.prune(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+
+        // Deferred control frames first: they are older than anything the
+        // queue will hand us and their commits are still pending.
+        drainPendingControlFrames()
+        // The drain settles asynchronously (iOS send completions); until the
+        // spill queue is empty AND the in-flight frame resolved, pulling
+        // more messages could interleave frames into a register's delta
+        // chain — or translate a same-group re-register against an
+        // uncommitted diff base and permanently miss a RemoveGroupMember.
+        // The next 100ms tick retries. (The Kotlin bridge gets this ordering
+        // for free from OkHttp's synchronous enqueue.)
+        guard pendingControlFrames.isEmpty, !isDrainingControlFrames else { return }
 
         // Timer already runs on messageQueue, no need for extra dispatch
         // Poll for next message from protocol - batch send up to 10 messages per poll
@@ -998,42 +1190,30 @@ public class InternetManager: NSObject, TransportManager {
                 ])
                 break
             }
-            
+
+            // Every relay-bound frame takes a token (see RelayRateLimiter):
+            // the poll cadence alone could burst 100 frames/s at the relay's
+            // 10/s bucket, and over-budget frames are dropped server-side
+            // AFTER the local write "succeeded". Out of tokens: leave the
+            // rest queued in the core.
+            guard rateLimiter.tryAcquire(nowMs: Int64(Date().timeIntervalSince1970 * 1000)) else {
+                break
+            }
+
             guard let message = self.protocolInstance.internetGetNextMessage() else {
+                rateLimiter.refund()
                 break
             }
 
             if let controlOp = message.controlOp {
-                // A control op's frame chain (primary + member deltas +
-                // translator commit) settles asynchronously on the URLSession
-                // delegate queue. Block this poll loop until it does: the
-                // next translate must see the committed diff base (or a
-                // same-batch re-register computes deltas against a stale
-                // snapshot and can permanently miss a RemoveGroupMember), and
-                // later messages must not hit the wire between a register and
-                // its deltas. Mirrors the Kotlin bridge, where OkHttp's
-                // synchronous enqueue gives this ordering for free.
-                let settled = DispatchSemaphore(value: 0)
                 self.sendControlOp(
                     messageId: message.messageId,
                     recipientId: message.recipientId,
                     controlOp: controlOp,
                     controlPayload: message.controlPayload ?? "",
                     data: Data(message.data),
-                    replyToMsg: message.replyToMsg,
-                    onSettled: { settled.signal() }
+                    replyToMsg: message.replyToMsg
                 )
-                // Settlement happens on the delegate queue, never on
-                // messageQueue, so waiting here cannot deadlock. The timeout
-                // is a safety net for a wedged socket: the batch ends, and a
-                // chain that settles late still commits after its writes.
-                if settled.wait(timeout: .now() + 10) == .timedOut {
-                    emitDiagnostic("warning", "Control-op send chain timed out, ending batch", context: [
-                        "controlOp": controlOp,
-                        "messageId": message.messageId
-                    ])
-                    break
-                }
             } else {
                 self.sendMessage(
                     messageId: message.messageId,
@@ -1043,6 +1223,13 @@ public class InternetManager: NSObject, TransportManager {
                 )
             }
             batchSent += 1
+
+            // A control op may have spilled extra frames into the pending
+            // queue; stop pulling until its chain settles (same reasoning
+            // as the guard above the batch).
+            if !pendingControlFrames.isEmpty || isDrainingControlFrames {
+                break
+            }
         }
 
         if batchSent > 1 {
@@ -1056,7 +1243,7 @@ public class InternetManager: NSObject, TransportManager {
         messageId: String,
         recipientId: String,
         data: Data,
-        replyToMsg replyToMsgParam: String? = nil
+        replyToMsg: String? = nil
     ) {
         // Re-check connection state right before sending
         // This handles race conditions where connection drops between poll and send
@@ -1076,51 +1263,34 @@ public class InternetManager: NSObject, TransportManager {
         // Convert data to string content for the relay protocol
         let content = String(data: data, encoding: .utf8) ?? data.base64EncodedString()
 
-        // reply_to_msg comes from the Rust SDK via InternetMessage (parity
-        // with the Kotlin bridge); the content re-parse below remains only as
-        // a legacy fallback — non-JSON content (e.g. MLS ciphertext) has
-        // nothing to parse and would silently drop the field.
-        var replyToMsg: String? = replyToMsgParam.flatMap { $0.isEmpty ? nil : $0 }
-        if replyToMsg == nil,
-           let contentData = content.data(using: .utf8),
-           let messageJson = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any] {
-            if let replyToMsgValue = messageJson["reply_to_msg"] {
-                // reply_to_msg can be a string (MessageId as string) or an object
-                if let replyToMsgString = replyToMsgValue as? String {
-                    replyToMsg = replyToMsgString
-                } else if let replyToMsgDict = replyToMsgValue as? [String: Any] {
-                    // If it's an object, try to extract a string representation
-                    // MessageId might be serialized as an object with nested fields
-                    if let stringValue = replyToMsgDict.values.first as? String {
-                        replyToMsg = stringValue
-                    } else if let replyToMsgData = try? JSONSerialization.data(withJSONObject: replyToMsgDict),
-                                let replyToMsgString = String(data: replyToMsgData, encoding: .utf8) {
-                        replyToMsg = replyToMsgString
-                    }
-                }
-            }
-        }
-        
         // Wrap in relay server protocol format
+        // reply_to_msg is provided directly from the Rust SDK via
+        // InternetMessage — the only source, matching the Kotlin bridge.
         var relayMessage: [String: Any] = [
             "type": "SendMessage",
             "recipient": recipientId,
             "content": content
         ]
-        if let replyToMsg = replyToMsg {
+        if let replyToMsg = replyToMsg, !replyToMsg.isEmpty {
             relayMessage["reply_to_msg"] = replyToMsg
         }
-        
+
         guard let jsonData = try? JSONSerialization.data(withJSONObject: relayMessage),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
             emitDiagnostic("error", "Failed to create relay message")
             protocolInstance.internetSendFailed(messageId: messageId)
             return
         }
-        
+
         task.send(.string(jsonString)) { [weak self] error in
             guard let self = self else { return }
-            
+            // A stale task's send outcome must not increment the failure
+            // counter, report internetSendFailed for the message (the
+            // disconnect path's fail_all_pending already owned it), or
+            // trigger a teardown of the connection rebuilt after it
+            // (see isStale).
+            guard !self.isStale(task) else { return }
+
             if let error = error {
                 let failures = self.consecutiveSendFailures.increment()
                 self.protocolInstance.internetSendFailed(messageId: messageId)
@@ -1137,9 +1307,7 @@ public class InternetManager: NSObject, TransportManager {
                     self.emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect for DORS", context: [
                         "failures": failures
                     ])
-                    DispatchQueue.main.async {
-                        self.teardownCurrentSocket(reason: "Send failures exceeded threshold")
-                    }
+                    self.teardownSocket(ifCurrent: task, reason: "Send failures exceeded threshold")
                 }
             } else {
                 // Reset failure counter on successful send
@@ -1169,20 +1337,17 @@ public class InternetManager: NSObject, TransportManager {
     /// Sends a core-tagged server-plane control frame via the relay-native
     /// protocol (see RelayControlOpTranslator). Wire-outcome contract is the
     /// same as sendMessage: the original message id is confirmed on the
-    /// primary frame's socket-write success, failed otherwise.
-    ///
-    /// `onSettled` fires exactly once, when the whole chain (primary frame,
-    /// best-effort deltas, translator commit) has resolved either way. The
-    /// poll loop blocks on it so translator commits stay ordered before the
-    /// next translate.
+    /// primary frame's socket-write success, failed otherwise. Extra frames
+    /// (member deltas, LeaveGroup taps) go through the token-gated pending
+    /// queue; the translator's commit runs only after the last of them was
+    /// written. Runs on messageQueue.
     private func sendControlOp(
         messageId: String,
         recipientId: String,
         controlOp: String,
         controlPayload: String,
         data: Data,
-        replyToMsg: String?,
-        onSettled: @escaping () -> Void
+        replyToMsg: String?
     ) {
         let translation = controlOpTranslator.translate(
             controlOp: controlOp,
@@ -1191,27 +1356,21 @@ public class InternetManager: NSObject, TransportManager {
         )
         switch translation {
         case .passThrough:
-            // No translator state involved — fire-and-forget like a plain
-            // send (frame order on the wire follows task.send submission).
             sendMessage(messageId: messageId, recipientId: recipientId, data: data, replyToMsg: replyToMsg)
-            onSettled()
 
         case .tap(let frames, let commit):
             // Verbatim delivery owns the message id outcome; the extra
             // relay-native frames are best-effort. The translator's state
             // commits only once every extra frame was written — a dropped
             // frame must be re-sent by a later translation, not assumed
-            // applied.
+            // applied. Frames the rate limiter defers spill to the next poll
+            // tick with the commit still attached.
             sendMessage(messageId: messageId, recipientId: recipientId, data: data, replyToMsg: replyToMsg)
-            sendRelayFramesBestEffort(frames, controlOp: controlOp) { allSent in
-                if allSent { commit?() }
-                onSettled()
-            }
+            enqueueControlFrames(controlOp: controlOp, frames: frames, commit: commit)
 
         case .replace(let frames, let commit):
             guard isConnected, isAuthenticated, let task = webSocketTask else {
                 protocolInstance.internetSendFailed(messageId: messageId)
-                onSettled()
                 return
             }
             guard let primary = frames.first else {
@@ -1219,7 +1378,6 @@ public class InternetManager: NSObject, TransportManager {
                 // reflected server-side; confirm so the core moves on.
                 commit?()
                 protocolInstance.internetConfirmSent(messageId: messageId)
-                onSettled()
                 return
             }
             guard let primaryData = try? JSONSerialization.data(withJSONObject: primary),
@@ -1231,14 +1389,14 @@ public class InternetManager: NSObject, TransportManager {
                     "controlOp": controlOp,
                     "messageId": messageId
                 ])
-                onSettled()
                 return
             }
             task.send(.string(primaryJson)) { [weak self] error in
-                guard let self = self else {
-                    onSettled()
-                    return
-                }
+                guard let self = self else { return }
+                // A stale task's send outcome must not touch failure
+                // counters, fail the message id (fail_all_pending owned it),
+                // or trigger teardown (see isStale).
+                guard !self.isStale(task) else { return }
                 if let error = error {
                     let failures = self.consecutiveSendFailures.increment()
                     self.protocolInstance.internetSendFailed(messageId: messageId)
@@ -1249,11 +1407,8 @@ public class InternetManager: NSObject, TransportManager {
                         "consecutiveFailures": failures
                     ])
                     if failures >= self.MAX_CONSECUTIVE_FAILURES {
-                        DispatchQueue.main.async {
-                            self.teardownCurrentSocket(reason: "Send failures exceeded threshold")
-                        }
+                        self.teardownSocket(ifCurrent: task, reason: "Send failures exceeded threshold")
                     }
-                    onSettled()
                 } else {
                     self.consecutiveSendFailures.set(0)
                     self.bytesSent.add(Int64(primaryData.count))
@@ -1264,13 +1419,6 @@ public class InternetManager: NSObject, TransportManager {
                         nowMs: Int64(Date().timeIntervalSince1970 * 1000)
                     )
                     self.protocolInstance.internetConfirmSent(messageId: messageId)
-                    self.sendRelayFramesBestEffort(
-                        Array(frames.dropFirst()),
-                        controlOp: controlOp
-                    ) { allSent in
-                        if allSent { commit?() }
-                        onSettled()
-                    }
                     self.emitDiagnostic("debug", "Control op sent relay-native", context: [
                         "controlOp": controlOp,
                         "messageId": messageId,
@@ -1278,60 +1426,99 @@ public class InternetManager: NSObject, TransportManager {
                     ])
                 }
             }
+            // Extra frames are queued NOW, on messageQueue, so the poll loop
+            // sees a non-empty spill queue and holds further pulls until the
+            // chain settles. Submission order keeps them behind the primary
+            // on the wire; if the primary's write fails, theirs fail too and
+            // the drain drops everything pending without committing.
+            enqueueControlFrames(controlOp: controlOp, frames: Array(frames.dropFirst()), commit: commit)
         }
     }
 
-    /// Sends the frames sequentially. `onDone(true)` runs only when every
-    /// frame was written — the caller then invokes the translator's commit
-    /// hook (see `RelayControlOpTranslator.Translation`). A dropped or
-    /// unserializable frame aborts the chain with `onDone(false)`, so the
-    /// next translation re-sends the missing state instead of assuming it
-    /// applied. `onDone` fires exactly once either way.
-    private func sendRelayFramesBestEffort(
-        _ frames: [[String: Any]],
+    /// Queues a translation's extra frames for token-gated delivery and
+    /// starts draining immediately (the common small case goes out in the
+    /// same tick). The commit runs only after the translation's last frame
+    /// was written. messageQueue only.
+    private func enqueueControlFrames(
         controlOp: String,
-        onDone: ((Bool) -> Void)? = nil
+        frames: [[String: Any]],
+        commit: (() -> Void)?
     ) {
-        guard !frames.isEmpty else {
-            onDone?(true)
+        if frames.isEmpty {
+            commit?()
             return
         }
-        guard isConnected, isAuthenticated, let task = webSocketTask else {
-            onDone?(false)
-            return
-        }
-        var remaining = frames
-        let frame = remaining.removeFirst()
+        pendingControlFrames.append(
+            PendingControlFrames(controlOp: controlOp, frames: frames, commit: commit)
+        )
+        drainPendingControlFrames()
+    }
+
+    /// Sends deferred control frames, oldest first, as tokens allow — one
+    /// frame at a time: the next frame is submitted only from the previous
+    /// frame's send completion (hopped back to messageQueue), so "written to
+    /// the socket" means the completion succeeded and a translation's commit
+    /// truly runs after its LAST frame's write outcome. A write failure
+    /// drops everything pending: the frames are per-connection, their
+    /// commits stay uninvoked (and are generation-dead after the disconnect
+    /// reset), and the reconnect's re-register re-derives them.
+    /// messageQueue only.
+    private func drainPendingControlFrames() {
+        guard !isDrainingControlFrames else { return }
+        guard let pending = pendingControlFrames.first, let frame = pending.frames.first else { return }
+        guard isConnected, isAuthenticated, let task = webSocketTask else { return }
+        // Presence/data frames all meter through the same bucket; a deferred
+        // frame just waits for the next tick's tokens.
+        guard rateLimiter.tryAcquire(nowMs: Int64(Date().timeIntervalSince1970 * 1000)) else { return }
         guard let frameData = try? JSONSerialization.data(withJSONObject: frame),
               let frameJson = String(data: frameData, encoding: .utf8) else {
-            emitDiagnostic("warning", "Best-effort relay frame unserializable", context: [
-                "controlOp": controlOp,
+            rateLimiter.refund()
+            emitDiagnostic("warning", "Relay control frame dropped by socket", context: [
+                "controlOp": pending.controlOp,
                 "frameType": frame["type"] as? String ?? "unknown"
             ])
-            onDone?(false)
+            pendingControlFrames.removeAll()
             return
         }
+        isDrainingControlFrames = true
         task.send(.string(frameJson)) { [weak self] error in
-            guard let self = self else {
-                onDone?(false)
-                return
+            guard let self = self else { return }
+            self.messageQueue.async {
+                self.isDrainingControlFrames = false
+                // Stale task: the disconnect path already cleared the queue
+                // and generation-killed the commits.
+                guard !self.isStale(task) else { return }
+                if let error = error {
+                    self.rateLimiter.refund()
+                    self.emitDiagnostic("warning", "Relay control frame dropped by socket", context: [
+                        "controlOp": pending.controlOp,
+                        "frameType": frame["type"] as? String ?? "unknown",
+                        "error": error.localizedDescription
+                    ])
+                    self.pendingControlFrames.removeAll()
+                    return
+                }
+                self.bytesSent.add(Int64(frameData.count))
+                // The queue may have been cleared (RateLimited) — and even
+                // repopulated by a newer translation — while the write was in
+                // flight. Only the translation that owns the in-flight frame
+                // may be popped; a positional pop would silently drop a frame
+                // that was never sent.
+                guard self.pendingControlFrames.first === pending else { return }
+                pending.frames.removeFirst()
+                if pending.frames.isEmpty {
+                    self.pendingControlFrames.removeFirst()
+                    pending.commit?()
+                }
+                self.drainPendingControlFrames()
             }
-            if let error = error {
-                self.emitDiagnostic("warning", "Best-effort relay frame dropped", context: [
-                    "controlOp": controlOp,
-                    "frameType": frame["type"] as? String ?? "unknown",
-                    "error": error.localizedDescription
-                ])
-                onDone?(false)
-                return
-            }
-            self.sendRelayFramesBestEffort(remaining, controlOp: controlOp, onDone: onDone)
         }
     }
 
     /// Sends a raw, caller-built relay command verbatim (RN
     /// `internetSendRawCommand`). The JSON must parse; returns false when
-    /// invalid or not connected+authenticated. Responses the SDK doesn't
+    /// invalid, not connected+authenticated, or deferred by the client-side
+    /// rate limiter (the caller may retry). Responses the SDK doesn't
     /// consume arrive as `internet_server_message` events.
     public func sendRawCommand(json: String, completion: @escaping (Bool) -> Void) {
         guard isConnected, isAuthenticated, let task = webSocketTask else {
@@ -1344,10 +1531,17 @@ public class InternetManager: NSObject, TransportManager {
             completion(false)
             return
         }
-        // Resolve from the send completion so `true` means written to the
-        // socket, matching the documented TS contract (OkHttp on Android is
-        // enqueue-confirmed — the closest its API offers).
-        task.send(.string(json)) { error in
+        guard rateLimiter.tryAcquire(nowMs: Int64(Date().timeIntervalSince1970 * 1000)) else {
+            completion(false)
+            return
+        }
+        // The ORIGINAL string is what goes out (re-serializing would alter
+        // app-authored frames). Resolve from the send completion so `true`
+        // means written to the socket, matching the documented TS contract
+        // (OkHttp on Android is enqueue-confirmed — the closest its API
+        // offers); a failed write returns its token.
+        task.send(.string(json)) { [weak self] error in
+            if error != nil { self?.rateLimiter.refund() }
             completion(error == nil)
         }
     }
@@ -1390,10 +1584,6 @@ public class InternetManager: NSObject, TransportManager {
         ])
     }
 
-    // The presence timer's lifecycle is invoked from three contexts (the
-    // URLSession delegate queue via handleAuthenticated, RN threads via
-    // stop/pause/resume, main via handleConnectionClosed); the lock makes the
-    // swap atomic so two concurrent starts can't leak a live timer.
     private func startPresenceWatch() {
         let timer = DispatchSource.makeTimerSource(queue: messageQueue)
         timer.schedule(
@@ -1403,19 +1593,19 @@ public class InternetManager: NSObject, TransportManager {
         timer.setEventHandler { [weak self] in
             self?.presenceWatchTick()
         }
-        presenceWatchTimerLock.lock()
+        timerLock.lock()
         let previous = presenceWatchTimer
         presenceWatchTimer = timer
-        presenceWatchTimerLock.unlock()
+        timerLock.unlock()
         previous?.cancel()
         timer.resume()
     }
 
     private func stopPresenceWatch() {
-        presenceWatchTimerLock.lock()
+        timerLock.lock()
         let timer = presenceWatchTimer
         presenceWatchTimer = nil
-        presenceWatchTimerLock.unlock()
+        timerLock.unlock()
         timer?.cancel()
     }
 
@@ -1424,32 +1614,51 @@ public class InternetManager: NSObject, TransportManager {
 
         let coreWatchlist = protocolInstance.internetPresenceWatchlist()
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        let peers = presenceWatch.peersToQuery(coreWatchlist: coreWatchlist, nowMs: now)
-            .filter { $0 != deviceId }
-        guard !peers.isEmpty else { return }
-
+        // Self is filtered BEFORE the merge so it can never enter the watch
+        // set and pin a rotation slot until the idle TTL.
+        let peers = presenceWatch.peersToQuery(
+            coreWatchlist: coreWatchlist.filter { $0 != deviceId },
+            nowMs: now
+        )
+        var queried = 0
         for peer in peers {
+            // Presence queries yield to data traffic under rate pressure;
+            // skipped peers come around on a later rotation.
+            guard rateLimiter.tryAcquire(nowMs: now) else { break }
             let checkMessage: [String: Any] = [
                 "type": "CheckPresence",
                 "username": peer
             ]
             guard let jsonData = try? JSONSerialization.data(withJSONObject: checkMessage),
-                  let jsonString = String(data: jsonData, encoding: .utf8) else { continue }
-            task.send(.string(jsonString)) { _ in }
+                  let jsonString = String(data: jsonData, encoding: .utf8) else {
+                rateLimiter.refund()
+                continue
+            }
+            task.send(.string(jsonString)) { [weak self] error in
+                // A failed completion means the frame never hit the wire —
+                // return its token (Kotlin refunds on a false send()).
+                if error != nil { self?.rateLimiter.refund() }
+            }
+            queried += 1
         }
-        emitDiagnostic("debug", "Presence watch tick", context: [
-            "queried": peers.count,
-            "watched": presenceWatch.watchedPeers().count
-        ])
+        if queried > 0 {
+            emitDiagnostic("debug", "Presence watch tick", context: [
+                "queried": queried,
+                "watched": presenceWatch.watchedPeers().count
+            ])
+        }
     }
 
     /// App-facing one-shot presence query (RN `checkInternetPresence`). The
     /// answer arrives as the SDK's `presence_updated` event — fire-and-event,
-    /// matching relay semantics. Returns true if the query was written to
-    /// the socket.
-    public func checkPresence(userId: String) -> Bool {
+    /// matching relay semantics. Completes true only when the query was
+    /// written to the socket (the send completion succeeded); false when not
+    /// connected+authenticated or deferred by the client-side rate limiter
+    /// (the caller may retry).
+    public func checkPresence(userId: String, completion: @escaping (Bool) -> Void) {
         guard !userId.isEmpty, isConnected, isAuthenticated, let task = webSocketTask else {
-            return false
+            completion(false)
+            return
         }
         let checkMessage: [String: Any] = [
             "type": "CheckPresence",
@@ -1457,29 +1666,42 @@ public class InternetManager: NSObject, TransportManager {
         ]
         guard let jsonData = try? JSONSerialization.data(withJSONObject: checkMessage),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
-            return false
+            completion(false)
+            return
         }
-        task.send(.string(jsonString)) { _ in }
-        return true
+        guard rateLimiter.tryAcquire(nowMs: Int64(Date().timeIntervalSince1970 * 1000)) else {
+            completion(false)
+            return
+        }
+        task.send(.string(jsonString)) { [weak self] error in
+            if error != nil { self?.rateLimiter.refund() }
+            completion(error == nil)
+        }
     }
 
     // MARK: - Ping/Pong
 
+    // Same lock-guarded swap as the presence watch timer (see timerLock).
     private func startPingTimer() {
-        stopPingTimer()
-        
         let timer = DispatchSource.makeTimerSource(queue: messageQueue)
         timer.schedule(deadline: .now() + PING_INTERVAL, repeating: PING_INTERVAL)
         timer.setEventHandler { [weak self] in
             self?.sendPing()
         }
-        timer.resume()
+        timerLock.lock()
+        let previous = pingTimer
         pingTimer = timer
+        timerLock.unlock()
+        previous?.cancel()
+        timer.resume()
     }
-    
+
     private func stopPingTimer() {
-        pingTimer?.cancel()
+        timerLock.lock()
+        let timer = pingTimer
         pingTimer = nil
+        timerLock.unlock()
+        timer?.cancel()
     }
     
     private func sendPing() {
@@ -1503,9 +1725,7 @@ public class InternetManager: NSObject, TransportManager {
                     self.emitDiagnostic("warning", "Too many consecutive ping failures, triggering reconnect for DORS", context: [
                         "failures": failures
                     ])
-                    DispatchQueue.main.async {
-                        self.teardownCurrentSocket(reason: "Ping failures exceeded threshold")
-                    }
+                    self.teardownSocket(ifCurrent: task, reason: "Ping failures exceeded threshold")
                 }
             } else {
                 // Reset failure counter on successful ping
@@ -1540,10 +1760,13 @@ extension InternetManager: URLSessionWebSocketDelegate {
     }
 
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        // One of the 2-3 terminal signals URLSession fires per disconnect;
+        // funnel into the single task-scoped close: main hop, identity
+        // check, detach FIRST, then handleConnectionClosed — whichever
+        // signal lands first wins and the rest become stale no-ops.
         DispatchQueue.main.async { [weak self] in
-            // A replaced or detached socket's close must not tear down the
-            // connection rebuilt after it (see isStale).
-            guard let self = self, !self.isStale(webSocketTask) else { return }
+            guard let self = self, webSocketTask === self.webSocketTask else { return }
+            self.webSocketTask = nil
             let reasonString = reason.flatMap { String(data: $0, encoding: .utf8) }
             self.emitDiagnostic("info", "WebSocket closed", context: [
                 "closeCode": closeCode.rawValue,
@@ -1555,10 +1778,8 @@ extension InternetManager: URLSessionWebSocketDelegate {
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error = error {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, !self.isStale(task) else { return }
-                self.handleConnectionClosed(error: error)
-            }
+            // Same close funnel as didCloseWith / the receive-loop failure.
+            handleSocketTerminated(task, error: error)
         }
     }
 }

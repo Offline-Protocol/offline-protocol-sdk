@@ -314,4 +314,104 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         XCTAssertEqual(again[1]["type"] as? String, "AddGroupMember")
         XCTAssertEqual(again[1]["username"] as? String, "bob")
     }
+
+    func testRegisterCommitAfterResetIsANoOp() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+
+        // A chain that settles after a disconnect reset must not commit a
+        // phantom snapshot into the NEXT connection's diff base — the relay
+        // never received the buffered deltas, and a poisoned base would make
+        // the reconnect's register skip them permanently.
+        let staleTranslation = translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "alice"
+        )
+        translator.reset()
+        commit(staleTranslation)
+
+        let again = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(again.count, 2)
+        XCTAssertEqual(again[1]["type"] as? String, "AddGroupMember")
+        XCTAssertEqual(again[1]["username"] as? String, "bob")
+    }
+
+    func testLeaveCommitAfterResetIsANoOp() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+
+        let staleTranslation = translator.translate(
+            controlOp: "group_mls_leave",
+            controlPayload: #"{"group_id":"g1","leaving_member":"alice"}"#,
+            recipientId: "bob"
+        )
+        translator.reset()
+        commit(staleTranslation)
+
+        // The stale LeaveGroup never reached the relay's registry on the
+        // new connection; the dedup must not swallow the retry.
+        let retry = frames(translator.translate(
+            controlOp: "group_mls_leave",
+            controlPayload: #"{"group_id":"g1","leaving_member":"alice"}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(retry.count, 1)
+        XCTAssertEqual(retry[0]["type"] as? String, "LeaveGroup")
+    }
+
+    func testNonAdminReasonGroupErrorDoesNotSuppressDeltas() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+
+        // Only the relay's admin-denial wording flips the suppression; an
+        // unrelated group error (bad member id, transient state) must not
+        // silently stop membership sync.
+        translator.onGroupError(groupId: "g1", reason: "User not found")
+
+        let registration = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(registration.count, 2)
+        XCTAssertEqual(registration[1]["type"] as? String, "AddGroupMember")
+    }
+
+    func testRolePromotionReenablesMemberDeltas() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+        translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
+
+        // Denied: registration is CreateGroup only.
+        let denied = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(denied.count, 1)
+
+        // Someone else's promotion — or a demotion — changes nothing.
+        translator.onRoleChanged(groupId: "g1", userId: "carol", newRole: "admin")
+        translator.onRoleChanged(groupId: "g1", userId: "bob", newRole: "member")
+        XCTAssertEqual(
+            frames(translator.translate(
+                controlOp: "group_relay_register",
+                controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+                recipientId: "bob"
+            )).count,
+            1
+        )
+
+        // This device's promotion to admin re-enables the deltas.
+        translator.onRoleChanged(groupId: "g1", userId: "bob", newRole: "admin")
+        let promoted = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(promoted.count, 2)
+        XCTAssertEqual(promoted[1]["type"] as? String, "AddGroupMember")
+        XCTAssertEqual(promoted[1]["username"] as? String, "alice")
+    }
 }

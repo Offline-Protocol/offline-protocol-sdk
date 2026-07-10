@@ -36,4 +36,14 @@ class RelayTimestampsTest {
         assertNull(RelayTimestamps.parseToMsOrNull("not-a-timestamp"))
         assertNull(RelayTimestamps.parseToMsOrNull("2024-13-45T99:99:99Z"))
     }
+
+    @Test
+    fun epochSecondsAreScaledToMilliseconds() {
+        // ~2024-07 as epoch seconds; without the heuristic this would render
+        // as January 1970 in a last-seen display.
+        assertEquals(1720000000000L, RelayTimestamps.parseToMsOrNull("1720000000"))
+        assertEquals(1720000000000L, RelayTimestamps.normalizeEpochToMs(1720000000L))
+        // Already-milliseconds values pass through untouched.
+        assertEquals(1720000000000L, RelayTimestamps.normalizeEpochToMs(1720000000000L))
+    }
 }

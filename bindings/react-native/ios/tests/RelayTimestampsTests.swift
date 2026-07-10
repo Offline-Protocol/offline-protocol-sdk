@@ -33,4 +33,13 @@ final class RelayTimestampsTests: XCTestCase {
         XCTAssertNil(RelayTimestamps.parseToMsOrNull("not-a-timestamp"))
         XCTAssertNil(RelayTimestamps.parseToMsOrNull("2024-13-45T99:99:99Z"))
     }
+
+    func testEpochSecondsAreScaledToMilliseconds() {
+        // ~2024-07 as epoch seconds; without the heuristic this would render
+        // as January 1970 in a last-seen display.
+        XCTAssertEqual(RelayTimestamps.parseToMsOrNull("1720000000"), 1_720_000_000_000)
+        XCTAssertEqual(RelayTimestamps.normalizeEpochToMs(1_720_000_000), 1_720_000_000_000)
+        // Already-milliseconds values pass through untouched.
+        XCTAssertEqual(RelayTimestamps.normalizeEpochToMs(1_720_000_000_000), 1_720_000_000_000)
+    }
 }

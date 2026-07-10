@@ -21,6 +21,7 @@ Pod::Spec.new do |s|
     "BleManager.swift",
     "InternetManager.swift",
     "RelayControlOpTranslator.swift",
+    "RelayRateLimiter.swift",
     "PresenceWatchPolicy.swift",
     "RecipientInFlightTracker.swift",
     "RelayTimestamps.swift",

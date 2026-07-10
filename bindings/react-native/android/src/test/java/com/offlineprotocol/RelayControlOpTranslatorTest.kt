@@ -331,4 +331,120 @@ class RelayControlOpTranslatorTest {
         assertEquals("AddGroupMember", again[1].getString("type"))
         assertEquals("bob", again[1].getString("username"))
     }
+
+    @Test
+    fun registerCommitAfterResetIsANoOp() {
+        val translator = RelayControlOpTranslator("alice")
+
+        // A chain that settles after a disconnect reset must not commit a
+        // phantom snapshot into the NEXT connection's diff base — the relay
+        // never received the buffered deltas, and a poisoned base would make
+        // the reconnect's register skip them permanently.
+        val staleTranslation = translator.translate(
+            "group_relay_register",
+            """{"group_id":"g1","members":["alice","bob"]}""",
+            "alice"
+        )
+        translator.reset()
+        commit(staleTranslation)
+
+        val again = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "alice"
+            )
+        )
+        assertEquals(2, again.size)
+        assertEquals("AddGroupMember", again[1].getString("type"))
+        assertEquals("bob", again[1].getString("username"))
+    }
+
+    @Test
+    fun leaveCommitAfterResetIsANoOp() {
+        val translator = RelayControlOpTranslator("alice")
+
+        val staleTranslation = translator.translate(
+            "group_mls_leave",
+            """{"group_id":"g1","leaving_member":"alice"}""",
+            "bob"
+        )
+        translator.reset()
+        commit(staleTranslation)
+
+        // The stale LeaveGroup never reached the relay's registry on the
+        // new connection; the dedup must not swallow the retry.
+        val retry = frames(
+            translator.translate(
+                "group_mls_leave",
+                """{"group_id":"g1","leaving_member":"alice"}""",
+                "bob"
+            )
+        )
+        assertEquals(1, retry.size)
+        assertEquals("LeaveGroup", retry[0].getString("type"))
+    }
+
+    @Test
+    fun nonAdminReasonGroupErrorDoesNotSuppressDeltas() {
+        val translator = RelayControlOpTranslator("alice")
+
+        // Only the relay's admin-denial wording flips the suppression; an
+        // unrelated group error (bad member id, transient state) must not
+        // silently stop membership sync.
+        translator.onGroupError("g1", "User not found")
+
+        val registration = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "alice"
+            )
+        )
+        assertEquals(2, registration.size)
+        assertEquals("AddGroupMember", registration[1].getString("type"))
+    }
+
+    @Test
+    fun rolePromotionReenablesMemberDeltas() {
+        val translator = RelayControlOpTranslator("bob")
+        translator.onGroupError("g1", "Only admins can add members")
+
+        // Denied: registration is CreateGroup only.
+        val denied = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "bob"
+            )
+        )
+        assertEquals(1, denied.size)
+
+        // Someone else's promotion — or a demotion — changes nothing.
+        translator.onRoleChanged("g1", "carol", "admin")
+        translator.onRoleChanged("g1", "bob", "member")
+        assertEquals(
+            1,
+            frames(
+                translator.translate(
+                    "group_relay_register",
+                    """{"group_id":"g1","members":["alice","bob"]}""",
+                    "bob"
+                )
+            ).size
+        )
+
+        // This device's promotion to admin re-enables the deltas.
+        translator.onRoleChanged("g1", "bob", "admin")
+        val promoted = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "bob"
+            )
+        )
+        assertEquals(2, promoted.size)
+        assertEquals("AddGroupMember", promoted[1].getString("type"))
+        assertEquals("alice", promoted[1].getString("username"))
+    }
 }
