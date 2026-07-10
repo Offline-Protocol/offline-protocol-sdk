@@ -471,6 +471,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             peer_id,
             status: _,
             timestamp: _,
+            last_seen_ms: _,
         } => {
             hash_string(peer_id, scrubber);
         }
@@ -1017,6 +1018,7 @@ mod tests {
                 peer_id: "p".into(),
                 status: PresenceStatus::Online,
                 timestamp: 0,
+                last_seen_ms: None,
             },
         ];
         let scrubber = scrubber_enabled();

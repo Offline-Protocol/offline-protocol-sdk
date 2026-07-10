@@ -2620,6 +2620,7 @@ fn test_relay_sync_on_internet_available_transition() {
     // Add Internet transport
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
+    let internet_handle = internet.clone();
     protocol
         .transport_manager_mut()
         .add_transport(TransportType::Internet, Box::new(internet));
@@ -2630,10 +2631,21 @@ fn test_relay_sync_on_internet_available_transition() {
     // Internet should now be tracked as available
     assert!(protocol.group_mesh.internet_was_available);
 
-    // Group should be relay-synced
+    // The registration frame goes out on the transition...
     assert!(
-        protocol.group_mesh.relay_synced.contains(&group_id),
-        "Group should be relay-synced after Internet becomes available"
+        internet_handle
+            .sent_messages()
+            .iter()
+            .any(|m| m.content.starts_with(internal_prefixes::GROUP_RELAY_REGISTER)),
+        "Registration frame should be sent when Internet becomes available"
+    );
+    // ...but enqueueing proves nothing about relay support: sync is only set
+    // by the relay's __GROUP_CREATED__ acknowledgment, never on enqueue —
+    // otherwise sends take the broadcast path against a prefix-unaware relay
+    // (which just echoes self-addressed frames) and group messages are lost.
+    assert!(
+        !protocol.group_mesh.relay_synced.contains(&group_id),
+        "Group must not be relay-synced before the relay acknowledges"
     );
 }
 
@@ -2932,6 +2944,7 @@ fn test_relay_register_group_on_create() {
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
+    let internet_handle = internet.clone();
     protocol
         .transport_manager_mut()
         .add_transport(TransportType::Internet, Box::new(internet));
@@ -2940,9 +2953,19 @@ fn test_relay_register_group_on_create() {
     let info = protocol.create_group("Auto Register Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
+    // Creation sends the self-addressed registration frame...
     assert!(
-        protocol.group_mesh.relay_synced.contains(&group_id),
-        "Group should be relay-synced after creation with Internet available"
+        internet_handle
+            .sent_messages()
+            .iter()
+            .any(|m| m.content.starts_with(internal_prefixes::GROUP_RELAY_REGISTER)),
+        "Registration frame should be sent on group creation with Internet available"
+    );
+    // ...but the group is only marked relay-synced by the relay's
+    // __GROUP_CREATED__ acknowledgment, never on enqueue.
+    assert!(
+        !protocol.group_mesh.relay_synced.contains(&group_id),
+        "Group must not be relay-synced before the relay acknowledges"
     );
 }
 

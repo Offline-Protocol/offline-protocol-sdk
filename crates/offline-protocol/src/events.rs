@@ -848,6 +848,11 @@ pub enum Event {
         status: PresenceStatus,
         /// Timestamp of the update (Unix ms).
         timestamp: i64,
+        /// When the peer was last seen (Unix ms), if the source knows it —
+        /// e.g. the internet relay's PresenceStatusWithLastSeen. Absent for
+        /// peer-sent `__PRESENCE__` updates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_seen_ms: Option<i64>,
     },
 
     /// A typing indicator was received from a peer.
@@ -1369,6 +1374,23 @@ impl Event {
             peer_id,
             status,
             timestamp,
+            last_seen_ms: None,
+        }
+    }
+
+    /// Creates a PresenceUpdated event carrying a last-seen timestamp
+    /// (relay-sourced presence).
+    pub fn presence_updated_with_last_seen(
+        peer_id: String,
+        status: PresenceStatus,
+        timestamp: i64,
+        last_seen_ms: Option<i64>,
+    ) -> Self {
+        Self::PresenceUpdated {
+            peer_id,
+            status,
+            timestamp,
+            last_seen_ms,
         }
     }
 
@@ -2327,11 +2349,13 @@ impl fmt::Debug for Event {
                 peer_id: _,
                 status,
                 timestamp,
+                last_seen_ms,
             } => f
                 .debug_struct("PresenceUpdated")
                 .field("peer_id", &"[REDACTED]")
                 .field("status", status)
                 .field("timestamp", timestamp)
+                .field("last_seen_ms", last_seen_ms)
                 .finish(),
             Self::TypingIndicatorReceived {
                 sender: _,
