@@ -3,13 +3,28 @@
 Companion to `docs/relay-transport-parity-spec.md`. Spec validated against three repos on 2026-07-10:
 `offline-protocol-sdk` (this repo), `../fernweh_v2` (JS relay client), `../relay-server` (relay source — full ground truth).
 
-> **Implementation status (2026-07-10, branch `feat/relay-parity-phase-a`):** Phase A (A0–A8) and
-> Phase B (B1–B4, B6, B7) are implemented and verified (807 Rust tests, clippy `-D warnings`, fmt,
-> Android CI-harness suite — 110 JVM tests, 42 Swift helper tests via SwiftPM harness, `tsc`). A
+> **Implementation status (2026-07-11, branch `feat/relay-parity-phase-a`):** Phase A (A0–A8) and
+> Phase B (B1–B4, B6, B7) are implemented and verified (814 Rust tests, clippy `-D warnings`, fmt,
+> Android CI-harness suite — 118 JVM tests, 51 Swift tests via the now checked-in SwiftPM harness
+> with its own `ios-unit-tests` CI job, `tsc`). A
 > post-review hardening pass added: registration-ack correlation for `relay_synced` (a forged
 > `__GROUP_CREATED__` over ANY path is now rejected), a bridge-side server-plane prefix firewall on
 > peer-delivered frames, a clock-step-proof monotonic rate limiter, `MessageSent`-driven in-flight
 > pruning, and iOS main-confinement/lock coverage for the socket lifecycle.
+> A third (full-review) pass then closed the remaining trust-boundary and lifecycle gaps:
+> control-op classification is hop-count-gated and the receive loop drops forged-self frames (a mesh
+> peer can no longer drive relay-native ops on our authenticated connection); the mesh-carrier
+> predicate counts only BLE/WiFi-Direct and unreachable parks escalate 15s→10min (no unbounded
+> relay resend loop); unanswered relay registrations expire after 30s with a 3-attempt budget; a
+> late `DeliveryError` can no longer corrupt a confirmed session's lifecycle; the watchlist ages out
+> 14-day-stale lifecycles; the bridges' in-flight trackers are plane-tagged (`MessageSent` /
+> `DeliveryError` answer only data frames, `ConnectionRequestError` only conn-req frames — a
+> delivered message can no longer be false-failed); Android gained a detach-first close funnel, an
+> auth-response timeout, a stop()-race guard on `handleAuthenticated`, monotonic tracker/watch
+> clocks, and always-release stop(); iOS gained session invalidation on restart, success-gated
+> `.replace` delta enqueueing, lock-guarded connection flags, record-before-write in-flight
+> tracking, and a sleep-inclusive monotonic clock; the admin-denial marker on both bridges now
+> requires correlation to an outstanding member-delta window.
 > B5 (WI-7 `MessageSent` reconciliation) dropped by design. Still
 > open: B8 integration verification against the production relay (needs devices/relay access), and
 > `npm run build:uniffi:all` to rebuild native libs before device testing (bindings are regenerated,
@@ -108,8 +123,9 @@ hardcodes the literal — document the cross-layer contract at both sites). Add
 
 The spec's `internet_peer_presence(peer_id, online, last_seen_ms)` UDL method, with one addition grounded
 in finding #3: **`online=false` parks pending welcomes for that peer** (shipped as
-`park_welcome_peer_unreachable`: only `Created`/`Failed` records park, only when Internet is the sole live
-carrier, and the park is **edge-driven — `next_retry_at = None`, no timed retry**; the carrier is healthy,
+`park_welcome_peer_unreachable`: only `Created`/`Failed` records park, only when no *local mesh* carrier
+— BLE / WiFi-Direct; Nostr and Reticulum are internet-dependent and deliberately do not count — is live,
+and the park is **edge-driven — `next_retry_at = None`, no timed retry**; the carrier is healthy,
 so a timer would just re-send into another failure). Combined with the watch loop, this is what actually
 stops budget burn when FCM push "succeeds" against an offline peer: welcome confirm-timeout burns 1–2
 attempts (of default 10), the watch tick's `CheckPresence` says offline → parked; presence online →
@@ -127,13 +143,20 @@ add a core-owned source: UDL `sequence<string> internet_presence_watchlist()` re
 unconfirmed welcome lifecycle — including wire-confirmed `Sent` records, which only a presence signal can
 rescue over a store-less relay (the shipped semantics; an earlier draft excluded `Sent`). The bridge unions it into the watch set each 20s tick (poll-as-reconciliation —
 no missed-event risk, trivially testable). Removal: peer went online, inbound traffic from peer, or ~10 min
-idle.
+idle. Core-side aging backstop: lifecycles older than 14 days drop off `internet_presence_watchlist()` so a
+permanently-dead peer (abandoned install) cannot hold watch-rotation slots — and keep its parked record's
+`expires_at` pushed — forever; once unwatched the record ages out through normal expiry, and recovery
+degrades to peer-initiated contact or mesh discovery.
 
 ### D5 — WI-7 (`MessageSent`)
 
 Recommend **dropping** from scope. Ground truth makes it actively misleading: `MessageSent` fires even
-when the recipient is offline and only an FCM poke went out. If kept, telemetry-only; never treat as
-delivery, never clear WI-2 in-flight entries with it.
+when the recipient is offline and only an FCM poke went out. Never treat it as delivery and never let it
+remove a peer from the presence watch. One shipped exception to "ignore it entirely": the bridges DO
+resolve WI-2 in-flight entries on `MessageSent` (data-plane entries only). That pruning is required for
+sound `DeliveryError` correlation — the relay answers `MessageSent` XOR `DeliveryError` per frame, so a
+frame the relay accepted must leave the tracker or a later recipient-keyed `DeliveryError` sweep would
+false-fail a delivered message.
 
 ## Blast radius
 
@@ -161,8 +184,10 @@ never revert it without also setting `group.relay_enabled=false`.
 when `relay_synced` is false; (2) stale relay presence parking a welcome for a peer that's actually online
 — the shipped park is edge-driven (no timed retry), so recovery rides the ~20s presence watch tick: the
 peer stays on the watchlist, the next `PresenceStatus(online)` answer re-arms immediately, and any inbound
-traffic or neighbor discovery re-arms instantly; the park also only happens when Internet is the sole live
-carrier (a mesh-visible peer keeps its timed retry track); (3) relay
+traffic or neighbor discovery re-arms instantly; the park also only happens when no local mesh carrier
+(BLE / WiFi-Direct) is live — with one up, the record keeps a timed retry whose interval escalates per
+consecutive unreachable park (15s doubling to a 10-min cap, reset on any reachability edge), so a
+DORS-routed retry that keeps landing on the internet path cannot become an unbounded resend loop; (3) relay
 `AddGroupMember` admin-gating semantics unverified → possible `GroupError` noise from non-admin members'
 re-registrations — resolved by the B3 step-0 check against local relay source; (4) release vehicle: Phase A
 must ship in an npm release that includes the issue-#136 fix (on `main` post-v0.11.0 — verify by tag

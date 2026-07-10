@@ -8,6 +8,8 @@ transports: { internet: { enabled: true, serverAddress: '<relay-ws-url>', authTo
 
 — and gets full feature parity with fernweh's bespoke JS relay client (`src/hooks/useWebSocketRelay.ts`, ~2,300 lines), so that client can be deleted. **Constraint: the relay server is not modified.** The SDK adapts to the relay's existing JSON protocol.
 
+> **Reading order:** this spec is the design as validated pre-implementation; `relay-transport-parity-plan.md` records the ground-truth corrections and the as-shipped semantics where they diverge (see its "Ground-truth corrections" and decision sections). Where the two disagree, the plan is authoritative.
+
 ---
 
 ## 0. Current state (verified 2026-07-09)
@@ -45,7 +47,7 @@ fernweh already sets SDK `userId = storedUsername` (relay username) (`fernweh_v2
 
 **Problem.** `on_transport_send_failed` (`crates/offline-protocol/src/protocol/send.rs:1742-1763`) computes
 `no_carrier = self.transport_manager.get_available_transports().is_empty()`.
-When the relay socket is up but the *recipient* is offline, `no_carrier=false`, so a `DeliveryError`-driven failure would burn a Welcome attempt (max 6) instead of parking. This is the "fails-while-up burns the budget" bug; over pure internet an offline peer expires the Welcome terminally in ~1–2 min.
+When the relay socket is up but the *recipient* is offline, `no_carrier=false`, so a `DeliveryError`-driven failure would burn a Welcome attempt (budget is config-driven, default 10 — not 6 as an earlier draft said) instead of parking. This is the "fails-while-up burns the budget" bug; over pure internet an offline peer expires the Welcome terminally in minutes.
 
 **Change.** Define a well-known reason marker, e.g. in `types.rs`:
 
@@ -149,14 +151,14 @@ Match the exact payload field names against the core's control-message builders 
 **Change.**
 
 - RN method `internetSendRawCommand(json: string): Promise<boolean>` → validates JSON, sends verbatim when connected+authenticated (else returns false).
-- The `processReceivedData` `else` branch (`InternetManager.kt:866-871`) — plus explicitly unhandled types (`GroupInviteLink*`, `*InviteJoin*`, `GroupRoleChanged`, `GroupRenamed`, `GroupDeleted`, `TypingUpdate`, `MessageRead`) — emits an RN event `internetServerMessage { json: string }` instead of dropping.
+- The `processReceivedData` `else` branch (`InternetManager.kt:866-871`) — plus explicitly unhandled types (`GroupInviteLink*`, `*InviteJoin*`, `GroupRoleChanged`, `GroupRenamed`, `GroupDeleted`) — emits an RN event `internet_server_message { type, json }` instead of dropping. (As shipped: `TypingUpdate` is NOT raw-forwarded — the bridge translates it to the SDK's `__TYPING__` path — and `MessageRead` is never emitted by the relay; an earlier draft listed both here.)
 - TS: `sendRawServerCommand(json)`, `addListener('internet_server_message', …)` in `bindings/react-native/src/index.ts` + `types.ts`.
 
 fernweh ports its invite-link request/response correlation (request_id matching, 25s/90s/8s timeouts, early-complete) onto this channel — ~300 lines of portable JS instead of the 2,300-line client.
 
 ### WI-7 (bridge, minor) — `MessageSent` reconciliation
 
-`MessageSent {message_id, recipient}` from the relay is logged only (`InternetManager.kt:515-534`). Optional: correlate server-generated ids with local ones for telemetry. Not load-bearing; do last.
+`MessageSent {message_id, recipient}` from the relay is logged only (`InternetManager.kt:515-534`). Optional: correlate server-generated ids with local ones for telemetry. Not load-bearing; do last. (As shipped: dropped as a feature — `MessageSent` is not a delivery signal — but the bridges do resolve WI-2 in-flight data-plane entries on it, which is required for sound `DeliveryError` correlation; see plan D5.)
 
 ### WI-8 — iOS parity
 
@@ -165,7 +167,7 @@ Every bridge WI (2, 4, 5, 6, 7 + the WI-3 handler) must be mirrored in `bindings
 ### WI-9 — Surface plumbing
 
 - UDL: `internet_peer_presence`, extended `InternetMessage`; regenerate uniffi bindings for android/ios.
-- RN module: `checkInternetPresence`, `internetSendRawCommand`, `internetServerMessage` event registration.
+- RN module: `checkInternetPresence`, `internetSendRawCommand`, `internet_server_message` event registration.
 - TS: new methods/events/types; **rebuild `lib/`** (`npm run build`) so compiled `.d.ts` matches `src/` before fernweh consumes it via `file:`.
 
 ### WI-10 — fernweh migration (separate repo, after SDK ships)
