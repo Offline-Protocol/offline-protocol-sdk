@@ -19,6 +19,14 @@ import Foundation
 
 final class RelayControlOpTranslator {
 
+    /// Cross-layer contract: substring of the relay server's admin-denial
+    /// GroupError reasons ("Only admins can add members" / "Only admins can
+    /// remove members"). If the relay rewords these, non-admin devices
+    /// without the core's `is_admin` hint fall back to re-learning the
+    /// denial each connection — noisy but safe. Keep in sync with the relay
+    /// source (see docs/relay-transport-parity-spec.md).
+    static let adminDeniedReasonMarker = "Only admins"
+
     enum Translation {
         /// Send these relay-native frames instead of the original message.
         /// Invoke the commit ONLY after every frame was written to the
@@ -136,7 +144,7 @@ final class RelayControlOpTranslator {
         guard !groupId.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
-        if reason.range(of: "Only admins", options: .caseInsensitive) != nil {
+        if reason.range(of: Self.adminDeniedReasonMarker, options: .caseInsensitive) != nil {
             memberDeltasDenied.insert(groupId)
             // The optimistic membership snapshot was not applied server-side.
             registeredMembers.removeValue(forKey: groupId)
@@ -159,6 +167,15 @@ final class RelayControlOpTranslator {
             .compactMap { $0 as? String }
             .filter { !$0.isEmpty } ?? []
 
+        // A register proves membership again: a rejoin after a committed
+        // leave must be allowed to send LeaveGroup again later.
+        leaveSent.remove(groupId)
+
+        // The core's admin hint: explicitly-not-admin devices never send
+        // member deltas (the relay would deny each with a group-scoped
+        // GroupError). Absent hint = unknown, fall back to send-and-learn.
+        let notAdmin = (payload["is_admin"] as? Bool) == false
+
         var frames: [[String: Any]] = [[
             "type": "CreateGroup",
             "group_id": groupId,
@@ -169,7 +186,7 @@ final class RelayControlOpTranslator {
         // redundant, so the self id never appears in a delta. Sorted for a
         // deterministic wire order across platforms.
         var commit: (() -> Void)? = nil
-        if !memberDeltasDenied.contains(groupId) {
+        if !notAdmin && !memberDeltasDenied.contains(groupId) {
             let desired = Set(members.filter { $0 != selfId })
             let known = registeredMembers[groupId] ?? []
             for added in desired.subtracting(known).sorted() {

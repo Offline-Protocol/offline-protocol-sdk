@@ -33,11 +33,15 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     func testConnectionOpsTranslateToRelayNativeFrames() {
         let translator = RelayControlOpTranslator(selfId: "alice")
 
-        let req = frames(translator.translate(
+        let reqTranslation = translator.translate(
             controlOp: "conn_req",
             controlPayload: #"{"sender_name":"Alice","timestamp_ms":1,"key_package":[1,2,3]}"#,
             recipientId: "bob"
-        ))
+        )
+        guard case .replace = reqTranslation else {
+            return XCTFail("conn_req must be a replace, not passThrough/tap")
+        }
+        let req = frames(reqTranslation)
         XCTAssertEqual(req.count, 1)
         XCTAssertEqual(req[0]["type"] as? String, "SendConnectionRequest")
         XCTAssertEqual(req[0]["recipient"] as? String, "bob")
@@ -149,13 +153,17 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         XCTAssertEqual(leaveFrames[0]["group_id"] as? String, "g1")
         commit(tap)
 
-        // Second per-member leave notification: no duplicate LeaveGroup.
+        // Second per-member leave notification: still a tap (the verbatim
+        // send must go out) with no duplicate LeaveGroup.
         let second = translator.translate(
             controlOp: "group_mls_leave",
             controlPayload: #"{"group_id":"g1","leaving_member":"alice"}"#,
             recipientId: "carol"
         )
-        XCTAssertTrue(frames(second).isEmpty)
+        guard case .tap(let secondFrames, _) = second else {
+            return XCTFail("deduped leave must stay a tap, not degrade to passThrough")
+        }
+        XCTAssertTrue(secondFrames.isEmpty)
 
         // Someone else leaving is not our LeaveGroup to send.
         let other = translator.translate(
@@ -163,7 +171,93 @@ final class RelayControlOpTranslatorTests: XCTestCase {
             controlPayload: #"{"group_id":"g2","leaving_member":"bob"}"#,
             recipientId: "carol"
         )
-        XCTAssertTrue(frames(other).isEmpty)
+        guard case .tap(let otherFrames, _) = other else {
+            return XCTFail("third-party leave must stay a tap")
+        }
+        XCTAssertTrue(otherFrames.isEmpty)
+    }
+
+    func testNotAdminHintSkipsMemberDeltasUpFront() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+
+        // The core's is_admin=false hint: no deltas are ever attempted, so
+        // the relay never answers the group-scoped denials that would revoke
+        // relay_synced and surface as app-visible group_error on reconnect.
+        let translation = translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob","carol"],"is_admin":false}"#,
+            recipientId: "bob"
+        )
+        guard case .replace = translation else {
+            return XCTFail("register must stay a replace")
+        }
+        let sent = frames(translation)
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent[0]["type"] as? String, "CreateGroup")
+
+        // is_admin=true keeps the normal delta behavior.
+        let admin = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g2","members":["alice","bob"],"is_admin":true}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(admin.count, 2)
+        XCTAssertEqual(admin[1]["type"] as? String, "AddGroupMember")
+        XCTAssertEqual(admin[1]["username"] as? String, "alice")
+    }
+
+    func testLeaveAfterRejoinSendsLeaveGroupAgain() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+
+        commit(translator.translate(
+            controlOp: "group_mls_leave",
+            controlPayload: #"{"group_id":"g1","leaving_member":"alice"}"#,
+            recipientId: "bob"
+        ))
+
+        // Rejoining re-registers the group: that proves membership again and
+        // must re-arm the leave dedup.
+        commit(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "alice"
+        ))
+
+        let secondLeave = translator.translate(
+            controlOp: "group_mls_leave",
+            controlPayload: #"{"group_id":"g1","leaving_member":"alice"}"#,
+            recipientId: "bob"
+        )
+        guard case .tap(let leaveFrames, _) = secondLeave else {
+            return XCTFail("leave after rejoin must be a tap")
+        }
+        XCTAssertEqual(leaveFrames.count, 1)
+        XCTAssertEqual(leaveFrames[0]["type"] as? String, "LeaveGroup")
+        XCTAssertEqual(leaveFrames[0]["group_id"] as? String, "g1")
+    }
+
+    func testAdminDenialDuringFlightWinsOverCommit() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+
+        // Frames produced, but the relay's denial lands before the caller
+        // commits (delegate queue races the send chain): the commit must not
+        // record the membership snapshot the relay refused.
+        let inFlight = translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        )
+        translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
+        commit(inFlight)
+
+        let after = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
+        // Denied: CreateGroup only, and no snapshot was committed.
+        XCTAssertEqual(after.count, 1)
+        XCTAssertEqual(after[0]["type"] as? String, "CreateGroup")
     }
 
     func testMalformedPayloadAndUnknownOpFallBackToPassThrough() {

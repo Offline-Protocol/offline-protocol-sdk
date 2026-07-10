@@ -3290,7 +3290,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
         guard let manager = internetManager else {
-            rejecter("ERROR_INTERNET", "Internet transport not initialized", nil)
+            // Same message shape as the Android module's rejectWithProtocolError.
+            rejecter("ERROR_INTERNET", "Failed to query presence: Internet transport not initialized", nil)
             return
         }
         resolver(manager.checkPresence(userId: userId))
@@ -3304,10 +3305,13 @@ class OfflineProtocolModule: RCTEventEmitter {
                                       resolver: @escaping RCTPromiseResolveBlock,
                                       rejecter: @escaping RCTPromiseRejectBlock) {
         guard let manager = internetManager else {
-            rejecter("ERROR_INTERNET", "Internet transport not initialized", nil)
+            // Same message shape as the Android module's rejectWithProtocolError.
+            rejecter("ERROR_INTERNET", "Failed to send raw server command: Internet transport not initialized", nil)
             return
         }
-        resolver(manager.sendRawCommand(json: json))
+        manager.sendRawCommand(json: json) { written in
+            resolver(written)
+        }
     }
 
     // MARK: - Helpers
