@@ -4115,12 +4115,25 @@ fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
         WelcomeDeliveryState::Sent
     );
 
+    // Sent → SendAttempted must never happen directly: a re-send always
+    // goes through a rebuild (Created) or a corrective Failed first.
     let illegal = protocol.transition_welcome_state(
         "bob",
-        WelcomeDeliveryState::Failed,
+        WelcomeDeliveryState::SendAttempted,
         "test_illegal_transition",
     );
     assert!(illegal.is_err());
+
+    // Sent → Failed, by contrast, is the one legal way back out of Sent:
+    // the relay's DeliveryError authoritatively proves a wire-confirmed
+    // frame was dropped (see apply_recipient_unreachable_failure).
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "recipient_unreachable")
+        .unwrap();
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::Failed
+    );
 }
 
 #[test]
@@ -14210,8 +14223,10 @@ fn test_recipient_unreachable_reason_parks_welcome_without_burning_budget() {
     // The internet transport is UP, and attempt == max_retries — a plain
     // carrier-backed failure here would expire the welcome terminally. A
     // recipient_unreachable-tagged reason (the bridge's translation of the
-    // relay's DeliveryError) must instead classify as per-peer no-carrier
-    // and park it.
+    // relay's DeliveryError) must instead park it pending a reachability
+    // edge: no timed retry (a timer would just re-send into another
+    // DeliveryError over the healthy socket), recovery via presence/
+    // discovery.
     protocol
         .on_transport_send_failed(
             &welcome_id,
@@ -14226,7 +14241,10 @@ fn test_recipient_unreachable_reason_parks_welcome_without_burning_budget() {
         lifecycle.last_reason_code,
         Some(crate::events::WelcomeReasonCode::PeerUnreachable)
     );
-    assert!(lifecycle.next_retry_at.is_some());
+    assert!(
+        lifecycle.next_retry_at.is_none(),
+        "peer-unreachable parks must not schedule a timed retry"
+    );
     assert!(lifecycle.expires_at > Utc::now() + ChronoDuration::seconds(60));
 
     protocol.stop().unwrap();
@@ -14346,8 +14364,10 @@ fn test_peer_presence_offline_parks_failed_welcome() {
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(lifecycle.attempt, 1);
 
-    // The relay says bob is offline: park on the slow interval with the
-    // truthful reason, without touching the burned-budget counter.
+    // The relay says bob is offline: park pending a reachability edge with
+    // the truthful reason, without touching the burned-budget counter and
+    // without scheduling a timed retry (which would re-send over the healthy
+    // socket into another DeliveryError).
     protocol.on_peer_presence("bob", false, Some(1_000));
 
     let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
@@ -14357,7 +14377,7 @@ fn test_peer_presence_offline_parks_failed_welcome() {
         lifecycle.last_reason_code,
         Some(crate::events::WelcomeReasonCode::PeerUnreachable)
     );
-    assert!(lifecycle.next_retry_at.is_some());
+    assert!(lifecycle.next_retry_at.is_none());
     assert!(lifecycle.expires_at > Utc::now() + ChronoDuration::seconds(60));
 
     protocol.stop().unwrap();
@@ -14619,6 +14639,173 @@ fn test_group_created_ack_gates_relay_sync() {
     );
     protocol.process_internal_message(&error);
     assert!(!protocol.group_mesh.relay_synced.contains(&group_id));
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_delivery_error_after_wire_confirm_corrects_false_sent() {
+    let (mut protocol, internet_handle, welcome_id) =
+        setup_internet_protocol_with_pending_welcome();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    // The bridge wire-confirms on socket-write success, BEFORE the relay can
+    // answer — so when its DeliveryError arrives the record is already Sent.
+    // This is the production ordering; the failure must not no-op on it.
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::Sent
+    );
+
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+
+    // The false Sent is corrected: parked Failed, attempt refunded, no timed
+    // retry (a timer would re-send into another DeliveryError forever).
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(lifecycle.attempt, 0, "the peer never saw the frame");
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert!(lifecycle.next_retry_at.is_none());
+
+    // The app's earlier welcome_send_succeeded is superseded by a retryable
+    // welcome_send_failed so its UI reflects the truth.
+    let correction = events.lock().unwrap().iter().any(|e| {
+        matches!(
+            e,
+            Event::WelcomeSendFailed {
+                reason_code: crate::events::WelcomeReasonCode::PeerUnreachable,
+                retryable: true,
+                ..
+            }
+        )
+    });
+    assert!(
+        correction,
+        "expected a corrective welcome_send_failed event"
+    );
+
+    // The timed retry queue must NOT re-send over the healthy socket.
+    let welcomes_before = internet_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| m.content.starts_with(internal_prefixes::WELCOME))
+        .count();
+    protocol.process_welcome_retry_queue().unwrap();
+    let welcomes_after = internet_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| m.content.starts_with(internal_prefixes::WELCOME))
+        .count();
+    assert_eq!(welcomes_after, welcomes_before);
+
+    // The presence-online edge is what re-arms it.
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::SendAttempted
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_presence_online_rescue_backoff() {
+    let (mut protocol, internet_handle, welcome_id) =
+        setup_internet_protocol_with_pending_welcome();
+    let count_welcomes = |handle: &MockTransport| {
+        handle
+            .sent_messages()
+            .iter()
+            .filter(|m| m.content.starts_with(internal_prefixes::WELCOME))
+            .count()
+    };
+
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+
+    // First online answer: the rescue is free.
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::SendAttempted
+    );
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    let welcomes_after_first = count_welcomes(&internet_handle);
+
+    // Presence answers arrive on the platform's ~20s watch tick. A peer that
+    // is online but never proves the session (stale key package after a
+    // reinstall) must NOT be re-sent the welcome every tick: the second
+    // consecutive online answer is throttled.
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::Sent,
+        "second immediate online answer must not rescue again"
+    );
+    assert_eq!(count_welcomes(&internet_handle), welcomes_after_first);
+
+    // Once the backoff window elapses, the rescue runs again.
+    protocol
+        .welcome_presence_rescue
+        .get_mut("bob")
+        .expect("throttle entry for bob")
+        .next_allowed_at = Utc::now() - ChronoDuration::seconds(1);
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::SendAttempted
+    );
+    assert_eq!(count_welcomes(&internet_handle), welcomes_after_first + 1);
+
+    // Only executed rescues count toward the doubling backoff — the
+    // throttled tick in between must not inflate it.
+    assert_eq!(
+        protocol.welcome_presence_rescue.get("bob").unwrap().rescues,
+        2
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_peer_presence_offline_defers_to_mesh_carrier() {
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    // A mesh carrier is up alongside the relay socket.
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+
+    // Carrier-backed failure: the welcome sits on the data-plane retry track.
+    protocol
+        .on_transport_send_failed(&welcome_id, Some("network blip".to_string()))
+        .unwrap();
+    let before = protocol.welcome_lifecycles.get("bob").unwrap().clone();
+    assert_eq!(before.state, WelcomeDeliveryState::Failed);
+    assert!(before.next_retry_at.is_some());
+
+    // Relay presence is only authoritative for the internet path: with BLE
+    // also available the offline answer must not touch the retry track —
+    // the peer may be sitting right next to us.
+    protocol.on_peer_presence("bob", false, None);
+    let after = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(after.state, WelcomeDeliveryState::Failed);
+    assert_eq!(after.next_retry_at, before.next_retry_at);
+    assert_eq!(after.last_reason_code, before.last_reason_code);
 
     protocol.stop().unwrap();
 }

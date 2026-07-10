@@ -43,11 +43,23 @@ pub(crate) const WELCOME_MESH_CONFIRM_TIMEOUT_SECS: i64 = 15;
 /// carrier returning without a fresh discovery event, so it is deliberately far
 /// slower than the data-plane retry interval to keep an offline device quiet.
 pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
+/// Backoff base for presence-driven welcome rescue. The first rescue for a
+/// peer is immediate; each subsequent rescue that still fails to prove the
+/// session doubles the wait (40s, 80s, 160s, ...) up to
+/// [`WELCOME_PRESENCE_RESCUE_MAX_SECS`]. Bounds the resend loop when a peer
+/// is provably online but can never confirm (stale key package after a
+/// reinstall, incompatible peer version) — without it the platform's 20s
+/// presence watch would re-send the multi-frame MLS welcome forever.
+pub(crate) const WELCOME_PRESENCE_RESCUE_BASE_SECS: i64 = 40;
+/// Cap for the presence-rescue backoff (10 minutes).
+pub(crate) const WELCOME_PRESENCE_RESCUE_MAX_SECS: i64 = 600;
 /// Well-known prefix for transport send-failure reasons meaning "the carrier
 /// is up but this recipient is unreachable on it" (e.g. the internet relay
 /// answered `DeliveryError` for an offline peer). Classified in
-/// `on_transport_send_failed` as per-peer no-carrier so a welcome parks
-/// instead of burning a retry attempt.
+/// `on_transport_send_failed` as authoritative proof the frame was dropped:
+/// a welcome parks pending a reachability edge (no timed retry — the carrier
+/// being healthy means a timer would just re-send into another
+/// `DeliveryError`) instead of burning a retry attempt.
 ///
 /// Cross-layer contract: the React Native platform bridges
 /// (`InternetManager.kt` / `InternetManager.swift`) hardcode this literal when
@@ -381,6 +393,18 @@ impl WelcomeDeliveryState {
             Self::Expired => "Expired",
         }
     }
+}
+
+/// Per-peer throttle for presence-driven welcome rescue (see
+/// `OfflineProtocol::on_peer_presence`). Deliberately in-memory only: a
+/// restart resets the backoff, and the one free rescue that buys is useful
+/// after a restart anyway.
+#[derive(Debug, Clone)]
+pub(crate) struct PresenceRescueThrottle {
+    pub(crate) next_allowed_at: DateTime<Utc>,
+    /// Consecutive rescues without the session confirming; drives the
+    /// exponential backoff exponent.
+    pub(crate) rescues: u32,
 }
 
 /// Durable metadata for outbound Welcome reliability handling.

@@ -138,6 +138,12 @@ pub struct OfflineProtocol {
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
+    /// Backoff state for presence-driven welcome rescue, keyed by peer id.
+    /// Bounds how often an online-but-never-confirming peer triggers a
+    /// welcome re-arm/re-send (see `on_peer_presence`). Entries are dropped
+    /// lazily once the peer has no unconfirmed welcome left.
+    welcome_presence_rescue: HashMap<String, PresenceRescueThrottle>,
+
     /// Peers for which we are the both-create "owner" (kept our own session
     /// group on the lexicographic tiebreak) and are still awaiting a
     /// *group-aware* proof that the peer adopted our group. While a peer is in
@@ -334,6 +340,7 @@ impl OfflineProtocol {
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
+            welcome_presence_rescue: HashMap::new(),
             both_create_awaiting_decrypt: std::collections::HashSet::new(),
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),
             mls_event_rate_limiter: MlsEventRateLimiter::default(),
