@@ -1380,11 +1380,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     val manager = internetManager
                         ?: throw IllegalStateException("Failed to create Internet manager")
                     
-                    // Stop the manager first if it's running (to ensure clean restart)
-                    if (manager.state == TransportState.RUNNING) {
+                    // Stop the manager first if it's active (to ensure clean
+                    // restart). STARTING counts: a manager mid-handshake holds
+                    // a live OkHttp client and an isConnecting latch — starting
+                    // over it would leak the client and silently drop the new
+                    // configuration (connect() early-returns on the latch, so
+                    // the old handshake to the old URL would just continue).
+                    if (manager.state == TransportState.RUNNING ||
+                        manager.state == TransportState.STARTING) {
                         manager.stop()
                     }
-                    
+
                     configureAndStartInternet(manager, config)
                     emitDiagnostic("info", "Internet transport enabled")
                 }

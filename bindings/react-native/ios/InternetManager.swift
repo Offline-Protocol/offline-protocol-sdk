@@ -34,6 +34,11 @@ public class InternetManager: NSObject, TransportManager {
     private let RECONNECT_BACKOFF_MULTIPLIER: Double = 2.0
     private let PING_INTERVAL: TimeInterval = 10.0  // Reduced from 30s for faster failure detection
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
+    private let AUTH_RESPONSE_TIMEOUT: TimeInterval = 10.0
+    // Tracker ids for app-authored raw SendMessage frames (sendRawCommand):
+    // recorded to keep the per-recipient FIFO honest, never reported to the
+    // core. Mirrors InternetManager.kt — keep in sync.
+    private static let rawSendSentinelPrefix = "raw:"
     
     // MARK: - Properties
     
@@ -101,6 +106,10 @@ public class InternetManager: NSObject, TransportManager {
     }
     private var currentReconnectDelay: TimeInterval = 1.0
     private var reconnectWorkItem: DispatchWorkItem?
+    // Auth watchdog (mirrors the Kotlin bridge's authTimeoutRunnable):
+    // main-owned like reconnectWorkItem; armed on socket open, cancelled on
+    // Authenticated and by every close/teardown path.
+    private var authTimeoutWorkItem: DispatchWorkItem?
     private var maxReconnectAttempts: Int = 0 // 0 = infinite
     private var autoReconnect: Bool = true
 
@@ -173,14 +182,16 @@ public class InternetManager: NSObject, TransportManager {
         return info
     }()
 
-    /// Time source for the rate limiter: monotonic AND sleep-inclusive
+    /// Time source for the rate limiter, the in-flight tracker, and the
+    /// presence watch policy: monotonic AND sleep-inclusive
     /// (mach_continuous_time — the true analogue of the Kotlin bridge's
     /// SystemClock.elapsedRealtime), so a wall-clock step (NTP correction,
-    /// manual change) can never freeze or over-mint token refill, and a
+    /// manual change) can never freeze or over-mint token refill,
+    /// mass-expire in-flight sends, or evict the whole watch set, and a
     /// device-sleep interval still refills the bucket instead of pausing it
     /// (mach_absolute_time-based clocks stop ticking during sleep). Every
-    /// rateLimiter call must use this — mixing time sources per call site
-    /// would look like clock jumps to the bucket.
+    /// call into those three must use this — mixing time sources per call
+    /// site would look like clock jumps to their TTLs.
     private func monotonicNowMs() -> Int64 {
         let timebase = Self.machTimebase
         let ticks = mach_continuous_time()
@@ -268,10 +279,16 @@ public class InternetManager: NSObject, TransportManager {
             throw TransportError.invalidState("Invalid server URL: \(serverUrl)")
         }
         
-        self.serverUrl = url
-        self.autoReconnect = autoReconnect
-        self.maxReconnectAttempts = maxReconnectAttempts
-        
+        // autoReconnect / maxReconnectAttempts are main-owned plain vars
+        // (scheduleReconnect and handleConnectionClosed read them on main);
+        // configure() arrives on an RN thread, so hop like the lifecycle
+        // entry points instead of racing those readers.
+        runOnMainSync {
+            self.serverUrl = url
+            self.autoReconnect = autoReconnect
+            self.maxReconnectAttempts = maxReconnectAttempts
+        }
+
         emitDiagnostic("info", "Internet transport configured", context: [
             "serverUrl": serverUrl,
             "autoReconnect": autoReconnect,
@@ -531,6 +548,7 @@ public class InternetManager: NSObject, TransportManager {
             let task = webSocketTask
             webSocketTask = nil
             task?.cancel(with: .goingAway, reason: nil)
+            cancelAuthTimeout()
             isConnected = false
             isConnecting = false
             isAuthenticated = false
@@ -572,7 +590,7 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
 
-    private func handleConnectionOpened() {
+    private func handleConnectionOpened(task: URLSessionWebSocketTask) {
         isConnected = true
         isConnecting = false
         isAuthenticated = false
@@ -583,13 +601,45 @@ public class InternetManager: NSObject, TransportManager {
         // hammering the relay.
         consecutiveSendFailures.set(0)
         consecutivePingFailures.set(0)
-        
+
         emitDiagnostic("info", "WebSocket connected, authenticating...", context: [
             "serverUrl": serverUrl?.absoluteString ?? "unknown"
         ])
-        
+
+        // A relay that opens the socket but never answers must not wedge
+        // the transport (isConnected=true short-circuits connect() and the
+        // timers only start on Authenticated). URLSession's request timeout
+        // is no substitute: any inbound frame resets it, so a half-alive
+        // relay that pings but never authenticates slips past it.
+        scheduleAuthTimeout(for: task)
+
         // Authenticate with the relay server using deviceId as the user ID
         sendAuthentication()
+    }
+
+    /// Arms the auth watchdog for `task` (mirrors the Kotlin bridge's
+    /// scheduleAuthTimeout). Main-thread only. Fires through the close
+    /// funnel via teardownSocket; cancelled on Authenticated and by every
+    /// close/teardown path.
+    private func scheduleAuthTimeout(for task: URLSessionWebSocketTask) {
+        cancelAuthTimeout()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.authTimeoutWorkItem = nil
+            guard task === self.webSocketTask, !self.isAuthenticated else { return }
+            self.emitDiagnostic("error", "No auth response from relay within timeout", context: [
+                "timeoutMs": Int(self.AUTH_RESPONSE_TIMEOUT * 1000)
+            ])
+            self.teardownSocket(ifCurrent: task, reason: "Auth response timeout")
+        }
+        authTimeoutWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + AUTH_RESPONSE_TIMEOUT, execute: workItem)
+    }
+
+    /// Main-thread only.
+    private func cancelAuthTimeout() {
+        authTimeoutWorkItem?.cancel()
+        authTimeoutWorkItem = nil
     }
     
     private func sendAuthentication() {
@@ -638,6 +688,7 @@ public class InternetManager: NSObject, TransportManager {
 
     private func handleAuthenticatedOnMain(userId: String, username: String) {
         isAuthenticated = true
+        cancelAuthTimeout()
         // The relay accepted us — this, not the TCP open, is what proves the
         // connection good and earns a backoff reset.
         reconnectAttempts = 0
@@ -675,7 +726,11 @@ public class InternetManager: NSObject, TransportManager {
         isConnected = false
         isConnecting = false
         isAuthenticated = false
-        
+
+        // The dead socket's auth watchdog must not fire into (or outlive)
+        // whatever connection replaces it.
+        cancelAuthTimeout()
+
         // Stop polling and pinging immediately to prevent sending on dead connection
         stopMessagePolling()
         stopPingTimer()
@@ -816,7 +871,8 @@ public class InternetManager: NSObject, TransportManager {
         bytesReceived.add(Int64(data.count))
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let messageType = json["type"] as? String else {
+              let messageType = json["type"] as? String,
+              let rawText = String(data: data, encoding: .utf8) else {
             emitDiagnostic("warning", "Received non-JSON or invalid message", context: [
                 "size": data.count
             ])
@@ -828,10 +884,15 @@ public class InternetManager: NSObject, TransportManager {
         // casts return nil instead of throwing, so the per-field guards (and
         // per-entry compactMaps) inside the dispatch are the equivalent
         // containment.
-        dispatchRelayFrame(json, messageType: messageType, task: task)
+        dispatchRelayFrame(json, messageType: messageType, task: task, rawText: rawText)
     }
 
-    private func dispatchRelayFrame(_ json: [String: Any], messageType: String, task: URLSessionWebSocketTask) {
+    /// `rawText` is the frame exactly as it arrived; it — not a
+    /// re-serialized `json` — is what `internet_server_message` forwards,
+    /// per the TS contract ("the verbatim relay frame"). JSONSerialization
+    /// reorders keys and canonicalizes numbers (25.0 -> 25), the same
+    /// reason sendRawCommand refuses to re-serialize outbound frames.
+    private func dispatchRelayFrame(_ json: [String: Any], messageType: String, task: URLSessionWebSocketTask, rawText: String) {
         switch messageType {
         case "Authenticated":
             // Handle authentication success
@@ -866,7 +927,7 @@ public class InternetManager: NSObject, TransportManager {
                 inFlightTracker.resolveOnRelayAccepted(
                     recipient: sentRecipient,
                     messageId: (sentMessageId?.isEmpty == false) ? sentMessageId : nil,
-                    nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+                    nowMs: monotonicNowMs()
                 )
             }
 
@@ -1185,6 +1246,11 @@ public class InternetManager: NSObject, TransportManager {
         case "GroupCreated":
             guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
             let name = json["name"] as? String ?? ""
+            // A success answer on the group channel closes the translator's
+            // admin-denial correlation window — without this only errors
+            // close it, and it would stay armed for the rest of the
+            // connection after a successful register.
+            controlOpTranslator.onGroupAnswered(groupId: groupId)
             injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_CREATED__", payload: ["group_id": groupId, "name": name])
             
         case "GroupMessageReceived":
@@ -1200,12 +1266,14 @@ public class InternetManager: NSObject, TransportManager {
             
         case "GroupMemberAdded":
             guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
+            controlOpTranslator.onGroupAnswered(groupId: groupId)
             let userId = json["user_id"] as? String ?? ""
             let addedBy = json["added_by"] as? String ?? ""
             injectGroupInternalMessage(senderId: addedBy.isEmpty ? "relay" : addedBy, prefix: "__GROUP_MEMBER_ADDED__", payload: ["group_id": groupId, "user_id": userId, "added_by": addedBy])
             
         case "GroupMemberRemoved":
             guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
+            controlOpTranslator.onGroupAnswered(groupId: groupId)
             let userId = json["user_id"] as? String ?? ""
             let removedBy = json["removed_by"] as? String ?? ""
             injectGroupInternalMessage(senderId: removedBy.isEmpty ? "relay" : removedBy, prefix: "__GROUP_MEMBER_REMOVED__", payload: ["group_id": groupId, "user_id": userId, "removed_by": removedBy])
@@ -1260,7 +1328,7 @@ public class InternetManager: NSObject, TransportManager {
             injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_ERROR__", payload: payload)
             // Dual-emit: apps correlating request_id-carrying errors
             // (invite-link ops ride the raw channel) need the full frame.
-            emitServerMessage(json)
+            emitServerMessage(rawText)
 
         case "RateLimited":
             // The relay dropped whatever exceeded the bucket — possibly a
@@ -1283,7 +1351,7 @@ public class InternetManager: NSObject, TransportManager {
                 self.rateLimiter.drain(nowMs: self.monotonicNowMs())
                 self.pendingControlFrames.removeAll()
             }
-            emitServerMessage(json)
+            emitServerMessage(rawText)
             emitDiagnostic("warning", "Relay rate limit hit — translator state reset")
 
         case "GroupRoleChanged":
@@ -1294,7 +1362,7 @@ public class InternetManager: NSObject, TransportManager {
                 userId: json["user_id"] as? String ?? "",
                 newRole: json["new_role"] as? String ?? json["role"] as? String ?? ""
             )
-            emitServerMessage(json)
+            emitServerMessage(rawText)
             emitDiagnostic("debug", "Relay server message forwarded", context: [
                 "type": messageType
             ])
@@ -1305,7 +1373,7 @@ public class InternetManager: NSObject, TransportManager {
         // socket without a second WebSocket in the app.
         case "GroupInviteLinkCreated", "GroupInviteLinkRevoked", "GroupJoinedViaInvite",
              "GroupInviteJoinPending", "GroupDeleted":
-            emitServerMessage(json)
+            emitServerMessage(rawText)
             emitDiagnostic("debug", "Relay server message forwarded", context: [
                 "type": messageType
             ])
@@ -1313,18 +1381,15 @@ public class InternetManager: NSObject, TransportManager {
         default:
             // Unknown types are forwarded too — future relay additions
             // surface to the app instead of being silently dropped.
-            emitServerMessage(json)
+            emitServerMessage(rawText)
             emitDiagnostic("debug", "Received relay message", context: [
                 "type": messageType
             ])
         }
     }
 
-    private func emitServerMessage(_ json: [String: Any]) {
-        guard let emitter = serverMessageEmitter,
-              let data = try? JSONSerialization.data(withJSONObject: json),
-              let raw = String(data: data, encoding: .utf8) else { return }
-        emitter(raw)
+    private func emitServerMessage(_ rawText: String) {
+        serverMessageEmitter?(rawText)
     }
     
     /// Parse ISO-8601 timestamp string to Unix ms, or return current time if invalid.
@@ -1416,7 +1481,10 @@ public class InternetManager: NSObject, TransportManager {
             return
         }
 
-        inFlightTracker.prune(nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+        // Monotonic like every tracker/watch call (mirrors the Kotlin
+        // bridge's contract): a wall-clock step must never mass-expire
+        // in-flight sends or evict the watch set.
+        inFlightTracker.prune(nowMs: monotonicNowMs())
 
         // Deferred control frames first: they are older than anything the
         // queue will hand us and their commits are still pending.
@@ -1556,7 +1624,7 @@ public class InternetManager: NSObject, TransportManager {
             recipient: recipientId,
             messageId: messageId,
             plane: .data,
-            nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+            nowMs: monotonicNowMs()
         )
 
         task.send(.string(jsonString)) { [weak self] error in
@@ -1690,7 +1758,7 @@ public class InternetManager: NSObject, TransportManager {
                     recipient: recipientId,
                     messageId: messageId,
                     plane: .connReq,
-                    nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+                    nowMs: monotonicNowMs()
                 )
             }
             // Hold the poll loop until the primary's outcome lands: the
@@ -1854,7 +1922,7 @@ public class InternetManager: NSObject, TransportManager {
             return
         }
         guard let data = json.data(using: .utf8),
-              (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] != nil else {
+              let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             emitDiagnostic("warning", "Rejected invalid raw server command", context: [:])
             completion(false)
             return
@@ -1863,13 +1931,38 @@ public class InternetManager: NSObject, TransportManager {
             completion(false)
             return
         }
+        // An app-authored SendMessage joins the same per-recipient FIFO the
+        // relay answers in order: without a tracker entry its MessageSent
+        // would consume the oldest SDK entry via the oldest-first fallback,
+        // costing that message its DeliveryError fail-fast. Sentinel-id
+        // entries resolve/drain like any other but are never reported to
+        // the core (the app owns raw-frame outcomes) — see
+        // handleRecipientUnreachable. Mirrors InternetManager.kt.
+        var sentinel: (recipient: String, id: String)? = nil
+        if parsed["type"] as? String == "SendMessage",
+           let recipient = parsed["recipient"] as? String, !recipient.isEmpty {
+            let id = Self.rawSendSentinelPrefix + UUID().uuidString
+            inFlightTracker.recordSent(
+                recipient: recipient,
+                messageId: id,
+                plane: .data,
+                nowMs: monotonicNowMs()
+            )
+            sentinel = (recipient, id)
+        }
         // The ORIGINAL string is what goes out (re-serializing would alter
         // app-authored frames). Resolve from the send completion so `true`
         // means written to the socket, matching the documented TS contract
         // (OkHttp on Android is enqueue-confirmed — the closest its API
         // offers); a failed write returns its token.
         task.send(.string(json)) { [weak self] error in
-            if error != nil { self?.rateLimiter.refund() }
+            if error != nil {
+                self?.rateLimiter.refund()
+                // Never written: no relay outcome will ever correlate.
+                if let sentinel = sentinel {
+                    self?.inFlightTracker.unrecord(recipient: sentinel.recipient, messageId: sentinel.id)
+                }
+            }
             completion(error == nil)
         }
     }
@@ -1897,9 +1990,13 @@ public class InternetManager: NSObject, TransportManager {
             ])
             return
         }
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let now = monotonicNowMs()
         let failedIds = inFlightTracker.drainRecipient(recipient, plane: plane, nowMs: now)
         for id in failedIds {
+            // Sentinel entries track app-authored raw SendMessage frames
+            // only to keep the per-recipient FIFO honest for MessageSent
+            // resolution; their outcomes belong to the app, not the core.
+            if id.hasPrefix(Self.rawSendSentinelPrefix) { continue }
             protocolInstance.internetSendFailedWithReason(
                 messageId: id,
                 reason: "recipient_unreachable: \(reason)"
@@ -1951,7 +2048,10 @@ public class InternetManager: NSObject, TransportManager {
         guard isConnected, isAuthenticated, let task = webSocketTask else { return }
 
         let coreWatchlist = protocolInstance.internetPresenceWatchlist()
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        // Monotonic like every tracker/watch call (mirrors the Kotlin
+        // bridge's contract): a wall-clock step must never evict the whole
+        // watch set through the idle TTL.
+        let now = monotonicNowMs()
         // Self is filtered BEFORE the merge so it can never enter the watch
         // set and pin a rotation slot until the idle TTL.
         let peers = presenceWatch.peersToQuery(
@@ -1961,9 +2061,7 @@ public class InternetManager: NSObject, TransportManager {
         var queried = 0
         for peer in peers {
             // Presence queries yield to data traffic under rate pressure;
-            // skipped peers come around on a later rotation. (The limiter
-            // gets the monotonic clock; `now` stays wall-clock for the
-            // watch policy's TTLs.)
+            // skipped peers come around on a later rotation.
             guard rateLimiter.tryAcquire(nowMs: monotonicNowMs()) else { break }
             let checkMessage: [String: Any] = [
                 "type": "CheckPresence",
@@ -2095,7 +2193,7 @@ extension InternetManager: URLSessionWebSocketDelegate {
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, !self.isStale(webSocketTask) else { return }
-            self.handleConnectionOpened()
+            self.handleConnectionOpened(task: webSocketTask)
         }
     }
 

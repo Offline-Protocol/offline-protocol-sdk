@@ -54,6 +54,19 @@ class RecipientInFlightTracker(
     }
 
     /**
+     * Removes a specific entry — the send was never written (a false socket
+     * write), so there is no relay outcome to correlate. Mirrors
+     * ios/RecipientInFlightTracker.swift's unrecord.
+     */
+    fun unrecord(recipient: String, messageId: String) {
+        synchronized(lock) {
+            val queue = byRecipient[recipient] ?: return
+            queue.removeAll { it.messageId == messageId }
+            if (queue.isEmpty()) byRecipient.remove(recipient)
+        }
+    }
+
+    /**
      * Resolves one DATA entry on the relay's `MessageSent` answer: the
      * relay accepted and forwarded that frame, so it must not be swept into
      * a later recipient-keyed `DeliveryError` (which would false-fail a

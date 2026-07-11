@@ -45,14 +45,24 @@ class InternetManager(
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val MAX_CONSECUTIVE_FAILURES = 2  // Trigger disconnect after 2 consecutive failures
         private const val AUTH_RESPONSE_TIMEOUT_MS = 10_000L
+        // Tracker ids for app-authored raw SendMessage frames (sendRawCommand):
+        // recorded to keep the per-recipient FIFO honest, never reported to
+        // the core. Mirrors InternetManager.swift — keep in sync.
+        private const val RAW_SEND_SENTINEL_PREFIX = "raw:"
     }
     
     // MARK: - Properties
     
-    private var serverUrl: String? = null
-    private var autoReconnect = true
-    private var maxReconnectAttempts = 0 // 0 = infinite
-    private var authToken: String? = null
+    // Written by configure()/setAuthToken() on the RN bridge thread; read on
+    // main (connect/scheduleReconnect) and on the OkHttp reader thread
+    // (sendAuthentication after a reconnect's onOpen). First-start flows get
+    // happens-before from the start() main-sync, but a mid-session token
+    // rotation or reconfigure has no such edge — volatile so a reconnect
+    // can't re-authenticate with a stale token.
+    @Volatile private var serverUrl: String? = null
+    @Volatile private var autoReconnect = true
+    @Volatile private var maxReconnectAttempts = 0 // 0 = infinite
+    @Volatile private var authToken: String? = null
     
     // OkHttp components
     private var okHttpClient: OkHttpClient? = null
@@ -261,7 +271,12 @@ class InternetManager(
     }
     
     private fun startUnsafe() {
-        if (state == TransportState.RUNNING) {
+        // STARTING is as much "already running" as RUNNING: a manager
+        // mid-handshake holds a live OkHttp client and the isConnecting
+        // latch, so proceeding would replace the client without shutting it
+        // down and then no-op in connect() — the caller must stop() first
+        // (enableTransport does).
+        if (state == TransportState.RUNNING || state == TransportState.STARTING) {
             throw TransportException.AlreadyRunning()
         }
         
@@ -414,12 +429,24 @@ class InternetManager(
         // future connect() would early-return — a wedged transport.
         val client = okHttpClient ?: return
 
-        isConnecting.set(true)
+        // The request must build BEFORE the isConnecting latch: url() throws
+        // IllegalArgumentException on a malformed app-provided server URL,
+        // and a throw after the latch would leave isConnecting=true with no
+        // socket callback to ever clear it — every future connect() would
+        // early-return, a wedged transport.
+        val request = try {
+            Request.Builder()
+                .url(url)
+                .addHeader("X-Device-ID", deviceId)
+                .build()
+        } catch (e: IllegalArgumentException) {
+            emitDiagnostic("error", "Invalid relay server URL", mapOf(
+                "url" to url
+            ))
+            throw TransportException.NotAvailable("Invalid server URL: $url")
+        }
 
-        val request = Request.Builder()
-            .url(url)
-            .addHeader("X-Device-ID", deviceId)
-            .build()
+        isConnecting.set(true)
 
         // Invariant: OkHttp dispatches listener callbacks asynchronously
         // (DNS/TCP take milliseconds), so a terminal callback cannot observe
@@ -443,27 +470,39 @@ class InternetManager(
     }
     
     private fun handleConnectionOpened(ws: WebSocket) {
-        isConnected.set(true)
-        isConnecting.set(false)
-        isAuthenticated.set(false)
-        // Backoff deliberately NOT reset here: only a full authenticate
-        // proves the connection good (handleAuthenticated). Resetting on TCP
-        // open would let a persistently bad token cycle
-        // connect → AuthError → teardown at the initial 1s delay forever,
-        // hammering the relay.
-        consecutiveSendFailures.set(0)
+        // ONE main-posted block gated on the socket still being current,
+        // like handleAuthenticated and terminateSocket: mutating the flags
+        // on the reader thread races stopUnsafe() — an onOpen that passed
+        // the listener's staleness pre-check, was preempted by disconnect()
+        // (webSocket=null, flags cleared), and then resumed would latch
+        // isConnected=true with no socket alive to ever clear it, and every
+        // future connect() would early-return — a wedged transport.
+        mainHandler.post {
+            if (ws !== webSocket) return@post
+            if (state == TransportState.STOPPING || state == TransportState.STOPPED) return@post
 
-        emitDiagnostic("info", "WebSocket connected, authenticating...", mapOf(
-            "serverUrl" to (serverUrl ?: "unknown")
-        ))
+            isConnected.set(true)
+            isConnecting.set(false)
+            isAuthenticated.set(false)
+            // Backoff deliberately NOT reset here: only a full authenticate
+            // proves the connection good (handleAuthenticated). Resetting on
+            // TCP open would let a persistently bad token cycle
+            // connect → AuthError → teardown at the initial 1s delay forever,
+            // hammering the relay.
+            consecutiveSendFailures.set(0)
 
-        // A relay that opens the socket but never answers must not wedge
-        // the transport (isConnected=true short-circuits connect() and the
-        // timers only start on Authenticated).
-        scheduleAuthTimeout(ws)
+            emitDiagnostic("info", "WebSocket connected, authenticating...", mapOf(
+                "serverUrl" to (serverUrl ?: "unknown")
+            ))
 
-        // Authenticate with the relay server using deviceId as the user ID
-        sendAuthentication()
+            // A relay that opens the socket but never answers must not wedge
+            // the transport (isConnected=true short-circuits connect() and
+            // the timers only start on Authenticated).
+            scheduleAuthTimeout(ws)
+
+            // Authenticate with the relay server using deviceId as the user ID
+            sendAuthentication()
+        }
     }
 
     /**
@@ -648,7 +687,20 @@ class InternetManager(
         ))
         
         reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
-        val runnable = Runnable { connect() }
+        // connect() throws on a malformed server URL (reachable if configure()
+        // changed it mid-session); a throw out of a posted runnable would
+        // crash the app, so a reconnect that cannot even build its request
+        // stops the transport instead.
+        val runnable = Runnable {
+            try {
+                connect()
+            } catch (e: Exception) {
+                emitDiagnostic("error", "Reconnect failed", mapOf(
+                    "error" to (e.message ?: "unknown")
+                ))
+                updateState(TransportState.STOPPED)
+            }
+        }
         reconnectRunnable = runnable
         mainHandler.postDelayed(runnable, delay)
     }
@@ -735,11 +787,12 @@ class InternetManager(
     private fun processReceivedData(ws: WebSocket, data: ByteArray) {
         bytesReceived.addAndGet(data.size.toLong())
 
+        val rawText = String(data, Charsets.UTF_8)
         val json: org.json.JSONObject
         val messageType: String
 
         try {
-            json = org.json.JSONObject(String(data, Charsets.UTF_8))
+            json = org.json.JSONObject(rawText)
             messageType = json.safeOptString("type")
         } catch (e: Exception) {
             emitDiagnostic("warning", "Received non-JSON or invalid message", mapOf(
@@ -749,7 +802,7 @@ class InternetManager(
         }
 
         try {
-            dispatchRelayFrame(ws, json, messageType)
+            dispatchRelayFrame(ws, json, messageType, rawText)
         } catch (e: Exception) {
             // One malformed frame must degrade to a diagnostic, never
             // propagate: an exception escaping OkHttp's onMessage fails the
@@ -762,7 +815,19 @@ class InternetManager(
         }
     }
 
-    private fun dispatchRelayFrame(ws: WebSocket, json: org.json.JSONObject, messageType: String) {
+    /**
+     * [rawText] is the frame exactly as it arrived; it — not a re-serialized
+     * [json] — is what `internet_server_message` forwards, per the TS
+     * contract ("the verbatim relay frame"). org.json reorders keys and
+     * canonicalizes numbers (25.0 -> 25), the same reason sendRawCommand
+     * refuses to re-serialize outbound frames.
+     */
+    private fun dispatchRelayFrame(
+        ws: WebSocket,
+        json: org.json.JSONObject,
+        messageType: String,
+        rawText: String
+    ) {
         when (messageType) {
             "Authenticated" -> {
                 // Handle authentication success
@@ -1125,6 +1190,11 @@ class InternetManager(
                 val groupId = json.safeOptString("group_id")
                 val name = json.safeOptString("name")
                 if (groupId.isEmpty()) return
+                // A success answer on the group channel closes the
+                // translator's admin-denial correlation window — without
+                // this only errors close it, and it would stay armed for
+                // the rest of the connection after a successful register.
+                controlOpTranslator.onGroupAnswered(groupId)
                 val payloadJson = org.json.JSONObject().apply {
                     put("group_id", groupId)
                     put("name", name)
@@ -1156,6 +1226,7 @@ class InternetManager(
                 val userId = json.safeOptString("user_id")
                 val addedBy = json.safeOptString("added_by")
                 if (groupId.isEmpty()) return
+                controlOpTranslator.onGroupAnswered(groupId)
                 val payloadJson = org.json.JSONObject().apply {
                     put("group_id", groupId)
                     put("user_id", userId)
@@ -1169,6 +1240,7 @@ class InternetManager(
                 val userId = json.safeOptString("user_id")
                 val removedBy = json.safeOptString("removed_by")
                 if (groupId.isEmpty()) return
+                controlOpTranslator.onGroupAnswered(groupId)
                 val payloadJson = org.json.JSONObject().apply {
                     put("group_id", groupId)
                     put("user_id", userId)
@@ -1250,7 +1322,7 @@ class InternetManager(
                 injectGroupInternalMessage("relay", "__GROUP_ERROR__", payloadJson)
                 // Dual-emit: apps correlating request_id-carrying errors
                 // (invite-link ops ride the raw channel) need the full frame.
-                serverMessageEmitter?.invoke(json.toString())
+                serverMessageEmitter?.invoke(rawText)
             }
 
             "RateLimited" -> {
@@ -1273,7 +1345,7 @@ class InternetManager(
                     rateLimiter.drain(monotonicNowMs())
                     pendingControlFrames.clear()
                 }
-                serverMessageEmitter?.invoke(json.toString())
+                serverMessageEmitter?.invoke(rawText)
                 emitDiagnostic("warning", "Relay rate limit hit — translator state reset")
             }
 
@@ -1285,7 +1357,7 @@ class InternetManager(
                     json.safeOptString("user_id"),
                     json.safeOptString("new_role", json.safeOptString("role"))
                 )
-                serverMessageEmitter?.invoke(json.toString())
+                serverMessageEmitter?.invoke(rawText)
                 emitDiagnostic("debug", "Relay server message forwarded", mapOf(
                     "type" to messageType
                 ))
@@ -1297,7 +1369,7 @@ class InternetManager(
             // SDK's socket without a second WebSocket in the app.
             "GroupInviteLinkCreated", "GroupInviteLinkRevoked", "GroupJoinedViaInvite",
             "GroupInviteJoinPending", "GroupDeleted" -> {
-                serverMessageEmitter?.invoke(json.toString())
+                serverMessageEmitter?.invoke(rawText)
                 emitDiagnostic("debug", "Relay server message forwarded", mapOf(
                     "type" to messageType
                 ))
@@ -1306,7 +1378,7 @@ class InternetManager(
             else -> {
                 // Unknown types are forwarded too — future relay additions
                 // surface to the app instead of being silently dropped.
-                serverMessageEmitter?.invoke(json.toString())
+                serverMessageEmitter?.invoke(rawText)
                 emitDiagnostic("debug", "Received relay message", mapOf(
                     "type" to messageType
                 ))
@@ -1324,7 +1396,7 @@ class InternetManager(
     fun sendRawCommand(json: String): Boolean {
         if (!isConnected.get() || !isAuthenticated.get()) return false
         val ws = webSocket ?: return false
-        try {
+        val parsed = try {
             // Parse purely as validation — the ORIGINAL string is what goes
             // out. Re-serializing (org.json reorders keys and canonicalizes
             // numbers, e.g. 25.0 -> 25) would alter app-authored frames and
@@ -1337,8 +1409,33 @@ class InternetManager(
             return false
         }
         if (!rateLimiter.tryAcquire(monotonicNowMs())) return false
+        // An app-authored SendMessage joins the same per-recipient FIFO the
+        // relay answers in order: without a tracker entry its MessageSent
+        // would consume the oldest SDK entry via the oldest-first fallback,
+        // costing that message its DeliveryError fail-fast. Sentinel-id
+        // entries resolve/drain like any other but are never reported to
+        // the core (the app owns raw-frame outcomes) — see
+        // handleRecipientUnreachable.
+        var sentinel: Pair<String, String>? = null
+        if (parsed.optString("type") == "SendMessage") {
+            val recipient = parsed.optString("recipient")
+            if (recipient.isNotEmpty()) {
+                val id = RAW_SEND_SENTINEL_PREFIX + java.util.UUID.randomUUID()
+                inFlightTracker.recordSent(
+                    recipient,
+                    id,
+                    RecipientInFlightTracker.Plane.DATA,
+                    monotonicNowMs()
+                )
+                sentinel = recipient to id
+            }
+        }
         val sent = ws.send(json)
-        if (!sent) rateLimiter.refund()
+        if (!sent) {
+            rateLimiter.refund()
+            // Never written: no relay outcome will ever correlate.
+            sentinel?.let { (recipient, id) -> inFlightTracker.unrecord(recipient, id) }
+        }
         return sent
     }
     
@@ -1740,6 +1837,10 @@ class InternetManager(
         val now = monotonicNowMs()
         val failedIds = inFlightTracker.drainRecipient(recipient, plane, now)
         for (id in failedIds) {
+            // Sentinel entries track app-authored raw SendMessage frames
+            // only to keep the per-recipient FIFO honest for MessageSent
+            // resolution; their outcomes belong to the app, not the core.
+            if (id.startsWith(RAW_SEND_SENTINEL_PREFIX)) continue
             try {
                 protocol.internetSendFailedWithReason(id, "recipient_unreachable: $reason")
             } catch (e: Exception) {
