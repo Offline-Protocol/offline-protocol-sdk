@@ -597,6 +597,37 @@ class RelayControlOpTranslatorTest {
     }
 
     @Test
+    fun successAnswerClosesTheDenialWindow() {
+        val translator = RelayControlOpTranslator("bob")
+
+        // The register succeeded (GroupCreated answered it): the success
+        // answer must close the delta window too, or it stays armed for the
+        // rest of the connection and a later unrelated error quoting the
+        // denial phrase (e.g. a user-authored group name) would be honored
+        // as OUR denial and suppress membership sync.
+        commit(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob"]}""",
+                "bob"
+            )
+        )
+        translator.onGroupAnswered("g1")
+        translator.onGroupError("g1", "Only admins can add members")
+
+        val registration = frames(
+            translator.translate(
+                "group_relay_register",
+                """{"group_id":"g1","members":["alice","bob","carol"]}""",
+                "bob"
+            )
+        )
+        assertEquals(2, registration.size)
+        assertEquals("AddGroupMember", registration[1].getString("type"))
+        assertEquals("carol", registration[1].getString("username"))
+    }
+
+    @Test
     fun resetClosesTheDenialWindow() {
         val translator = RelayControlOpTranslator("bob")
 

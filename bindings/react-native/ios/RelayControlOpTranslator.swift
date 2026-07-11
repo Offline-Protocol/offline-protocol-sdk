@@ -213,6 +213,22 @@ final class RelayControlOpTranslator {
         }
     }
 
+    /// Feed relay *success* answers on the group channel (GroupCreated,
+    /// GroupMemberAdded, GroupMemberRemoved): any group-scoped answer closes
+    /// the admin-denial correlation window, success included — `onGroupError`
+    /// already closes it for errors. Without this, a successful
+    /// register-with-deltas leaves the window open for the whole connection,
+    /// and a later request_id-less GroupError merely *quoting* the denial
+    /// phrase (e.g. a user-authored group name) would be honored as OUR
+    /// denial and suppress membership sync until reconnect. Mirrors
+    /// android RelayControlOpTranslator.kt — keep the two in sync.
+    func onGroupAnswered(groupId: String) {
+        guard !groupId.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        outstandingMemberDeltas.remove(groupId)
+    }
+
     /// Feed relay `GroupRoleChanged` frames: a promotion of this device to
     /// admin re-enables member deltas an earlier denial suppressed —
     /// otherwise a mid-connection promotion keeps membership edits away from

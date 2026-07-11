@@ -469,6 +469,69 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         XCTAssertEqual(registration[1]["username"] as? String, "carol")
     }
 
+    func testSuccessAnswerClosesTheDenialWindow() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+
+        // The register succeeded (GroupCreated answered it): the success
+        // answer must close the delta window too, or it stays armed for the
+        // rest of the connection and a later unrelated error quoting the
+        // denial phrase (e.g. a user-authored group name) would be honored
+        // as OUR denial and suppress membership sync.
+        commit(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
+        translator.onGroupAnswered(groupId: "g1")
+        translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
+
+        let registration = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob","carol"]}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(registration.count, 2)
+        XCTAssertEqual(registration[1]["type"] as? String, "AddGroupMember")
+        XCTAssertEqual(registration[1]["username"] as? String, "carol")
+    }
+
+    func testResetClosesTheDenialWindow() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+
+        _ = translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        )
+        translator.reset()
+
+        // The outstanding delta died with the connection: a phrase-quoting
+        // error on the next connection is not its answer.
+        translator.onGroupError(groupId: "g1", reason: "Only admins can add members")
+
+        let after = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g1","members":["alice","bob"]}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(after.count, 2)
+        XCTAssertEqual(after[1]["type"] as? String, "AddGroupMember")
+    }
+
+    func testStringIsAdminHintTreatedAsAbsent() {
+        let translator = RelayControlOpTranslator(selfId: "bob")
+
+        // A string encoding is not boolean-like on either platform: treated
+        // as an absent hint (send-and-learn), not as a denial — mirrors the
+        // string half of Kotlin's numericAndStringIsAdminHintsMatchSwiftSemantics.
+        let stringFalse = frames(translator.translate(
+            controlOp: "group_relay_register",
+            controlPayload: #"{"group_id":"g3","members":["alice","bob"],"is_admin":"false"}"#,
+            recipientId: "bob"
+        ))
+        XCTAssertEqual(stringFalse.count, 2)
+    }
+
     func testIsAdminHintAcceptsNumericEncoding() {
         let translator = RelayControlOpTranslator(selfId: "bob")
 
