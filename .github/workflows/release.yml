@@ -131,6 +131,11 @@ jobs:
             exit 1
           fi
 
+          # Google Play requires 16 KB page-size alignment (flags live in
+          # .cargo/config.toml); fail this ABI's build rather than ship 4 KB.
+          python3 bindings/react-native/scripts/check-elf-alignment.py \
+            "jniLibs/${{ matrix.abi }}/libuniffi_offline_protocol.so"
+
       - name: Upload ${{ matrix.abi }} library
         uses: actions/upload-artifact@v4
         with:
@@ -517,6 +522,10 @@ jobs:
           for abi in arm64-v8a armeabi-v7a x86_64 x86; do
             test -f "bindings/react-native/android/src/main/jniLibs/$abi/libuniffi_offline_protocol.so"
           done
+
+          echo "Checking 16 KB page-size alignment (Google Play requirement)..."
+          python3 bindings/react-native/scripts/check-elf-alignment.py \
+            bindings/react-native/android/src/main/jniLibs/*/libuniffi_offline_protocol.so
 
           echo "Checking Android Kotlin bindings..."
           test -d bindings/react-native/android/src/main/java/uniffi
