@@ -67,8 +67,11 @@ repositories {
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib"
 
-    // JNA required for UniFFI-generated Kotlin bindings
-    implementation 'net.java.dev.jna:jna:5.13.0@aar'
+    // JNA required for UniFFI-generated Kotlin bindings.
+    // Keep >= 5.17.0: earlier libjnidispatch.so is not 16 KB page-aligned on
+    // every ABI (Google Play requirement) and 5.17.0 fixed runtime crashes on
+    // 16 KB-page devices (java-native-access/jna#1618).
+    implementation 'net.java.dev.jna:jna:5.19.1@aar'
 
     // OkHttp for WebSocket support in InternetManager
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
