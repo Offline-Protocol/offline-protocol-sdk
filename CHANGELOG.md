@@ -109,6 +109,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Adaptive TTL no longer collapses at ~25,650 estimated devices (CQ-M1).** The size-based TTL boost computed "extra hundreds of devices" in a `usize` and narrowed it with a bare `as u8` cast, which wraps modulo 256: at an estimated 25,650+ devices the boost silently vanished — TTL fell back to the small-network base instead of the configured maximum, exactly when reach matters most — and oscillated as the network grew further. The count now saturates at the cast boundary; the existing max-TTL clamp bounds the result as before.
 - **Periodic cleanup sweeps no longer risk a panic on freshly-booted devices.** The group-message dedup, pending-commit, pending-group-message, and service-discovery dedup sweeps computed their expiry cutoff as `Instant::now() - TTL`, which panics on underflow — and on platforms where the monotonic clock starts at boot (Linux, Android, embedded), that subtraction underflows whenever the process is younger than the TTL, e.g. a messaging service auto-started at boot running its first sweep within 5 minutes. Entry ages are now compared with `saturating_duration_since` instead.
 
+## [0.11.1] — 2026-07-12
+
+Hotfix cut from `v0.11.0` — no API or behavior changes. Consumers only need a version bump.
+
+### Fixed
+
+- **Android native libraries are now 16 KB page-size aligned (Google Play requirement).**
+  `libuniffi_offline_protocol.so` in `0.11.0` and earlier had 4 KB-aligned `PT_LOAD` segments on every ABI, which Google Play now rejects (as a blocking error) for apps targeting Android 15+ on 64-bit devices. All four ABIs (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`) are now linked with `-Wl,-z,max-page-size=16384` via per-target rustflags in `.cargo/config.toml`, and both build paths (release CI and `build-uniffi-android.sh`) gate on a new `check-elf-alignment.py` so a future toolchain change cannot silently regress alignment. Verify with `readelf -l <lib.so>` — every `LOAD` segment shows `Align 0x4000`.
+
+### Changed
+
+- **JNA dependency bumped from 5.13.0 to 5.19.1** in the Android library. JNA 5.13.0's `libjnidispatch.so` is not 16 KB-aligned on `x86_64` and crashes at runtime on 16 KB-page devices (fixed upstream in JNA 5.17.0). No API impact; apps already forcing a newer JNA via Gradle resolution are unaffected.
+
 ## [0.11.0] — 2026-07-01
 
 ### Licensing
