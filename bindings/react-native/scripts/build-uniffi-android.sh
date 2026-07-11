@@ -159,7 +159,11 @@ for i in "${!ABIS[@]}"; do
   # Copy library to jniLibs
   # UniFFI generates code that looks for "uniffi_offline_protocol" which JNA converts to "libuniffi_offline_protocol.so"
   cp "$so_path" "$OUTPUT_DIR/$abi/libuniffi_offline_protocol.so"
-  
+
+  # Google Play requires 16 KB page-size alignment (flags live in
+  # .cargo/config.toml); fail here rather than package a 4 KB-aligned lib.
+  python3 "$SCRIPT_DIR/check-elf-alignment.py" "$OUTPUT_DIR/$abi/libuniffi_offline_protocol.so"
+
   echo "✅ Built and copied library for $abi"
 done
 
