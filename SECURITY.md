@@ -12,7 +12,7 @@ If you discover a security vulnerability in the Offline Protocol SDK, please rep
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Instead, please email security concerns to the repository maintainers via the contact information in the repository. Include:
+Instead, please email **gm@offlineprotocol.com** with the details. Include:
 
 1. A description of the vulnerability
 2. Steps to reproduce the issue

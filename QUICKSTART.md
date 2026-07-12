@@ -63,30 +63,38 @@ protocol.on('relay_promoted', () => {
 
 ## For Android Developers
 
+> Native (no React Native) integration needs the full `ProtocolConfig` and permission
+> setup. See the [Android Integration Guide](docs/android-integration.md) for the complete
+> walkthrough — the snippet below is just the shape.
+
 ### 1. Build Rust Library
 
 ```bash
 cargo build --release --target aarch64-linux-android
 ```
 
+This produces `liboffline_protocol_uniffi.so`.
+
 ### 2. Add to Android Project
 
-Copy `liboffline_protocol.so` to `app/src/main/jniLibs/arm64-v8a/`
+Copy it into `app/src/main/jniLibs/arm64-v8a/` as `libuniffi_offline_protocol.so` (the name
+UniFFI's loader expects). The `scripts/build-uniffi-android.sh` helper builds every ABI and
+renames automatically.
 
 ### 3. Use in Kotlin
 
 ```kotlin
-val protocol = OfflineProtocol(ProtocolConfig(
-    appId = "my-app",
-    userId = "user123"
-))
+import uniffi.offline_protocol.*
 
+// Build `config` with the full ProtocolConfig(...) — see the Android integration guide.
+val protocol = OfflineProtocol(config)
 protocol.start()
 
 val messageId = protocol.sendMessage(
     recipient = "friend",
     content = "Hello!",
-    priority = MessagePriority.HIGH
+    priority = MessagePriority.HIGH,
+    replyToMsg = null,
 )
 ```
 
@@ -94,31 +102,35 @@ val messageId = protocol.sendMessage(
 
 ## For iOS Developers
 
+> Native (no React Native) integration needs the full `ProtocolConfig` and permission
+> setup. See the [iOS Integration Guide](docs/ios-integration.md) for the complete
+> walkthrough — the snippet below is just the shape.
+
 ### 1. Build Rust Library
 
 ```bash
 cargo build --release --target aarch64-apple-ios
 ```
 
+This produces `liboffline_protocol_uniffi.a`.
+
 ### 2. Add to Xcode
 
-Add `liboffline_protocol.a` to your project frameworks.
+Add `liboffline_protocol_uniffi.a` (or the device/simulator slices from
+`scripts/build-uniffi-ios.sh`) and the generated `offline_protocol.swift` to your project.
 
 ### 3. Use in Swift
 
 ```swift
-let config = ProtocolConfig(
-    appId: "my-app",
-    userId: "user123"
-)
+// Build `config` with the full ProtocolConfig(...) — see the iOS integration guide.
+let mesh = try OfflineProtocol(config: config)
+try mesh.start()
 
-let protocol = try OfflineProtocol(config: config)
-try protocol.start()
-
-let messageId = try protocol.sendMessage(
+let messageId = try mesh.sendMessage(
     recipient: "friend",
     content: "Hello!",
-    priority: .high
+    priority: .high,
+    replyToMsg: nil
 )
 ```
 
@@ -146,7 +158,7 @@ Make sure you've run:
 
 ### Android: "Library not found"
 
-Ensure `liboffline_protocol.so` is in correct `jniLibs` folder for your architecture.
+Ensure `libuniffi_offline_protocol.so` is in the correct `jniLibs` folder for your architecture.
 
 ### iOS: "Undefined symbols"
 
@@ -159,4 +171,3 @@ Link against the Rust static library in Xcode Build Settings.
 - [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Step-by-step project setup
 - [GitHub Issues](https://github.com/Offline-Protocol/offline-protocol-sdk/issues)
 - [All Documentation](docs/)
-

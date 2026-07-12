@@ -29,66 +29,109 @@ cargo build --release --target aarch64-apple-ios
 cargo build --release --target aarch64-apple-ios-sim
 ```
 
-### 3. Create XCFramework
+Each build produces `liboffline_protocol_uniffi.a` under `target/<triple>/release/`
+(the crate's `[lib] name` is `offline_protocol_uniffi`).
+
+### 3. Package the Library and Generate Bindings
+
+The recommended path is the helper script, which builds the device/simulator slices **and**
+regenerates the UniFFI Swift bindings:
 
 ```bash
-# Combine into universal library
-lipo -create \\
-    target/aarch64-apple-ios/release/liboffline_protocol.a \\
-    -output liboffline_protocol.a
-
-# Add to Xcode project under Frameworks
+# From bindings/react-native
+./scripts/build-uniffi-ios.sh
 ```
+
+It produces, under `bindings/react-native/ios/`:
+
+- `liboffline_protocol_uniffi_device.a` (device)
+- `liboffline_protocol_uniffi_sim.a` (simulator, fat)
+- `Generated/offline_protocol.swift` and `Generated/offline_protocolFFI.modulemap`
+
+Add the `.a` for your build target plus `offline_protocol.swift` to your Xcode project. To
+do it by hand instead, `lipo`-combine the per-arch `liboffline_protocol_uniffi.a` outputs
+and run `uniffi-bindgen generate --language swift` to produce the Swift bindings.
 
 ### 4. Use in Swift
 
-```swift
-import OfflineProtocolSDK
+The generated `offline_protocol.swift` declares the public types (`OfflineProtocol`,
+`ProtocolConfig`, `EventCallback`, `MessagePriority`, …). When it compiles into your app
+target no extra `import` is needed — the low-level FFI is exposed to it as the
+`offline_protocolFFI` clang module referenced from the generated file.
 
-class ViewController: UIViewController {
-    var protocol: OfflineProtocol?
-    
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        
-        // Initialize protocol
-        let config = ProtocolConfig(
-            appId: "my-ios-app",
-            userId: "user123"
-        )
-        
-        do {
-            protocol = try OfflineProtocol(config: config)
-            try protocol?.start()
-            
-            // Set up event handler
-            protocol?.onEvent { event in
-                switch event {
-                case .messageReceived(let msg):
-                    print("Received: \\(msg.content)")
-                case .transportSwitched(let evt):
-                    print("Switched to \\(evt.to)")
-                default:
-                    break
-                }
-            }
-            
-            // Send a message
-            let messageId = try protocol?.sendMessage(
-                recipient: "user456",
-                content: "Hello from iOS!",
-                priority: .high
-            )
-            
-            print("Message sent: \\(messageId ?? "")")
-            
-        } catch {
-            print("Error: \\(error)")
+```swift
+import Foundation
+
+// Events are delivered as JSON strings — implement `EventCallback` to receive them.
+final class MeshEventHandler: EventCallback {
+    func onEvent(eventJson: String) {
+        guard let data = eventJson.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["type"] as? String else { return }
+
+        switch type {
+        case "message_received":
+            let sender = obj["sender"] as? String ?? "?"
+            let content = obj["content"] as? String ?? ""
+            print("Received from \(sender): \(content)")
+        case "transport_switched":
+            print("Transport switched: \(eventJson)")
+        default:
+            break
         }
     }
-    
-    deinit {
-        try? protocol?.stop()
+}
+
+final class MeshController {
+    private var offlineProtocol: OfflineProtocol?
+    private let eventHandler = MeshEventHandler()
+
+    func startMesh() {
+        // ProtocolConfig has 16 required fields (+ 4 with defaults). See
+        // docs/configuration.md for what each one controls.
+        let config = ProtocolConfig(
+            appId: "my-ios-app",
+            userId: "user123",
+            bleEnabled: true,
+            wifiDirectEnabled: false,   // iOS does not support Wi-Fi Direct
+            internetEnabled: true,
+            reticulumEnabled: false,
+            nostrEnabled: false,
+            preferOnline: false,
+            initialTtl: 8,
+            encryptionEnabled: true,
+            autoKeyExchange: true,
+            storePending: true,
+            maxPendingPerPeer: 100,
+            maxPendingGlobal: 1000,
+            pendingTtlMs: 604_800_000,   // 7 days
+            overflowPolicy: .dropOldest
+            // requireEncryption (true), maxGroupMembers (256), groupRelayEnabled (true),
+            // and requireTransportIdentity (false) use their defaults.
+        )
+
+        do {
+            let mesh = try OfflineProtocol(config: config)
+            mesh.setEventCallback(callback: eventHandler)
+            try mesh.start()
+
+            // Send a message (priority is required; replyToMsg is optional)
+            let messageId = try mesh.sendMessage(
+                recipient: "user456",
+                content: "Hello from iOS!",
+                priority: .high,
+                replyToMsg: nil
+            )
+            print("Message sent: \(messageId)")
+
+            offlineProtocol = mesh
+        } catch {
+            print("Error: \(error)")
+        }
+    }
+
+    func stopMesh() {
+        try? offlineProtocol?.stop()
     }
 }
 ```
@@ -147,30 +190,32 @@ Create and manage encrypted groups over the mesh. The group creator is automatic
 
 ```swift
 // Create a group
-let group = try protocol.meshCreateGroup(groupName: "Project Team")
+let group = try offlineProtocol.createGroup(groupName: "Project Team")
 
 // Invite a member (admin only)
-try protocol.meshInviteToGroup(groupId: group.groupId, inviteeUserId: "bob")
+try offlineProtocol.inviteToGroup(groupId: group.groupId, inviteeUserId: "bob")
 
 // Send an encrypted group message
-let messageIds = try protocol.meshSendGroupMessage(
+let messageIds = try offlineProtocol.sendGroupMessage(
     groupId: group.groupId,
-    content: "Hello team!"
+    content: "Hello team!",
+    priority: nil,
+    replyToMsg: nil
 )
 
 // Remove a member (admin only)
-try protocol.meshRemoveFromGroup(groupId: group.groupId, memberId: "bob")
+try offlineProtocol.removeFromGroup(groupId: group.groupId, memberId: "bob")
 
 // Get group info (members, epoch, etc.)
-if let info = try protocol.getGroupInfo(groupId: group.groupId) {
+if let info = try offlineProtocol.getGroupInfo(groupId: group.groupId) {
     print("Members: \(info.members)")
 }
 
 // Rename a group (admin only)
-try protocol.renameGroup(groupId: group.groupId, newName: "New Team Name")
+try offlineProtocol.renameGroup(groupId: group.groupId, newName: "New Team Name")
 
 // Leave a group
-try protocol.meshLeaveGroup(groupId: group.groupId)
+try offlineProtocol.leaveGroup(groupId: group.groupId)
 ```
 
 ### Group Role Management
@@ -179,25 +224,31 @@ Groups use role-based access control: **Admin** and **Member**.
 
 ```swift
 // Promote a member to admin (admin only)
-try protocol.setMemberRole(groupId: groupId, userId: "bob", role: "admin")
+try offlineProtocol.setMemberRole(groupId: groupId, userId: "bob", role: "admin")
 
 // Check a member's role
-let role = try protocol.getMemberRole(groupId: groupId, userId: "bob") // "admin" or "member"
+let role = try offlineProtocol.getMemberRole(groupId: groupId, userId: "bob") // "admin" or "member"
 
 // Get all roles
-let roles = try protocol.getGroupRoles(groupId: groupId)
+let roles = try offlineProtocol.getGroupRoles(groupId: groupId)
 // ["alice": "admin", "bob": "admin", "charlie": "member"]
 ```
 
-Listen for role changes and renames:
+Role changes and renames arrive through the same `EventCallback` as every other event —
+JSON strings whose `type` is `group_role_changed` or `group_renamed`. Handle them inside
+your `onEvent(eventJson:)`:
 
 ```swift
-protocol.onEvent { event in
-    switch event {
-    case .groupRoleChanged(let evt):
-        print("\(evt.userId) is now \(evt.newRole) (changed by \(evt.changedBy))")
-    case .groupRenamed(let evt):
-        print("Group \(evt.groupId) renamed to \(evt.newName) by \(evt.renamedBy)")
+func onEvent(eventJson: String) {
+    guard let data = eventJson.data(using: .utf8),
+          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let type = obj["type"] as? String else { return }
+
+    switch type {
+    case "group_role_changed":
+        print("\(obj["user_id"] ?? "?") is now \(obj["new_role"] ?? "?") (by \(obj["changed_by"] ?? "?"))")
+    case "group_renamed":
+        print("Group \(obj["group_id"] ?? "?") renamed to \(obj["new_name"] ?? "?") by \(obj["renamed_by"] ?? "?")")
     default:
         break
     }
@@ -215,7 +266,7 @@ Reset a peer's TOFU-pinned public key when you need to re-establish trust (e.g.,
 
 ```swift
 // Reset trust pin for a peer
-let removed = try protocol.resetTofuForPeer(peerId: "bob")
+let removed = try offlineProtocol.resetTofuForPeer(peerId: "bob")
 // removed == true if an entry was cleared, false if none existed
 ```
 
@@ -233,4 +284,3 @@ iOS does **not** support Wi-Fi Direct. Available transports:
 - Message sending: <1ms overhead
 - Memory safe: Zero buffer overflows or memory leaks
 - Battery efficient: Optimized for iOS power management
-

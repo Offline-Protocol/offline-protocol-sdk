@@ -113,7 +113,7 @@ const INTERNET_FALLBACK_DEMOTION: f32 = 10_000.0;
 /// Recovers the real 0–125 quality score from a (possibly demoted) routing
 /// `total` for telemetry / display.
 ///
-/// [`INTERNET_FALLBACK_DEMOTION`] is a pure *ranking* device: it pushes the
+/// `INTERNET_FALLBACK_DEMOTION` is a pure *ranking* device: it pushes the
 /// Internet transport below every mesh score so selection only escalates to it
 /// as a last resort. That sentinel must never leak to app-facing telemetry
 /// (events, routing decisions, the UniFFI boundary) — a dashboard reading a

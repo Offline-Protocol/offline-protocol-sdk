@@ -214,10 +214,11 @@ let encrypted = try protocol.mlsEncryptForUser(
 )
 
 // Send the encrypted message using existing transport
-protocol.sendMessage(
+_ = try protocol.sendMessage(
     recipient: "bob",
     content: encryptedToJson(encrypted),
-    priority: .medium
+    priority: .medium,
+    replyToMsg: nil
 )
 ```
 
@@ -225,24 +226,26 @@ protocol.sendMessage(
 
 ```swift
 // Create a group (creator becomes admin)
-let group = try protocol.meshCreateGroup(groupName: "Project Team")
+let group = try protocol.createGroup(groupName: "Project Team")
 
 // Invite members (admin only — handles key exchange + Welcome automatically)
-try protocol.meshInviteToGroup(groupId: group.groupId, inviteeUserId: "alice")
+try protocol.inviteToGroup(groupId: group.groupId, inviteeUserId: "alice")
 
 // Send encrypted group message (MLS encryption + mesh fan-out)
-let messageIds = try protocol.meshSendGroupMessage(
+let messageIds = try protocol.sendGroupMessage(
     groupId: group.groupId,
-    content: "Hello team!"
+    content: "Hello team!",
+    priority: nil,
+    replyToMsg: nil
 )
 
 // Get group info
-if let info = try protocol.meshGetGroupInfo(groupId: group.groupId) {
+if let info = try protocol.getGroupInfo(groupId: group.groupId) {
     print("Members: \(info.members), Epoch: \(info.epoch)")
 }
 
 // Rename a group (admin only, broadcasts to all members)
-try protocol.meshRenameGroup(groupId: group.groupId, newName: "Engineering Team")
+try protocol.renameGroup(groupId: group.groupId, newName: "Engineering Team")
 ```
 
 ### 4. Receive and Decrypt Messages
