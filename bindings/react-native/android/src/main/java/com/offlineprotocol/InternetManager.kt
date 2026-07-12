@@ -925,54 +925,30 @@ class InternetManager(
                             messageBytes = contentJson.toString().toByteArray(Charsets.UTF_8)
                         } else {
                             // Content is just the message text, reconstruct full Message JSON
-                            // (legacy JS-relay senders). Every field required by the Rust
-                            // Message deserializer must be present — a missing id/timestamp
-                            // or non-lowercase priority makes the transport silently drop
-                            // the frame.
-                            val messageJson = org.json.JSONObject().apply {
-                                put(
-                                    "id",
-                                    if (messageId != null && messageId.isNotEmpty()) messageId
-                                    else java.util.UUID.randomUUID().toString()
-                                )
-                                put("sender", senderId)
-                                put("recipient", deviceId) // Will be corrected by protocol
-                                put("content", content)
-                                put("app_id", "offline-messenger") // Default app ID
-                                put("priority", "medium")
-                                put("ttl", 8)
-                                put("hop_count", 0)
-                                put("requires_ack", true)
-                                put("timestamp", parseTimestampToMs(timestamp))
-                                if (replyToMsg != null && replyToMsg.isNotEmpty()) {
-                                    put("reply_to_msg", replyToMsg)
-                                }
-                            }
-                            messageBytes = messageJson.toString().toByteArray(Charsets.UTF_8)
+                            // (legacy JS-relay senders). LegacyRelayMessage carries every
+                            // field the Rust Message deserializer requires — a missing
+                            // id/timestamp or non-lowercase priority makes the transport
+                            // silently drop the frame.
+                            messageBytes = LegacyRelayMessage.buildJson(
+                                senderId = senderId,
+                                recipientId = deviceId, // Will be corrected by protocol
+                                content = content,
+                                timestampMs = parseTimestampToMs(timestamp),
+                                messageId = messageId,
+                                replyToMsg = replyToMsg
+                            ).toString().toByteArray(Charsets.UTF_8)
                         }
                     } catch (e: org.json.JSONException) {
                         // Content is not JSON (plain text), reconstruct full Message JSON
                         // (same required-field constraints as above).
-                        val messageJson = org.json.JSONObject().apply {
-                            put(
-                                "id",
-                                if (messageId != null && messageId.isNotEmpty()) messageId
-                                else java.util.UUID.randomUUID().toString()
-                            )
-                            put("sender", senderId)
-                            put("recipient", deviceId) // Will be corrected by protocol
-                            put("content", content)
-                            put("app_id", "offline-messenger") // Default app ID
-                            put("priority", "medium")
-                            put("ttl", 8)
-                            put("hop_count", 0)
-                            put("requires_ack", true)
-                            put("timestamp", parseTimestampToMs(timestamp))
-                            if (replyToMsg != null && replyToMsg.isNotEmpty()) {
-                                put("reply_to_msg", replyToMsg)
-                            }
-                        }
-                        messageBytes = messageJson.toString().toByteArray(Charsets.UTF_8)
+                        messageBytes = LegacyRelayMessage.buildJson(
+                            senderId = senderId,
+                            recipientId = deviceId, // Will be corrected by protocol
+                            content = content,
+                            timestampMs = parseTimestampToMs(timestamp),
+                            messageId = messageId,
+                            replyToMsg = replyToMsg
+                        ).toString().toByteArray(Charsets.UTF_8)
                     }
                     
                     // Server-plane firewall: peers must never originate
@@ -1460,24 +1436,13 @@ class InternetManager(
     }
 
     /** Build serialized Message JSON bytes for an internal (relay) message, same shape as MessageReceived. */
-    private fun buildInternalMessageBytes(senderId: String, content: String): ByteArray {
-        val messageJson = org.json.JSONObject().apply {
-            put("id", java.util.UUID.randomUUID().toString())
-            put("sender", senderId)
-            put("recipient", deviceId)
-            put("content", content)
-            put("app_id", "offline-messenger")
-            // Serde expects the SDK's canonical lowercase variant ("medium");
-            // any other casing fails deserialization and the frame is
-            // silently dropped by the transport.
-            put("priority", "medium")
-            put("ttl", 8)
-            put("hop_count", 0)
-            put("requires_ack", true)
-            put("timestamp", System.currentTimeMillis())
-        }
-        return messageJson.toString().toByteArray(Charsets.UTF_8)
-    }
+    private fun buildInternalMessageBytes(senderId: String, content: String): ByteArray =
+        LegacyRelayMessage.buildJson(
+            senderId = senderId,
+            recipientId = deviceId,
+            content = content,
+            timestampMs = System.currentTimeMillis()
+        ).toString().toByteArray(Charsets.UTF_8)
     
     /** Inject a group (relay) internal message into the protocol so it emits the corresponding event. */
     private fun injectGroupInternalMessage(senderId: String, prefix: String, payloadJson: org.json.JSONObject) {

@@ -1012,25 +1012,18 @@ public class InternetManager: NSObject, TransportManager {
                         messageData = try JSONSerialization.data(withJSONObject: messageDict)
                     } else {
                         // Content is plain text, reconstruct full Message JSON
-                        // (legacy JS-relay senders). Every field required by the
-                        // Rust Message deserializer must be present — a missing
-                        // id/timestamp or non-lowercase priority makes the
-                        // transport silently drop the frame.
-                        var messageDict: [String: Any] = [
-                            "id": (messageId?.isEmpty == false) ? messageId! : UUID().uuidString,
-                            "sender": senderId,
-                            "recipient": self.deviceId, // Will be corrected by protocol
-                            "content": content,
-                            "app_id": "offline-messenger",
-                            "priority": "medium",
-                            "ttl": 8,
-                            "hop_count": 0,
-                            "requires_ack": true,
-                            "timestamp": self.parseTimestampToMs(timestampStr)
-                        ]
-                        if let replyToMsg = replyToMsg, !replyToMsg.isEmpty {
-                            messageDict["reply_to_msg"] = replyToMsg
-                        }
+                        // (legacy JS-relay senders). LegacyRelayMessage carries
+                        // every field the Rust Message deserializer requires —
+                        // a missing id/timestamp or non-lowercase priority
+                        // makes the transport silently drop the frame.
+                        let messageDict = LegacyRelayMessage.buildDict(
+                            senderId: senderId,
+                            recipientId: self.deviceId, // Will be corrected by protocol
+                            content: content,
+                            timestampMs: self.parseTimestampToMs(timestampStr),
+                            messageId: messageId,
+                            replyToMsg: replyToMsg
+                        )
                         messageData = try JSONSerialization.data(withJSONObject: messageDict)
                     }
                     
@@ -1435,21 +1428,12 @@ public class InternetManager: NSObject, TransportManager {
     /// relay group frame is one refactor away — callers' do/catch degrades
     /// it to a diagnostic instead (the Kotlin bridge cannot crash here).
     private func buildInternalMessageData(senderId: String, content: String) throws -> Data {
-        let messageDict: [String: Any] = [
-            "id": UUID().uuidString,
-            "sender": senderId,
-            "recipient": deviceId,
-            "content": content,
-            "app_id": "offline-messenger",
-            // Serde expects the SDK's canonical lowercase variant ("medium");
-            // any other casing fails deserialization and the frame is
-            // silently dropped by the transport.
-            "priority": "medium",
-            "ttl": 8,
-            "hop_count": 0,
-            "requires_ack": true,
-            "timestamp": Int64(Date().timeIntervalSince1970 * 1000)
-        ]
+        let messageDict = LegacyRelayMessage.buildDict(
+            senderId: senderId,
+            recipientId: deviceId,
+            content: content,
+            timestampMs: Int64(Date().timeIntervalSince1970 * 1000)
+        )
         return try JSONSerialization.data(withJSONObject: messageDict)
     }
     
