@@ -468,6 +468,14 @@ public class InternetManager: NSObject, TransportManager {
             // rate-limit budget on CheckPresence ticks; parked welcomes
             // re-arm from the watch loop after resume().
             stopPresenceWatch()
+            // Final drain: the core blocks new sends while paused, so the
+            // only strandable messages are the ones already queued when the
+            // poll timer stopped — flush them now instead of leaving them
+            // in the Rust queue (still marked Available to DORS) until
+            // resume().
+            if state == .running && isConnected {
+                pollAndSendMessages()
+            }
         }
     }
 

@@ -813,6 +813,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             bleManager?.pause()
             reticulumManager?.pause()
             nostrManager?.pause()
+            internetManager?.pause()
 
             try protocolInstance?.pause()
             resolver(nil)
@@ -825,11 +826,12 @@ class OfflineProtocolModule: RCTEventEmitter {
                      rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             try protocolInstance?.resume()
-            
+
             // Resume transports
             bleManager?.resume()
             reticulumManager?.resume()
             nostrManager?.resume()
+            internetManager?.resume()
 
             resolver(nil)
         } catch {
