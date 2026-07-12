@@ -244,8 +244,10 @@ public class InternetManager: NSObject, TransportManager {
     /// the chain's completions re-run the drain once the chain settles
     /// (`settleDrainIfRequested`). Deliberately survives a background
     /// reconnect while paused (the pause-drain guarantee is "queued
-    /// messages go out once chains settle", not "one attempt"); disarmed on
-    /// settle-fire and on stop(). messageQueue-confined.
+    /// messages go out once chains settle", not "one attempt"): the old
+    /// socket's completions die on the stale guard before firing the hook,
+    /// so a reconnect while armed re-fires it from handleAuthenticatedOnMain.
+    /// Disarmed on settle-fire and on stop(). messageQueue-confined.
     private var drainOnSettle = false
 
     /// Receives raw relay frames that are app/server concerns rather than SDK
@@ -743,6 +745,20 @@ public class InternetManager: NSObject, TransportManager {
             // This ensures messages queued during disconnection are sent promptly
             messageQueue.async { [weak self] in
                 self?.pollAndSendMessages()
+            }
+        } else {
+            // Paused, but an armed pause-drain (drainOnSettle) may have
+            // survived the disconnect reset on purpose. The completions that
+            // would have re-fired it died with the old socket (stale guard),
+            // and polling stays stopped while paused — so nothing else will.
+            // Now that a live socket exists, hop to messageQueue and fire the
+            // settle hook: pendingControlFrames was cleared on disconnect, so
+            // if still armed it re-runs drainForPause and flushes whatever the
+            // Rust outbox holds. The guard inside makes this a no-op unless
+            // armed and idle — so a clean pause is unaffected, and drainOnSettle
+            // stays messageQueue-confined (never read from main).
+            messageQueue.async { [weak self] in
+                self?.settleDrainIfRequested()
             }
         }
 
@@ -1594,10 +1610,13 @@ public class InternetManager: NSObject, TransportManager {
     /// chain is (still) settling — pollAndSendMessages returns early
     /// mid-chain and the poll timer is stopped, so no tick will retry —
     /// arms the one-shot settle hook so the chain's completions re-run the
-    /// drain. Residual: a chain parked by rate-limiter token denial has no
-    /// completion outstanding to fire the hook; its frames (and queued
-    /// data-plane messages) stay parked until resume(), which is safe —
-    /// commits are deferred, never dropped. messageQueue only.
+    /// drain. Residual, both safe (commits/messages are deferred, never
+    /// dropped, and resume() re-drains): (1) a chain parked by rate-limiter
+    /// token denial has no completion outstanding to fire the hook; (2) a
+    /// data-plane backlog beyond the 10-message batch cap or the token
+    /// bucket — plain sendMessage completions don't call the settle hook, so
+    /// only the first batch goes out and the remainder waits for resume().
+    /// messageQueue only.
     private func drainForPause() {
         pollAndSendMessages()
         if !pendingControlFrames.isEmpty || isDrainingControlFrames
