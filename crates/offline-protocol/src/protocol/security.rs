@@ -343,20 +343,42 @@ impl OfflineProtocol {
     /// Validates that the claimed `message.sender` matches the transport-level
     /// peer identity, if available. Returns `true` if validated or if no
     /// transport identity is available (best-effort). Returns `false` if
-    /// there is a mismatch.
+    /// there is a mismatch on a frame claiming direct origin.
+    ///
+    /// # Hop-count rule
+    ///
+    /// The strict match applies only to frames with `hop_count == 0` — the
+    /// frame's claim that the carrying peer *is* its origin. A frame with
+    /// `hop_count > 0` was mesh-relayed: the transport identity names the
+    /// nearest carrier (the relaying peer), not the origin in
+    /// `message.sender`, so a mismatch is expected and carries no spoofing
+    /// signal. Those frames fall back to the signature + TOFU gate. A
+    /// spoofer can forge `hop_count > 0` to skip this check, but that lands
+    /// it exactly on the no-identity best-effort path — never weaker.
     ///
     /// # Relay / mesh forwarding
     ///
-    /// Forwarded messages are re-created via [`send_internal_message`] which
-    /// calls [`create_message`], producing a fresh `Message` with
-    /// `transport_peer_id: None`. Because `transport_peer_id` is
-    /// `#[serde(skip)]`, it is also `None` after deserialization. In both
-    /// cases this method returns `true` (best-effort pass), so relayed
-    /// control messages are never incorrectly rejected by this check.
+    /// Forwarded messages re-created via [`send_internal_message`] →
+    /// [`create_message`] have `transport_peer_id: None`, and because
+    /// `transport_peer_id` is `#[serde(skip)]` it is also `None` after
+    /// deserialization unless the receiving transport attaches an
+    /// authenticated identity (Internet relay, Reticulum). Frames relayed
+    /// verbatim by `try_relay_message` keep their original `sender` but
+    /// always arrive with `hop_count >= 1` (the relayer increments before
+    /// re-sending), so the hop-count rule above prevents this check from
+    /// rejecting them.
     pub(super) fn validate_transport_sender(&self, message: &Message) -> bool {
         match message.transport_peer_id() {
             Some(transport_peer) => {
-                if message.sender.as_str() != transport_peer {
+                if message.hop_count.value() > 0 {
+                    debug!(
+                        claimed_sender = %message.sender,
+                        transport_peer = %transport_peer,
+                        hop_count = message.hop_count.value(),
+                        message_id = %message.id,
+                        "Relayed control message: transport peer is the carrier, not the origin; skipping strict match"
+                    );
+                } else if message.sender.as_str() != transport_peer {
                     warn!(
                         claimed_sender = %message.sender,
                         transport_peer = %transport_peer,

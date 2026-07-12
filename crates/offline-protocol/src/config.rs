@@ -154,10 +154,19 @@ pub struct SecurityConfig {
     /// keys have already been pinned, but the first contact with any peer is
     /// vulnerable to man-in-the-middle if the transport identity is absent.
     ///
-    /// Set to `true` in production deployments where all transports reliably
-    /// provide peer identity (authenticated WebSocket, bonded BLE devices).
-    /// Leave as `false` during development or when using relay-based mesh
-    /// routing where forwarded messages legitimately lack transport identity.
+    /// Note that this flag only controls the *absent-identity* case. When a
+    /// transport does attach an authenticated identity (Internet relay,
+    /// Reticulum), frames claiming direct origin (`hop_count == 0`) are
+    /// strict-matched against `message.sender` regardless of this flag —
+    /// spoofed hop-0 control frames on those transports are rejected even
+    /// with the default `false`.
+    ///
+    /// Set to `true` only when every enabled transport reliably attaches
+    /// peer identity. Today that means Internet + Reticulum deployments;
+    /// BLE, WiFi Direct, and Nostr inbound frames carry no transport
+    /// identity, so `true` would reject all their control messages, and
+    /// mesh-forwarded frames re-created by intermediate nodes legitimately
+    /// lack identity as well.
     pub require_transport_identity: bool,
 }
 

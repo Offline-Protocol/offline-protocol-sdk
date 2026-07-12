@@ -158,9 +158,11 @@ impl InternetTransport {
     /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
     ///   `UserId` string) that the relay server has authenticated for this
     ///   connection (e.g. via WebSocket session token). This is **not** the raw
-    ///   transport address (IP, session token, etc.). The protocol layer uses
-    ///   this value to verify that `message.sender` matches the authenticated
-    ///   peer.
+    ///   transport address (IP, session token, etc.). The protocol layer
+    ///   strict-matches this value against `message.sender` for control
+    ///   frames claiming direct origin (`hop_count == 0`); mesh-relayed
+    ///   frames (`hop_count > 0`) are exempt because there the authenticated
+    ///   uploader is the carrier, not the origin.
     pub fn on_message_received_from(&self, message: Message, peer_id: String) {
         crate::common::on_message_received_from(&self.receive_queue, message, peer_id);
     }
@@ -399,13 +401,20 @@ impl Transport for InternetTransport {
     /// Like [`Transport::on_data_received`], but attaches a
     /// transport-verified `peer_id` to the deserialized message.
     ///
+    /// This is the production ingest path for relay traffic: the FFI layer
+    /// routes every inbound relay frame with a non-empty authenticated
+    /// sender through here.
+    ///
     /// # Parameters
     ///
     /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
     ///   `UserId` string) that the relay server has authenticated for this
     ///   connection. This is **not** the raw transport address (IP, session
-    ///   token, etc.). The protocol layer uses this value to verify that
-    ///   `message.sender` matches the authenticated peer.
+    ///   token, etc.). The protocol layer strict-matches this value against
+    ///   `message.sender` for control frames claiming direct origin
+    ///   (`hop_count == 0`); mesh-relayed frames (`hop_count > 0`) are
+    ///   exempt because there the authenticated uploader is the carrier,
+    ///   not the origin.
     fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
         crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
     }

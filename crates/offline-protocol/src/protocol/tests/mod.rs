@@ -8482,6 +8482,63 @@ fn test_validate_transport_sender_match_with_require_identity() {
 }
 
 #[test]
+fn test_validate_transport_sender_relayed_hop_mismatch_passes() {
+    let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mut msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "hello",
+    );
+    // A mesh-relayed frame: the transport identity names the carrier ("carol"),
+    // not the origin ("alice"). hop_count >= 1 exempts it from the strict match.
+    msg.increment_hop().unwrap();
+    msg.set_transport_peer_id("carol".to_string()).unwrap();
+
+    assert!(
+        protocol.validate_transport_sender(&msg),
+        "relayed frame (hop > 0) must not be rejected for carrier/origin mismatch"
+    );
+}
+
+#[test]
+fn test_validate_transport_sender_hop_zero_mismatch_still_rejected() {
+    let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mut msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "hello",
+    );
+    // hop_count == 0 claims the carrier IS the origin — mismatch is spoofing.
+    msg.set_transport_peer_id("eve".to_string()).unwrap();
+
+    assert!(!protocol.validate_transport_sender(&msg));
+}
+
+#[test]
+fn test_relayed_control_message_with_carrier_identity_not_security_rejected() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // A control message from "sender123" relayed by "carol" (hop 1): the
+    // security gate must not drop it for the carrier/origin mismatch.
+    let mut msg = pending_test_message(
+        "sender123",
+        &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    msg.increment_hop().unwrap();
+    msg.set_transport_peer_id("carol".to_string()).unwrap();
+
+    let result = protocol.process_internal_message(&msg);
+    assert!(
+        !matches!(result, Some(InternalMessageResult::SecurityRejected)),
+        "relayed control message must pass the transport-identity gate"
+    );
+}
+
+#[test]
 fn test_control_message_with_transport_mismatch_is_dropped() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
