@@ -15,8 +15,7 @@
 //! via [`InternetTransport::on_data_received`].
 
 use crate::constants::{
-    INTERNET_CONNECTION_TIMEOUT_SECS, INTERNET_DEFAULT_SERVER_ADDRESS,
-    INTERNET_HEARTBEAT_INTERVAL_SECS, INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS,
+    INTERNET_DEFAULT_SERVER_ADDRESS, INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::{Message, MutexExt};
@@ -26,29 +25,21 @@ use std::time::{Duration, Instant};
 
 use crate::common::recalculate_delivery_ratios;
 
-/// Internet transport configuration
+/// Internet transport configuration.
+///
+/// Connection lifecycle (timeouts, reconnection, keepalive) is owned by the
+/// platform bridge that manages the actual socket — this config carries only
+/// what the Rust side itself consumes.
 #[derive(Debug, Clone)]
 pub struct InternetConfig {
     /// Server address (WebSocket URL or TCP address)
     pub server_address: String,
-    /// Connection timeout
-    pub connection_timeout: Duration,
-    /// Enable automatic reconnection
-    pub auto_reconnect: bool,
-    /// Reconnection delay
-    pub reconnect_delay: Duration,
-    /// Maximum reconnection attempts (0 = infinite)
-    pub max_reconnect_attempts: u32,
 }
 
 impl Default for InternetConfig {
     fn default() -> Self {
         Self {
             server_address: INTERNET_DEFAULT_SERVER_ADDRESS.to_string(),
-            connection_timeout: Duration::from_secs(INTERNET_CONNECTION_TIMEOUT_SECS),
-            auto_reconnect: true,
-            reconnect_delay: Duration::from_secs(5),
-            max_reconnect_attempts: 0,
         }
     }
 }
@@ -68,7 +59,6 @@ impl Default for InternetConfig {
 /// 3. `send_queue`
 /// 4. `metrics`
 /// 5. `receive_queue`
-/// 6. `reconnect_attempts` / `last_heartbeat` / `platform_handle`
 ///
 /// Not every method needs all of these — the ordering only matters when
 /// multiple locks are held simultaneously.
@@ -95,12 +85,6 @@ pub struct InternetTransport {
     pending_confirmation: Arc<Mutex<HashMap<String, Instant>>>,
     /// Transport metrics
     metrics: Arc<Mutex<TransportMetrics>>,
-    /// Last heartbeat time
-    last_heartbeat: Arc<Mutex<Option<Instant>>>,
-    /// Reconnection attempts counter
-    reconnect_attempts: Arc<Mutex<u32>>,
-    /// Platform-specific handle (opaque pointer to actual connection)
-    platform_handle: Arc<Mutex<Option<usize>>>,
 }
 
 impl InternetTransport {
@@ -119,9 +103,6 @@ impl InternetTransport {
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
             pending_confirmation: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
-            last_heartbeat: Arc::new(Mutex::new(None)),
-            reconnect_attempts: Arc::new(Mutex::new(0)),
-            platform_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -133,16 +114,6 @@ impl InternetTransport {
     /// Gets the configuration.
     pub fn config(&self) -> &InternetConfig {
         &self.config
-    }
-
-    /// Sets the platform-specific handle.
-    pub fn set_platform_handle(&self, handle: usize) {
-        crate::common::set_platform_handle(&self.platform_handle, handle);
-    }
-
-    /// Gets the platform-specific handle.
-    pub fn platform_handle(&self) -> Option<usize> {
-        crate::common::platform_handle(&self.platform_handle)
     }
 
     /// Called when a message is received from the server.
@@ -234,39 +205,6 @@ impl InternetTransport {
         self.pending_confirmation.lock_or_recover().len()
     }
 
-    /// Checks if reconnection should be attempted.
-    pub fn should_reconnect(&self) -> bool {
-        if !self.config.auto_reconnect {
-            return false;
-        }
-
-        let attempts = *self.reconnect_attempts.lock_or_recover();
-        self.config.max_reconnect_attempts == 0 || attempts < self.config.max_reconnect_attempts
-    }
-
-    /// Increments reconnection attempt counter.
-    /// Uses saturating addition to prevent overflow.
-    pub fn increment_reconnect_attempts(&self) {
-        let mut attempts = self.reconnect_attempts.lock_or_recover();
-        *attempts = attempts.saturating_add(1);
-    }
-
-    /// Updates heartbeat timestamp.
-    pub fn update_heartbeat(&self) {
-        *self.last_heartbeat.lock_or_recover() = Some(Instant::now());
-    }
-
-    /// Checks if heartbeat is needed.
-    pub fn needs_heartbeat(&self) -> bool {
-        let last = *self.last_heartbeat.lock_or_recover();
-        match last {
-            Some(instant) => {
-                instant.elapsed() >= Duration::from_secs(INTERNET_HEARTBEAT_INTERVAL_SECS)
-            }
-            None => true,
-        }
-    }
-
     /// Updates transport metrics while preserving confirmation-loop delivery counts.
     ///
     /// The confirmation loop (`confirm_sent` / `report_send_failure`) owns
@@ -349,7 +287,6 @@ impl Transport for InternetTransport {
     /// EDGE CASE HANDLING:
     /// - Messages in send_queue are preserved during disconnection
     /// - They will be sent when transport becomes available again
-    /// - Reconnect counter is reset on successful connection
     fn on_status_changed(&self, status: TransportStatus) {
         let previous_status = {
             let mut guard = self.status.lock_or_recover();
@@ -358,12 +295,8 @@ impl Transport for InternetTransport {
             prev
         };
 
-        // Reset reconnect counter on successful connection
         if status == TransportStatus::Available {
-            // Acquire send_queue before reconnect_attempts to respect lock
-            // ordering (send_queue is #3, reconnect_attempts is #6).
             let queue_len = self.send_queue.lock_or_recover().len();
-            *self.reconnect_attempts.lock_or_recover() = 0;
 
             if queue_len > 0 {
                 tracing::info!(
@@ -537,30 +470,6 @@ impl InternetTransportBuilder {
         self
     }
 
-    /// Sets the connection timeout.
-    pub fn connection_timeout(mut self, timeout: Duration) -> Self {
-        self.config.connection_timeout = timeout;
-        self
-    }
-
-    /// Enables or disables automatic reconnection.
-    pub fn auto_reconnect(mut self, enabled: bool) -> Self {
-        self.config.auto_reconnect = enabled;
-        self
-    }
-
-    /// Sets the reconnection delay.
-    pub fn reconnect_delay(mut self, delay: Duration) -> Self {
-        self.config.reconnect_delay = delay;
-        self
-    }
-
-    /// Sets the maximum reconnection attempts.
-    pub fn max_reconnect_attempts(mut self, attempts: u32) -> Self {
-        self.config.max_reconnect_attempts = attempts;
-        self
-    }
-
     /// Builds the transport.
     pub fn build(self) -> InternetTransport {
         InternetTransport::with_config(self.device_id, self.config)
@@ -594,16 +503,9 @@ mod tests {
     fn test_builder() {
         let transport = InternetTransportBuilder::new("test-device")
             .server_address("ws://example.com:8080")
-            .connection_timeout(Duration::from_secs(10))
-            .auto_reconnect(false)
             .build();
 
         assert_eq!(transport.config().server_address, "ws://example.com:8080");
-        assert_eq!(
-            transport.config().connection_timeout,
-            Duration::from_secs(10)
-        );
-        assert!(!transport.config().auto_reconnect);
     }
 
     #[test]
@@ -722,32 +624,6 @@ mod tests {
     }
 
     #[test]
-    fn test_reconnect_logic() {
-        let transport = InternetTransportBuilder::new("test-device")
-            .auto_reconnect(true)
-            .max_reconnect_attempts(3)
-            .build();
-
-        assert!(transport.should_reconnect());
-
-        transport.increment_reconnect_attempts();
-        transport.increment_reconnect_attempts();
-        transport.increment_reconnect_attempts();
-
-        assert!(!transport.should_reconnect()); // Max attempts reached
-    }
-
-    #[test]
-    fn test_heartbeat() {
-        let transport = InternetTransport::new("test-device");
-
-        assert!(transport.needs_heartbeat());
-
-        transport.update_heartbeat();
-        assert!(!transport.needs_heartbeat());
-    }
-
-    #[test]
     fn test_stop_fails_pending() {
         let transport = InternetTransport::new("test-device");
         transport.on_status_changed(TransportStatus::Available);
@@ -853,27 +729,6 @@ mod tests {
         assert_eq!(m.rssi, Some(-70));
         assert_eq!(m.latency_ms, Some(100));
         assert_eq!(m.success_count, 1);
-    }
-
-    #[test]
-    fn test_platform_handle() {
-        let transport = InternetTransport::new("test-device");
-        assert_eq!(transport.platform_handle(), None);
-        transport.set_platform_handle(123);
-        assert_eq!(transport.platform_handle(), Some(123));
-    }
-
-    #[test]
-    fn test_should_reconnect_infinite_attempts() {
-        let transport = InternetTransportBuilder::new("test-device")
-            .auto_reconnect(true)
-            .max_reconnect_attempts(0)
-            .build();
-        assert!(transport.should_reconnect());
-        for _ in 0..100 {
-            transport.increment_reconnect_attempts();
-        }
-        assert!(transport.should_reconnect());
     }
 
     #[test]

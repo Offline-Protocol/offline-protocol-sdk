@@ -72,15 +72,11 @@ pub const DEFAULT_DEVICE_NAME: &str = "OfflineProtocolDevice";
 pub const DEFAULT_GROUP_OWNER_INTENT: u8 = 7;
 
 // Internet Transport Constants
+// Connection timeouts and keepalive are owned by the platform bridge that
+// manages the actual socket (OkHttp pingInterval on Android, URLSession
+// ping on iOS) — no Rust-side constants for them.
 /// Default WebSocket server address for Internet transport.
 pub const INTERNET_DEFAULT_SERVER_ADDRESS: &str = "ws://localhost:8080";
-
-/// Connection timeout for Internet transport in seconds.
-pub const INTERNET_CONNECTION_TIMEOUT_SECS: u64 = 30;
-
-/// Heartbeat interval for Internet transport in seconds.
-/// Used to keep the connection alive and detect disconnections.
-pub const INTERNET_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
 /// Timeout for pending Internet send confirmations in seconds.
 /// Messages awaiting platform confirmation beyond this duration are treated as failed.
