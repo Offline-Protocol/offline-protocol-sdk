@@ -41,7 +41,11 @@ class InternetManager(
         private const val RECONNECT_INITIAL_DELAY_MS = 1000L
         private const val RECONNECT_MAX_DELAY_MS = 30000L
         private const val RECONNECT_BACKOFF_MULTIPLIER = 2.0
-        private const val PING_INTERVAL_MS = 10000L  // Reduced from 30s for faster failure detection
+        // Keepalive is OkHttp's built-in WebSocket ping/pong (pingInterval on
+        // the client builder) — a failed ping surfaces as onFailure and feeds
+        // the normal reconnect funnel. 10s (down from 30s) for faster failure
+        // detection.
+        private const val PING_INTERVAL_MS = 10000L
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val MAX_CONSECUTIVE_FAILURES = 2  // Trigger disconnect after 2 consecutive failures
         private const val AUTH_RESPONSE_TIMEOUT_MS = 10_000L
@@ -86,16 +90,6 @@ class InternetManager(
         }
     }
     
-    // Ping runnable
-    private val pingRunnable = object : Runnable {
-        override fun run() {
-            sendPing()
-            if (state == TransportState.RUNNING && isConnected.get()) {
-                mainHandler.postDelayed(this, PING_INTERVAL_MS)
-            }
-        }
-    }
-
     // Presence watch runnable: periodically asks the relay about peers with
     // undelivered traffic (CheckPresence), so parked welcomes re-arm the
     // moment a peer comes back — the relay never stores content, so presence
@@ -342,7 +336,6 @@ class InternetManager(
 
         // Stop timers
         stopMessagePolling()
-        stopPingTimer()
         stopPresenceWatch()
 
         // Close WebSocket
@@ -387,11 +380,18 @@ class InternetManager(
             // not restart the timers the app paused.
             isPaused = true
             stopMessagePolling()
-            stopPingTimer()
             // A backgrounded app must not keep spending battery and relay
             // rate-limit budget on CheckPresence ticks; parked welcomes
             // re-arm from the watch loop after resume().
             stopPresenceWatch()
+            // Final drain: the core blocks new sends while paused, so the
+            // only strandable messages are the ones already queued when the
+            // poll timer stopped — flush them now instead of leaving them
+            // in the Rust queue (still marked Available to DORS) until
+            // resume().
+            if (state == TransportState.RUNNING && isConnected.get()) {
+                pollAndSendMessages()
+            }
         }
     }
 
@@ -400,7 +400,6 @@ class InternetManager(
             isPaused = false
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
-                startPingTimer()
                 startPresenceWatch()
             }
         }
@@ -582,12 +581,12 @@ class InternetManager(
                 Log.e(TAG, "Error notifying protocol of connect", e)
             }
 
-            // Start polling, pinging, and the presence watch — unless the app
-            // paused the transport; a background reconnect must stay quiet and
-            // resume() restarts the timers.
+            // Start polling and the presence watch — unless the app paused
+            // the transport; a background reconnect must stay quiet and
+            // resume() restarts the timers. (Keepalive is OkHttp's
+            // pingInterval, not a timer of ours.)
             if (!isPaused) {
                 startMessagePolling()
-                startPingTimer()
                 startPresenceWatch()
 
                 // Immediately poll for messages to flush outbox after reconnection
@@ -614,9 +613,8 @@ class InternetManager(
         val wasAuthenticated = isAuthenticated.getAndSet(false)
         isConnecting.set(false)
 
-        // Stop polling and pinging immediately to prevent sending on dead connection
+        // Stop polling immediately to prevent sending on dead connection
         stopMessagePolling()
-        stopPingTimer()
         stopPresenceWatch()
         // Wire outcomes for anything in flight are now owned by the
         // transport layer (fail_all_pending on disconnect).
@@ -1805,22 +1803,6 @@ class InternetManager(
             pending.commit?.invoke()
             pendingControlFrames.removeFirst()
         }
-    }
-
-    // MARK: - Ping
-
-    private fun startPingTimer() {
-        stopPingTimer()
-        mainHandler.postDelayed(pingRunnable, PING_INTERVAL_MS)
-    }
-    
-    private fun stopPingTimer() {
-        mainHandler.removeCallbacks(pingRunnable)
-    }
-    
-    private fun sendPing() {
-        // OkHttp handles ping/pong automatically with pingInterval
-        // This is just for manual pings if needed
     }
 
     // MARK: - Presence Watch
