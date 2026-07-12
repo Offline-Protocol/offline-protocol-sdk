@@ -34,6 +34,23 @@ Core (Rust) already has:
 
 fernweh already sets SDK `userId = storedUsername` (relay username) (`fernweh_v2/context/MeshCoreContext.tsx:217`), and the RN module wires `config.authToken → setAuthToken` (`OfflineProtocolModule.kt:1524-1526`).
 
+### Inbound sender attribution
+
+The relay stamps the `sender` field of every inbound frame (`MessageReceived`,
+`ConnectionRequestReceived`, `GroupMessageReceived`, …) server-side from the
+**authenticated uploading connection** — it is never client-supplied
+(`relay-server/src/websocket.rs`). The bridge passes that value to
+`internetMessageReceived(sender, bytes)`, and the FFI attaches it to the
+deserialized message as its transport-verified peer identity
+(`on_data_received_from`). The control-message security gate then
+strict-matches it against `message.sender` for frames claiming direct origin
+(`hop_count == 0`) and drops mismatches with a
+`SecurityWarning{TransportIdentityMismatch}`. Mesh-relayed frames
+(`hop_count > 0`) are exempt — the uploader is the carrier, not the origin —
+and fall back to the Ed25519 signature + TOFU gate. Bridge-synthesized frames
+(`buildInternalMessageBytes`) always set `sender = <stamped sender>` and
+`hop_count = 0`, so they pass the strict match by construction.
+
 ### Mental model: two planes
 
 - **Data plane (works today):** anything expressible as a peer→peer SDK `Message` rides `SendMessage`/`MessageReceived` with the serialized Message JSON as opaque `content`. This already carries `__MLS_WELCOME__`, `__MLS_ENC__`, `__TYPING__`, `__READ_RECEIPT__`, `__PRESENCE__` (push), connection-request control messages, and 1:1 chat. The relay forwards it verbatim.

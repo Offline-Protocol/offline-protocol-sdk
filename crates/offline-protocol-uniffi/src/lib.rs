@@ -3073,6 +3073,16 @@ impl OfflineProtocol {
     }
 
     /// Internet: Message received from relay server
+    ///
+    /// `sender_id` is the relay envelope's `sender` field, which the relay
+    /// stamps server-side from the *authenticated* uploading connection —
+    /// it is never client-supplied. When non-empty it is attached to the
+    /// deserialized message as its transport-verified peer identity, which
+    /// the control-message security gate strict-matches against
+    /// `message.sender` for frames claiming direct origin (`hop_count == 0`).
+    /// Mesh-relayed frames (`hop_count > 0`) are exempt: there the uploader
+    /// is the carrier, not the origin. An empty `sender_id` falls back to
+    /// unattributed ingest so the message is still processed best-effort.
     pub fn internet_message_received(
         &self,
         sender_id: String,
@@ -3083,7 +3093,12 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
         {
-            if let Err(e) = transport_arc.on_data_received(data) {
+            let ingest_result = if sender_id.is_empty() {
+                transport_arc.on_data_received(data)
+            } else {
+                transport_arc.on_data_received_from(data, sender_id.clone())
+            };
+            if let Err(e) = ingest_result {
                 return Err(ProtocolError::TransportError(format!(
                     "Failed to process internet message: {}",
                     e
@@ -6211,6 +6226,104 @@ mod tests {
             events.push(event);
         }
         events
+    }
+
+    /// Builds serialized bytes for a security-gated control frame, the same
+    /// shape the platform bridges construct (`buildInternalMessageBytes`).
+    /// Fixed id is fine: each caller uses a fresh protocol instance.
+    fn serialized_control_frame(sender: &str, recipient: &str, hop_count: u8) -> Vec<u8> {
+        serde_json::json!({
+            "id": "6dd7f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f",
+            "sender": sender,
+            "recipient": recipient,
+            "content": "__CONN_REQ__{\"data\":\"test\"}",
+            "app_id": "test-app",
+            "priority": "medium",
+            "ttl": 8,
+            "hop_count": hop_count,
+            "requires_ack": true,
+            "timestamp": 1_700_000_000_000_i64,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// End-to-end pin for the internet sender-attribution wiring: a gated
+    /// control frame claiming direct origin (`hop_count == 0`) whose relay-
+    /// authenticated uploader does not match `message.sender` must be dropped
+    /// with a `security_warning`, while matched and mesh-relayed frames pass.
+    #[test]
+    fn test_internet_control_frame_spoofed_sender_rejected() {
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.internet_status_changed(true).unwrap();
+
+        // Uploader "eve" (relay-authenticated) delivers a hop-0 frame claiming
+        // to originate from "alice" — spoofing, must be security-rejected.
+        let frame = serialized_control_frame("alice", "receiver-user", 0);
+        receiver
+            .internet_message_received("eve".to_string(), frame)
+            .unwrap();
+
+        assert!(
+            drained_events(&receiver)
+                .iter()
+                .any(|e| e.contains("security_warning") && e.contains("alice")),
+            "spoofed hop-0 control frame over internet must emit a security warning"
+        );
+    }
+
+    #[test]
+    fn test_internet_control_frame_matching_sender_passes_gate() {
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.internet_status_changed(true).unwrap();
+
+        // Uploader "alice" delivers her own hop-0 frame — identities match.
+        let frame = serialized_control_frame("alice", "receiver-user", 0);
+        receiver
+            .internet_message_received("alice".to_string(), frame)
+            .unwrap();
+
+        assert!(
+            !drained_events(&receiver)
+                .iter()
+                .any(|e| e.contains("security_warning")),
+            "matched sender must pass the transport-identity gate"
+        );
+    }
+
+    #[test]
+    fn test_internet_control_frame_relayed_carrier_mismatch_passes_gate() {
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.internet_status_changed(true).unwrap();
+
+        // Uploader "carol" relays alice's frame (hop 1): carrier/origin
+        // mismatch is expected and must not trip the gate.
+        let frame = serialized_control_frame("alice", "receiver-user", 1);
+        receiver
+            .internet_message_received("carol".to_string(), frame)
+            .unwrap();
+
+        assert!(
+            !drained_events(&receiver)
+                .iter()
+                .any(|e| e.contains("security_warning")),
+            "mesh-relayed control frame must not be rejected for carrier/origin mismatch"
+        );
     }
 
     #[test]
