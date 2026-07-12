@@ -1884,16 +1884,12 @@ struct BleState {
 
 /// Internal state for Internet transport operations
 struct InternetState {
-    /// Outgoing messages queue
-    outgoing_messages: VecDeque<(String, Vec<u8>)>,
     /// Whether internet transport is connected
     is_connected: bool,
 }
 
 /// Internal state for WiFi Direct transport operations
 struct WifiDirectState {
-    /// Outgoing messages queue
-    outgoing_messages: VecDeque<(String, Vec<u8>)>,
     /// Whether WiFi Direct is connected to a peer group
     is_connected: bool,
     /// Peer device address (if connected)
@@ -2031,11 +2027,9 @@ impl OfflineProtocol {
                 peers: HashMap::new(),
             }),
             internet_state: Mutex::new(InternetState {
-                outgoing_messages: VecDeque::new(),
                 is_connected: false,
             }),
             wifi_direct_state: Mutex::new(WifiDirectState {
-                outgoing_messages: VecDeque::new(),
                 is_connected: false,
                 connected_peer: None,
             }),
@@ -3022,19 +3016,19 @@ impl OfflineProtocol {
     /// - Handles race conditions between transport switching and message sending
     /// - Ensures messages queued during disconnection are sent when transport is available
     pub fn internet_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
-        // Track previous state for edge case handling
+        // Atomically read previous state and update in a single lock scope
+        // (two scopes would let concurrent calls interleave between the read
+        // and the write, double-flushing or missing the flush below).
         let was_connected = {
-            let internet_state = self.lock_internet()?;
-            internet_state.is_connected
+            let mut internet_state = self.lock_internet()?;
+            let prev = internet_state.is_connected;
+            internet_state.is_connected = is_connected;
+            prev
         };
 
-        // Update internal state
-        {
-            let mut internet_state = self.lock_internet()?;
-            internet_state.is_connected = is_connected;
-        }
-
-        // Update the Internet transport status in the transport manager
+        // Update the Internet transport status in the transport manager.
+        // Unconditional even on a redundant report: the transport's own
+        // on_status_changed is idempotent and resets its reconnect counter.
         {
             let new_status = if is_connected {
                 offline_protocol_transport::TransportStatus::Available
@@ -3053,21 +3047,25 @@ impl OfflineProtocol {
             protocol.flush_outbox_all();
         }
 
-        // Emit connection event
-        let event = if is_connected {
-            CoreEvent::TransportSwitched {
-                from: None,
-                to: "Internet".to_string(),
-                reason: "Connected to relay server".to_string(),
-            }
-        } else {
-            CoreEvent::TransportSwitched {
-                from: Some("Internet".to_string()),
-                to: "None".to_string(),
-                reason: "Disconnected from relay server".to_string(),
-            }
-        };
-        self.emit_event(event);
+        // Emit the connection event only on a real transition — bridges may
+        // re-report the current state (e.g. on auth refresh), and duplicate
+        // TransportSwitched events would show phantom switches downstream.
+        if was_connected != is_connected {
+            let event = if is_connected {
+                CoreEvent::TransportSwitched {
+                    from: None,
+                    to: "Internet".to_string(),
+                    reason: "Connected to relay server".to_string(),
+                }
+            } else {
+                CoreEvent::TransportSwitched {
+                    from: Some("Internet".to_string()),
+                    to: "None".to_string(),
+                    reason: "Disconnected from relay server".to_string(),
+                }
+            };
+            self.emit_event(event);
+        }
 
         Ok(())
     }
@@ -3147,55 +3145,6 @@ impl OfflineProtocol {
                     });
                 }
             }
-        }
-
-        // Fallback to local queue.
-        // Loop so that un-deserializable entries are skipped rather than
-        // blocking the rest of the queue.
-        let mut internet_state = recover_mutex(&self.internet_state, "internet_state");
-        while let Some((recipient, data)) = internet_state.outgoing_messages.pop_front() {
-            let parsed = if let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::Internet)
-            {
-                transport_arc.deserialize_message(&data).ok()
-            } else {
-                None
-            };
-
-            let msg_id = parsed
-                .as_ref()
-                .map(|msg| msg.id.as_str().to_string())
-                .unwrap_or_default();
-
-            // An empty message_id would break the confirm/fail feedback loop — skip it
-            // and try the next entry.  These messages are permanently lost (no outbox
-            // entry, no retry).  If this fires systematically it indicates a
-            // serialization schema mismatch that must be investigated.
-            if msg_id.is_empty() {
-                tracing::warn!(
-                    recipient = %recipient,
-                    data_len = data.len(),
-                    "Dropping fallback internet message: could not recover message_id from deserialization — message is permanently lost"
-                );
-                continue;
-            }
-
-            let reply_to_msg = parsed
-                .as_ref()
-                .and_then(|msg| msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()));
-            let control = parsed
-                .as_ref()
-                .and_then(|msg| protocol.internet_control_op(msg));
-
-            return Some(InternetMessage {
-                message_id: msg_id,
-                recipient_id: recipient,
-                data,
-                reply_to_msg,
-                control_op: control.as_ref().map(|(op, _)| op.to_string()),
-                control_payload: control.map(|(_, payload)| payload),
-            });
         }
 
         None
@@ -3360,31 +3309,16 @@ impl OfflineProtocol {
         }
 
         // Try to get message from the WiFi Direct transport
-        let message = self
-            .with_transport(CoreTransportType::WiFiDirect, |transport| {
-                if let Ok(Some((recipient, data))) = transport.get_next_message() {
-                    return Some(WifiDirectMessage {
-                        recipient_id: recipient,
-                        data,
-                    });
-                }
-                None
-            })
-            .flatten();
-        if message.is_some() {
-            return message;
-        }
-
-        // Fallback to local queue
-        let mut wifi_direct_state = recover_mutex(&self.wifi_direct_state, "wifi_direct_state");
-        if let Some((recipient, data)) = wifi_direct_state.outgoing_messages.pop_front() {
-            return Some(WifiDirectMessage {
-                recipient_id: recipient,
-                data,
-            });
-        }
-
-        None
+        self.with_transport(CoreTransportType::WiFiDirect, |transport| {
+            if let Ok(Some((recipient, data))) = transport.get_next_message() {
+                return Some(WifiDirectMessage {
+                    recipient_id: recipient,
+                    data,
+                });
+            }
+            None
+        })
+        .flatten()
     }
 
     /// WiFi Direct: Peer connected
@@ -6246,6 +6180,33 @@ mod tests {
         })
         .to_string()
         .into_bytes()
+    }
+
+    /// Redundant same-state reports (e.g. bridge auth refresh) must not emit
+    /// phantom TransportSwitched events; only real transitions do.
+    #[test]
+    fn test_internet_status_changed_redundant_report_emits_no_event() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+
+        protocol.internet_status_changed(true).unwrap();
+        drained_events(&protocol);
+
+        protocol.internet_status_changed(true).unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched")),
+            "redundant connected report must not emit transport_switched"
+        );
+
+        protocol.internet_status_changed(false).unwrap();
+        assert!(
+            drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched")),
+            "real transition must still emit transport_switched"
+        );
     }
 
     /// End-to-end pin for the internet sender-attribution wiring: a gated
