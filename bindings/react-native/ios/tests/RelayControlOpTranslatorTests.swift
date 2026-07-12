@@ -260,6 +260,41 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         XCTAssertEqual(after[0]["type"] as? String, "CreateGroup")
     }
 
+    /// Parity pin against the Rust op registry
+    /// (test_internet_control_op_registry_is_closed in
+    /// crates/offline-protocol/src/protocol/tests/mod.rs): every op the core
+    /// can emit must translate to a relay-native shape (.replace/.tap),
+    /// never .passThrough. A new Rust op must be handled here AND in the
+    /// Kotlin translator AND the spec table before it ships — an unhandled
+    /// op degrades to an opaque SendMessage the relay merely echoes/forwards.
+    func testEveryCoreControlOpTranslatesToRelayNative() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+
+        // Ordered: g1 is registered before the ops that reference it.
+        let cases: [(op: String, payload: String, recipient: String)] = [
+            ("conn_req", #"{"sender_name":"Alice"}"#, "bob"),
+            ("conn_acc", #"{"accepted_by_name":"Alice"}"#, "bob"),
+            ("conn_rej", "", "bob"),
+            ("conn_can", "", "bob"),
+            ("group_relay_register", #"{"group_id":"g1","group_name":"Trip","members":["alice","bob"]}"#, "alice"),
+            ("group_relay_broadcast", #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":1}"#, "alice"),
+            ("group_mls_leave", #"{"group_id":"g1","leaving_member":"alice"}"#, "bob"),
+        ]
+
+        for c in cases {
+            let translation = translator.translate(
+                controlOp: c.op,
+                controlPayload: c.payload,
+                recipientId: c.recipient
+            )
+            commit(translation)
+            XCTAssertFalse(
+                isPassThrough(translation),
+                "core op '\(c.op)' must translate to a relay-native shape, got passThrough"
+            )
+        }
+    }
+
     func testMalformedPayloadAndUnknownOpFallBackToPassThrough() {
         let translator = RelayControlOpTranslator(selfId: "alice")
         XCTAssertTrue(isPassThrough(

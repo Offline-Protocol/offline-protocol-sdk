@@ -152,6 +152,15 @@ dictionary InternetMessage {
 
 Everything else — `__MLS_*`, `__TYPING__`, `__READ_RECEIPT__`, `__PRESENCE__`, `__GROUP_MSG__`, plain chat — continues verbatim as `SendMessage` (verified working carrier today; the round-trip is lossless because the inbound side already maps relay-native events back to the same prefixes). Third-party frames transiting this device's outbox (mesh relaying) never classify — a relay-native replacement would misattribute the op to this device's authenticated connection.
 
+**Maintenance: this table is a three-way contract.** The op set is pinned by
+`test_internet_control_op_registry_is_closed` (Rust) and the
+`everyCoreControlOpTranslatesToRelayNative` /
+`testEveryCoreControlOpTranslatesToRelayNative` parity tests (Kotlin/Swift).
+Adding an op to `internet_control_op` without teaching both translators makes
+it degrade to an opaque `SendMessage` that the relay merely echoes/forwards —
+the bridges emit an "Unhandled control op" diagnostic when that happens, but
+the op does nothing server-side. Update all three (plus this table) together.
+
 **Group content messages: two paths, ack-gated.** `send_group_message` takes the O(1) relay path (`__GRP_RELAY_BCAST__` → `SendGroupMessage`) **only after** the relay has positively acknowledged the group registration — an inbound `GroupCreated` for a locally-tracked group, arriving on the Internet transport, sets `relay_synced`; any group-scoped `GroupError` revokes it. Until then (and after any revocation) sends stay per-member `__GROUP_MSG__` fan-out, the always-correct path. (An earlier draft of this spec said "do NOT translate group content for v1" — that predates the ack-gating; a broadcast is never routed into a relay that has not proven it owns the group's registry.) The registry translation replaces fernweh's manual "mesh-first group sync" (`useWebSocketRelay.ts:1723-1770`).
 
 Match the exact payload field names against the core's control-message builders (grep the prefix constants in `crates/offline-protocol/src/`) — the table above reflects the relay-side field names from fernweh's client (`useWebSocketRelay.ts:1902-1975, 1714-1835`).
