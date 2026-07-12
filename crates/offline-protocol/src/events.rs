@@ -79,6 +79,12 @@ pub enum SecurityWarningCode {
     /// A control message's signature failed verification (invalid signature,
     /// TOFU violation, or malformed metadata).
     ControlSignatureInvalid,
+    /// An unsigned control message was rejected because
+    /// `require_transport_identity` demands signed control traffic: frames
+    /// claiming mesh relay (`hop_count > 0`) skip the strict identity match,
+    /// so accepting unsigned frames there would let a forged-hop spoofer
+    /// impersonate any not-yet-pinned peer without committing a key.
+    UnsignedControlRejected,
     /// An encrypted media chunk's MLS group did not match the 1:1 session
     /// group of the claimed wire sender — a valid ciphertext (from some
     /// session) delivered under a different sender's name is a media
@@ -108,6 +114,7 @@ impl SecurityWarningCode {
             Self::TransportIdentityMismatch => "TRANSPORT_IDENTITY_MISMATCH",
             Self::SignatureDowngrade => "SIGNATURE_DOWNGRADE",
             Self::ControlSignatureInvalid => "CONTROL_SIGNATURE_INVALID",
+            Self::UnsignedControlRejected => "UNSIGNED_CONTROL_REJECTED",
             Self::MediaSenderGroupMismatch => "MEDIA_SENDER_GROUP_MISMATCH",
             Self::PlaintextSend => "PLAINTEXT_SEND",
             Self::PlaintextReceiveRejected => "PLAINTEXT_RECEIVE_REJECTED",
@@ -2688,6 +2695,7 @@ mod tests {
             SecurityWarningCode::TransportIdentityMismatch,
             SecurityWarningCode::SignatureDowngrade,
             SecurityWarningCode::ControlSignatureInvalid,
+            SecurityWarningCode::UnsignedControlRejected,
             SecurityWarningCode::MediaSenderGroupMismatch,
             SecurityWarningCode::PlaintextSend,
             SecurityWarningCode::PlaintextReceiveRejected,
@@ -2709,6 +2717,7 @@ mod tests {
                 | SecurityWarningCode::TransportIdentityMismatch
                 | SecurityWarningCode::SignatureDowngrade
                 | SecurityWarningCode::ControlSignatureInvalid
+                | SecurityWarningCode::UnsignedControlRejected
                 | SecurityWarningCode::MediaSenderGroupMismatch
                 | SecurityWarningCode::PlaintextSend
                 | SecurityWarningCode::PlaintextReceiveRejected => {}
