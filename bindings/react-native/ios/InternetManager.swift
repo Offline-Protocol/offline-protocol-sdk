@@ -468,13 +468,21 @@ public class InternetManager: NSObject, TransportManager {
             // rate-limit budget on CheckPresence ticks; parked welcomes
             // re-arm from the watch loop after resume().
             stopPresenceWatch()
-            // Final drain: the core blocks new sends while paused, so the
-            // only strandable messages are the ones already queued when the
-            // poll timer stopped — flush them now instead of leaving them
-            // in the Rust queue (still marked Available to DORS) until
-            // resume().
+            // Final drain: flush messages already queued in the Rust queue
+            // (still marked Available to DORS) instead of leaving them
+            // stranded until resume(). The module pauses the core right
+            // after the transports, so the remaining window — a send racing
+            // pause() itself — is bounded to sends already in flight.
+            // pollAndSendMessages and the control-frame drain state are
+            // messageQueue-confined, and a cancelled poll timer's in-flight
+            // tick may still be running there — hop onto messageQueue like
+            // stop() does. pause() leaves the socket up, so the drain
+            // landing after this block returns is safe (and it re-checks
+            // isConnected itself).
             if state == .running && isConnected {
-                pollAndSendMessages()
+                messageQueue.async { [weak self] in
+                    self?.pollAndSendMessages()
+                }
             }
         }
     }

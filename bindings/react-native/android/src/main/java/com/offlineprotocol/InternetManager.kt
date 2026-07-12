@@ -384,11 +384,13 @@ class InternetManager(
             // rate-limit budget on CheckPresence ticks; parked welcomes
             // re-arm from the watch loop after resume().
             stopPresenceWatch()
-            // Final drain: the core blocks new sends while paused, so the
-            // only strandable messages are the ones already queued when the
-            // poll timer stopped — flush them now instead of leaving them
-            // in the Rust queue (still marked Available to DORS) until
-            // resume().
+            // Final drain: flush messages already queued in the Rust queue
+            // (still marked Available to DORS) instead of leaving them
+            // stranded until resume(). The module pauses the core right
+            // after the transports, so the remaining window — a send racing
+            // pause() itself — is bounded to sends already in flight.
+            // (Safe to run inline here: polling and pause share the main
+            // handler, unlike the iOS bridge's messageQueue confinement.)
             if (state == TransportState.RUNNING && isConnected.get()) {
                 pollAndSendMessages()
             }
