@@ -48,6 +48,7 @@ let package = Package(
                 "tests"
             ],
             sources: [
+                "LegacyRelayMessage.swift",
                 "PresenceWatchPolicy.swift",
                 "RecipientInFlightTracker.swift",
                 "RelayControlOpTranslator.swift",
@@ -68,6 +69,7 @@ let package = Package(
                 "ProtocolErrorBridgeTests.swift"
             ],
             sources: [
+                "LegacyRelayMessageTests.swift",
                 "PresenceWatchPolicyTests.swift",
                 "RecipientInFlightTrackerTests.swift",
                 "RelayControlOpTranslatorTests.swift",
