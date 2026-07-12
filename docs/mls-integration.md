@@ -172,17 +172,24 @@ Use the manual MLS APIs (described below) when you need:
 
 ### 1. Initialize MLS
 
-The SDK includes built-in secure storage using platform-native APIs (iOS Keychain, Android EncryptedSharedPreferences). Just call initialize:
+MLS persists key material through a secure-storage backend that you provide by implementing
+`MlsStorageProvider` (iOS Keychain, Android Keystore / EncryptedSharedPreferences, or your own
+scheme). Pass your provider to `initializeMls` — see [Custom Storage](#custom-storage-advanced)
+for a complete provider implementation:
 
 ```swift
-// iOS - uses Keychain automatically
-try protocol.initializeMlsWithSecureStorage()
+// iOS — `storage` is your MlsStorageProvider (e.g. Keychain-backed)
+try mesh.initializeMls(storage: storage)
 ```
 
 ```kotlin
-// Android - uses EncryptedSharedPreferences automatically
-protocol.initializeMlsWithSecureStorage()
+// Android — `storage` is your MlsStorageProvider (e.g. EncryptedSharedPreferences-backed)
+protocol.initializeMls(storage)
 ```
+
+> **React Native:** the wrapper bundles a Keychain / EncryptedSharedPreferences provider, so RN
+> apps can just call `initializeMlsWithSecureStorage()` — or let `start()` initialize MLS
+> automatically when encryption is enabled.
 
 ### 2. Generate and Share Key Packages
 
@@ -190,7 +197,7 @@ Key packages allow others to initiate encrypted sessions with you:
 
 ```swift
 // Generate a key package
-let keyPackage = try protocol.mlsGenerateKeyPackage()
+let keyPackage = try mesh.mlsGenerateKeyPackage()
 
 // Upload to your server for distribution
 uploadKeyPackage(keyPackage.keyPackageData, userId: keyPackage.userId)
@@ -202,19 +209,19 @@ uploadKeyPackage(keyPackage.keyPackageData, userId: keyPackage.userId)
 
 ```swift
 // First, import the recipient's key package
-try protocol.mlsImportKeyPackage(
+try mesh.mlsImportKeyPackage(
     userId: "bob",
     keyPackageData: bobsKeyPackage
 )
 
 // Send an encrypted message
-let encrypted = try protocol.mlsEncryptForUser(
+let encrypted = try mesh.mlsEncryptForUser(
     otherUserId: "bob",
     plaintext: "Hello, Bob!".data(using: .utf8)!
 )
 
 // Send the encrypted message using existing transport
-_ = try protocol.sendMessage(
+_ = try mesh.sendMessage(
     recipient: "bob",
     content: encryptedToJson(encrypted),
     priority: .medium,
@@ -226,13 +233,13 @@ _ = try protocol.sendMessage(
 
 ```swift
 // Create a group (creator becomes admin)
-let group = try protocol.createGroup(groupName: "Project Team")
+let group = try mesh.createGroup(groupName: "Project Team")
 
 // Invite members (admin only — handles key exchange + Welcome automatically)
-try protocol.inviteToGroup(groupId: group.groupId, inviteeUserId: "alice")
+try mesh.inviteToGroup(groupId: group.groupId, inviteeUserId: "alice")
 
 // Send encrypted group message (MLS encryption + mesh fan-out)
-let messageIds = try protocol.sendGroupMessage(
+let messageIds = try mesh.sendGroupMessage(
     groupId: group.groupId,
     content: "Hello team!",
     priority: nil,
@@ -240,12 +247,12 @@ let messageIds = try protocol.sendGroupMessage(
 )
 
 // Get group info
-if let info = try protocol.getGroupInfo(groupId: group.groupId) {
+if let info = try mesh.getGroupInfo(groupId: group.groupId) {
     print("Members: \(info.members), Epoch: \(info.epoch)")
 }
 
 // Rename a group (admin only, broadcasts to all members)
-try protocol.renameGroup(groupId: group.groupId, newName: "Engineering Team")
+try mesh.renameGroup(groupId: group.groupId, newName: "Engineering Team")
 ```
 
 ### 4. Receive and Decrypt Messages
@@ -254,7 +261,7 @@ try protocol.renameGroup(groupId: group.groupId, newName: "Engineering Team")
 // When receiving a message, check if it was encrypted
 if message.metadata["encrypted"] == "true" {
     let encrypted = parseEncryptedMessage(message.content)
-    if let plaintext = try protocol.mlsDecrypt(encrypted: encrypted) {
+    if let plaintext = try mesh.mlsDecrypt(encrypted: encrypted) {
         let text = String(data: plaintext, encoding: .utf8)
         // Handle decrypted message
     }
@@ -263,7 +270,7 @@ if message.metadata["encrypted"] == "true" {
 // When receiving a Welcome message (invited to group)
 if let welcomeData = message.metadata["mls_welcome"] {
     let welcome = parseWelcomeMessage(welcomeData)
-    let groupInfo = try protocol.mlsProcessWelcome(welcome: welcome)
+    let groupInfo = try mesh.mlsProcessWelcome(welcome: welcome)
     // Now you're part of the group
 }
 ```
@@ -272,14 +279,14 @@ if let welcomeData = message.metadata["mls_welcome"] {
 
 ## Custom Storage (Advanced)
 
-The SDK includes built-in secure storage, but you can provide a custom implementation if needed (e.g., for custom backup strategies, additional encryption layers, or testing).
+The React Native wrapper ships built-in secure storage; native (Swift/Kotlin) integrations provide their own by implementing `MlsStorageProvider`. A custom provider is also useful for custom backup strategies, additional encryption layers, or testing.
 
 ### Using Custom Storage
 
 ```swift
 // iOS - custom storage
 let customStorage = MyCustomMlsStorage()
-try protocol.initializeMls(storage: customStorage)
+try mesh.initializeMls(storage: customStorage)
 ```
 
 ```kotlin
@@ -371,19 +378,19 @@ DELETE /keys/{userId}/{pkgId} # Delete used key package
 
 ```swift
 // Get pending key packages to upload
-let pending = protocol.mlsGetPendingKeyPackages()
+let pending = mesh.mlsGetPendingKeyPackages()
 
 for pkg in pending {
     // Upload to server
     try await uploadKeyPackage(pkg)
     
     // Mark as synced
-    try protocol.mlsMarkKeyPackageSynced(packageId: pkg.packageId)
+    try mesh.mlsMarkKeyPackageSynced(packageId: pkg.packageId)
 }
 
 // Fetch a contact's key package before messaging
 let keyPackageData = try await fetchKeyPackage(userId: "bob")
-try protocol.mlsImportKeyPackage(userId: "bob", keyPackageData: keyPackageData)
+try mesh.mlsImportKeyPackage(userId: "bob", keyPackageData: keyPackageData)
 ```
 
 ### Offline Key Exchange
@@ -461,6 +468,11 @@ MLS control payloads (key package / welcome / ciphertext envelopes) are encoded 
 ---
 
 ## API Reference
+
+> The method names in these tables follow the **React Native / JS wrapper** API — including the
+> `mesh*` group helpers and `initializeMlsWithSecureStorage()`. The native UniFFI bindings expose
+> the same operations under their generated names (e.g. `createGroup`, `inviteToGroup`,
+> `sendGroupMessage`, `initializeMls(storage)`), as shown in the Swift/Kotlin snippets above.
 
 ### Initialization
 
