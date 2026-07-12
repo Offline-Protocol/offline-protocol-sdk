@@ -186,7 +186,7 @@ Rust Core (100% safe)
 
 ## Group Messaging (MLS-Encrypted Mesh)
 
-Create and manage encrypted groups over the mesh. The group creator is automatically an admin.
+Create and manage encrypted groups over the mesh. The group creator is automatically an admin. The snippets below assume you've unwrapped your started instance into a non-optional `offlineProtocol` (e.g. `guard let offlineProtocol = self.offlineProtocol else { return }`).
 
 ```swift
 // Create a group
