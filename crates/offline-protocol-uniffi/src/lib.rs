@@ -3028,7 +3028,7 @@ impl OfflineProtocol {
 
         // Update the Internet transport status in the transport manager.
         // Unconditional even on a redundant report: the transport's own
-        // on_status_changed is idempotent and resets its reconnect counter.
+        // on_status_changed is idempotent.
         {
             let new_status = if is_connected {
                 offline_protocol_transport::TransportStatus::Available
