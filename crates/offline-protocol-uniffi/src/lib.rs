@@ -3166,7 +3166,7 @@ impl OfflineProtocol {
                             tracing::warn!(
                                 message_id = %message_id,
                                 error = %err,
-                                "Failed to apply welcome lifecycle transport failure"
+                                "Failed to apply transport-failure to pending welcome lifecycle (frame may not be a welcome)"
                             );
                         }
                         transport_arc.report_send_failure(&message_id);
