@@ -10158,6 +10158,68 @@ fn test_security_gate_passes_with_matching_transport_id_when_required() {
     );
 }
 
+/// With `require_transport_identity = true`, a frame claiming mesh relay
+/// (hop > 0, carrier identity attached) skips the strict identity match —
+/// but must not be able to skip the signature too: unsigned → rejected
+/// (`UnsignedControlRejected`). Otherwise forging `hop_count` would grant
+/// an unsigned frame more than the no-identity path, which the flag
+/// rejects outright.
+#[test]
+fn test_relayed_unsigned_control_rejected_when_identity_required() {
+    let mut config = create_test_config_for_user("bob");
+    config.security.require_transport_identity = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let mut msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    msg.increment_hop().unwrap();
+    msg.set_transport_peer_id("carol".to_string()).unwrap();
+
+    let result = protocol.security_gate_control_message(&msg);
+    assert!(
+        matches!(result, Some(InternalMessageResult::SecurityRejected)),
+        "unsigned relayed control frame must be rejected under \
+         require_transport_identity"
+    );
+}
+
+/// The hop-count exemption still admits honest relayed traffic under the
+/// strict flag: a SIGNED mesh-relayed frame with a carrier identity passes.
+/// (The Ed25519 canonical payload deliberately excludes `hop_count`, so
+/// relaying — increment + re-send — keeps the origin's signature valid.)
+#[test]
+fn test_relayed_signed_control_passes_when_identity_required() {
+    let mut config = create_test_config_for_user("bob");
+    config.security.require_transport_identity = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
+    alice.initialize_mls(storage_a).unwrap();
+
+    let mut msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    alice.sign_control_message(&mut msg).unwrap();
+    msg.increment_hop().unwrap();
+    msg.set_transport_peer_id("carol".to_string()).unwrap();
+
+    let result = protocol.security_gate_control_message(&msg);
+    assert!(
+        result.is_none(),
+        "signed mesh-relayed control frame must pass the strict gate"
+    );
+}
+
 #[test]
 fn test_enable_message_persistence_restores_tofu_keys() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());

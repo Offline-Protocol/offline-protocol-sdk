@@ -314,6 +314,27 @@ impl OfflineProtocol {
                     );
                     return Some(InternalMessageResult::SecurityRejected);
                 }
+                // Strict deployments reject unsigned control traffic outright.
+                // The transport-identity strict match only covers frames
+                // claiming direct origin (`hop_count == 0`); a forged-hop
+                // frame skips it and lands here, so accepting unsigned frames
+                // would let a spoofer impersonate any not-yet-pinned peer
+                // without even committing a signing key. Requiring a
+                // signature forces the attacker to present a key that TOFU
+                // pins — and later flags when the real peer shows up.
+                if self.config.security.require_transport_identity {
+                    warn!(
+                        sender = %sender,
+                        message_id = %message.id,
+                        "Dropping unsigned control message (require_transport_identity demands signed control traffic)"
+                    );
+                    self.emit_security_warning(
+                        sender,
+                        SecurityWarningCode::UnsignedControlRejected,
+                        "Unsigned control message rejected by strict transport-identity policy",
+                    );
+                    return Some(InternalMessageResult::SecurityRejected);
+                }
                 debug!(
                     sender = %sender,
                     message_id = %message.id,
@@ -352,9 +373,20 @@ impl OfflineProtocol {
     /// `hop_count > 0` was mesh-relayed: the transport identity names the
     /// nearest carrier (the relaying peer), not the origin in
     /// `message.sender`, so a mismatch is expected and carries no spoofing
-    /// signal. Those frames fall back to the signature + TOFU gate. A
-    /// spoofer can forge `hop_count > 0` to skip this check, but that lands
-    /// it exactly on the no-identity best-effort path — never weaker.
+    /// signal. Those frames fall back to the signature + TOFU gate.
+    ///
+    /// A spoofer can forge `hop_count > 0` to skip this check. Under the
+    /// default configuration that lands it exactly on the no-identity
+    /// best-effort path (signature + TOFU) — never weaker. Under
+    /// `require_transport_identity = true` the no-identity path *rejects*,
+    /// so the forged-hop path would be strictly weaker if the gate accepted
+    /// unsigned frames there; to close that, the gate also rejects unsigned
+    /// control frames outright when the flag is set
+    /// ([`SecurityWarningCode::UnsignedControlRejected`]). The residual
+    /// trust assumption in every configuration is first-contact TOFU
+    /// pinning — a forged-hop spoofer must commit a signing key that TOFU
+    /// pins and later flags, exactly as on the identity-less mesh
+    /// transports.
     ///
     /// # Relay / mesh forwarding
     ///

@@ -154,19 +154,28 @@ pub struct SecurityConfig {
     /// keys have already been pinned, but the first contact with any peer is
     /// vulnerable to man-in-the-middle if the transport identity is absent.
     ///
-    /// Note that this flag only controls the *absent-identity* case. When a
-    /// transport does attach an authenticated identity (Internet relay,
+    /// When a transport attaches an authenticated identity (Internet relay,
     /// Reticulum), frames claiming direct origin (`hop_count == 0`) are
     /// strict-matched against `message.sender` regardless of this flag —
     /// spoofed hop-0 control frames on those transports are rejected even
-    /// with the default `false`.
+    /// with the default `false`. Frames claiming mesh relay
+    /// (`hop_count > 0`) skip the strict match (the identity names the
+    /// carrier, not the origin) and rest on the signature + TOFU gate.
+    ///
+    /// Enabling this flag therefore tightens two things: control frames
+    /// *without* any transport identity are rejected, and *unsigned*
+    /// security-gated control frames are rejected outright — otherwise a
+    /// spoofer could forge `hop_count > 0` to skip the strict match and do
+    /// better than a peer with no identity at all. The remaining trust
+    /// assumption is first-contact TOFU pinning.
     ///
     /// Set to `true` only when every enabled transport reliably attaches
-    /// peer identity. Today that means Internet + Reticulum deployments;
-    /// BLE, WiFi Direct, and Nostr inbound frames carry no transport
-    /// identity, so `true` would reject all their control messages, and
-    /// mesh-forwarded frames re-created by intermediate nodes legitimately
-    /// lack identity as well.
+    /// peer identity AND all peers sign control traffic (MLS initialized —
+    /// legacy pre-MLS peers cannot interoperate with a strict deployment).
+    /// Today that means Internet + Reticulum deployments; BLE, WiFi Direct,
+    /// and Nostr inbound frames carry no transport identity, so `true`
+    /// would reject all their control messages, and mesh-forwarded frames
+    /// re-created by intermediate nodes legitimately lack identity as well.
     pub require_transport_identity: bool,
 }
 
