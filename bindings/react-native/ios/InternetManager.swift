@@ -958,7 +958,8 @@ public class InternetManager: NSObject, TransportManager {
 
             let replyToMsg = json["reply_to_msg"] as? String
             let messageId = json["message_id"] as? String
-            
+            let timestampStr = json["timestamp"] as? String ?? ""
+
             messagesReceived.increment()
             
             messageQueue.async { [weak self] in
@@ -995,19 +996,22 @@ public class InternetManager: NSObject, TransportManager {
                         messageData = try JSONSerialization.data(withJSONObject: messageDict)
                     } else {
                         // Content is plain text, reconstruct full Message JSON
+                        // (legacy JS-relay senders). Every field required by the
+                        // Rust Message deserializer must be present — a missing
+                        // id/timestamp or non-lowercase priority makes the
+                        // transport silently drop the frame.
                         var messageDict: [String: Any] = [
+                            "id": (messageId?.isEmpty == false) ? messageId! : UUID().uuidString,
                             "sender": senderId,
                             "recipient": self.deviceId, // Will be corrected by protocol
                             "content": content,
                             "app_id": "offline-messenger",
-                            "priority": "Medium",
+                            "priority": "medium",
                             "ttl": 8,
                             "hop_count": 0,
-                            "requires_ack": true
+                            "requires_ack": true,
+                            "timestamp": self.parseTimestampToMs(timestampStr)
                         ]
-                        if let messageId = messageId, !messageId.isEmpty {
-                            messageDict["id"] = messageId
-                        }
                         if let replyToMsg = replyToMsg, !replyToMsg.isEmpty {
                             messageDict["reply_to_msg"] = replyToMsg
                         }
@@ -1421,7 +1425,10 @@ public class InternetManager: NSObject, TransportManager {
             "recipient": deviceId,
             "content": content,
             "app_id": "offline-messenger",
-            "priority": "Medium",
+            // Serde expects the SDK's canonical lowercase variant ("medium");
+            // any other casing fails deserialization and the frame is
+            // silently dropped by the transport.
+            "priority": "medium",
             "ttl": 8,
             "hop_count": 0,
             "requires_ack": true,

@@ -925,19 +925,25 @@ class InternetManager(
                             messageBytes = contentJson.toString().toByteArray(Charsets.UTF_8)
                         } else {
                             // Content is just the message text, reconstruct full Message JSON
-                            // This shouldn't happen if server forwards the full Message, but handle it anyway
+                            // (legacy JS-relay senders). Every field required by the Rust
+                            // Message deserializer must be present — a missing id/timestamp
+                            // or non-lowercase priority makes the transport silently drop
+                            // the frame.
                             val messageJson = org.json.JSONObject().apply {
-                                if (messageId != null && messageId.isNotEmpty()) {
-                                    put("id", messageId)
-                                }
+                                put(
+                                    "id",
+                                    if (messageId != null && messageId.isNotEmpty()) messageId
+                                    else java.util.UUID.randomUUID().toString()
+                                )
                                 put("sender", senderId)
                                 put("recipient", deviceId) // Will be corrected by protocol
                                 put("content", content)
                                 put("app_id", "offline-messenger") // Default app ID
-                                put("priority", "Medium")
+                                put("priority", "medium")
                                 put("ttl", 8)
                                 put("hop_count", 0)
                                 put("requires_ack", true)
+                                put("timestamp", parseTimestampToMs(timestamp))
                                 if (replyToMsg != null && replyToMsg.isNotEmpty()) {
                                     put("reply_to_msg", replyToMsg)
                                 }
@@ -946,18 +952,22 @@ class InternetManager(
                         }
                     } catch (e: org.json.JSONException) {
                         // Content is not JSON (plain text), reconstruct full Message JSON
+                        // (same required-field constraints as above).
                         val messageJson = org.json.JSONObject().apply {
-                            if (messageId != null && messageId.isNotEmpty()) {
-                                put("id", messageId)
-                            }
+                            put(
+                                "id",
+                                if (messageId != null && messageId.isNotEmpty()) messageId
+                                else java.util.UUID.randomUUID().toString()
+                            )
                             put("sender", senderId)
                             put("recipient", deviceId) // Will be corrected by protocol
                             put("content", content)
                             put("app_id", "offline-messenger") // Default app ID
-                            put("priority", "Medium")
+                            put("priority", "medium")
                             put("ttl", 8)
                             put("hop_count", 0)
                             put("requires_ack", true)
+                            put("timestamp", parseTimestampToMs(timestamp))
                             if (replyToMsg != null && replyToMsg.isNotEmpty()) {
                                 put("reply_to_msg", replyToMsg)
                             }
@@ -1457,7 +1467,10 @@ class InternetManager(
             put("recipient", deviceId)
             put("content", content)
             put("app_id", "offline-messenger")
-            put("priority", "Medium")
+            // Serde expects the SDK's canonical lowercase variant ("medium");
+            // any other casing fails deserialization and the frame is
+            // silently dropped by the transport.
+            put("priority", "medium")
             put("ttl", 8)
             put("hop_count", 0)
             put("requires_ack", true)
