@@ -31,19 +31,27 @@ cargo build --release --target x86_64-linux-android
 
 ### 3. Copy Native Libraries
 
-Copy the compiled `.so` files to your Android project:
+Each build produces `liboffline_protocol_uniffi.so`. UniFFI's Kotlin loader looks for
+`libuniffi_offline_protocol.so`, so copy each ABI's output under **that** name:
 
 ```
 android/app/src/main/jniLibs/
-├── arm64-v8a/liboffline_protocol.so
-├── armeabi-v7a/liboffline_protocol.so
-└── x86_64/liboffline_protocol.so
+├── arm64-v8a/libuniffi_offline_protocol.so
+├── armeabi-v7a/libuniffi_offline_protocol.so
+└── x86_64/libuniffi_offline_protocol.so
 ```
+
+The `bindings/react-native/scripts/build-uniffi-android.sh` helper builds every ABI and
+renames automatically (and regenerates the Kotlin bindings).
 
 ### 4. Use in Kotlin
 
+The generated Kotlin bindings live in the `uniffi.offline_protocol` package, so import
+that (not `com.offlineprotocol.*`, which is the React Native wrapper).
+
 ```kotlin
-import com.offlineprotocol.OfflineProtocol
+import uniffi.offline_protocol.*
+import org.json.JSONObject
 
 class MainActivity : AppCompatActivity() {
     private lateinit var protocol: OfflineProtocol
@@ -51,39 +59,59 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Initialize protocol
+        // ProtocolConfig has 16 required fields (+ 4 with defaults). See
+        // docs/configuration.md for what each one controls.
         val config = ProtocolConfig(
             appId = "my-android-app",
-            userId = "user123"
+            userId = "user123",
+            bleEnabled = true,
+            wifiDirectEnabled = true,
+            internetEnabled = true,
+            reticulumEnabled = false,
+            nostrEnabled = false,
+            preferOnline = false,
+            initialTtl = 8.toUByte(),
+            encryptionEnabled = true,
+            autoKeyExchange = true,
+            storePending = true,
+            maxPendingPerPeer = 100.toULong(),
+            maxPendingGlobal = 1_000.toULong(),
+            pendingTtlMs = 604_800_000.toULong(),
+            overflowPolicy = OverflowPolicy.DROP_OLDEST,
+            // requireEncryption (true), maxGroupMembers (256u), groupRelayEnabled (true),
+            // and requireTransportIdentity (false) use their defaults.
         )
 
         protocol = OfflineProtocol(config)
+
+        // Events are delivered as JSON strings via the EventCallback interface.
+        protocol.setEventCallback(MeshEventHandler())
         protocol.start()
 
-        // Set up event listener
-        protocol.setEventListener { event ->
-            when (event) {
-                is Event.MessageReceived -> {
-                    Log.d("Protocol", "Received: ${event.content}")
-                }
-                is Event.TransportSwitched -> {
-                    Log.d("Protocol", "Switched to ${event.to}")
-                }
-                else -> {}
-            }
-        }
-
-        // Send a message
+        // Send a message (priority is required; replyToMsg is optional)
         val messageId = protocol.sendMessage(
             recipient = "user456",
             content = "Hello from Android!",
-            priority = MessagePriority.HIGH
+            priority = MessagePriority.HIGH,
+            replyToMsg = null,
         )
     }
 
     override fun onDestroy() {
         super.onDestroy()
         protocol.stop()
+    }
+}
+
+class MeshEventHandler : EventCallback {
+    override fun onEvent(eventJson: String) {
+        val obj = JSONObject(eventJson)
+        when (obj.optString("type")) {
+            "message_received" ->
+                Log.d("Protocol", "Received from ${obj.optString("sender")}: ${obj.optString("content")}")
+            "transport_switched" ->
+                Log.d("Protocol", "Transport switched: $eventJson")
+        }
     }
 }
 ```
@@ -117,19 +145,21 @@ Create and manage encrypted groups over the mesh. The group creator is automatic
 
 ```kotlin
 // Create a group
-val group = protocol.meshCreateGroup("Project Team")
+val group = protocol.createGroup("Project Team")
 
 // Invite a member (admin only)
-protocol.meshInviteToGroup(group.groupId, "bob")
+protocol.inviteToGroup(group.groupId, "bob")
 
 // Send an encrypted group message
-val messageIds = protocol.meshSendGroupMessage(
+val messageIds = protocol.sendGroupMessage(
     groupId = group.groupId,
-    content = "Hello team!"
+    content = "Hello team!",
+    priority = null,
+    replyToMsg = null,
 )
 
 // Remove a member (admin only)
-protocol.meshRemoveFromGroup(group.groupId, "bob")
+protocol.removeFromGroup(group.groupId, "bob")
 
 // Get group info (members, epoch, etc.)
 val info = protocol.getGroupInfo(group.groupId)
@@ -139,7 +169,7 @@ info?.let { println("Members: ${it.members}") }
 protocol.renameGroup(group.groupId, "New Team Name")
 
 // Leave a group
-protocol.meshLeaveGroup(group.groupId)
+protocol.leaveGroup(group.groupId)
 ```
 
 ### Group Role Management
@@ -158,18 +188,18 @@ val roles = protocol.getGroupRoles(groupId)
 // mapOf("alice" to "admin", "bob" to "admin", "charlie" to "member")
 ```
 
-Listen for role changes and renames:
+Role changes and renames arrive through the same `EventCallback` as every other event —
+JSON strings whose `type` is `group_role_changed` or `group_renamed`. Extend your
+`onEvent(eventJson:)` to handle them:
 
 ```kotlin
-protocol.setEventListener { event ->
-    when (event) {
-        is Event.GroupRoleChanged -> {
-            Log.d("Protocol", "${event.userId} is now ${event.newRole} (by ${event.changedBy})")
-        }
-        is Event.GroupRenamed -> {
-            Log.d("Protocol", "Group ${event.groupId} renamed to ${event.newName} by ${event.renamedBy}")
-        }
-        else -> {}
+override fun onEvent(eventJson: String) {
+    val obj = JSONObject(eventJson)
+    when (obj.optString("type")) {
+        "group_role_changed" ->
+            Log.d("Protocol", "${obj.optString("user_id")} is now ${obj.optString("new_role")} (by ${obj.optString("changed_by")})")
+        "group_renamed" ->
+            Log.d("Protocol", "Group ${obj.optString("group_id")} renamed to ${obj.optString("new_name")} by ${obj.optString("renamed_by")}")
     }
 }
 ```
@@ -206,4 +236,3 @@ Rust Core (100% safe)
 - Message sending: <1ms overhead
 - Memory safe: Zero buffer overflows or memory leaks
 - Battery efficient: Optimized BLE and relay logic
-

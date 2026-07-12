@@ -28,7 +28,7 @@ Offline-first mesh networking SDK for React Native. Enables peer-to-peer messagi
 |----------|---------|
 | React Native | >= 0.70.0 |
 | iOS | >= 13.0 |
-| Android | >= API 26 (Android 8.0) |
+| Android | >= API 24 (Android 7.0) |
 | Node.js | >= 16 |
 
 ---
@@ -1147,4 +1147,11 @@ If you see the linking error message:
 
 ## License
 
-ISC
+The Offline Protocol SDK is **dual-licensed**:
+
+- **AGPL-3.0-only** — see [LICENSE](../../LICENSE). Free for use in projects that comply
+  with AGPL-3.0, including its network-use source-disclosure requirement (section 13).
+- **Commercial License** — for proprietary apps that cannot or do not wish to comply with
+  the AGPL. See [LICENSE-COMMERCIAL.md](./LICENSE-COMMERCIAL.md) (contact legal@offlineprotocol.com).
+
+You may use the SDK under **either** license; you do not need both.
