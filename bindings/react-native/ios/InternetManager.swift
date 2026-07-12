@@ -239,6 +239,15 @@ public class InternetManager: NSObject, TransportManager {
     /// falsely release a newer primary's hold. messageQueue-confined.
     private var inFlightControlPrimaries = 0
 
+    /// Armed by pause()'s final drain when a control-frame chain is still
+    /// settling: the poll timer is stopped, so no tick will retry — instead
+    /// the chain's completions re-run the drain once the chain settles
+    /// (`settleDrainIfRequested`). Deliberately survives a background
+    /// reconnect while paused (the pause-drain guarantee is "queued
+    /// messages go out once chains settle", not "one attempt"); disarmed on
+    /// settle-fire and on stop(). messageQueue-confined.
+    private var drainOnSettle = false
+
     /// Receives raw relay frames that are app/server concerns rather than SDK
     /// concerns (invite links, role changes, rate limiting, unknown types) —
     /// the module forwards them to JS as the `internet_server_message` event.
@@ -432,6 +441,10 @@ public class InternetManager: NSObject, TransportManager {
         controlOpTranslator.reset()
         messageQueue.async { [weak self] in
             self?.pendingControlFrames.removeAll()
+            // An armed pause-drain dies with the session (a disconnect
+            // reset deliberately keeps it — the drain guarantee survives
+            // background reconnects while paused).
+            self?.drainOnSettle = false
         }
         // The watch set survives *reconnects* on purpose (pending traffic is
         // still pending), but an explicit stop() ends the session: without
@@ -478,10 +491,13 @@ public class InternetManager: NSObject, TransportManager {
             // tick may still be running there — hop onto messageQueue like
             // stop() does. pause() leaves the socket up, so the drain
             // landing after this block returns is safe (and it re-checks
-            // isConnected itself).
+            // isConnected itself). drainForPause (not a bare
+            // pollAndSendMessages): the poll drain returns early while a
+            // control-frame chain settles, and with the timer stopped no
+            // tick would retry — the settle hook re-runs it instead.
             if state == .running && isConnected {
                 messageQueue.async { [weak self] in
-                    self?.pollAndSendMessages()
+                    self?.drainForPause()
                 }
             }
         }
@@ -1573,7 +1589,35 @@ public class InternetManager: NSObject, TransportManager {
             ])
         }
     }
-    
+
+    /// pause()'s final drain: runs the poll drain, and if a control-frame
+    /// chain is (still) settling — pollAndSendMessages returns early
+    /// mid-chain and the poll timer is stopped, so no tick will retry —
+    /// arms the one-shot settle hook so the chain's completions re-run the
+    /// drain. Residual: a chain parked by rate-limiter token denial has no
+    /// completion outstanding to fire the hook; its frames (and queued
+    /// data-plane messages) stay parked until resume(), which is safe —
+    /// commits are deferred, never dropped. messageQueue only.
+    private func drainForPause() {
+        pollAndSendMessages()
+        if !pendingControlFrames.isEmpty || isDrainingControlFrames
+            || inFlightControlPrimaries > 0 {
+            drainOnSettle = true
+        }
+    }
+
+    /// Fires the armed pause-drain once every control-frame chain has
+    /// settled. Called (via defer) from the two completions that can settle
+    /// a chain — the `.replace` primary's and the deferred frame's — and
+    /// re-arms itself through drainForPause when the drain starts another
+    /// chain. messageQueue only.
+    private func settleDrainIfRequested() {
+        guard drainOnSettle, pendingControlFrames.isEmpty,
+              !isDrainingControlFrames, inFlightControlPrimaries == 0 else { return }
+        drainOnSettle = false
+        drainForPause()
+    }
+
     private func sendMessage(
         messageId: String,
         recipientId: String,
@@ -1794,6 +1838,9 @@ public class InternetManager: NSObject, TransportManager {
                     // commit die with the connection (the disconnect reset
                     // generation-kills the commit).
                     guard !self.isStale(task) else { return }
+                    // Every non-stale exit may have settled the chain — let
+                    // an armed pause-drain fire.
+                    defer { self.settleDrainIfRequested() }
                     if let error = error {
                         // Never hit the wire — return the token, take back
                         // the optimistic in-flight entry. No deltas and no
@@ -1901,6 +1948,9 @@ public class InternetManager: NSObject, TransportManager {
                 // Stale task: the disconnect path already cleared the queue
                 // and generation-killed the commits.
                 guard !self.isStale(task) else { return }
+                // Every non-stale exit may have settled the chain — let an
+                // armed pause-drain fire.
+                defer { self.settleDrainIfRequested() }
                 if let error = error {
                     self.rateLimiter.refund()
                     self.emitDiagnostic("warning", "Relay control frame dropped by socket", context: [
