@@ -329,6 +329,48 @@ class RelayControlOpTranslatorTest {
         assertTrue(frames(other).isEmpty())
     }
 
+    /**
+     * Parity pin against the Rust op registry
+     * (test_internet_control_op_registry_is_closed in
+     * crates/offline-protocol/src/protocol/tests/mod.rs): every op the core
+     * can emit must translate to a relay-native shape (Replace/Tap), never
+     * PassThrough. A new Rust op must be handled here AND in the Swift
+     * translator AND the spec table before it ships — an unhandled op
+     * degrades to an opaque SendMessage the relay merely echoes/forwards.
+     */
+    @Test
+    fun everyCoreControlOpTranslatesToRelayNative() {
+        val translator = RelayControlOpTranslator("alice")
+
+        // Ordered: g1 is registered before the ops that reference it.
+        val cases = listOf(
+            Triple("conn_req", """{"sender_name":"Alice"}""", "bob"),
+            Triple("conn_acc", """{"accepted_by_name":"Alice"}""", "bob"),
+            Triple("conn_rej", "", "bob"),
+            Triple("conn_can", "", "bob"),
+            Triple(
+                "group_relay_register",
+                """{"group_id":"g1","group_name":"Trip","members":["alice","bob"]}""",
+                "alice"
+            ),
+            Triple(
+                "group_relay_broadcast",
+                """{"group_id":"g1","ciphertext":"AAECAw==","epoch":1}""",
+                "alice"
+            ),
+            Triple("group_mls_leave", """{"group_id":"g1","leaving_member":"alice"}""", "bob"),
+        )
+
+        for ((op, payload, recipient) in cases) {
+            val translation = translator.translate(op, payload, recipient)
+            commit(translation)
+            assertFalse(
+                "core op '$op' must translate to a relay-native shape, got PassThrough",
+                translation is RelayControlOpTranslator.Translation.PassThrough
+            )
+        }
+    }
+
     @Test
     fun malformedPayloadAndUnknownOpFallBackToPassThrough() {
         val translator = RelayControlOpTranslator("alice")

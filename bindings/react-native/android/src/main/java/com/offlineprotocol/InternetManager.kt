@@ -1668,6 +1668,16 @@ class InternetManager(
     ) {
         when (val translation = controlOpTranslator.translate(controlOp, controlPayload, recipientId)) {
             is RelayControlOpTranslator.Translation.PassThrough -> {
+                // Every op the core emits should translate to Replace or Tap;
+                // PassThrough here means an unknown op (translator behind the
+                // Rust registry — see test_internet_control_op_registry_is_closed)
+                // or a malformed payload. The frame still ships verbatim as
+                // SendMessage (the relay echoes/forwards it without acting),
+                // but make the degradation observable instead of silent.
+                emitDiagnostic("warning", "Unhandled control op sent verbatim as SendMessage", mapOf(
+                    "controlOp" to controlOp,
+                    "recipientId" to recipientId
+                ))
                 sendMessage(messageId, recipientId, data, replyToMsg)
             }
 

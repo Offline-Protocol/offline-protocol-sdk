@@ -1716,6 +1716,16 @@ public class InternetManager: NSObject, TransportManager {
         )
         switch translation {
         case .passThrough:
+            // Every op the core emits should translate to .replace or .tap;
+            // .passThrough here means an unknown op (translator behind the
+            // Rust registry — see test_internet_control_op_registry_is_closed)
+            // or a malformed payload. The frame still ships verbatim as
+            // SendMessage (the relay echoes/forwards it without acting), but
+            // make the degradation observable instead of silent.
+            emitDiagnostic("warning", "Unhandled control op sent verbatim as SendMessage", context: [
+                "controlOp": controlOp,
+                "recipientId": recipientId
+            ])
             sendMessage(messageId: messageId, recipientId: recipientId, data: data, replyToMsg: replyToMsg)
 
         case .tap(let frames, let commit):

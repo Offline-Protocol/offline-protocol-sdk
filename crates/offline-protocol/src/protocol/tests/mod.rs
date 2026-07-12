@@ -14644,6 +14644,56 @@ fn test_internet_control_op_classification() {
     }
 }
 
+/// Pins the closed set of server-plane control ops `internet_control_op`
+/// can emit, by sweeping every internal prefix through both classifying
+/// shapes (self-originated peer-addressed, and self-originated
+/// self-addressed for relay hints).
+///
+/// **If this test fails because you added an op:** the platform bridges
+/// translate ops by name, and an op they don't recognize degrades to an
+/// opaque `SendMessage` the relay merely echoes/forwards. Before extending
+/// this list, update BOTH translators —
+/// `bindings/react-native/android/.../RelayControlOpTranslator.kt` and
+/// `bindings/react-native/ios/RelayControlOpTranslator.swift` — plus the
+/// op table in `docs/relay-transport-parity-spec.md`.
+#[test]
+fn test_internet_control_op_registry_is_closed() {
+    let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut ops = std::collections::BTreeSet::new();
+
+    for prefix in INTERNAL_PREFIXES {
+        let content = format!("{}{{}}", prefix);
+        for recipient in ["bob", "user123"] {
+            let msg = Message::new(
+                UserId::new("user123").unwrap(),
+                UserId::new(recipient).unwrap(),
+                AppId::new("test-app").unwrap(),
+                content.as_str(),
+            );
+            if let Some((op, _)) = protocol.internet_control_op(&msg) {
+                ops.insert(op);
+            }
+        }
+    }
+
+    let expected: std::collections::BTreeSet<&str> = [
+        "conn_req",
+        "conn_acc",
+        "conn_rej",
+        "conn_can",
+        "group_mls_leave",
+        "group_relay_register",
+        "group_relay_broadcast",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        ops, expected,
+        "internet_control_op emitted an op outside the pinned registry — \
+         update both bridge translators and the spec table before extending it"
+    );
+}
+
 #[test]
 fn test_relayed_frame_with_hops_never_classifies() {
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
