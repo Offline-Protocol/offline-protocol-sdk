@@ -3124,25 +3124,53 @@ impl OfflineProtocol {
             }
         }
 
-        let protocol = recover_mutex(&self.inner, "inner");
+        let mut protocol = recover_mutex(&self.inner, "inner");
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
         {
             if let Ok(Some((message_id, data))) = transport_arc.get_next_message() {
-                if let Ok(message) = transport_arc.deserialize_message(&data) {
-                    let control = protocol.internet_control_op(&message);
-                    return Some(InternetMessage {
-                        message_id,
-                        recipient_id: message.recipient.as_str().to_string(),
-                        data,
-                        reply_to_msg: message
-                            .reply_to_msg
-                            .as_ref()
-                            .map(|id| id.as_str().to_string()),
-                        control_op: control.as_ref().map(|(op, _)| op.to_string()),
-                        control_payload: control.map(|(_, payload)| payload),
-                    });
+                match transport_arc.deserialize_message(&data) {
+                    Ok(message) => {
+                        let control = protocol.internet_control_op(&message);
+                        return Some(InternetMessage {
+                            message_id,
+                            recipient_id: message.recipient.as_str().to_string(),
+                            data,
+                            reply_to_msg: message
+                                .reply_to_msg
+                                .as_ref()
+                                .map(|id| id.as_str().to_string()),
+                            control_op: control.as_ref().map(|(op, _)| op.to_string()),
+                            control_payload: control.map(|(_, payload)| payload),
+                        });
+                    }
+                    Err(e) => {
+                        // The transport serialized this exact frame when it
+                        // was queued, so a round-trip failure here is a serde
+                        // asymmetry bug that must be investigated — never a
+                        // silent drop. The frame is already popped and gone;
+                        // close the confirm/fail feedback loop now instead of
+                        // letting the pending entry age out as an anonymous
+                        // timeout failure.
+                        tracing::warn!(
+                            message_id = %message_id,
+                            data_len = data.len(),
+                            error = %e,
+                            "Dropping internet outbox frame: failed to deserialize a frame the transport itself serialized — message is permanently lost"
+                        );
+                        if let Err(err) = protocol.on_transport_send_failed(
+                            &message_id,
+                            Some("Internet outbox frame failed deserialization".to_string()),
+                        ) {
+                            tracing::warn!(
+                                message_id = %message_id,
+                                error = %err,
+                                "Failed to apply welcome lifecycle transport failure"
+                            );
+                        }
+                        transport_arc.report_send_failure(&message_id);
+                    }
                 }
             }
         }
@@ -6284,6 +6312,50 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("security_warning")),
             "mesh-relayed control frame must not be rejected for carrier/origin mismatch"
+        );
+    }
+
+    /// An empty authenticated sender (relay frame without attribution) must
+    /// fall back to unattributed ingest: no strict match against an empty
+    /// identity, and the frame is still processed best-effort.
+    #[test]
+    fn test_internet_message_received_empty_sender_falls_back_to_unattributed() {
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.internet_status_changed(true).unwrap();
+
+        // A parseable ConnectionRequestPayload, so full processing is
+        // observable as a connection_request_received event.
+        let frame = serde_json::json!({
+            "id": "6dd7f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f",
+            "sender": "alice",
+            "recipient": "receiver-user",
+            "content": "__CONN_REQ__{\"sender_name\":\"Alice\",\"timestamp_ms\":1700000000000}",
+            "app_id": "test-app",
+            "priority": "medium",
+            "ttl": 8,
+            "hop_count": 0,
+            "requires_ack": true,
+            "timestamp": 1_700_000_000_000_i64,
+        })
+        .to_string()
+        .into_bytes();
+        receiver
+            .internet_message_received(String::new(), frame)
+            .unwrap();
+
+        let events = drained_events(&receiver);
+        assert!(
+            !events.iter().any(|e| e.contains("security_warning")),
+            "unattributed ingest must not strict-match against an empty identity"
+        );
+        assert!(
+            events.iter().any(|e| e.contains("connection_request")),
+            "unattributed control frame must still be processed best-effort"
         );
     }
 
