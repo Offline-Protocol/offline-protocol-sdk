@@ -175,6 +175,20 @@ pub(crate) const MAX_PENDING_KEY_PACKAGES: usize = 1000;
 /// of forgetting a peer is a one-time idempotent re-send of our key package.
 pub(crate) const MAX_KEY_PACKAGE_SENT_TO: usize = 1000;
 
+/// Maximum lifetime (in milliseconds) honored for a *received* peer key
+/// package's cached expiry.
+///
+/// `remaining_lifetime_ms` arrives on the wire unauthenticated and becomes the
+/// eviction sort key for [`MAX_PENDING_KEY_PACKAGES`] (the soonest-to-expire
+/// entry is evicted first). Without a ceiling, a flood of forged senders
+/// claiming a maximal lifetime would pin their entries as latest-to-expire and
+/// preferentially evict legitimate peers. Key packages are minted with a 30-day
+/// lifetime (`DEFAULT_KEY_PACKAGE_LIFETIME_SECS` in `offline-protocol-mls`), so
+/// a larger value is never legitimate. This bound is purely cache bookkeeping —
+/// OpenMLS enforces real key-package validity at use time — so clamping only
+/// affects when we drop the *cached* copy, never crypto correctness.
+pub(crate) const MAX_KEY_PACKAGE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
 /// Minimum age (in milliseconds) a TOFU entry must have before it can be
 /// evicted by LRU. This prevents a cache-filling attack where an adversary
 /// rapidly registers many fake identities to evict legitimate pinned keys.

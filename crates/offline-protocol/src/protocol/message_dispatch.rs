@@ -5,7 +5,8 @@ use super::{
     GroupCreatedPayload, GroupErrorPayload, GroupInfoPayload, GroupMemberAddedPayload,
     GroupMemberRemovedPayload, GroupMessageReceivedPayload, InternalMessageResult,
     KeyPackagePayload, OfflineProtocol, PresencePayload, ReadReceiptPayload, ReceivedKeyPackage,
-    TypingIndicatorPayload, UserGroupsPayload, MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
+    TypingIndicatorPayload, UserGroupsPayload, MAX_KEY_PACKAGE_LIFETIME_MS,
+    MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
 };
 use crate::events::{DecryptionFailureCode, Event};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
@@ -50,13 +51,22 @@ impl OfflineProtocol {
             }
 
             let now_ms = Utc::now().timestamp_millis() as u64;
-            let local_expires_at_ms = if payload.remaining_lifetime_ms > 0 {
-                now_ms.saturating_add(payload.remaining_lifetime_ms)
+            // Clamp the peer-supplied lifetime to `MAX_KEY_PACKAGE_LIFETIME_MS`.
+            // It is an unauthenticated wire field that becomes the eviction sort
+            // key (soonest-to-expire) for `pending_key_packages`; without a
+            // ceiling a flood of forged senders claiming a maximal lifetime
+            // would pin their entries as latest-to-expire and preferentially
+            // evict legitimate peers. A legacy sender omitting the field (0)
+            // falls back to the same default. This only bounds the *cached*
+            // expiry — OpenMLS enforces real key-package validity at use time.
+            let lifetime_ms = if payload.remaining_lifetime_ms > 0 {
+                payload
+                    .remaining_lifetime_ms
+                    .min(MAX_KEY_PACKAGE_LIFETIME_MS)
             } else {
-                // Legacy sender didn't include remaining_lifetime_ms;
-                // assume 30-day default lifetime.
-                now_ms.saturating_add(30 * 24 * 60 * 60 * 1000)
+                MAX_KEY_PACKAGE_LIFETIME_MS
             };
+            let local_expires_at_ms = now_ms.saturating_add(lifetime_ms);
             let pkg = ReceivedKeyPackage {
                 key_package_data: payload.key_package_data,
                 local_expires_at_ms,
@@ -1011,6 +1021,22 @@ impl OfflineProtocol {
                 // `__GROUP_CREATED__` above: a BLE/WiFi-mesh attacker can never
                 // present `arrival_transport == Internet`, which drops the
                 // forgery while preserving legitimate relay reconciliation.
+                //
+                // Residual (accepted): this does NOT authenticate a malicious
+                // *Internet* peer who can address us through the store-and-
+                // forward relay (which forwards peer content verbatim). We do
+                // not additionally gate on the wire `sender` being an admin —
+                // as the sibling `__GROUP_MEMBER_REMOVED__` path does — because
+                // this frame has no signed sender to check: the mobile bindings
+                // synthesize it from a relay notification with `sender =
+                // added_by`, falling back to the literal `"relay"` when the
+                // notification omits `added_by` (see InternetManager.{swift,kt}),
+                // so an admin check would drop those legitimate reconciliations.
+                // The residual is bounded: a spliced phantom cannot decrypt
+                // (it is never in the MLS group), so it leaks only membership/
+                // activity metadata, the `members.get_mut` guard below limits
+                // the splice to groups we already track, and crypto membership
+                // stays MLS-authoritative via `refresh_group_members`.
                 if arrival_transport != Some(TransportType::Internet) {
                     warn!(
                         group_id = %payload.group_id,
