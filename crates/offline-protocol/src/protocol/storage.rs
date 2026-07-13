@@ -528,22 +528,31 @@ impl OfflineProtocol {
 
     /// Restores the store-and-forward outbox from storage on startup.
     ///
-    /// Rebuilds `self.outbox` from persisted entries. The retry queue and ACK
-    /// manager start empty, so every restored entry lands in the "stranded"
-    /// state that [`Self::flush_outbox_all`] already recovers — a flush on
-    /// `start()` re-drives delivery.
+    /// Merges persisted entries into `self.outbox` — it is *not* cleared first.
+    /// An entry queued before persistence was enabled lives only in memory and,
+    /// if it succeeded at the transport but is awaiting an ACK, is not in the
+    /// retry queue either; clearing would strand it with no recovery path (the
+    /// ACK-timeout path drops a message that is missing from the outbox). Where
+    /// an id exists in both, storage is authoritative and overwrites.
+    ///
+    /// The retry queue and ACK manager start empty, so every restored entry
+    /// lands in the "stranded" state that [`Self::flush_outbox_all`] already
+    /// recovers — a flush on `start()` re-drives delivery.
     ///
     /// Recovery rules, mirroring the other restore paths:
     /// - corrupted entries are dropped from storage and skipped;
     /// - any stray media entry is dropped (they must never be resurrected);
+    /// - the total is pruned to `MAX_OUTBOX_ENTRIES`, keeping the newest by
+    ///   `last_sent_at`;
     /// - the TTL clock is carrier-relative: an entry whose `last_sent_at` has
     ///   already lapsed the outbox lifetime is refreshed rather than restored
     ///   already-expired, so it gets a fresh delivery window once a carrier
-    ///   reappears (mirrors the Welcome lifecycle repair);
-    /// - the total is pruned to `MAX_OUTBOX_ENTRIES`, keeping the newest by
-    ///   `last_sent_at`.
+    ///   reappears (mirrors the Welcome lifecycle repair). This runs *after*
+    ///   the prune, so a refreshed (now-stamped) clock can't sort as the newest
+    ///   and crowd genuinely-fresh entries out of the kept set;
+    /// - pre-existing in-memory entries not yet in storage are persisted, so
+    ///   memory and storage are consistent once restore returns.
     pub(crate) fn restore_outbox(&mut self) -> Result<()> {
-        self.outbox.clear();
         let Some(storage) = &self.message_storage else {
             return Ok(());
         };
@@ -566,7 +575,7 @@ impl OfflineProtocol {
                 continue;
             };
 
-            let mut entry = match serde_json::from_slice::<OutboxEntry>(&data) {
+            let entry = match serde_json::from_slice::<OutboxEntry>(&data) {
                 Ok(entry) => entry,
                 Err(e) => {
                     warn!(message_id = %message_id, error = %e, "Dropping corrupted outbox entry");
@@ -583,25 +592,14 @@ impl OfflineProtocol {
                 continue;
             }
 
-            // Carrier-relative TTL: don't restore an entry already past the
-            // outbox lifetime — refresh the clock so it survives the first
-            // cleanup tick and gets a fresh chance once a carrier appears.
-            if entry.last_sent_at + lifetime <= Utc::now() {
-                entry.last_sent_at = Utc::now();
-                self.persist_outbox_entry(&entry);
-                info!(
-                    event = "outbox_entry_restored",
-                    message_id = %message_id,
-                    repair_action = "ttl_refreshed_carrier_relative",
-                    "outbox_entry_restored"
-                );
-            }
-
             restored.push(entry);
         }
 
-        // Prune to capacity, keeping the newest by last_sent_at. Delete the
-        // pruned overflow from storage so it can't linger and be re-restored.
+        // Prune to capacity BEFORE refreshing TTLs, keeping the newest by
+        // last_sent_at. Delete the pruned overflow from storage so it can't
+        // linger and be re-restored. Ordering matters: refreshing a lapsed
+        // clock stamps it with `now`, which would otherwise sort it as the
+        // newest and crowd genuinely-fresh entries out of the kept set.
         if restored.len() > MAX_OUTBOX_ENTRIES {
             restored.sort_by_key(|e| std::cmp::Reverse(e.last_sent_at));
             for entry in restored.drain(MAX_OUTBOX_ENTRIES..) {
@@ -609,9 +607,46 @@ impl OfflineProtocol {
             }
         }
 
+        // Carrier-relative TTL: refresh any entry already past the outbox
+        // lifetime so it survives the first cleanup tick and gets a fresh chance
+        // once a carrier appears. Collect the refreshed clones so the repair can
+        // be re-persisted below, once the mutable borrow of `restored` is gone.
+        let now = Utc::now();
+        let mut refreshed: Vec<OutboxEntry> = Vec::new();
+        for entry in &mut restored {
+            if entry.last_sent_at + lifetime <= now {
+                entry.last_sent_at = now;
+                refreshed.push(entry.clone());
+                info!(
+                    event = "outbox_entry_restored",
+                    message_id = %entry.message.id,
+                    repair_action = "ttl_refreshed_carrier_relative",
+                    "outbox_entry_restored"
+                );
+            }
+        }
+
+        // Pre-existing in-memory entries not backed by storage (queued before
+        // persistence was enabled) must be persisted too, so they survive the
+        // next restart and memory/storage stay consistent after restore.
+        let restored_ids: std::collections::HashSet<String> =
+            restored.iter().map(|e| e.message.id.as_str()).collect();
+        let orphans: Vec<OutboxEntry> = self
+            .outbox
+            .values()
+            .filter(|e| !restored_ids.contains(&e.message.id.as_str()))
+            .cloned()
+            .collect();
+
         let count = restored.len();
         for entry in restored {
             self.outbox.insert(entry.message.id.clone(), entry);
+        }
+        for entry in &refreshed {
+            self.persist_outbox_entry(entry);
+        }
+        for entry in &orphans {
+            self.persist_outbox_entry(entry);
         }
         if count > 0 {
             info!(count = count, "Restored outbox entries from storage");

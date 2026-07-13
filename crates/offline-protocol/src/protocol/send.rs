@@ -1556,6 +1556,7 @@ impl OfflineProtocol {
         } else {
             &mut self.outbox
         };
+        let is_new = !outbox.contains_key(&message.id);
         let entry = outbox
             .entry(message.id.clone())
             .or_insert_with(|| OutboxEntry {
@@ -1574,9 +1575,14 @@ impl OfflineProtocol {
         entry.last_sent_at = now;
         entry.last_transport = transport;
 
-        // Persist the updated main-outbox entry so its latest attempt state
-        // survives a restart. Media entries are not persisted.
-        if !is_media {
+        // Persist only when the entry is newly created here. The success path
+        // never calls ensure_outbox_entry, so this is the one point a
+        // successfully-sent message first enters the durable outbox before its
+        // ACK. Later attempts don't re-persist: the durable copy already exists
+        // and attempt/timestamp churn isn't restore-critical (the TTL is
+        // refreshed on restore anyway), which keeps secure-storage writes off
+        // the retry hot path. Media entries are never persisted.
+        if is_new && !is_media {
             if let Some(entry) = self.outbox.get(&message.id) {
                 self.persist_outbox_entry(entry);
             }
