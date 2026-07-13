@@ -1508,6 +1508,9 @@ impl OfflineProtocol {
                     &mut self.outbox
                 };
                 outbox.remove(&oldest_id);
+                if !is_media {
+                    self.clear_outbox_entry_from_storage(&oldest_id);
+                }
                 self.handle_outbound_media_chunk_failed(&oldest_id, "outbox eviction");
             }
         }
@@ -1517,6 +1520,7 @@ impl OfflineProtocol {
         } else {
             &mut self.outbox
         };
+        let is_new = !outbox.contains_key(&message.id);
         outbox
             .entry(message.id.clone())
             .or_insert_with(|| OutboxEntry {
@@ -1526,6 +1530,13 @@ impl OfflineProtocol {
                 last_sent_at: Utc::now(),
                 last_transport: None,
             });
+        // Persist newly-created main-outbox entries so they survive a restart.
+        // media entries are intentionally not persisted.
+        if is_new && !is_media {
+            if let Some(entry) = self.outbox.get(&message.id) {
+                self.persist_outbox_entry(entry);
+            }
+        }
     }
 
     pub(super) fn mark_message_sent(
@@ -1539,7 +1550,8 @@ impl OfflineProtocol {
         }
 
         let now = Utc::now();
-        let outbox = if Self::is_media_outbox_message(message) {
+        let is_media = Self::is_media_outbox_message(message);
+        let outbox = if is_media {
             &mut self.media_outbox
         } else {
             &mut self.outbox
@@ -1561,12 +1573,22 @@ impl OfflineProtocol {
         entry.attempt_count = attempt_hint.unwrap_or(entry.attempt_count.saturating_add(1));
         entry.last_sent_at = now;
         entry.last_transport = transport;
+
+        // Persist the updated main-outbox entry so its latest attempt state
+        // survives a restart. Media entries are not persisted.
+        if !is_media {
+            if let Some(entry) = self.outbox.get(&message.id) {
+                self.persist_outbox_entry(entry);
+            }
+        }
     }
 
     pub(super) fn remove_outbox_entry(&mut self, message_id: &MessageId) -> Option<OutboxEntry> {
-        self.outbox
-            .remove(message_id)
-            .or_else(|| self.media_outbox.remove(message_id))
+        if let Some(entry) = self.outbox.remove(message_id) {
+            self.clear_outbox_entry_from_storage(message_id);
+            return Some(entry);
+        }
+        self.media_outbox.remove(message_id)
     }
 
     pub(super) fn cleanup_outbox(&mut self) {
@@ -1592,6 +1614,7 @@ impl OfflineProtocol {
             }
             self.retry_queue.remove(&message_id.as_str());
             self.outbox.remove(&message_id);
+            self.clear_outbox_entry_from_storage(&message_id);
             self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
         }
 

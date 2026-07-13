@@ -392,8 +392,10 @@ impl OfflineProtocol {
     /// - manager publication is transactional: restore must succeed before
     ///   `mls_manager` becomes visible to callers
     ///
-    /// The same storage is also used for persisting pending messages,
-    /// ensuring they survive app crashes/restarts.
+    /// The same storage is also used for persisting pending messages and the
+    /// store-and-forward outbox (under the `outbox` key type), ensuring both
+    /// survive app crashes/restarts. The media (file-chunk) outbox is not
+    /// persisted — file transfers must be re-initiated after a restart.
     pub fn initialize_mls(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
         if self.mls_manager.is_some() {
             return Ok(());
@@ -413,6 +415,7 @@ impl OfflineProtocol {
         let previous_lamport_clock = self.lamport_clock.value();
         let previous_tofu_keys = self.known_peer_public_keys.clone();
         let previous_blocked_users = self.blocked_users.clone();
+        let previous_outbox = self.outbox.clone();
 
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
@@ -436,6 +439,7 @@ impl OfflineProtocol {
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
             self.restore_welcome_lifecycles()?;
+            self.restore_outbox()?;
             self.restore_both_create_awaiting_decrypt();
             Ok(())
         })();
@@ -448,6 +452,7 @@ impl OfflineProtocol {
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
             self.known_peer_public_keys = previous_tofu_keys;
             self.blocked_users = previous_blocked_users;
+            self.outbox = previous_outbox;
             return Err(err);
         }
 
@@ -460,9 +465,11 @@ impl OfflineProtocol {
 
     /// Enables message persistence using the provided storage backend.
     ///
-    /// This allows pending messages to survive app crashes/restarts even
-    /// when MLS encryption is not used. The storage backend should be a
-    /// platform-native secure storage implementation.
+    /// This allows pending messages and the store-and-forward outbox to
+    /// survive app crashes/restarts even when MLS encryption is not used. The
+    /// storage backend should be a platform-native secure storage
+    /// implementation. The media (file-chunk) outbox is not persisted — file
+    /// transfers must be re-initiated after a restart.
     ///
     /// Note: If you call `initialize_mls()`, message persistence is
     /// automatically enabled using the same storage.
@@ -474,6 +481,7 @@ impl OfflineProtocol {
         self.restore_lamport_clock();
         self.restore_tofu_keys();
         self.restore_blocked_users();
+        self.restore_outbox()?;
         info!("Message persistence enabled");
         Ok(())
     }
@@ -674,6 +682,14 @@ impl OfflineProtocol {
         self.flush_restored_confirmed_pending_messages();
         self.kick_pending_session_reconciliation("start");
         self.process_welcome_retry_queue()?;
+
+        // Re-drive delivery of any outbox entries restored from a previous
+        // session. They land here in the "stranded" state (not in the retry
+        // queue, not awaiting an ACK), which flush_outbox_all already recovers:
+        // it sends immediately where a transport is available and re-enqueues
+        // the rest with backoff. Runs at start() rather than at restore time
+        // because transports aren't up yet during initialize_mls.
+        self.flush_outbox_all();
 
         Ok(())
     }

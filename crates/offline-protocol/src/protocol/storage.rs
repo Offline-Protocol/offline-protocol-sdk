@@ -1,13 +1,14 @@
 //! Storage persistence methods for protocol state.
 
 use super::{
-    storage_keys, OfflineProtocol, PendingMessage, ReceivedKeyPackage, SessionState,
+    storage_keys, OfflineProtocol, OutboxEntry, PendingMessage, ReceivedKeyPackage, SessionState,
     WelcomeDeliveryState, WelcomeLifecycleRecord, MAX_PENDING_KEY_PACKAGES,
     WELCOME_LIFECYCLE_TTL_SECS,
 };
+use crate::constants::MAX_OUTBOX_ENTRIES;
 use crate::{Error, Result};
 use chrono::{Duration as ChronoDuration, Utc};
-use offline_protocol_core::LamportClock;
+use offline_protocol_core::{LamportClock, MessageId};
 use offline_protocol_mls::MlsManager;
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use std::sync::{Arc, RwLock};
@@ -479,6 +480,156 @@ impl OfflineProtocol {
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // OUTBOX PERSISTENCE
+    // ========================================================================
+
+    /// Persists a single outbox entry to storage, keyed by message id.
+    ///
+    /// Best-effort and infallible: the send path cannot propagate storage
+    /// errors, so a failed write is logged and swallowed (the message still
+    /// lives in the in-memory outbox and will retry; it just won't survive a
+    /// restart). No-ops when persistence is not configured or when the entry
+    /// belongs to the media outbox — file transfers are not persisted and
+    /// resurrected chunks could never complete, so we never write them.
+    pub(crate) fn persist_outbox_entry(&self, entry: &OutboxEntry) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if Self::is_media_outbox_message(&entry.message) {
+            return;
+        }
+        match serde_json::to_vec(entry) {
+            Ok(data) => {
+                if let Err(e) =
+                    storage.store(storage_keys::OUTBOX, &entry.message.id.as_str(), &data)
+                {
+                    warn!(message_id = %entry.message.id, error = %e, "Failed to persist outbox entry");
+                }
+            }
+            Err(e) => {
+                warn!(message_id = %entry.message.id, error = %e, "Failed to serialize outbox entry");
+            }
+        }
+    }
+
+    /// Removes a persisted outbox entry from storage. Best-effort: a media
+    /// message id is never persisted, so deleting it is a harmless no-op.
+    pub(crate) fn clear_outbox_entry_from_storage(&self, message_id: &MessageId) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::OUTBOX, &message_id.as_str()) {
+            warn!(message_id = %message_id, error = %e, "Failed to clear persisted outbox entry");
+        }
+    }
+
+    /// Restores the store-and-forward outbox from storage on startup.
+    ///
+    /// Rebuilds `self.outbox` from persisted entries. The retry queue and ACK
+    /// manager start empty, so every restored entry lands in the "stranded"
+    /// state that [`Self::flush_outbox_all`] already recovers — a flush on
+    /// `start()` re-drives delivery.
+    ///
+    /// Recovery rules, mirroring the other restore paths:
+    /// - corrupted entries are dropped from storage and skipped;
+    /// - any stray media entry is dropped (they must never be resurrected);
+    /// - the TTL clock is carrier-relative: an entry whose `last_sent_at` has
+    ///   already lapsed the outbox lifetime is refreshed rather than restored
+    ///   already-expired, so it gets a fresh delivery window once a carrier
+    ///   reappears (mirrors the Welcome lifecycle repair);
+    /// - the total is pruned to `MAX_OUTBOX_ENTRIES`, keeping the newest by
+    ///   `last_sent_at`.
+    pub(crate) fn restore_outbox(&mut self) -> Result<()> {
+        self.outbox.clear();
+        let Some(storage) = &self.message_storage else {
+            return Ok(());
+        };
+
+        let message_ids = storage
+            .list_keys(storage_keys::OUTBOX)
+            .map_err(|e| Error::Other(format!("Failed to list outbox entries: {}", e)))?;
+
+        let lifetime = ChronoDuration::milliseconds(
+            self.config.reliability.retry.outbox_max_lifetime_ms as i64,
+        );
+
+        let mut restored: Vec<OutboxEntry> = Vec::new();
+        for message_id in message_ids {
+            let loaded = self
+                .message_storage
+                .as_ref()
+                .and_then(|s| s.load(storage_keys::OUTBOX, &message_id).ok().flatten());
+            let Some(data) = loaded else {
+                continue;
+            };
+
+            let mut entry = match serde_json::from_slice::<OutboxEntry>(&data) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    warn!(message_id = %message_id, error = %e, "Dropping corrupted outbox entry");
+                    self.delete_outbox_key(&message_id);
+                    continue;
+                }
+            };
+
+            // A media entry should never have been persisted; drop any that
+            // slipped in (e.g. from an older build) so it can't be resurrected.
+            if Self::is_media_outbox_message(&entry.message) {
+                warn!(message_id = %message_id, "Dropping persisted media outbox entry");
+                self.delete_outbox_key(&message_id);
+                continue;
+            }
+
+            // Carrier-relative TTL: don't restore an entry already past the
+            // outbox lifetime — refresh the clock so it survives the first
+            // cleanup tick and gets a fresh chance once a carrier appears.
+            if entry.last_sent_at + lifetime <= Utc::now() {
+                entry.last_sent_at = Utc::now();
+                self.persist_outbox_entry(&entry);
+                info!(
+                    event = "outbox_entry_restored",
+                    message_id = %message_id,
+                    repair_action = "ttl_refreshed_carrier_relative",
+                    "outbox_entry_restored"
+                );
+            }
+
+            restored.push(entry);
+        }
+
+        // Prune to capacity, keeping the newest by last_sent_at. Delete the
+        // pruned overflow from storage so it can't linger and be re-restored.
+        if restored.len() > MAX_OUTBOX_ENTRIES {
+            restored.sort_by_key(|e| std::cmp::Reverse(e.last_sent_at));
+            for entry in restored.drain(MAX_OUTBOX_ENTRIES..) {
+                self.delete_outbox_key(&entry.message.id.as_str());
+            }
+        }
+
+        let count = restored.len();
+        for entry in restored {
+            self.outbox.insert(entry.message.id.clone(), entry);
+        }
+        if count > 0 {
+            info!(count = count, "Restored outbox entries from storage");
+        }
+
+        Ok(())
+    }
+
+    /// Deletes an outbox key from storage without the media/no-storage guards
+    /// of [`Self::clear_outbox_entry_from_storage`] — used inside
+    /// [`Self::restore_outbox`], which already holds a storage handle and
+    /// operates on raw persisted keys.
+    fn delete_outbox_key(&self, message_id: &str) {
+        if let Some(storage) = &self.message_storage {
+            if let Err(e) = storage.delete(storage_keys::OUTBOX, message_id) {
+                warn!(message_id = %message_id, error = %e, "Failed to delete outbox key");
+            }
+        }
     }
 
     // ========================================================================
