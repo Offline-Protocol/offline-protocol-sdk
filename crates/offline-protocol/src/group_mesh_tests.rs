@@ -6515,17 +6515,24 @@ fn test_plaintext_removal_notification_from_non_admin_member_rejected() {
 }
 
 #[test]
-fn test_plaintext_removal_notification_from_relay_allowed() {
+fn test_plaintext_removal_notification_from_nonmember_naming_admin_rejected() {
+    // Regression (HIGH-2): a non-member must not force-evict the victim by
+    // naming a real admin in the unauthenticated `removed_by` payload field.
+    // Authorization is bound to the authenticated wire `sender`, never
+    // `removed_by`. A genuine relay-forwarded removal keeps the removing admin
+    // as `message.sender` (relaying preserves origin, hop_count > 0), so it is
+    // covered by the admin-sender path (see
+    // `test_plaintext_removal_notification_from_admin_cleans_up`); a frame whose
+    // `sender` is a non-member relay/attacker carries no authenticated claim on
+    // behalf of the admin and must be dropped.
     let (mut protocol, events) = setup_started_with_events();
 
-    // Create a group — "user123" (test default) is creator/admin
-    let info = protocol.create_group("Relay Test").unwrap();
+    // Create a group — "user123" (test default) is creator/admin.
+    let info = protocol.create_group("Relay Evict Forgery Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    // Simulate a relay-originated removal notification.
-    // The relay server ("relay-server") is NOT in the group member list.
-    // The removed_by field must reference a verified admin ("user123")
-    // so the handler can validate the removal is legitimate.
+    // A non-member sender names the real admin ("user123") in removed_by,
+    // trying to evict the local node from its own group.
     let payload = crate::protocol::GroupMemberRemovedPayload {
         group_id: group_id.clone(),
         user_id: "user123".to_string(),
@@ -6540,14 +6547,19 @@ fn test_plaintext_removal_notification_from_relay_allowed() {
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
-    // Event should be emitted (removed_by is a verified admin)
+    // No eviction: the non-member sender is not an admin, so a real admin named
+    // in `removed_by` does not authorize the removal.
     let events = events.lock().unwrap();
-    let removal = events
-        .iter()
-        .find(|e| matches!(e, Event::GroupMemberRemoved { .. }));
     assert!(
-        removal.is_some(),
-        "Should emit GroupMemberRemoved from relay when removed_by is verified admin"
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::GroupMemberRemoved { .. })),
+        "Non-member naming an admin in removed_by must not force eviction"
+    );
+    drop(events);
+    assert!(
+        protocol.group_mesh.members.contains_key(&group_id),
+        "Group state must remain intact after a forged removal from a non-member"
     );
 }
 

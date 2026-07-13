@@ -996,30 +996,27 @@ impl OfflineProtocol {
                 // so we don't retain a stale group that can't encrypt/decrypt.
                 let self_removed = payload.user_id == self.config.user_id;
                 if self_removed {
-                    // SECURITY: Verify the sender is authorized to remove us.
-                    // If the sender is a known group member, they must be an admin.
-                    // If the sender is not a member (e.g. relay server), verify
-                    // that removed_by in the payload is a known admin to prevent
-                    // arbitrary non-member senders from forging removals.
-                    let sender_is_member = self
-                        .group_mesh
-                        .members
-                        .get(&payload.group_id)
-                        .map(|m| m.contains(&sender.to_string()))
-                        .unwrap_or(false);
-                    let admin_to_verify = if sender_is_member {
-                        sender
-                    } else {
-                        &payload.removed_by
-                    };
-                    match self.check_is_admin(&payload.group_id, admin_to_verify) {
+                    // SECURITY (HIGH-2): authorize this destructive local
+                    // teardown off the authenticated wire `sender`, never the
+                    // attacker-controlled `payload.removed_by`. A legitimate
+                    // removal notification is sent directly by the removing admin
+                    // (`remove_member` → `send_internal_message(member_id, …)`),
+                    // so its `sender` IS that admin. Requiring the sender to be
+                    // an admin matches every sibling membership handler (role
+                    // change, rename, commit) and forces a forger to impersonate
+                    // an admin identity — which the control-frame signature +
+                    // TOFU gate rejects for any pinned admin. The prior
+                    // `removed_by` fallback authenticated nothing: `removed_by`
+                    // is an unauthenticated payload field, so naming any real
+                    // admin passed the check and let an unpinned non-member
+                    // force-evict the victim (dropping local MLS group state).
+                    match self.check_is_admin(&payload.group_id, sender) {
                         Ok(true) => {}
                         Ok(false) => {
                             error!(
                                 sender = %sender,
-                                verified_id = %admin_to_verify,
                                 group_id = %payload.group_id,
-                                "SECURITY: Group removal notification with unverifiable admin, ignoring"
+                                "SECURITY: Group removal notification from non-admin sender, ignoring"
                             );
                             return;
                         }
