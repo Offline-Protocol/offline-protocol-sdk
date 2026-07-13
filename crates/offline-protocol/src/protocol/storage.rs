@@ -185,25 +185,36 @@ impl OfflineProtocol {
         };
         let session_set: std::collections::HashSet<_> = sessions.into_iter().collect();
 
+        let mut pruned = 0usize;
         for peer_id in peer_ids {
+            if session_set.contains(&peer_id) {
+                continue;
+            }
             // Bound restore to the same cap as the live insert path so a
             // pre-existing over-cap durable store (e.g. a flood that landed
-            // before the cap existed) cannot re-inflate memory without limit on
-            // boot. Excess persisted entries are left on disk rather than loaded.
+            // before the cap existed) cannot re-inflate memory on boot. Rather
+            // than leaving the overflow to linger on disk forever — where it
+            // would re-inflate memory on a future boot and waste durable
+            // storage — prune it so the store shrinks to the cap in a single
+            // boot. Dropping a cached package only costs a recoverable
+            // re-exchange, exactly like the live eviction path. Overflow is
+            // deleted without loading it, so peak memory stays cap-bounded.
             if self.pending_key_packages.len() >= MAX_PENDING_KEY_PACKAGES {
-                warn!(
-                    cap = MAX_PENDING_KEY_PACKAGES,
-                    "Peer key package restore reached capacity; leaving remaining persisted entries on disk"
-                );
-                break;
-            }
-            if session_set.contains(&peer_id) {
+                self.delete_peer_key_package_from_storage(&peer_id);
+                pruned += 1;
                 continue;
             }
             if let Some(pkg) = self.load_peer_key_package_from_storage(&peer_id) {
                 info!(peer_id = %peer_id, "Restored peer key package from storage");
                 self.pending_key_packages.insert(peer_id, pkg);
             }
+        }
+        if pruned > 0 {
+            warn!(
+                cap = MAX_PENDING_KEY_PACKAGES,
+                pruned,
+                "Peer key package store exceeded the cap on restore; pruned overflow from durable storage"
+            );
         }
 
         Ok(())

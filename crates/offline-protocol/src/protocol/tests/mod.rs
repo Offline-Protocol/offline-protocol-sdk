@@ -7785,6 +7785,110 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
 }
 
 #[test]
+fn test_received_key_package_lifetime_is_clamped() {
+    // Regression (H2 follow-up): `remaining_lifetime_ms` is an unauthenticated
+    // wire field that becomes the eviction sort key for `pending_key_packages`
+    // (soonest-to-expire is evicted first). A forged sender claiming a maximal
+    // lifetime must not pin its entry as latest-to-expire and starve legitimate
+    // peers, so the cached expiry is clamped to MAX_KEY_PACKAGE_LIFETIME_MS.
+    let mut config = create_test_config();
+    // Keep the entry resident (no auto-establish) so we can inspect its expiry.
+    config.encryption.auto_key_exchange = false;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let before_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let key_pkg_payload = KeyPackagePayload {
+        user_id: "attacker".to_string(),
+        key_package_data: vec![1, 2, 3],
+        remaining_lifetime_ms: u64::MAX, // attacker claims a maximal lifetime
+        timestamp_ms: 0,
+        session_reset: false,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&key_pkg_payload).unwrap()
+    );
+    let message = Message::new(
+        UserId::new("attacker").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+    let _ = protocol.process_internal_message(&message);
+    let after_ms = chrono::Utc::now().timestamp_millis() as u64;
+
+    let pkg = protocol
+        .pending_key_packages
+        .get("attacker")
+        .expect("key package should be inserted");
+    // Expiry is anchored to *our* clock and bounded by the clamp: it lands in
+    // [before + MAX, after + MAX], never u64::MAX (which the unclamped
+    // saturating_add would have produced).
+    assert!(
+        pkg.local_expires_at_ms >= before_ms.saturating_add(MAX_KEY_PACKAGE_LIFETIME_MS)
+            && pkg.local_expires_at_ms <= after_ms.saturating_add(MAX_KEY_PACKAGE_LIFETIME_MS),
+        "a maximal claimed lifetime must be clamped to MAX_KEY_PACKAGE_LIFETIME_MS (got {})",
+        pkg.local_expires_at_ms
+    );
+}
+
+#[test]
+fn test_restore_peer_key_packages_prunes_overflow_from_storage() {
+    // Regression (H2 follow-up): a pre-cap over-sized durable store (a flood
+    // that landed before MAX_PENDING_KEY_PACKAGES existed) must not re-inflate
+    // memory on boot or linger on disk forever. The restore loop bounds memory
+    // to the cap AND prunes the on-disk overflow so the store shrinks to the
+    // cap in a single boot.
+    let storage = Arc::new(InMemoryStorage::new());
+    let overflow = 5;
+    let total = MAX_PENDING_KEY_PACKAGES + overflow;
+
+    // Persist more than the cap of non-expired, non-session peer key packages,
+    // writing straight to durable storage to bypass the live insert cap.
+    {
+        let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
+        writer.initialize_mls(storage.clone()).unwrap();
+        let pkg = ReceivedKeyPackage {
+            key_package_data: vec![0],
+            local_expires_at_ms: u64::MAX, // never expired
+        };
+        for i in 0..total {
+            writer.persist_peer_key_package(&format!("peer_{i}"), &pkg);
+        }
+    }
+    assert_eq!(
+        storage
+            .list_keys(storage_keys::PEER_KEY_PACKAGES)
+            .unwrap()
+            .len(),
+        total,
+        "precondition: durable store holds more than the cap"
+    );
+
+    // Boot a fresh instance against the same storage; initialize_mls runs the
+    // restore path.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage.clone()).unwrap();
+
+    assert_eq!(
+        protocol.pending_key_packages.len(),
+        MAX_PENDING_KEY_PACKAGES,
+        "restore must bound memory to the cap"
+    );
+    assert_eq!(
+        storage
+            .list_keys(storage_keys::PEER_KEY_PACKAGES)
+            .unwrap()
+            .len(),
+        MAX_PENDING_KEY_PACKAGES,
+        "overflow must be pruned from durable storage, not left to linger"
+    );
+}
+
+#[test]
 fn test_establishment_state_returns_correct_states() {
     let storage = Arc::new(InMemoryStorage::new());
     let bob_storage = Arc::new(InMemoryStorage::new());

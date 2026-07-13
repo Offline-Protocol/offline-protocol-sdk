@@ -6786,6 +6786,51 @@ fn test_group_member_added_from_mesh_is_dropped_not_cache_poisoned() {
     );
 }
 
+#[test]
+fn test_group_member_added_over_internet_accepted_regardless_of_sender_documents_residual() {
+    // Documents the accepted residual of the H1 gate: the Internet-arrival
+    // check stops BLE/WiFi-mesh forgery but does NOT authenticate a malicious
+    // Internet peer relaying content through the store-and-forward relay. We
+    // deliberately do not additionally gate on the wire `sender` being an admin
+    // (as `__GROUP_MEMBER_REMOVED__` does): the mobile bindings synthesize this
+    // frame with `sender = added_by`, falling back to the literal "relay" when
+    // the relay notification omits `added_by`, so an admin check would drop
+    // those legitimate reconciliations. The residual is bounded — a spliced
+    // phantom is never in the MLS group and cannot decrypt (metadata leak
+    // only). This test locks the behavior so any future sender-based check is a
+    // conscious, reviewed change rather than an accidental regression.
+    let (mut protocol, _events) = setup_started_with_events();
+
+    let info = protocol.create_group("Residual Doc Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec!["user123".to_string()]);
+
+    let payload = crate::protocol::GroupMemberAddedPayload {
+        group_id: group_id.clone(),
+        user_id: "eve".to_string(),
+        added_by: "user123".to_string(),
+        group_name: None,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MEMBER_ADDED,
+        serde_json::to_string(&payload).unwrap()
+    );
+
+    // An arbitrary, non-admin, non-member `sender` over the Internet relay path.
+    let message = make_message("mallory", "user123", &content);
+    let result = protocol.process_internal_message_via(&message, Some(TransportType::Internet));
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    let members = protocol.group_mesh.members.get(&group_id).unwrap();
+    assert!(
+        members.contains(&"eve".to_string()),
+        "Internet-arrival GROUP_MEMBER_ADDED is accepted regardless of sender (documented residual)"
+    );
+}
+
 // ========================================================================
 // KEY PACKAGE REPLENISHMENT AFTER WELCOME
 // ========================================================================
