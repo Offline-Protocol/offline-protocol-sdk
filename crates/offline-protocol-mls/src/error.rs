@@ -134,12 +134,14 @@ pub enum MlsError {
         authenticated: String,
     },
 
-    /// A Welcome's `group_id` — the session storage slot it would install
-    /// into — does not match the slot for the (local user, authenticated
-    /// inviter) pair. Rejecting this prevents an authenticated peer from
-    /// installing or overwriting a *third* party's 1:1 session slot, which
-    /// would hijack the victim's session so their outbound messages encrypt
-    /// to the attacker's group.
+    /// A 1:1-session Welcome's `group_id` — the session storage slot it would
+    /// install into — does not match the slot for the (local user,
+    /// authenticated inviter) pair. Rejecting this stops an authenticated peer
+    /// from installing or overwriting a *third* party's 1:1 session slot, which
+    /// would hijack the victim's session so their outbound messages encrypt to
+    /// the attacker's group. This guards the session-Welcome (`join_session`)
+    /// half of SEC-M6; the group-Welcome half is guarded by
+    /// [`MlsError::ReservedSessionNamespace`].
     #[error(
         "Welcome session-slot mismatch: inviter maps to slot '{expected}', Welcome claims '{found}'"
     )]
@@ -148,5 +150,21 @@ pub enum MlsError {
         expected: String,
         /// The slot the Welcome's `group_id` actually named.
         found: String,
+    },
+
+    /// A group Welcome named a `group_id` in the reserved `session:` namespace.
+    /// That namespace is owned exclusively by identity-bound 1:1 sessions
+    /// (installed only via `join_session`, guarded by
+    /// [`MlsError::WelcomeIdentityMismatch`]). A group Welcome carries an
+    /// attacker-controllable `group_id` with no (self, inviter) binding and
+    /// installs into the *same* storage/OpenMLS keyspace, so allowing one to
+    /// name a session slot would let an authenticated peer seed or overwrite a
+    /// third party's 1:1 session — the identical hijack SEC-M6 blocks on the
+    /// session-Welcome path, reached through the group path. This is the
+    /// group-Welcome half of that binding.
+    #[error("Group Welcome may not target the reserved 'session:' namespace: '{group_id}'")]
+    ReservedSessionNamespace {
+        /// The reserved-namespace slot the group Welcome tried to install into.
+        group_id: String,
     },
 }
