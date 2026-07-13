@@ -3561,6 +3561,35 @@ impl OfflineProtocol {
     // RELAY INBOUND — MLS-AWARE ROUTING
     // ========================================================================
 
+    /// Returns `true` if we hold local MLS state for `group_id`.
+    ///
+    /// The raw-emit fallbacks in [`Self::handle_relay_group_message_with_mls`]
+    /// attribute unauthenticated plaintext to a caller-supplied `sender`. That
+    /// is only ever acceptable for a genuine legacy relay-only (unencrypted)
+    /// group, which has no MLS state. If we secure this group with MLS, a real
+    /// member always sends MLS ciphertext, so plaintext naming the group is a
+    /// spoof — this test lets the caller drop it rather than surface a message
+    /// forged in a trusted member's name.
+    ///
+    /// Fail-closed: when MLS is initialized but the lookup cannot complete
+    /// (lock poisoned, invalid id), assume state may exist and return `true`
+    /// so a transient fault can never be leveraged to force a plaintext spoof
+    /// through. When MLS is not initialized at all, there is no group to
+    /// secure, so return `false` (genuine legacy).
+    fn has_mls_group_state(&self, group_id: &str) -> bool {
+        if !self.is_mls_initialized() {
+            return false;
+        }
+        let Ok(gid) = offline_protocol_mls::GroupId::new(group_id) else {
+            // An id we cannot even construct names no real MLS group.
+            return false;
+        };
+        match self.read_mls_guard() {
+            Ok(guard) => guard.has_group(&gid).unwrap_or(true),
+            Err(_) => true,
+        }
+    }
+
     /// Handles an inbound relay group message by routing through MLS
     /// decryption.
     ///
@@ -3571,7 +3600,11 @@ impl OfflineProtocol {
     /// messages are buffered for deferred retry. Content that is not MLS
     /// ciphertext (base64-undecodable, or base64 that is not MLS wire
     /// framing for a group without local state) is a legacy relay-only
-    /// group message and is emitted raw.
+    /// group message and is emitted raw — but only for a group we do *not*
+    /// secure with MLS. Plaintext naming a group we hold MLS state for is a
+    /// sender-spoofing attempt (a real member sends ciphertext) and is
+    /// dropped, since the raw emit would attribute attacker content to a
+    /// trusted member with no authentication.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_relay_group_message_with_mls(
         &mut self,
@@ -3604,7 +3637,29 @@ impl OfflineProtocol {
         let ciphertext_bytes = match base64_decode(content) {
             Ok(bytes) => bytes,
             Err(_) => {
-                // Not ciphertext — emit as plaintext
+                // Plaintext content naming a group we secure with MLS cannot be
+                // legitimate: a real member always sends MLS ciphertext (which
+                // is base64 and decodes here). Emitting it raw would attribute
+                // attacker-chosen content to the unauthenticated inner `sender`
+                // — a message forged in a trusted member's name. Drop it. Only
+                // a genuine legacy relay-only group (no local MLS state) may be
+                // emitted as plaintext.
+                if self.has_mls_group_state(group_id) {
+                    warn!(
+                        group_id = %group_id,
+                        sender = %sender,
+                        "SECURITY: dropping non-MLS plaintext naming an MLS-secured group (sender spoofing)"
+                    );
+                    self.emit_event(Event::security_warning(
+                        sender.to_string(),
+                        crate::events::SecurityWarningCode::PlaintextReceiveRejected,
+                        "Plaintext group message rejected: the named group is secured with MLS, \
+                         so unauthenticated plaintext cannot be attributed to the claimed sender"
+                            .to_string(),
+                    ));
+                    return;
+                }
+                // Not ciphertext and no MLS state — legacy relay-only group.
                 self.emit_event(Event::group_message_received(
                     group_id.to_string(),
                     sender.to_string(),

@@ -762,6 +762,18 @@ impl MlsManager {
         Ok(Some(info))
     }
 
+    /// Returns `true` if local MLS group state exists for `group_id`.
+    ///
+    /// This is the authoritative test for "do we actually participate in this
+    /// group via MLS" — it gates on the stored group marker, not the member
+    /// send-cache (which relay reconciliation can populate without any MLS
+    /// state). Callers use it to distinguish a genuine legacy relay-only
+    /// (unencrypted) group, which has no MLS state, from an unauthenticated
+    /// plaintext frame spoofed against a group the node secures with MLS.
+    pub fn has_group(&self, group_id: &GroupId) -> Result<bool> {
+        Ok(self.group_manager.load_group(group_id)?.is_some())
+    }
+
     /// Updates the group name.
     pub fn set_group_name(&self, group_id: &GroupId, name: &str) -> Result<()> {
         let mut metadata = self
