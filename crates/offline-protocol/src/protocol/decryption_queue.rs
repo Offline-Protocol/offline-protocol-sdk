@@ -175,6 +175,24 @@ impl PendingDecryptionQueue {
         self.queues.values().map(VecDeque::len).max().unwrap_or(0)
     }
 
+    /// Returns whether an overflow-pressure counter is tracked for a peer.
+    #[cfg(test)]
+    pub(crate) fn has_overflow_hits(&self, peer_id: &str) -> bool {
+        self.peer_overflow_hits.contains_key(peer_id)
+    }
+
+    /// Returns the number of peers with a tracked overflow-pressure counter.
+    #[cfg(test)]
+    pub(crate) fn overflow_hits_tracked(&self) -> usize {
+        self.peer_overflow_hits.len()
+    }
+
+    /// Returns the retained-memory footprint the queue charges for a message.
+    #[cfg(test)]
+    pub(crate) fn message_footprint(message: &Message) -> usize {
+        Self::message_bytes(message)
+    }
+
     /// Overrides the `received_at` timestamp of the front entry for a peer (fault injection).
     #[cfg(test)]
     pub(crate) fn set_front_received_at(&mut self, peer_id: &str, at: Instant) {
@@ -213,14 +231,48 @@ impl PendingDecryptionQueue {
         self.metrics.pending_bytes_current = self.total_bytes;
     }
 
-    /// Payload footprint of a queued message: text content plus binary content.
+    /// Retained-memory footprint of a queued message, for budget accounting.
+    ///
+    /// The queue stores a full [`Message`] clone, so this must reflect every
+    /// owned field a peer can inflate — not just the text/binary payload.
+    /// Counting only `content`/`binary_content` (as this once did) let a
+    /// crafted message with a tiny payload but a megabyte-scale `sender` or
+    /// `metadata` map evade the per-peer/global byte budgets entirely and drive
+    /// the queue to OOM while `pending_bytes_current` reported near-zero. The id
+    /// fields (`sender`/`recipient`/`app_id`) are additionally length-capped at
+    /// the type boundary (`offline_protocol_core::MAX_ID_LEN`); `metadata` and
+    /// the media strings are not, so this accounting is what bounds them.
+    ///
+    /// Fixed per-entry overhead (queue node, index entry, the duplicated
+    /// `peer_id`/`message_id` strings) is intentionally *not* added here — the
+    /// per-peer and global *count* caps already bound that fixed cost; the byte
+    /// budget exists to bound variable field/payload bloat.
     fn message_bytes(message: &Message) -> usize {
+        let metadata_bytes: usize = message
+            .metadata
+            .iter()
+            .map(|(k, v)| k.len() + v.len())
+            .sum();
+        let media_bytes = message
+            .media_metadata
+            .as_ref()
+            .map(|m| {
+                m.mime_type.len()
+                    + m.file_name.len()
+                    + m.thumbnail_base64.as_ref().map(String::len).unwrap_or(0)
+            })
+            .unwrap_or(0);
         message.content.len()
             + message
                 .binary_content
                 .as_ref()
                 .map(|binary| binary.len())
                 .unwrap_or(0)
+            + message.sender.as_str().len()
+            + message.recipient.as_str().len()
+            + message.app_id.as_str().len()
+            + metadata_bytes
+            + media_bytes
     }
 
     fn peer_bytes_for(&self, peer_id: &str) -> usize {
@@ -274,6 +326,12 @@ impl PendingDecryptionQueue {
         if queue_empty {
             self.queues.remove(peer_id);
             self.peer_bytes.remove(peer_id);
+            // Prune the overflow-pressure counter alongside the queue. It is
+            // keyed by the (attacker-controllable) wire sender and was
+            // previously never removed, so a flood of distinct forged senders
+            // leaked one permanent entry each. A peer with no queued messages
+            // has no live pressure to track.
+            self.peer_overflow_hits.remove(peer_id);
         }
         self.update_peer_gauge(peer_id);
         Some(removed)
@@ -972,6 +1030,10 @@ impl PendingDecryptionQueue {
                 .saturating_sub(Self::message_bytes(&entry.message));
         }
         self.peer_bytes.remove(sender);
+        // Prune the overflow-pressure counter with the drained queue (see the
+        // matching cleanup in `remove_entry_by_sequence`) so it cannot outlive
+        // the peer's queued messages and leak per-sender.
+        self.peer_overflow_hits.remove(sender);
         self.update_peer_gauge(sender);
         self.update_current_gauge();
         self.cleanup_global_order_front();
