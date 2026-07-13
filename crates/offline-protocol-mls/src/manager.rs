@@ -1430,6 +1430,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_join_group_rejects_embedded_group_id_mismatch() {
+        // Regression (HIGH-1): OpenMLS persists a joined group under the group
+        // id embedded in the Welcome's GroupContext — a value the inviter picks
+        // freely at creation (`new_with_group_id`) — while our storage marker
+        // and every load/delete lookup key off the *wire* `group_id`, which is
+        // all the SEC-M5/M6 bindings validate. If the two diverge, `into_group`
+        // would install the group under the attacker's embedded id: an
+        // arbitrary slot the wire-id checks never inspected. The join must bind
+        // embedded == wire and reject before any state is written.
+        let bob = create_test_manager("bob");
+        let mallory = create_test_manager("mallory");
+
+        // Mallory builds a real group whose EMBEDDED id is one value...
+        let bob_kp = bob.generate_key_package().unwrap();
+        let embedded = GroupId::new("group:11111111-1111-4111-8111-111111111111").unwrap();
+        let cred = mallory.get_credential().unwrap();
+        let signer = mallory.get_signer().unwrap();
+        mallory
+            .group_manager
+            .create_group(&embedded, &cred, &signer)
+            .unwrap();
+        let (welcome, _commit) = mallory
+            .add_group_member(&embedded, &bob_kp.key_package_data)
+            .unwrap();
+        assert_eq!(welcome.group_id, embedded);
+
+        // ...but presents it under a DIFFERENT wire group_id. The wire id clears
+        // the reserved-namespace guard (not `session:`), so only the embedded-id
+        // binding stands between the attacker and an arbitrary slot.
+        let wire = GroupId::new("group:22222222-2222-4222-8222-222222222222").unwrap();
+        let tampered = WelcomeMessage {
+            group_id: wire.clone(),
+            ..welcome
+        };
+
+        let err = bob.join_group(&tampered).unwrap_err();
+        assert!(
+            matches!(err, MlsError::WelcomeGroupIdMismatch { .. }),
+            "expected WelcomeGroupIdMismatch, got {:?}",
+            err
+        );
+
+        // Nothing was installed under EITHER id — the reject precedes into_group.
+        assert!(bob.group_manager.load_group(&wire).unwrap().is_none());
+        assert!(bob.group_manager.load_group(&embedded).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_welcome_embedded_id_cannot_hijack_session_slot() {
+        // Regression (HIGH-1, the SEC-M6 hijack reached through the embedded id).
+        // Bob has a live 1:1 session with Alice at `session:alice:bob`. Mallory,
+        // authenticating honestly as herself with a wire `group_id` that PASSES
+        // `verify_welcome_slot` (`session:bob:mallory`), sends a Welcome whose
+        // *embedded* GroupContext id squats `session:alice:bob`. Without the
+        // embedded-id binding, `into_group` overwrites Bob's Alice session so his
+        // next `encrypt_for_user("alice")` encrypts to Mallory's group. The
+        // binding must reject it and leave Bob's Alice session intact.
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        let welcome = alice.create_session("bob").unwrap();
+        bob.join_session(&welcome).unwrap();
+        assert!(bob.has_session("alice").unwrap());
+
+        // Mallory crafts a group whose embedded id squats bob's alice slot.
+        let mallory = create_test_manager("mallory");
+        let bob_kp2 = bob.generate_key_package().unwrap();
+        let squat = GroupId::new("session:alice:bob").unwrap();
+        let cred = mallory.get_credential().unwrap();
+        let signer = mallory.get_signer().unwrap();
+        mallory
+            .group_manager
+            .create_group(&squat, &cred, &signer)
+            .unwrap();
+        let (mal_welcome, _commit) = mallory
+            .add_group_member(&squat, &bob_kp2.key_package_data)
+            .unwrap();
+
+        // Present it under a wire slot that passes verify_welcome_slot for mallory.
+        let attack = WelcomeMessage {
+            group_id: GroupId::new("session:bob:mallory").unwrap(),
+            welcome_data: mal_welcome.welcome_data,
+            inviter_id: "mallory".to_string(),
+            group_name: None,
+            timestamp_ms: 0,
+        };
+
+        let err = bob.join_session(&attack).unwrap_err();
+        assert!(
+            matches!(err, MlsError::WelcomeGroupIdMismatch { .. }),
+            "expected WelcomeGroupIdMismatch, got {:?}",
+            err
+        );
+
+        // Bob's Alice session survived and still encrypts to Alice's group.
+        assert!(bob.has_session("alice").unwrap());
+        let ct = bob.encrypt_for_user("alice", b"still private").unwrap();
+        let pt = alice.decrypt_from_user(&ct, "bob").unwrap();
+        assert_eq!(pt.as_deref(), Some(&b"still private"[..]));
+    }
+
     /// Builds a two-member group (alice admin, bob member) for group
     /// sender-binding tests. Returns (alice, bob, group_id).
     fn create_test_group_with_bob() -> (MlsManager, MlsManager, GroupId) {

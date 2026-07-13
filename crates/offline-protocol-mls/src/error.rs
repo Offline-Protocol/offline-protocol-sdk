@@ -167,4 +167,24 @@ pub enum MlsError {
         /// The reserved-namespace slot the group Welcome tried to install into.
         group_id: String,
     },
+
+    /// A Welcome's embedded MLS group id (the id OpenMLS actually persists the
+    /// joined group under) does not match the wire `group_id` the caller
+    /// authenticated and keys storage by. The embedded id lives in the
+    /// Welcome's `GroupContext` and is chosen freely by the inviter at group
+    /// creation (`new_with_group_id`); every SEC-M5/M6 binding validates only
+    /// the wire field. Left unchecked, `into_group` would persist the group
+    /// under the attacker-chosen embedded id — seeding or overwriting an
+    /// arbitrary session/group slot the wire-id checks never inspected, the
+    /// same hijack SEC-M6 blocks, reached through the identifier it does not
+    /// cover. Rejecting binds the two before any state is written.
+    #[error(
+        "Welcome group-id mismatch: wire slot '{expected}', Welcome installs under '{embedded}'"
+    )]
+    WelcomeGroupIdMismatch {
+        /// The wire `group_id` the caller authenticated and keys storage by.
+        expected: String,
+        /// The group id embedded in the Welcome's GroupContext (attacker-chosen).
+        embedded: String,
+    },
 }
