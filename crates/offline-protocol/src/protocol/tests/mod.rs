@@ -3005,9 +3005,10 @@ fn test_initialize_mls_restore_failure_does_not_publish_partial_state() {
 
 #[test]
 fn test_initialize_mls_restore_failure_rolls_back_outbox() {
-    // Storage that fails specifically on the outbox restore step, which runs
-    // after restore_outbox has already cleared the in-memory map — the exact
-    // window the rollback snapshot must cover.
+    // Storage that fails specifically on the outbox restore step. The failure
+    // propagates out of the transactional initialize_mls closure, and the
+    // rollback snapshot must restore the pre-existing in-memory outbox rather
+    // than leave it half-merged or published under a failed init.
     #[derive(Default)]
     struct FailingOutboxListStorage {
         inner: crate::mls::InMemoryStorage,
@@ -11684,6 +11685,111 @@ fn test_restored_outbox_entry_flushed_on_start() {
         sent.iter().any(|m| m.id == msg_id),
         "Restored outbox entry should be flushed and sent on start()"
     );
+}
+
+#[test]
+fn test_restore_outbox_preserves_preexisting_in_memory_entry() {
+    // An entry queued in memory *before* persistence is enabled is not in
+    // storage. restore_outbox must merge, not clear — otherwise this entry is
+    // silently dropped, and if it was awaiting an ACK (not in the retry queue)
+    // it has no recovery path. Restore must also persist it so it survives the
+    // next restart.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // Populate the in-memory outbox while storage is still None.
+    let msg = test_message("bob", "queued-before-persistence");
+    let msg_id = msg.id.clone();
+    protocol.ensure_outbox_entry(&msg);
+    assert_eq!(protocol.outbox_entry_count(), 1);
+    assert!(
+        storage.list_keys(storage_keys::OUTBOX).unwrap().is_empty(),
+        "Nothing is persisted before persistence is enabled"
+    );
+
+    // Enabling persistence runs restore_outbox. The pre-existing entry must
+    // survive and become durable.
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        1,
+        "Pre-existing in-memory entry must survive restore (merge, not clear)"
+    );
+    assert_eq!(protocol.outbox_messages().next().unwrap().id, msg_id);
+    let keys = storage.list_keys(storage_keys::OUTBOX).unwrap();
+    assert_eq!(
+        keys.len(),
+        1,
+        "Pre-existing entry must be persisted on restore"
+    );
+    assert_eq!(keys[0], msg_id.as_str());
+}
+
+#[test]
+fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
+    // Prune must run before the carrier-relative TTL refresh. A lapsed entry
+    // refreshed *before* the prune would be stamped `now` and sort as the
+    // newest, crowding genuinely-fresh entries out of the kept set. Here the
+    // lapsed entries are the overflow and must be dropped, not resurrected.
+    let storage = Arc::new(InMemoryStorage::new());
+    let now = chrono::Utc::now();
+
+    // Exactly capacity's worth of fresh entries (well within the 1h lifetime).
+    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+        store_outbox_entry(
+            &storage,
+            &OutboxEntry {
+                message: test_message("bob", &format!("fresh-{i}")),
+                attempt_count: 0,
+                first_sent_at: now,
+                last_sent_at: now - ChronoDuration::seconds((i + 1) as i64),
+                last_transport: None,
+            },
+        );
+    }
+    // A handful of lapsed entries (older than the 1h lifetime) — overflow.
+    let mut lapsed_ids = Vec::new();
+    for i in 0..5 {
+        let entry = OutboxEntry {
+            message: test_message("bob", &format!("lapsed-{i}")),
+            attempt_count: 0,
+            first_sent_at: now - ChronoDuration::hours(2),
+            last_sent_at: now - ChronoDuration::hours(2),
+            last_transport: None,
+        };
+        lapsed_ids.push(entry.message.id.as_str().to_string());
+        store_outbox_entry(&storage, &entry);
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        crate::constants::MAX_OUTBOX_ENTRIES,
+        "Restore should prune to capacity"
+    );
+    // The lapsed (oldest) entries are the pruned overflow — they must NOT have
+    // been refreshed-and-kept, and must be gone from both memory and storage.
+    let restored_ids: std::collections::HashSet<String> = protocol
+        .outbox_messages()
+        .map(|m| m.id.as_str().to_string())
+        .collect();
+    let keys = storage.list_keys(storage_keys::OUTBOX).unwrap();
+    for id in &lapsed_ids {
+        assert!(
+            !restored_ids.contains(id),
+            "Lapsed overflow entry {id} must be pruned, not refreshed-and-kept"
+        );
+        assert!(
+            !keys.iter().any(|k| k == id),
+            "Pruned lapsed entry {id} must be deleted from storage"
+        );
+    }
 }
 
 #[test]
