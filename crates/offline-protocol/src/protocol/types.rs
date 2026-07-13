@@ -155,6 +155,26 @@ pub(crate) const MAX_BLOCKED_USERS: usize = 10_000;
 /// memory stays capped.
 pub(crate) const MAX_PLAINTEXT_RECEIVE_WARNED_PEERS: usize = 1000;
 
+/// Maximum number of pending (received-but-unused) peer key packages retained
+/// in memory and in durable `MlsStorage`.
+///
+/// Keyed by the wire-claimed `sender`, so — like [`MAX_KNOWN_PEERS`] — an
+/// unpinned peer can flood distinct forged ids under the default config. Each
+/// entry is also written to durable secure storage (`persist_peer_key_package`,
+/// iOS Keychain / Android Keystore) and re-loaded on boot, so without this cap
+/// a flood grows durable storage without bound and re-inflates memory on every
+/// restart. At capacity a new peer evicts the soonest-to-expire entry and drops
+/// its persisted copy; the restore-on-boot loop is capped the same way.
+pub(crate) const MAX_PENDING_KEY_PACKAGES: usize = 1000;
+
+/// Maximum number of peers remembered in `key_package_sent_to` (the "already
+/// sent our key package to this peer" set).
+///
+/// Wire-claimed ids grow this set in lockstep with a key-package flood, so it
+/// resets at capacity like [`MAX_PLAINTEXT_RECEIVE_WARNED_PEERS`]: the only cost
+/// of forgetting a peer is a one-time idempotent re-send of our key package.
+pub(crate) const MAX_KEY_PACKAGE_SENT_TO: usize = 1000;
+
 /// Minimum age (in milliseconds) a TOFU entry must have before it can be
 /// evicted by LRU. This prevents a cache-filling attack where an adversary
 /// rapidly registers many fake identities to evict legitimate pinned keys.

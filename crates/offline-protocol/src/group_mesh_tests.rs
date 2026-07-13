@@ -6719,6 +6719,73 @@ fn test_other_member_removal_from_non_admin_does_not_poison_send_cache() {
     );
 }
 
+#[test]
+fn test_group_member_added_from_mesh_is_dropped_not_cache_poisoned() {
+    // Regression (H1): `__GROUP_MEMBER_ADDED__` splices `payload.user_id` into
+    // `group_mesh.members`, the group fan-out send cache that
+    // `send_group_message_inner` reads verbatim. It is a relay reconciliation
+    // frame injected by the mobile bindings from a relay notification, so it
+    // only ever legitimately arrives over the Internet transport (a real MLS
+    // add is surfaced from the authenticated roster by `refresh_group_members`,
+    // not through this handler). Without the arrival gate, a mesh/BLE peer that
+    // forges this frame injects itself as a silent recipient of every
+    // subsequent group MLS ciphertext (a membership/activity metadata leak) and
+    // forges a roster event. A non-Internet arrival must be dropped; an
+    // Internet arrival is honored.
+    let (mut protocol, events) = setup_started_with_events();
+
+    let info = protocol.create_group("Add Poison Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Seed the fan-out cache with the real roster.
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec!["user123".to_string()]);
+
+    let payload = crate::protocol::GroupMemberAddedPayload {
+        group_id: group_id.clone(),
+        user_id: "eve".to_string(),
+        added_by: "user123".to_string(),
+        group_name: None,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MEMBER_ADDED,
+        serde_json::to_string(&payload).unwrap()
+    );
+
+    // (1) Mesh arrival (non-Internet) must be dropped: no cache mutation, no
+    // roster event.
+    let message = make_message("eve", "user123", &content);
+    let result = protocol.process_internal_message_via(&message, Some(TransportType::BLE));
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    {
+        let members = protocol.group_mesh.members.get(&group_id).unwrap();
+        assert!(
+            !members.contains(&"eve".to_string()),
+            "Mesh-forged __GROUP_MEMBER_ADDED__ must not splice a phantom into the fan-out cache"
+        );
+        let events = events.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::GroupMemberAdded { .. })),
+            "Mesh-forged __GROUP_MEMBER_ADDED__ must not emit a roster event"
+        );
+    }
+
+    // (2) The same frame delivered over the Internet relay path is honored.
+    let message = make_message("user123", "user123", &content);
+    let result = protocol.process_internal_message_via(&message, Some(TransportType::Internet));
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    let members = protocol.group_mesh.members.get(&group_id).unwrap();
+    assert!(
+        members.contains(&"eve".to_string()),
+        "Internet-arrival relay reconciliation should update the fan-out cache"
+    );
+}
+
 // ========================================================================
 // KEY PACKAGE REPLENISHMENT AFTER WELCOME
 // ========================================================================

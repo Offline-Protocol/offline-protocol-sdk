@@ -2,7 +2,8 @@
 
 use super::{
     storage_keys, OfflineProtocol, PendingMessage, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, WELCOME_LIFECYCLE_TTL_SECS,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, MAX_PENDING_KEY_PACKAGES,
+    WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::{Error, Result};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -185,6 +186,17 @@ impl OfflineProtocol {
         let session_set: std::collections::HashSet<_> = sessions.into_iter().collect();
 
         for peer_id in peer_ids {
+            // Bound restore to the same cap as the live insert path so a
+            // pre-existing over-cap durable store (e.g. a flood that landed
+            // before the cap existed) cannot re-inflate memory without limit on
+            // boot. Excess persisted entries are left on disk rather than loaded.
+            if self.pending_key_packages.len() >= MAX_PENDING_KEY_PACKAGES {
+                warn!(
+                    cap = MAX_PENDING_KEY_PACKAGES,
+                    "Peer key package restore reached capacity; leaving remaining persisted entries on disk"
+                );
+                break;
+            }
             if session_set.contains(&peer_id) {
                 continue;
             }

@@ -5,7 +5,7 @@ use super::{
     GroupCreatedPayload, GroupErrorPayload, GroupInfoPayload, GroupMemberAddedPayload,
     GroupMemberRemovedPayload, GroupMessageReceivedPayload, InternalMessageResult,
     KeyPackagePayload, OfflineProtocol, PresencePayload, ReadReceiptPayload, ReceivedKeyPackage,
-    TypingIndicatorPayload, UserGroupsPayload, MAX_READ_RECEIPT_IDS,
+    TypingIndicatorPayload, UserGroupsPayload, MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
 };
 use crate::events::{DecryptionFailureCode, Event};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
@@ -61,6 +61,35 @@ impl OfflineProtocol {
                 key_package_data: payload.key_package_data,
                 local_expires_at_ms,
             };
+            // SECURITY (resource exhaustion): `pending_key_packages` is keyed by
+            // the wire-claimed `sender`, and every insert also writes a durable
+            // entry via `persist_peer_key_package` (iOS Keychain / Android
+            // Keystore). Under the default config an unpinned peer can flood
+            // distinct forged senders, so bound the map exactly like
+            // `known_peers`: at capacity, evict the soonest-to-expire entry and
+            // drop its persisted copy before inserting, so neither memory nor
+            // durable storage grows without bound or survives a reboot
+            // re-inflated. A refreshed existing peer (already present) never
+            // triggers eviction.
+            if !self.pending_key_packages.contains_key(sender)
+                && self.pending_key_packages.len() >= MAX_PENDING_KEY_PACKAGES
+            {
+                if let Some(victim) = self
+                    .pending_key_packages
+                    .iter()
+                    .min_by_key(|(_, p)| p.local_expires_at_ms)
+                    .map(|(id, _)| id.clone())
+                {
+                    debug!(
+                        peer_id = %sender,
+                        evicted = %victim,
+                        cap = MAX_PENDING_KEY_PACKAGES,
+                        "Pending key packages at capacity, evicting soonest-to-expire"
+                    );
+                    self.pending_key_packages.remove(&victim);
+                    self.delete_peer_key_package_from_storage(&victim);
+                }
+            }
             self.pending_key_packages
                 .insert(sender.to_string(), pkg.clone());
             self.persist_peer_key_package(sender, &pkg);
@@ -967,6 +996,30 @@ impl OfflineProtocol {
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MEMBER_ADDED) {
             if let Ok(payload) = serde_json::from_str::<GroupMemberAddedPayload>(data) {
+                // SECURITY: `__GROUP_MEMBER_ADDED__` is a relay reconciliation
+                // frame — the mobile bindings inject it from a relay
+                // notification that arrives over the Internet transport. It has
+                // no in-SDK mesh producer (a real MLS add is surfaced from the
+                // authenticated roster by `refresh_group_members`, not here).
+                // The mutation below splices `payload.user_id` into
+                // `group_mesh.members`, the group fan-out send cache that
+                // `send_group_message_inner` reads verbatim, so an accepted
+                // forgery makes us deliver every subsequent group MLS ciphertext
+                // to an attacker-chosen id (a silent recipient — they cannot
+                // decrypt, but it leaks membership/activity metadata) and forges
+                // a roster event. Gate on Internet arrival exactly like
+                // `__GROUP_CREATED__` above: a BLE/WiFi-mesh attacker can never
+                // present `arrival_transport == Internet`, which drops the
+                // forgery while preserving legitimate relay reconciliation.
+                if arrival_transport != Some(TransportType::Internet) {
+                    warn!(
+                        group_id = %payload.group_id,
+                        user_id = %payload.user_id,
+                        sender = %sender,
+                        "SECURITY: dropping __GROUP_MEMBER_ADDED__ not delivered over the Internet relay path (mesh forgery)"
+                    );
+                    return;
+                }
                 info!(group_id = %payload.group_id, user_id = %payload.user_id, "Group member added");
                 // Reconcile local member cache if we have MLS state for this group
                 if let Some(members) = self.group_mesh.members.get_mut(&payload.group_id) {

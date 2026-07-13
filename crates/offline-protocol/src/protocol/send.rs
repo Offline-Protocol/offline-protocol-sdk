@@ -4,7 +4,7 @@ use super::{
     internal_prefixes, lock_shared_state, ConnectionAcceptedPayload, ConnectionRequestPayload,
     KeyPackagePayload, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
     OutboxEntry, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
-    TypingIndicatorPayload, WelcomeDeliveryState, MAX_READ_RECEIPT_IDS,
+    TypingIndicatorPayload, WelcomeDeliveryState, MAX_KEY_PACKAGE_SENT_TO, MAX_READ_RECEIPT_IDS,
     SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
 };
 use crate::constants::{
@@ -2417,6 +2417,16 @@ impl OfflineProtocol {
 
         match self.transport_manager.send(&message) {
             Ok(()) => {
+                // SECURITY (resource exhaustion): `key_package_sent_to` is keyed
+                // by the wire-claimed peer id, so a forged-sender key-package
+                // flood (each reply routes through here) would grow it without
+                // bound. Reset at capacity like `plaintext_receive_warned` — the
+                // only cost of forgetting a peer is one idempotent re-send.
+                if !self.key_package_sent_to.contains(peer_id)
+                    && self.key_package_sent_to.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.key_package_sent_to.clear();
+                }
                 self.key_package_sent_to.insert(peer_id.to_string());
                 debug!(peer_id = %peer_id, message_id = %message.id, "Sent key package");
                 Ok(())
