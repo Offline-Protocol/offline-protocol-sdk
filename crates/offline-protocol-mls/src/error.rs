@@ -133,4 +133,20 @@ pub enum MlsError {
         /// The identity authenticated by the MLS credential.
         authenticated: String,
     },
+
+    /// A Welcome's `group_id` — the session storage slot it would install
+    /// into — does not match the slot for the (local user, authenticated
+    /// inviter) pair. Rejecting this prevents an authenticated peer from
+    /// installing or overwriting a *third* party's 1:1 session slot, which
+    /// would hijack the victim's session so their outbound messages encrypt
+    /// to the attacker's group.
+    #[error(
+        "Welcome session-slot mismatch: inviter maps to slot '{expected}', Welcome claims '{found}'"
+    )]
+    WelcomeIdentityMismatch {
+        /// The only session slot the authenticated inviter may write.
+        expected: String,
+        /// The slot the Welcome's `group_id` actually named.
+        found: String,
+    },
 }
