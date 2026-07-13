@@ -7707,6 +7707,84 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
 }
 
 #[test]
+fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
+    // Regression (H2): `pending_key_packages` is keyed by the wire-claimed
+    // `sender`, and every insert also writes a durable Keychain/Keystore entry,
+    // so an unpinned peer flooding distinct forged `__MLS_KEY_PKG__` senders
+    // (accepted under the default config) would grow both memory and durable
+    // storage without bound and re-inflate on every reboot. The map must be
+    // capped like `known_peers`: at capacity a new peer evicts the
+    // soonest-to-expire entry (and its persisted copy) rather than growing past
+    // the cap.
+    let mut config = create_test_config();
+    // Keep the flooded entry resident: with auto-exchange off the handler just
+    // inserts it, instead of auto-establishing and consuming it.
+    config.encryption.auto_key_exchange = false;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    // Fill the map to capacity. One entry ("victim") is the unambiguous
+    // soonest-to-expire; the rest expire far in the future.
+    protocol.pending_key_packages.insert(
+        "victim".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: vec![0],
+            local_expires_at_ms: 1, // smallest expiry -> the eviction target
+        },
+    );
+    for i in 0..(MAX_PENDING_KEY_PACKAGES - 1) {
+        protocol.pending_key_packages.insert(
+            format!("filler_{i}"),
+            ReceivedKeyPackage {
+                key_package_data: vec![0],
+                local_expires_at_ms: 1_000_000_000_000 + i as u64,
+            },
+        );
+    }
+    assert_eq!(
+        protocol.pending_key_packages.len(),
+        MAX_PENDING_KEY_PACKAGES
+    );
+
+    // A new forged sender arrives — this must evict, not grow past the cap.
+    let key_pkg_payload = KeyPackagePayload {
+        user_id: "attacker".to_string(),
+        // Invalid bytes are fine: the insert precedes any MLS use of the data.
+        key_package_data: vec![1, 2, 3],
+        remaining_lifetime_ms: 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: false,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&key_pkg_payload).unwrap()
+    );
+    let message = Message::new(
+        UserId::new("attacker").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+    let _ = protocol.process_internal_message(&message);
+
+    assert_eq!(
+        protocol.pending_key_packages.len(),
+        MAX_PENDING_KEY_PACKAGES,
+        "map must stay bounded at the cap, not grow past it"
+    );
+    assert!(
+        protocol.pending_key_packages.contains_key("attacker"),
+        "the new key package should be inserted"
+    );
+    assert!(
+        !protocol.pending_key_packages.contains_key("victim"),
+        "the soonest-to-expire entry should have been evicted"
+    );
+}
+
+#[test]
 fn test_establishment_state_returns_correct_states() {
     let storage = Arc::new(InMemoryStorage::new());
     let bob_storage = Arc::new(InMemoryStorage::new());
