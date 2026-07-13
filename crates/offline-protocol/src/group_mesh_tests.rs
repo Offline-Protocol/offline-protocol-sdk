@@ -91,6 +91,68 @@ fn make_message(sender: &str, recipient: &str, content: &str) -> offline_protoco
 }
 
 #[test]
+fn test_group_welcome_cannot_squat_session_slot() {
+    // SEC-M6 (group-Welcome side): the identity binding on `join_session`
+    // guards the session-Welcome (`__MLS_WELCOME__`) path, but a group Welcome
+    // (`__GRP_MLS_WELCOME__`) carries an attacker-controllable `group_id` with
+    // no (self, inviter) binding and installs into the SAME storage/OpenMLS
+    // keyspace. Without a namespace guard, an authenticated peer could ship a
+    // group Welcome whose `group_id` squats a third party's 1:1 session slot
+    // (`session:alice:bob`), seeding/overwriting the victim's session so their
+    // outbound 1:1 messages to that party encrypt to the attacker's group —
+    // the identical hijack SEC-M6 blocks on the session path, reached via the
+    // group path. Regression against `main`: before the `join_group`
+    // reserved-namespace guard, this installed a group at the squatted slot.
+    let storage_m = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut mallory = OfflineProtocol::new(create_test_config_for_user("mallory")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    mallory.initialize_mls(storage_m).unwrap();
+    bob.initialize_mls(storage_b).unwrap();
+    mallory.start().unwrap();
+    bob.start().unwrap();
+
+    // Mallory builds a REAL group Welcome that legitimately adds bob (she holds
+    // bob's key package, as any contact would).
+    let group_info = mallory.create_group("mallory-group").unwrap();
+    let gid = offline_protocol_mls::GroupId::new(group_info.group_id.as_str()).unwrap();
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    let (welcome, _commit) = {
+        let mallory_mls = mallory.mls_manager_for_testing().read().unwrap();
+        mallory_mls
+            .add_group_member(&gid, &bob_kp.key_package_data)
+            .unwrap()
+    };
+
+    // Ship that valid Welcome but relabel its `group_id` to squat the alice+bob
+    // 1:1 session slot.
+    let squat = GroupMlsWelcomePayload {
+        group_id: "session:alice:bob".to_string(),
+        group_name: None,
+        welcome_data: base64_encode(&welcome.welcome_data),
+        member_list: vec!["mallory".to_string(), "bob".to_string()],
+        member_roles: HashMap::new(),
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_WELCOME,
+        serde_json::to_string(&squat).unwrap()
+    );
+    bob.process_internal_message(&make_message("mallory", "bob", &content));
+
+    // The squat was dropped: bob has no 1:1 session at the alice+bob slot, so
+    // his `encrypt_for_user("alice")` can never encrypt to mallory's group.
+    let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+    assert!(
+        !bob_mls.has_session("alice").unwrap(),
+        "a group Welcome must not install into the reserved `session:` slot"
+    );
+}
+
+#[test]
 fn test_group_mls_create_mesh_group_requires_mls() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     // Without MLS initialization, create_mesh_group should fail

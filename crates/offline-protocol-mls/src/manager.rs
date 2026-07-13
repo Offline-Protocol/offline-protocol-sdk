@@ -390,6 +390,12 @@ impl MlsManager {
         offline_protocol_core::validate_id_chars(other_user_id, "User ID")
             .map_err(|e| MlsError::InvalidUserId(e.to_string()))?;
 
+        // SEC-M6: reject a mismatched session slot BEFORE the best-effort
+        // deletes below, so a forged Welcome that squats a third party's slot
+        // performs no mutation. `join_session` re-checks this as its own
+        // boundary; hoisting it here keeps the reject side effect-free.
+        self.session_manager.verify_welcome_slot(welcome)?;
+
         // Clear any pending welcome we were about to send
         let _ = self.clear_pending_welcome(other_user_id);
 
@@ -689,6 +695,23 @@ impl MlsManager {
 
     /// Joins a group using a Welcome message.
     pub fn join_group(&self, welcome: &WelcomeMessage) -> Result<GroupInfo> {
+        // SEC-M6 (group-Welcome side): the `session:` namespace is owned
+        // exclusively by identity-bound 1:1 sessions installed via
+        // `join_session`. A group Welcome carries an attacker-controllable
+        // `group_id` with no (self, inviter) binding and writes the same
+        // storage/OpenMLS keyspace, so one naming a `session:*` slot would seed
+        // or overwrite a third party's 1:1 session and hijack the victim's
+        // outbound encryption — the exact hijack SEC-M6 blocks on the
+        // session-Welcome path. Reject before staging. Enforced here (rather
+        // than only in the mesh handler) so *every* caller of `join_group` is
+        // covered. Legitimate mesh groups are always `group:<uuid>`
+        // (see `create_group`), so this rejects only forged Welcomes.
+        if welcome.group_id.as_str().starts_with("session:") {
+            return Err(MlsError::ReservedSessionNamespace {
+                group_id: welcome.group_id.to_string(),
+            });
+        }
+
         let mls_msg = MlsMessageIn::tls_deserialize_exact(&welcome.welcome_data)
             .map_err(|e| MlsError::Deserialization(e.to_string()))?;
 
@@ -1358,6 +1381,53 @@ mod tests {
         let legit = mallory.create_session("bob").unwrap();
         bob.join_session(&legit).unwrap();
         assert!(bob.has_session("mallory").unwrap());
+    }
+
+    #[test]
+    fn test_join_group_rejects_session_namespace() {
+        // Regression (session-hijack via the group-Welcome path): the identity
+        // binding on `join_session` only guards the session-Welcome path. A
+        // group Welcome carries an attacker-controllable `group_id` and writes
+        // the SAME storage/OpenMLS keyspace, so `join_group` must refuse the
+        // reserved `session:` namespace outright — otherwise an authenticated
+        // peer could seed/overwrite a third party's 1:1 session slot and
+        // hijack the victim's outbound encryption.
+        let bob = create_test_manager("bob");
+
+        let squat = WelcomeMessage {
+            group_id: GroupId::new("session:alice:bob").unwrap(),
+            welcome_data: vec![], // rejected before deserialization
+            inviter_id: "mallory".to_string(),
+            group_name: None,
+            timestamp_ms: 0,
+        };
+
+        let err = bob.join_group(&squat).unwrap_err();
+        assert!(
+            matches!(err, MlsError::ReservedSessionNamespace { .. }),
+            "join_group: expected ReservedSessionNamespace, got {:?}",
+            err
+        );
+
+        // The squatted 1:1 slot was never installed.
+        assert!(!bob.has_session("alice").unwrap());
+
+        // Precision: a legitimately-namespaced group Welcome is not caught by
+        // this guard (it fails later at deserialization of the empty blob, not
+        // with ReservedSessionNamespace).
+        let legit_ns = WelcomeMessage {
+            group_id: GroupId::new("group:0bd6e5f2-3a70-4a4e-9c3f-1c1f2a3b4c5d").unwrap(),
+            welcome_data: vec![],
+            inviter_id: "mallory".to_string(),
+            group_name: None,
+            timestamp_ms: 0,
+        };
+        let err = bob.join_group(&legit_ns).unwrap_err();
+        assert!(
+            !matches!(err, MlsError::ReservedSessionNamespace { .. }),
+            "a group:-namespaced Welcome must not trip the session-namespace guard, got {:?}",
+            err
+        );
     }
 
     /// Builds a two-member group (alice admin, bob member) for group
