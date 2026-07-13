@@ -111,6 +111,31 @@ impl SessionManager {
     /// stage and leaves the existing converged group intact — so adoption is
     /// idempotent and never bricks a working session.
     pub fn join_session(&self, welcome_msg: &WelcomeMessage) -> Result<GroupInfo> {
+        // SEC-M6: bind the Welcome's session slot to the (self, inviter) pair
+        // before touching any group state.
+        //
+        // `welcome_msg.group_id` is an attacker-controllable wire field that
+        // becomes the raw storage key for the adopted group, and the inviter is
+        // authenticated one layer up (`handle_welcome_message` drops any Welcome
+        // whose `inviter_id` != the transport-authenticated sender). The only
+        // 1:1 slot this Welcome may legitimately install is therefore
+        // `session:<self>:<inviter>`. Without this check an authenticated peer
+        // could name a *third* party's slot (e.g. "session:alice:bob") and, via
+        // the stage-then-replace adopt in `join_group_replacing`, overwrite or
+        // seed the victim's session with that party — hijacking it so the
+        // victim's `encrypt_for_user` output goes to the attacker's group. This
+        // mirrors the invite-side (SEC-M5) and decrypt-side (SEC-M1) identity
+        // bindings on the previously-unguarded join side. Checked before
+        // deserialization so a tampered slot is rejected regardless of the
+        // Welcome blob.
+        let expected_id = GroupId::for_session(&self.user_id, &welcome_msg.inviter_id)?;
+        if welcome_msg.group_id != expected_id {
+            return Err(MlsError::WelcomeIdentityMismatch {
+                expected: expected_id.to_string(),
+                found: welcome_msg.group_id.to_string(),
+            });
+        }
+
         // Deserialize the Welcome from the MlsMessageOut bytes
         let mls_msg = MlsMessageIn::tls_deserialize_exact(&welcome_msg.welcome_data)
             .map_err(|e| MlsError::Deserialization(e.to_string()))?;

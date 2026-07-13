@@ -1309,6 +1309,57 @@ mod tests {
         assert_eq!(pt.as_deref(), Some(&b"hello again"[..]));
     }
 
+    #[test]
+    fn test_join_session_binds_slot_to_inviter() {
+        // Regression (session-hijack): a Welcome from an authenticated inviter
+        // may only install the 1:1 session slot for (self, inviter). An inviter
+        // that names a *third* party's slot must be rejected before any group
+        // state is touched — otherwise the inviter overwrites/seeds the
+        // victim's session with that third party, so the victim's outbound
+        // messages to that party encrypt to the attacker's group.
+        let bob = create_test_manager("bob");
+
+        // mallory, authenticating honestly as herself, sends bob a Welcome whose
+        // group_id squats alice+bob's session slot.
+        let hijack = WelcomeMessage {
+            group_id: GroupId::new("session:alice:bob").unwrap(),
+            welcome_data: vec![], // rejected before deserialization
+            inviter_id: "mallory".to_string(),
+            group_name: None,
+            timestamp_ms: 0,
+        };
+
+        // Both join entry points must reject the mismatched slot.
+        let err = bob.join_session(&hijack).unwrap_err();
+        assert!(
+            matches!(err, MlsError::WelcomeIdentityMismatch { .. }),
+            "join_session: expected WelcomeIdentityMismatch, got {:?}",
+            err
+        );
+        let err = bob.replace_session_with_welcome(&hijack).unwrap_err();
+        assert!(
+            matches!(err, MlsError::WelcomeIdentityMismatch { .. }),
+            "replace_session_with_welcome: expected WelcomeIdentityMismatch, got {:?}",
+            err
+        );
+
+        // Nothing was installed: bob has no session with either identity.
+        assert!(!bob.has_session("alice").unwrap());
+        assert!(!bob.has_session("mallory").unwrap());
+
+        // The check is precise, not over-broad: a correctly-slotted Welcome from
+        // mallory (group_id == session:bob:mallory, inviter_id == mallory) still
+        // joins normally.
+        let bob_kp = bob.generate_key_package().unwrap();
+        let mallory = create_test_manager("mallory");
+        mallory
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        let legit = mallory.create_session("bob").unwrap();
+        bob.join_session(&legit).unwrap();
+        assert!(bob.has_session("mallory").unwrap());
+    }
+
     /// Builds a two-member group (alice admin, bob member) for group
     /// sender-binding tests. Returns (alice, bob, group_id).
     fn create_test_group_with_bob() -> (MlsManager, MlsManager, GroupId) {
