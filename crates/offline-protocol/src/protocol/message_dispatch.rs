@@ -1059,9 +1059,46 @@ impl OfflineProtocol {
                         .relay_register_pending
                         .remove(&payload.group_id);
                 } else {
-                    // Another member was removed — just update the cache
-                    if let Some(members) = self.group_mesh.members.get_mut(&payload.group_id) {
-                        members.retain(|m| m != &payload.user_id);
+                    // Another member was removed. This mutates the group
+                    // fan-out send cache (`group_mesh.members`), which
+                    // `send_group_message_inner` reads verbatim — dropping a
+                    // real member here silently denies them our group messages
+                    // until the next commit's `refresh_group_members`. So
+                    // authorize it off the authenticated wire `sender`, never
+                    // the payload-named `removed_by`, exactly like the
+                    // self-removal branch above and every sibling membership
+                    // handler. `removed_by` is unauthenticated payload content;
+                    // naming a real admin in it is free. The SDK only sends
+                    // `__GROUP_MEMBER_REMOVED__` directly to the removed member
+                    // (see `remove_from_group`), so a frame naming a third
+                    // party is an admin's relay reconciliation or a forgery —
+                    // requiring the sender to be an admin drops the forgeries.
+                    match self.check_is_admin(&payload.group_id, sender) {
+                        Ok(true) => {
+                            if let Some(members) =
+                                self.group_mesh.members.get_mut(&payload.group_id)
+                            {
+                                members.retain(|m| m != &payload.user_id);
+                            }
+                        }
+                        Ok(false) => {
+                            error!(
+                                sender = %sender,
+                                group_id = %payload.group_id,
+                                removed = %payload.user_id,
+                                "SECURITY: Group member-removal from non-admin sender, ignoring"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            warn!(
+                                sender = %sender,
+                                group_id = %payload.group_id,
+                                error = %e,
+                                "Failed to verify admin status for member-removal notification"
+                            );
+                            return;
+                        }
                     }
                 }
 

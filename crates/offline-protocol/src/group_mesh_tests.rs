@@ -2960,6 +2960,55 @@ fn test_handle_relay_group_message_mls_decrypt() {
 }
 
 #[test]
+fn test_relay_group_plaintext_naming_mls_group_is_dropped_not_spoofed() {
+    // Regression (group-message spoofing): the base64-undecodable raw-emit
+    // fallback attributes attacker-chosen content to the unauthenticated inner
+    // `sender`. For a group we secure with MLS, a real member always sends MLS
+    // ciphertext, so plaintext naming that group is a forgery and must be
+    // dropped rather than surfaced as a message from a trusted member. Only a
+    // genuine legacy relay-only group (no local MLS state) may emit plaintext
+    // (covered by `test_handle_relay_group_message_plaintext_passthrough`).
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Spoof Test");
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Non-base64 plaintext naming Bob's real MLS group, forged as "alice".
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        "Spoofed message! definitely not base64",
+        "2026-03-13T00:00:00Z",
+        "msg-spoof-001",
+        None,
+        None,
+    );
+
+    let events = bob_events.lock().unwrap();
+    // The spoofed content must NOT be surfaced.
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            Event::GroupMessageReceived { content, .. }
+                if content == "Spoofed message! definitely not base64"
+        )),
+        "Plaintext naming an MLS-secured group must not be emitted as a group message"
+    );
+    // And the rejection must be observable as a security warning.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::SecurityWarning { reason_code, .. }
+                if *reason_code == crate::events::SecurityWarningCode::PlaintextReceiveRejected
+        )),
+        "Dropping a spoofed plaintext group message should emit a PlaintextReceiveRejected warning"
+    );
+}
+
+#[test]
 fn test_handle_relay_group_message_mls_unavailable_drops_message() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     // Deliberately NOT initializing MLS
@@ -6594,6 +6643,79 @@ fn test_plaintext_removal_notification_from_relay_unverifiable_rejected() {
     assert!(
         removal.is_none(),
         "Should NOT process removal from non-member sender with unverifiable removed_by"
+    );
+}
+
+#[test]
+fn test_other_member_removal_from_non_admin_does_not_poison_send_cache() {
+    // Regression (fan-out cache poisoning): the "another member was removed"
+    // branch mutates `group_mesh.members`, the authority for group message
+    // fan-out. It must authorize off the authenticated wire `sender` (an
+    // admin), never the payload-named `removed_by` — otherwise any non-member
+    // could drop a real member from our send cache and silently deny them our
+    // group messages.
+    let (mut protocol, events) = setup_started_with_events();
+
+    let info = protocol.create_group("Cache Poison Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Promote "admin_alice" to admin and seed the send cache with a real
+    // member "bob" whom the attacker will try to drop.
+    {
+        let mls = protocol.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        mls.set_member_role(&gid, "admin_alice", GroupRole::Admin)
+            .unwrap();
+    }
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![
+            "user123".to_string(),
+            "admin_alice".to_string(),
+            "bob".to_string(),
+        ],
+    );
+
+    // Non-admin "eve" forges a removal of "bob", naming the real admin in
+    // `removed_by`. Authorization is off `sender` (eve), not `removed_by`.
+    let payload = crate::protocol::GroupMemberRemovedPayload {
+        group_id: group_id.clone(),
+        user_id: "bob".to_string(),
+        removed_by: "admin_alice".to_string(),
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MEMBER_REMOVED,
+        serde_json::to_string(&payload).unwrap()
+    );
+    let message = make_message("eve", "user123", &content);
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+    // bob must remain in the send cache, and no forged roster event fires.
+    {
+        let events = events.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::GroupMemberRemoved { .. })),
+            "Forged other-member removal from a non-admin must not emit an event"
+        );
+        let members = protocol.group_mesh.members.get(&group_id).unwrap();
+        assert!(
+            members.contains(&"bob".to_string()),
+            "Non-admin removal must not drop a real member from the fan-out cache"
+        );
+    }
+
+    // The same removal from the authenticated admin IS honored.
+    let message = make_message("admin_alice", "user123", &content);
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    let members = protocol.group_mesh.members.get(&group_id).unwrap();
+    assert!(
+        !members.contains(&"bob".to_string()),
+        "An admin-authorized removal should drop the member from the cache"
     );
 }
 
