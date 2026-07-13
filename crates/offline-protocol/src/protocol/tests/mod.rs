@@ -14390,12 +14390,110 @@ fn test_pending_queue_byte_accounting_across_drain() {
     let m2 = pending_test_message_with_bytes("peer", 200);
     protocol.pending_queue.enqueue(&queue_config, "peer", &m1);
     protocol.pending_queue.enqueue(&queue_config, "peer", &m2);
-    assert_eq!(protocol.pending_queue.total_bytes(), 500);
-    assert_eq!(protocol.pending_queue.metrics().pending_bytes_current, 500);
+    // Footprint is the full retained size (payload + sender/recipient/app_id +
+    // metadata), not payload-only, so compute the expectation from the same
+    // accounting the queue uses rather than hardcoding the 300+200 payloads.
+    let expected = PendingDecryptionQueue::message_footprint(&m1)
+        + PendingDecryptionQueue::message_footprint(&m2);
+    assert_eq!(protocol.pending_queue.total_bytes(), expected);
+    assert_eq!(
+        protocol.pending_queue.metrics().pending_bytes_current,
+        expected
+    );
 
     let drained = protocol.pending_queue.drain_for_peer(&queue_config, "peer");
     assert_eq!(drained.len(), 2);
     assert_eq!(protocol.pending_queue.total_bytes(), 0);
+}
+
+#[test]
+fn test_pending_queue_byte_budget_counts_metadata_not_just_payload() {
+    // Regression (remote unauth OOM): a crafted encrypted message with a tiny
+    // payload but a large `metadata` map must be charged against the byte
+    // budget. Before the fix `message_bytes` counted only content+binary, so
+    // such a message slipped past the per-peer/global byte budgets and could
+    // drive the queue to multi-GB retention while the accounting reported
+    // near-zero. Reachable unauth via the `__MLS_ENC__` (GroupNotFound) path.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_bytes_per_peer = 4096;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let queue_config = protocol.config.encryption.pending_queue.clone();
+
+    // ~3 KB of metadata behind a 2-byte payload.
+    let mut m1 = pending_test_message("peer", "hi");
+    m1.metadata.insert("blob".to_string(), "x".repeat(3000));
+    assert!(protocol
+        .pending_queue
+        .enqueue(&queue_config, "peer", &m1)
+        .is_empty());
+    assert!(
+        protocol.pending_queue.total_bytes() >= 3000,
+        "metadata bytes must be charged to the byte budget, got {}",
+        protocol.pending_queue.total_bytes()
+    );
+
+    // A second such message exceeds the 4096 budget, so the oldest is evicted
+    // (DropOldest default): memory stays bounded instead of growing per message.
+    let mut m2 = pending_test_message("peer", "hi");
+    m2.metadata.insert("blob".to_string(), "y".repeat(3000));
+    protocol.pending_queue.enqueue(&queue_config, "peer", &m2);
+    assert!(protocol.pending_queue.total_bytes() <= 4096);
+    assert_eq!(protocol.pending_queue.peer_queue_len("peer"), 1);
+}
+
+#[test]
+fn test_peer_overflow_hits_pruned_on_drain() {
+    // Regression (unbounded leak): `peer_overflow_hits` is keyed by the
+    // attacker-controllable wire sender and was never pruned. Draining a peer
+    // must drop its overflow-pressure counter so it cannot leak per-sender.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_per_peer = 1;
+    config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let queue_config = protocol.config.encryption.pending_queue.clone();
+
+    let m1 = pending_test_message("peer", "a");
+    let m2 = pending_test_message("peer", "b");
+    protocol.pending_queue.enqueue(&queue_config, "peer", &m1);
+    // Second message trips the per-peer limit → records an overflow hit; with
+    // DropNewest the queue keeps m1 (non-empty), so the counter is retained.
+    protocol.pending_queue.enqueue(&queue_config, "peer", &m2);
+    assert!(protocol.pending_queue.has_overflow_hits("peer"));
+
+    protocol.pending_queue.drain_for_peer(&queue_config, "peer");
+    assert!(!protocol.pending_queue.has_overflow_hits("peer"));
+    assert_eq!(protocol.pending_queue.overflow_hits_tracked(), 0);
+}
+
+#[test]
+fn test_peer_overflow_hits_pruned_when_last_entry_evicted() {
+    // Same leak, via the other cleanup path: when the peer's last queued entry
+    // is removed (here by TTL expiry through `remove_entry_by_sequence`), its
+    // overflow-pressure counter must be pruned with the queue.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.max_pending_per_peer = 1;
+    config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
+    config.encryption.pending_queue.pending_ttl_ms = 1000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let queue_config = protocol.config.encryption.pending_queue.clone();
+
+    let m1 = pending_test_message("peer", "a");
+    let m2 = pending_test_message("peer", "b");
+    protocol.pending_queue.enqueue(&queue_config, "peer", &m1);
+    protocol.pending_queue.enqueue(&queue_config, "peer", &m2);
+    assert!(protocol.pending_queue.has_overflow_hits("peer"));
+
+    // Age the sole remaining entry past its TTL and prune it.
+    let past = std::time::Instant::now() - std::time::Duration::from_millis(10_000);
+    protocol.pending_queue.set_front_received_at("peer", past);
+    protocol
+        .pending_queue
+        .prune_expired_for_peer(&queue_config, "peer", std::time::Instant::now());
+    assert!(!protocol.pending_queue.contains_peer("peer"));
+    assert!(!protocol.pending_queue.has_overflow_hits("peer"));
 }
 
 #[test]

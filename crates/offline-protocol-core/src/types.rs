@@ -33,6 +33,45 @@ pub enum IdValidationError {
         /// Label for the identifier kind being validated.
         type_name: String,
     },
+    /// The identifier exceeds [`MAX_ID_LEN`].
+    #[error("{type_name} exceeds the maximum length of {max} bytes ({len} bytes)")]
+    TooLong {
+        /// Label for the identifier kind being validated.
+        type_name: String,
+        /// Actual byte length that was rejected.
+        len: usize,
+        /// Maximum permitted byte length.
+        max: usize,
+    },
+}
+
+/// Maximum length, in bytes, of a [`UserId`] or [`AppId`].
+///
+/// Wire-supplied identifiers become map keys and are cloned into in-memory
+/// buffers (the pending-decryption queue, for one, retains a full `Message`
+/// clone), so an unbounded id is a resource-exhaustion vector: a peer could
+/// inflate `sender` to megabytes to evade the queue byte budgets or leak a
+/// per-id map entry. 256 bytes is far larger than any real identifier. MLS
+/// group ids keep their own, larger cap because they compose several ids
+/// behind a `:` namespace separator.
+pub const MAX_ID_LEN: usize = 256;
+
+/// Validates an identifier's length and character set. Shared by [`UserId`]
+/// and [`AppId`]. The length check runs first so a hostile megabyte-scale id
+/// is rejected before the O(n) character scan.
+///
+/// Not applied to MLS group ids, which validate per colon-separated segment
+/// via [`validate_id_chars`] directly and enforce their own larger total-length
+/// cap.
+fn validate_id(id: &str, type_name: &str) -> Result<(), IdValidationError> {
+    if id.len() > MAX_ID_LEN {
+        return Err(IdValidationError::TooLong {
+            type_name: type_name.to_string(),
+            len: id.len(),
+            max: MAX_ID_LEN,
+        });
+    }
+    validate_id_chars(id, type_name)
 }
 
 /// Validates that an identifier string is safe for use as a storage key.
@@ -91,8 +130,7 @@ impl UserId {
     /// Returns `Ok(UserId)` if valid, `Err` if the ID is empty.
     pub fn new(id: impl Into<String>) -> crate::Result<Self> {
         let id_str = id.into();
-        validate_id_chars(&id_str, "User ID")
-            .map_err(|e| crate::Error::InvalidUserId(e.to_string()))?;
+        validate_id(&id_str, "User ID").map_err(|e| crate::Error::InvalidUserId(e.to_string()))?;
         Ok(Self(id_str))
     }
 
@@ -131,8 +169,7 @@ impl AppId {
     /// Returns `Ok(AppId)` if valid, `Err` if the ID is empty.
     pub fn new(id: impl Into<String>) -> crate::Result<Self> {
         let id_str = id.into();
-        validate_id_chars(&id_str, "App ID")
-            .map_err(|e| crate::Error::InvalidAppId(e.to_string()))?;
+        validate_id(&id_str, "App ID").map_err(|e| crate::Error::InvalidAppId(e.to_string()))?;
         Ok(Self(id_str))
     }
 
@@ -453,6 +490,31 @@ mod tests {
     fn test_id_validation_error_display_includes_type_name() {
         let err = validate_id_chars("", "App ID").unwrap_err();
         assert_eq!(err.to_string(), "App ID cannot be empty");
+    }
+
+    #[test]
+    fn test_user_and_app_id_reject_oversized() {
+        // Boundary: exactly MAX_ID_LEN is accepted, one over is rejected.
+        assert!(UserId::new("a".repeat(MAX_ID_LEN)).is_ok());
+        assert!(AppId::new("a".repeat(MAX_ID_LEN)).is_ok());
+        assert!(matches!(
+            UserId::new("a".repeat(MAX_ID_LEN + 1)),
+            Err(crate::Error::InvalidUserId(_))
+        ));
+        assert!(matches!(
+            AppId::new("a".repeat(MAX_ID_LEN + 1)),
+            Err(crate::Error::InvalidAppId(_))
+        ));
+    }
+
+    #[test]
+    fn test_user_id_deserialize_rejects_oversized() {
+        // The wire path (custom Deserialize) is capped too, so a hostile
+        // megabyte-scale `sender` cannot be decoded into a UserId at all.
+        let oversized = format!("\"{}\"", "a".repeat(MAX_ID_LEN + 1));
+        assert!(serde_json::from_str::<UserId>(&oversized).is_err());
+        let ok = format!("\"{}\"", "a".repeat(MAX_ID_LEN));
+        assert!(serde_json::from_str::<UserId>(&ok).is_ok());
     }
 
     #[test]

@@ -22,5 +22,5 @@ pub use service::{ServiceDescriptor, ServiceId};
 pub use sync::{MutexExt, RwLockExt};
 pub use types::{
     validate_id_chars, AppId, HopCount, IdValidationError, LamportClock, LocalInstant, Timestamp,
-    UserId, WallClockTimestamp, TTL,
+    UserId, WallClockTimestamp, MAX_ID_LEN, TTL,
 };
