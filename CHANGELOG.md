@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Persistent store-and-forward outbox — undelivered messages survive app restarts.**
+  The outbox that holds messages awaiting delivery/ACK was purely in-memory, so a message queued while offline was lost if the app was killed before a carrier appeared. When message persistence is enabled (automatically via `initialize_mls`, or explicitly via `enable_message_persistence`), each main-outbox entry is now persisted through the existing `MlsStorage` key-value interface under a new `"outbox"` key type and restored on startup. Restored entries re-drive delivery on `start()` via the existing outbox-flush path.
+  - *Carrier-relative TTL*: the outbox lifetime clock is not wall-clock. An entry whose lifetime lapsed while the app was closed is refreshed on restore rather than immediately reaped, so a message that never had a delivery opportunity gets a fresh window once a carrier (or the peer) reappears — mirroring the Welcome-lifecycle restart behavior.
+  - *Bounded and self-healing*: the restored set is pruned to the in-memory capacity (newest kept), corrupted records are dropped from storage and skipped, and an entry delivered-then-crashed before its delete is resent and de-duplicated by the receiver's re-ACK path (at-least-once, matching the existing contract).
+  - *Media excluded by design*: the file-chunk (media) outbox is intentionally **not** persisted. File transfers are not durable, so a resurrected chunk could never complete its transfer — media transfers must be re-initiated by the app after a restart.
+  - No FFI, UDL, binding, or event changes; the storage contract is additive (older SDKs ignore the unknown `"outbox"` key type).
+
 ## [0.12.0] — 2026-07-13
 
 First npm release since **v0.11.0** (0.11.0 is the latest published version). This

@@ -499,6 +499,12 @@ pub(crate) mod storage_keys {
     pub const PEER_KEY_PACKAGES: &str = "peer_key_packages";
     /// Key type for persisted per-peer outbound welcome lifecycle state.
     pub const WELCOME_LIFECYCLES: &str = "welcome_lifecycles";
+    /// Key type for persisted store-and-forward outbox entries, keyed by
+    /// message id. Holds only main-outbox (non-media) entries so undelivered
+    /// messages survive app restarts; the media (file-chunk) outbox is
+    /// intentionally excluded because file transfers are not persisted and
+    /// must be re-initiated by the app after a restart.
+    pub const OUTBOX: &str = "outbox";
     /// Key type for the Lamport clock value.
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
@@ -610,7 +616,7 @@ pub(crate) fn lock_shared_state(
         .map_err(|_| Error::Other("Shared state mutex poisoned".to_string()))
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct OutboxEntry {
     pub(crate) message: Message,
     pub(crate) attempt_count: u32,

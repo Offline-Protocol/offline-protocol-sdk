@@ -3004,6 +3004,71 @@ fn test_initialize_mls_restore_failure_does_not_publish_partial_state() {
 }
 
 #[test]
+fn test_initialize_mls_restore_failure_rolls_back_outbox() {
+    // Storage that fails specifically on the outbox restore step, which runs
+    // after restore_outbox has already cleared the in-memory map — the exact
+    // window the rollback snapshot must cover.
+    #[derive(Default)]
+    struct FailingOutboxListStorage {
+        inner: crate::mls::InMemoryStorage,
+    }
+    impl MlsStorage for FailingOutboxListStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            self.inner.load(key_type, key_id)
+        }
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            if key_type == storage_keys::OUTBOX {
+                return Err(offline_protocol_mls::StorageError::LoadFailed(
+                    "forced outbox restore failure".to_string(),
+                ));
+            }
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Seed an in-memory outbox entry before persistence is wired up.
+    protocol.ensure_outbox_entry(&test_message("bob", "pre-existing"));
+    assert_eq!(protocol.outbox_entry_count(), 1);
+
+    let result = protocol.initialize_mls(Arc::new(FailingOutboxListStorage::default()));
+    assert!(result.is_err());
+    assert!(protocol.mls_manager.is_none());
+    assert!(protocol.message_storage.is_none());
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        1,
+        "Outbox should be rolled back to its pre-initialize state on restore failure"
+    );
+}
+
+#[test]
 fn test_auto_send_and_manual_mls_share_single_state_under_concurrency() {
     let mut config = create_test_config_for_user("alice");
     config.encryption.enabled = true;
@@ -11282,6 +11347,342 @@ fn test_flush_outbox_all_collects_stranded_outbox_entries() {
     assert!(
         !sent.is_empty(),
         "Expected stranded outbox message to be sent"
+    );
+}
+
+// ============================================================================
+// OUTBOX PERSISTENCE
+// ============================================================================
+
+/// Builds a config with long retry delays so a failed send parks the message
+/// in the outbox instead of racing a backoff timer during the test.
+fn outbox_persistence_config() -> ProtocolConfig {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    config
+}
+
+fn test_message(recipient: &str, content: &str) -> Message {
+    Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new(recipient).unwrap(),
+        AppId::new("test-app").unwrap(),
+        content,
+    )
+}
+
+fn store_outbox_entry(storage: &InMemoryStorage, entry: &OutboxEntry) {
+    storage
+        .store(
+            storage_keys::OUTBOX,
+            &entry.message.id.as_str(),
+            &serde_json::to_vec(entry).unwrap(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn test_outbox_persisted_and_restored_after_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let msg_id;
+    {
+        let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+        protocol
+            .enable_message_persistence(storage.clone())
+            .unwrap();
+
+        // Failing transport so the send is deferred into the outbox.
+        let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+        protocol.start().unwrap();
+
+        msg_id = protocol
+            .send_message("bob", "durable", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert!(protocol.outbox_entry_count() > 0);
+        assert_eq!(
+            storage.list_keys(storage_keys::OUTBOX).unwrap().len(),
+            1,
+            "Deferred message should be persisted to the outbox"
+        );
+    }
+
+    // New protocol instance, same storage: the outbox should be restored.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        1,
+        "Outbox entry should be restored after restart"
+    );
+    let restored = protocol.outbox_messages().next().unwrap();
+    assert_eq!(restored.id, msg_id);
+    assert_eq!(restored.content, "durable");
+}
+
+#[test]
+fn test_remove_outbox_entry_clears_storage() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+    protocol.start().unwrap();
+
+    let msg_id = protocol
+        .send_message(
+            "bob",
+            "to-be-acked",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    assert_eq!(storage.list_keys(storage_keys::OUTBOX).unwrap().len(), 1);
+
+    // Both delivery-ACK and max-retries removal funnel through
+    // remove_outbox_entry, which must also delete the persisted copy.
+    let removed = protocol.remove_outbox_entry(&msg_id);
+    assert!(removed.is_some());
+    assert!(
+        storage.list_keys(storage_keys::OUTBOX).unwrap().is_empty(),
+        "Persisted outbox entry should be deleted on removal"
+    );
+}
+
+#[test]
+fn test_outbox_eviction_deletes_from_storage() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+    protocol.start().unwrap();
+
+    // One more than capacity: the oldest entry is evicted, and its persisted
+    // copy must be deleted so storage never exceeds the in-memory cap.
+    let total = crate::constants::MAX_OUTBOX_ENTRIES + 1;
+    for i in 0..total {
+        let _ = protocol.send_message(
+            "bob",
+            &format!("msg-{i}"),
+            None::<MessagePriority>,
+            None::<String>,
+        );
+    }
+
+    assert_eq!(
+        storage.list_keys(storage_keys::OUTBOX).unwrap().len(),
+        crate::constants::MAX_OUTBOX_ENTRIES,
+        "Persisted outbox must be pruned to capacity on eviction"
+    );
+}
+
+#[test]
+fn test_restore_outbox_skips_corrupted_entries() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let valid = test_message("bob", "valid");
+    let valid_id = valid.id.clone();
+    store_outbox_entry(
+        &storage,
+        &OutboxEntry {
+            message: valid,
+            attempt_count: 2,
+            first_sent_at: chrono::Utc::now(),
+            last_sent_at: chrono::Utc::now(),
+            last_transport: None,
+        },
+    );
+    storage
+        .store(storage_keys::OUTBOX, "corrupt-id", b"not json")
+        .unwrap();
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        1,
+        "Only the valid entry should be restored"
+    );
+    assert_eq!(
+        protocol.outbox_messages().next().unwrap().id,
+        valid_id,
+        "The restored entry should be the valid one"
+    );
+    let keys = storage.list_keys(storage_keys::OUTBOX).unwrap();
+    assert_eq!(
+        keys.len(),
+        1,
+        "Corrupted key should be deleted from storage"
+    );
+    assert!(!keys.iter().any(|k| k == "corrupt-id"));
+}
+
+#[test]
+fn test_restore_outbox_prunes_overflow() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let base = chrono::Utc::now();
+
+    // Persist more than capacity, each with a strictly increasing last_sent_at
+    // so "newest kept" is unambiguous.
+    let total = crate::constants::MAX_OUTBOX_ENTRIES + 10;
+    let mut oldest_id = None;
+    for i in 0..total {
+        let entry = OutboxEntry {
+            message: test_message("bob", &format!("m{i}")),
+            attempt_count: 0,
+            first_sent_at: base,
+            last_sent_at: base + ChronoDuration::seconds(i as i64),
+            last_transport: None,
+        };
+        if i == 0 {
+            oldest_id = Some(entry.message.id.as_str());
+        }
+        store_outbox_entry(&storage, &entry);
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        crate::constants::MAX_OUTBOX_ENTRIES,
+        "Restore should prune the in-memory outbox to capacity"
+    );
+    let keys = storage.list_keys(storage_keys::OUTBOX).unwrap();
+    assert_eq!(
+        keys.len(),
+        crate::constants::MAX_OUTBOX_ENTRIES,
+        "Pruned overflow should be deleted from storage, not left to re-restore"
+    );
+    // The oldest (smallest last_sent_at) is what gets dropped.
+    let oldest_id = oldest_id.unwrap();
+    assert!(!keys.iter().any(|k| *k == oldest_id));
+}
+
+#[test]
+fn test_restore_outbox_refreshes_expired_ttl_carrier_relative() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    // Persist an entry whose last_sent_at is older than the default 1h outbox
+    // lifetime — as if the app was killed and reopened hours later.
+    let old = chrono::Utc::now() - ChronoDuration::hours(2);
+    store_outbox_entry(
+        &storage,
+        &OutboxEntry {
+            message: test_message("bob", "aged"),
+            attempt_count: 1,
+            first_sent_at: old,
+            last_sent_at: old,
+            last_transport: None,
+        },
+    );
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        1,
+        "An entry past its wall-clock TTL must still be restored"
+    );
+
+    // A cleanup tick must NOT reap it: the TTL clock is carrier-relative and
+    // was refreshed on restore, so the message keeps its delivery window.
+    protocol.cleanup_outbox();
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        1,
+        "Refreshed entry should survive cleanup (carrier-relative TTL)"
+    );
+}
+
+#[test]
+fn test_media_outbox_entry_not_persisted() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    let mut msg = test_message("bob", "chunk");
+    msg.content_type = ContentType::FileChunk;
+    protocol.ensure_outbox_entry(&msg);
+
+    // The chunk lands in the in-memory media outbox...
+    assert!(protocol.outbox_entry_count() > 0);
+    // ...but is never persisted: file transfers are not durable, so a
+    // resurrected chunk could never complete its transfer.
+    assert!(
+        storage.list_keys(storage_keys::OUTBOX).unwrap().is_empty(),
+        "Media (file-chunk) entries must not be persisted"
+    );
+}
+
+#[test]
+fn test_restored_outbox_entry_flushed_on_start() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let msg_id;
+    {
+        let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+        protocol
+            .enable_message_persistence(storage.clone())
+            .unwrap();
+        let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+        protocol.start().unwrap();
+        msg_id = protocol
+            .send_message("bob", "resend-me", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert_eq!(storage.list_keys(storage_keys::OUTBOX).unwrap().len(), 1);
+    }
+
+    // Restart with a working transport; start() should flush the restored
+    // entry and actually deliver it.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+    assert_eq!(protocol.outbox_entry_count(), 1);
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let mock_clone = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    protocol.start().unwrap();
+
+    let sent = mock_clone.sent_messages();
+    assert!(
+        sent.iter().any(|m| m.id == msg_id),
+        "Restored outbox entry should be flushed and sent on start()"
     );
 }
 
