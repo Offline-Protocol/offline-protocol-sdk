@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-13
+
+First npm release since **v0.11.0** (0.11.0 is the latest published version). This
+release folds in the **v0.11.1** 16 KB page-alignment hotfix — which was tagged but
+never published to npm — so the Google Play alignment fix (see the [0.11.1] entry
+below) reaches npm consumers for the first time here.
+
 ### Breaking Changes
 
 - **Inbound plaintext text is rejected by the `require_encryption` gate (SEC: inbound plaintext bypass)**
