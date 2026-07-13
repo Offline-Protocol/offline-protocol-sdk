@@ -293,6 +293,38 @@ impl GroupManager {
         }
     }
 
+    /// Binds a staged Welcome to the `group_id` the caller authenticated.
+    ///
+    /// OpenMLS derives the id it persists the joined group under from the
+    /// Welcome's embedded `GroupContext` — a value the inviter picks freely at
+    /// group creation (`MlsGroup::new_with_group_id`). Our storage marker
+    /// ([`save_group`]) and every [`load_group`]/`delete_group` lookup are
+    /// instead keyed by the caller-supplied wire `group_id`, and every
+    /// SEC-M5/M6 binding (`verify_welcome_slot`, the `session:`
+    /// reserved-namespace check) validates only that wire field. If the two
+    /// diverge, `into_group` writes the group under the *embedded* id, letting
+    /// an authenticated inviter seed or overwrite an arbitrary slot the
+    /// wire-id checks never inspected (e.g. embed `session:alice:bob` behind a
+    /// benign wire id that passes `verify_welcome_slot`) and hijack the
+    /// victim's session. Assert the two agree *before* `into_group` so no
+    /// cross-slot state is ever persisted. Legitimate Welcomes always carry
+    /// embedded == wire (both created via `new_with_group_id(group_id)`), so
+    /// this only rejects forgeries.
+    ///
+    /// Staging has already consumed the one-time key package by this point;
+    /// that only burns the package (inherent to any Welcome processing) and
+    /// does not touch existing group state.
+    fn verify_staged_group_id(staged: &StagedWelcome, group_id: &GroupId) -> Result<()> {
+        let embedded = staged.group_context().group_id().as_slice();
+        if embedded != group_id.as_str().as_bytes() {
+            return Err(MlsError::WelcomeGroupIdMismatch {
+                expected: group_id.to_string(),
+                embedded: String::from_utf8_lossy(embedded).into_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Joins a group using a Welcome message.
     pub fn join_group(&self, welcome: Welcome, group_id: &GroupId) -> Result<MlsGroup> {
         let group_config = MlsGroupJoinConfig::builder()
@@ -300,8 +332,15 @@ impl GroupManager {
             .sender_ratchet_configuration(sender_ratchet_configuration())
             .build();
 
-        let group = StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)
-            .map_err(|e| MlsError::WelcomeProcessing(format!("Failed to stage welcome: {}", e)))?
+        let staged = StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)
+            .map_err(|e| MlsError::WelcomeProcessing(format!("Failed to stage welcome: {}", e)))?;
+
+        // Bind the Welcome's embedded group id to the authenticated wire id
+        // before persisting — otherwise `into_group` would install under the
+        // attacker-chosen embedded id. See `verify_staged_group_id`.
+        Self::verify_staged_group_id(&staged, group_id)?;
+
+        let group = staged
             .into_group(&self.provider)
             .map_err(|e| MlsError::WelcomeProcessing(format!("Failed to join group: {}", e)))?;
 
@@ -345,6 +384,14 @@ impl GroupManager {
         // A failure here leaves the existing group untouched (benign duplicate).
         let staged = StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)
             .map_err(|e| MlsError::WelcomeProcessing(format!("Failed to stage welcome: {}", e)))?;
+
+        // Bind the Welcome's embedded group id to the authenticated wire id
+        // before the destructive replace below. A forged Welcome whose embedded
+        // id differs from `group_id` would otherwise `into_group` under the
+        // embedded id and hijack that slot; rejecting here also leaves the
+        // existing group at `group_id` untouched (no `delete_group` runs). See
+        // `verify_staged_group_id`.
+        Self::verify_staged_group_id(&staged, group_id)?;
 
         // Staging consumed the key package; from here a failure is not
         // recoverable by retrying the same Welcome. Drop the prior group so its
