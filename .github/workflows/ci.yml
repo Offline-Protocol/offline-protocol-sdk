@@ -197,7 +197,7 @@ jobs:
         run: swift test --package-path bindings/react-native/ios
 
   coverage:
-    name: Code Coverage
+    name: Coverage Report
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -212,16 +212,16 @@ jobs:
           shared-key: ci-coverage
 
       - name: Install cargo-llvm-cov
-        # Pinned because this job later receives CODECOV_TOKEN. Update the SHA
-        # when intentionally upgrading taiki-e/install-action v2.
+        # Keep third-party installers immutable in CI. Update the SHA when
+        # intentionally upgrading taiki-e/install-action v2.
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
 
       - name: Generate coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
 
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v7
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
+          name: rust-lcov
+          path: lcov.info
+          retention-days: 14
