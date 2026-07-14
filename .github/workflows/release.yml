@@ -367,13 +367,13 @@ jobs:
           python-version: '3.12'
 
       - name: Download Python bindings
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: python-bindings
           path: bindings/python/offline_protocol_sdk/
 
       - name: Download Linux x86_64 library
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: desktop-linux-x86_64
           path: native-libs/
@@ -435,13 +435,13 @@ jobs:
           python-version: '3.12'
 
       - name: Download Python bindings
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: python-bindings
           path: bindings/python/offline_protocol_sdk/
 
       - name: Download native library
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
           path: native-libs/
@@ -493,20 +493,20 @@ jobs:
         run: git-cliff --latest --strip header -o RELEASE_NOTES.md
 
       - name: Download iOS Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ios-libs
           path: bindings/react-native/ios
 
       - name: Download Android Libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: android-jniLibs-*
           path: bindings/react-native/android/src/main/jniLibs
           merge-multiple: true
 
       - name: Download Android Bindings
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-uniffi-bindings
           path: bindings/react-native/android/src/main/java
