@@ -68,8 +68,9 @@ class RelayControlOpTranslator(private val selfId: String) {
          * operation can never permanently silence membership sync. If the
          * relay rewords these, non-admin devices without the core's
          * `is_admin` hint fall back to re-learning the denial each
-         * connection — noisy but safe. Keep in sync with the relay source
-         * (see docs/relay-transport-parity-spec.md).
+         * connection — noisy but safe. These strings are an external wire
+         * contract — keep them in sync with the denial reasons received over
+         * the internet transport.
          */
         internal const val ADMIN_DENIED_REASON_MARKER = "Only admins"
 

@@ -647,7 +647,7 @@ public class InternetManager: NSObject, TransportManager {
         // relay that pings but never authenticates slips past it.
         scheduleAuthTimeout(for: task)
 
-        // Authenticate with the relay server using deviceId as the user ID
+        // Authenticate with the configured auth token (fails closed if unset).
         sendAuthentication()
     }
 
@@ -707,9 +707,9 @@ public class InternetManager: NSObject, TransportManager {
                     "error": error.localizedDescription
                 ])
             } else {
-                self?.emitDiagnostic("debug", "Auth message sent", context: [
-                    "userId": self?.deviceId ?? "unknown"
-                ])
+                // Don't log the token (a secret) or deviceId (not the
+                // authenticated identity) — just record that the frame went out.
+                self?.emitDiagnostic("debug", "Auth message sent")
             }
         }
     }

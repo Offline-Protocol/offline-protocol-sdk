@@ -15500,11 +15500,11 @@ fn test_internet_control_op_classification() {
 ///
 /// **If this test fails because you added an op:** the platform bridges
 /// translate ops by name, and an op they don't recognize degrades to an
-/// opaque `SendMessage` the relay merely echoes/forwards. Before extending
-/// this list, update BOTH translators —
+/// opaque `SendMessage` the transport merely echoes/forwards. Before
+/// extending this list, update BOTH translators —
 /// `bindings/react-native/android/.../RelayControlOpTranslator.kt` and
-/// `bindings/react-native/ios/RelayControlOpTranslator.swift` — plus the
-/// op table in `docs/relay-transport-parity-spec.md`.
+/// `bindings/react-native/ios/RelayControlOpTranslator.swift`. This test is
+/// the canonical registry of the closed op set — keep it authoritative.
 #[test]
 fn test_internet_control_op_registry_is_closed() {
     let protocol = OfflineProtocol::new(create_test_config()).unwrap();
