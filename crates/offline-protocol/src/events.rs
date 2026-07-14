@@ -2685,7 +2685,7 @@ mod tests {
     fn test_security_warning_code_as_str_matches_serde_wire_form() {
         // `SecurityWarningCode::as_str()` is hand-written, while the JSON wire
         // form is derived from `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`.
-        // JS consumers branch on the wire string (fernweh keys reinstall handling
+        // JS consumers branch on the wire string (e.g. keying reinstall handling
         // off `TOFU_KEY_MISMATCH`), so the two must never drift. Pin every variant
         // to its serialized form — a single-variant test would let the other four
         // rot.

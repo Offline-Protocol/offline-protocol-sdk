@@ -84,7 +84,7 @@ Call `await protocol.stop()` (and optionally `await protocol.destroy()`) on tear
 | Scenario                 | Recommended `dors.preferOnline` | Enabled Transports                    |
 |-------------------------|----------------------------------|---------------------------------------|
 | Fully offline mesh      | `false`                          | BLE + Wi‑Fi Direct                     |
-| Hybrid (Fernweh model)  | `true`                           | Internet (primary), BLE, Wi‑Fi Direct |
+| Hybrid (online-first)   | `true`                           | Internet (primary), BLE, Wi‑Fi Direct |
 | Emergency response mesh | `false` + aggressive hysteresis | BLE + Wi‑Fi Direct                     |
 
 **Offline**: set `internet: { enabled: false }`, bump `initialTtl` for sparse networks.

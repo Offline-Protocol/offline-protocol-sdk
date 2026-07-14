@@ -266,7 +266,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         const peerId = event.sender || event.peerId || event.peer_id || event.fromUserId || event.from_user_id;
         if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
         const peerName = event.sender_name || event.userName || event.user_name || peerId;
-        // fernweh-parity: ALWAYS require an explicit manual Accept — never
+        // Design: ALWAYS require an explicit manual Accept — never
         // auto-accept, even on a mutual request. Just record the incoming
         // request so it appears in the pending list for the user to accept.
         setConnectionRequests(prev => {
@@ -324,7 +324,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         // Record the session regardless of contact status — the peer may not be
         // an accepted contact yet (autoKeyExchange establishes on discovery).
         sessionPeersRef.current.add(peerId);
-        // fernweh-parity: a secure session establishing under the hood must NOT
+        // Design: a secure session establishing under the hood must NOT
         // auto-create a "connected" contact. Only mark hasSession on a contact
         // the user has already connected to via an accepted request. The MLS
         // session still exists; the peer stays unconnected in the UI until Accept.

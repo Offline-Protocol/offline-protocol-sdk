@@ -1354,8 +1354,8 @@ fn test_process_internal_message_connection_request_event() {
 
 #[test]
 fn test_tofu_key_mismatch_emits_security_warning_with_stable_code() {
-    // fernweh (and any consumer) gates a peer re-handshake on this exact signal,
-    // so the reason_code contract must not drift. A pinned peer presenting a
+    // Consumers gate a peer re-handshake on this exact signal, so the
+    // reason_code contract must not drift. A pinned peer presenting a
     // different key (reinstall / new device / impersonation) must be rejected
     // AND emit SecurityWarning carrying a stable TOFU_KEY_MISMATCH code — not
     // merely a human-readable `reason` string that could be reworded.
