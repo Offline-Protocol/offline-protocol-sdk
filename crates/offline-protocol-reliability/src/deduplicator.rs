@@ -246,7 +246,15 @@ impl Deduplicator {
 
     /// Creates a new deduplicator with custom configuration.
     pub fn with_config(config: DeduplicatorConfig) -> Self {
-        let bloom_filter = if config.use_bloom_filter {
+        // Keep the low-level constructor panic-free for direct users of this
+        // crate. The top-level ProtocolConfig rejects these invalid values;
+        // here we fail safe to exact HashMap mode instead of constructing a
+        // Bloom filter that would divide by zero or rotate an empty list.
+        let valid_bloom_config = config.bloom_filter_bits > 0
+            && config.bloom_hash_count > 0
+            && config.bloom_filter_count > 0
+            && config.bloom_rotation_secs > 0;
+        let bloom_filter = if config.use_bloom_filter && valid_bloom_config {
             Some(RotatingBloomFilter::new(
                 config.bloom_filter_count,
                 config.bloom_filter_bits,
@@ -543,6 +551,22 @@ mod tests {
         assert!(!dedup.is_bloom_filter_mode());
         let stats = dedup.stats();
         assert_eq!(stats.mode, DeduplicatorMode::HashMap);
+    }
+
+    #[test]
+    fn test_invalid_bloom_config_falls_back_without_panicking() {
+        let config = DeduplicatorConfig {
+            use_bloom_filter: true,
+            bloom_filter_bits: 0,
+            ..Default::default()
+        };
+
+        let mut dedup = Deduplicator::with_config(config);
+        let message_id = MessageId::new();
+
+        assert!(!dedup.is_bloom_filter_mode());
+        assert!(dedup.mark_seen(message_id.clone()));
+        assert!(dedup.is_duplicate(&message_id));
     }
 
     #[test]
