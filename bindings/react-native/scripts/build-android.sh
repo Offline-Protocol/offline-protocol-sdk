@@ -105,8 +105,8 @@ for i in "${!ABIS[@]}"; do
     so_path="$so_root/deps/liboffline_protocol_uniffi.so"
   fi
   
-  # Copy library to jniLibs
-  cp "$so_path" "$OUTPUT_DIR/$abi/"
+  # UniFFI loads "uniffi_offline_protocol", which maps to this filename on Android.
+  cp "$so_path" "$OUTPUT_DIR/$abi/libuniffi_offline_protocol.so"
   
   echo "✅ Built and copied library for $abi"
 done
@@ -118,7 +118,7 @@ echo ""
 # Print library info
 echo "Library sizes:"
 for abi in "${ABIS[@]}"; do
-  lib_path="$OUTPUT_DIR/$abi/liboffline_protocol_uniffi.so"
+  lib_path="$OUTPUT_DIR/$abi/libuniffi_offline_protocol.so"
   if [ -f "$lib_path" ]; then
     size=$(du -h "$lib_path" | cut -f1)
     echo "  $abi: $size"
@@ -127,4 +127,3 @@ done
 
 echo ""
 echo "✅ Android build complete!"
-
