@@ -374,6 +374,16 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 | **internetGetNextMessage** | `internetGetNextMessage(): Promise<{messageId, recipientId, data} \| null>` | Next outgoing internet message. Use `messageId` to confirm or report failure. |
 | **internetConfirmSent** | `internetConfirmSent(messageId: string): Promise<void>` | Confirms a message was sent over the wire. Call after WebSocket send succeeds. |
 | **internetSendFailed** | `internetSendFailed(messageId: string): Promise<void>` | Reports a message failed to send. Call when WebSocket send fails. |
+| **sendRawServerCommand** | `sendRawServerCommand(json: string): Promise<boolean>` | Sends a complete application-owned relay command verbatim. Responses arrive as `internet_server_message`. |
+
+#### Lossless group snapshot extensions
+
+Relay `GroupInfo` and `UserGroups` frames are dual-emitted:
+
+- `group_info` and `user_groups` provide the stable SDK-owned projections for standard group state.
+- `internet_server_message` carries the original relay frame in its `json` string, including application-owned fields such as `description`, `avatar_url`, `pending_join_requests`, profile/membership data, and unknown future extensions.
+
+Parse the raw event and check the server frame's `type` before consuming extension fields. Do not apply standard group state from both streams, and do not rely on typed/raw arrival order. Raw snapshots can include invite tokens, profile data, and key packages, so avoid logging them indiscriminately.
 
 ---
 

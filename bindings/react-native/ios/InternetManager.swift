@@ -250,9 +250,10 @@ public class InternetManager: NSObject, TransportManager {
     /// Disarmed on settle-fire and on stop(). messageQueue-confined.
     private var drainOnSettle = false
 
-    /// Receives raw relay frames that are app/server concerns rather than SDK
-    /// concerns (invite links, role changes, rate limiting, unknown types) —
-    /// the module forwards them to JS as the `internet_server_message` event.
+    /// Receives raw relay frames apps need outside or in addition to SDK-owned
+    /// processing (group snapshot extensions, invite links, role changes,
+    /// rate limiting, unknown types) — the module forwards them as the
+    /// `internet_server_message` event.
     public var serverMessageEmitter: ((String) -> Void)?
     
     // Metrics. Atomic (lock-guarded): send completions mutate on the
@@ -951,6 +952,22 @@ public class InternetManager: NSObject, TransportManager {
     /// reorders keys and canonicalizes numbers (25.0 -> 25), the same
     /// reason sendRawCommand refuses to re-serialize outbound frames.
     private func dispatchRelayFrame(_ json: [String: Any], messageType: String, task: URLSessionWebSocketTask, rawText: String) {
+        if RelayGroupSnapshotBridge.dispatch(
+            messageType: messageType,
+            json: json,
+            rawText: rawText,
+            emitTyped: { prefix, payload in
+                self.injectGroupInternalMessage(
+                    senderId: "relay",
+                    prefix: prefix,
+                    payload: payload
+                )
+            },
+            emitRaw: { frame in self.emitServerMessage(frame) }
+        ) {
+            return
+        }
+
         switch messageType {
         case "Authenticated":
             // Handle authentication success
@@ -1332,35 +1349,6 @@ public class InternetManager: NSObject, TransportManager {
             let userId = json["user_id"] as? String ?? ""
             let removedBy = json["removed_by"] as? String ?? ""
             injectGroupInternalMessage(senderId: removedBy.isEmpty ? "relay" : removedBy, prefix: "__GROUP_MEMBER_REMOVED__", payload: ["group_id": groupId, "user_id": userId, "removed_by": removedBy])
-            
-        case "GroupInfo":
-            guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
-            let name = json["name"] as? String ?? ""
-            let createdBy = json["created_by"] as? String ?? ""
-            let createdAt = json["created_at"] as? String ?? ""
-            let membersRaw = json["members"] as? [Any] ?? []
-            // Per-entry tolerance (parity with the Kotlin bridge): one
-            // non-object element or an entry without a user_id is skipped,
-            // never allowed to throw away the whole member list — and apps
-            // must not see phantom members.
-            let members: [[String: String]] = membersRaw.compactMap { raw in
-                guard let m = raw as? [String: Any],
-                      let memberId = m["user_id"] as? String, !memberId.isEmpty else { return nil }
-                return ["user_id": memberId, "role": m["role"] as? String ?? "member", "joined_at": m["joined_at"] as? String ?? ""]
-            }
-            injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_INFO__", payload: ["group_id": groupId, "name": name, "created_by": createdBy, "created_at": createdAt, "members": members])
-            
-        case "UserGroups":
-            guard let groupsRaw = json["groups"] as? [Any] else { return }
-            // Per-entry tolerance (parity with the Kotlin bridge): a
-            // malformed element or one without a group_id is skipped, never
-            // allowed to nuke the whole groups array.
-            let groups: [[String: String]] = groupsRaw.compactMap { raw in
-                guard let g = raw as? [String: Any],
-                      let gId = g["group_id"] as? String, !gId.isEmpty else { return nil }
-                return ["group_id": gId, "name": g["name"] as? String ?? "", "created_at": g["created_at"] as? String ?? ""]
-            }
-            injectGroupInternalMessage(senderId: "relay", prefix: "__USER_GROUPS__", payload: ["groups": groups])
             
         case "GroupError":
             let reason = json["reason"] as? String ?? "Unknown error"
@@ -2355,4 +2343,3 @@ final class AtomicCounter {
         return value
     }
 }
-

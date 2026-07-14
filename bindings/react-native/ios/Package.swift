@@ -52,6 +52,7 @@ let package = Package(
                 "PresenceWatchPolicy.swift",
                 "RecipientInFlightTracker.swift",
                 "RelayControlOpTranslator.swift",
+                "RelayGroupSnapshotBridge.swift",
                 "RelayRateLimiter.swift",
                 "RelayTimestamps.swift"
             ]
@@ -73,6 +74,7 @@ let package = Package(
                 "PresenceWatchPolicyTests.swift",
                 "RecipientInFlightTrackerTests.swift",
                 "RelayControlOpTranslatorTests.swift",
+                "RelayGroupSnapshotBridgeTests.swift",
                 "RelayRateLimiterTests.swift",
                 "RelayTimestampsTests.swift"
             ]

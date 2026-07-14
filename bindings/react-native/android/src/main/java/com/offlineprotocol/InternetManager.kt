@@ -170,9 +170,10 @@ class InternetManager(
     private val pendingControlFrames = ArrayDeque<PendingControlFrames>()
 
     /**
-     * Receives raw relay frames that are app/server concerns rather than SDK
-     * concerns (invite links, role changes, rate limiting, unknown types) —
-     * the module forwards them to JS as the `internet_server_message` event.
+     * Receives raw relay frames apps need outside or in addition to
+     * SDK-owned processing (group snapshot extensions, invite links, role
+     * changes, rate limiting, unknown types) — the module forwards them as the
+     * `internet_server_message` event.
      */
     var serverMessageEmitter: ((String) -> Unit)? = null
     
@@ -839,6 +840,19 @@ class InternetManager(
         messageType: String,
         rawText: String
     ) {
+        if (RelayGroupSnapshotBridge.dispatch(
+                messageType = messageType,
+                json = json,
+                rawText = rawText,
+                emitTyped = { prefix, payload ->
+                    injectGroupInternalMessage("relay", prefix, payload)
+                },
+                emitRaw = { frame -> serverMessageEmitter?.invoke(frame) }
+            )
+        ) {
+            return
+        }
+
         when (messageType) {
             "Authenticated" -> {
                 // Handle authentication success
@@ -1244,57 +1258,6 @@ class InternetManager(
                     put("removed_by", removedBy)
                 }
                 injectGroupInternalMessage(if (removedBy.isNotEmpty()) removedBy else "relay", "__GROUP_MEMBER_REMOVED__", payloadJson)
-            }
-            
-            "GroupInfo" -> {
-                val groupId = json.safeOptString("group_id")
-                val name = json.safeOptString("name")
-                val createdBy = json.safeOptString("created_by")
-                val createdAt = json.safeOptString("created_at")
-                val membersArray = json.optJSONArray("members")
-                if (groupId.isEmpty()) return
-                val membersJson = org.json.JSONArray()
-                if (membersArray != null) {
-                    for (i in 0 until membersArray.length()) {
-                        // Per-entry tolerance: one non-object element must
-                        // not throw away the frame (or, uncaught, the whole
-                        // connection).
-                        val m = membersArray.optJSONObject(i) ?: continue
-                        val memberId = m.safeOptString("user_id")
-                        if (memberId.isEmpty()) continue
-                        membersJson.put(org.json.JSONObject().apply {
-                            put("user_id", memberId)
-                            put("role", m.safeOptString("role", "member"))
-                            put("joined_at", m.safeOptString("joined_at"))
-                        })
-                    }
-                }
-                val payloadJson = org.json.JSONObject().apply {
-                    put("group_id", groupId)
-                    put("name", name)
-                    put("created_by", createdBy)
-                    put("created_at", createdAt)
-                    put("members", membersJson)
-                }
-                injectGroupInternalMessage("relay", "__GROUP_INFO__", payloadJson)
-            }
-            
-            "UserGroups" -> {
-                val groupsArray = json.optJSONArray("groups")
-                if (groupsArray == null) return
-                val groupsJson = org.json.JSONArray()
-                for (i in 0 until groupsArray.length()) {
-                    val g = groupsArray.optJSONObject(i) ?: continue
-                    val gId = g.safeOptString("group_id")
-                    if (gId.isEmpty()) continue
-                    groupsJson.put(org.json.JSONObject().apply {
-                        put("group_id", gId)
-                        put("name", g.safeOptString("name"))
-                        put("created_at", g.safeOptString("created_at"))
-                    })
-                }
-                val payloadJson = org.json.JSONObject().apply { put("groups", groupsJson) }
-                injectGroupInternalMessage("relay", "__USER_GROUPS__", payloadJson)
             }
             
             "GroupError" -> {
@@ -1935,4 +1898,3 @@ class InternetManager(
         listener?.onTransportDiagnostic(this, level, message, context)
     }
 }
-

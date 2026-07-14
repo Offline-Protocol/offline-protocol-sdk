@@ -21,6 +21,7 @@ Pod::Spec.new do |s|
     "BleManager.swift",
     "InternetManager.swift",
     "RelayControlOpTranslator.swift",
+    "RelayGroupSnapshotBridge.swift",
     "RelayRateLimiter.swift",
     "LegacyRelayMessage.swift",
     "PresenceWatchPolicy.swift",
@@ -67,4 +68,3 @@ Pod::Spec.new do |s|
   # Swift version
   s.swift_version = "5.5"
 end
-

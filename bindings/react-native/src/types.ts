@@ -923,7 +923,12 @@ export interface GroupInfoMemberEvent {
 }
 
 /**
- * Group info event (from relay)
+ * Stable SDK projection of a GroupInfo relay frame.
+ *
+ * The same frame is also emitted as `internet_server_message`; use that raw
+ * event for application-owned fields such as descriptions, avatars, pending
+ * join requests, or future server extensions. Do not apply standard group
+ * state from both events, and do not rely on their arrival order.
  */
 export interface GroupInfoEvent extends BaseEvent {
   type: 'group_info';
@@ -944,7 +949,12 @@ export interface UserGroupSummaryEvent {
 }
 
 /**
- * User groups event (from relay)
+ * Stable SDK projection of a UserGroups relay frame.
+ *
+ * The same frame is also emitted as `internet_server_message`; use that raw
+ * event for profile, membership, or future application-owned fields. Do not
+ * apply standard group state from both events, and do not rely on their
+ * arrival order.
  */
 export interface UserGroupsEvent extends BaseEvent {
   type: 'user_groups';
@@ -1235,14 +1245,19 @@ export interface TofuResetEvent extends BaseEvent {
 }
 
 /**
- * A raw relay server frame that is an app/server concern rather than an SDK
- * concern — invite-link lifecycle responses (`GroupInviteLinkCreated`,
+ * A raw relay server frame that apps need outside or in addition to
+ * SDK-owned processing — invite-link lifecycle responses (`GroupInviteLinkCreated`,
  * `GroupJoinedViaInvite`, `GroupInviteJoinPending`, …), `GroupRoleChanged`,
- * `GroupDeleted`, `RateLimited`, `GroupError` (dual-emitted so `request_id`
- * correlation works), and any future/unknown relay message types.
+ * `GroupDeleted`, `RateLimited`, and any future/unknown relay message types.
+ * `GroupError`, `GroupInfo`, and `UserGroups` are dual-emitted with their
+ * stable typed events so apps can consume request correlation or
+ * application-owned extension fields without losing the SDK projection.
  *
  * `json` is the verbatim relay frame; parse it and dispatch on its `type`
- * field. Pair with `sendRawServerCommand` for request/response flows.
+ * field. Pair with `sendRawServerCommand` for request/response flows. Typed
+ * and raw events have no cross-channel ordering guarantee. Raw frames can
+ * contain sensitive profile data, invite tokens, and key packages; avoid
+ * logging them indiscriminately.
  */
 export interface InternetServerMessageEvent extends BaseEvent {
   type: 'internet_server_message';
