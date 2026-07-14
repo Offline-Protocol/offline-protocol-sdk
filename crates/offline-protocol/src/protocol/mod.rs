@@ -510,7 +510,7 @@ impl OfflineProtocol {
     /// flow through as [`TelemetryRecord::Protocol`], MLS lifecycle events
     /// as [`TelemetryRecord::Mls`].
     ///
-    /// This does not replace the legacy [`EventCallback`] and
+    /// This does not replace the legacy [`crate::EventCallback`] and
     /// [`MlsEventEmitter`] paths — they continue to fire independently for
     /// backward compatibility.
     ///

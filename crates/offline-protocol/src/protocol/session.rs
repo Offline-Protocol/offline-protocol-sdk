@@ -910,7 +910,7 @@ impl OfflineProtocol {
     /// rescue for the store-less-relay hole: a welcome whose wire send was
     /// confirmed (`Sent`) while the peer was actually offline was dropped by
     /// the relay (it forwards or pushes, never stores), and
-    /// [`Self::rearm_welcome_for_peer`] deliberately never touches `Sent`.
+    /// `Self::rearm_welcome_for_peer` deliberately never touches `Sent`.
     /// The peer being provably online is the safe moment to rebuild and
     /// re-send it: if the original did land, the receiver dedups by message
     /// id and the confirmation probe resolves the lifecycle.
@@ -921,8 +921,8 @@ impl OfflineProtocol {
     /// confirm timeout resolves them, after which the next offline tick parks.
     ///
     /// The welcome re-arm/re-send on the online edge is throttled per peer
-    /// with exponential backoff ([`WELCOME_PRESENCE_RESCUE_BASE_SECS`] ..
-    /// [`WELCOME_PRESENCE_RESCUE_MAX_SECS`]): presence answers arrive on the
+    /// with exponential backoff (`WELCOME_PRESENCE_RESCUE_BASE_SECS` ..
+    /// `WELCOME_PRESENCE_RESCUE_MAX_SECS`): presence answers arrive on the
     /// platform's ~20s watch tick, and a peer that is online but can never
     /// prove the session (stale key package after a reinstall, incompatible
     /// version) must not be re-sent the multi-frame MLS welcome on every
@@ -966,7 +966,7 @@ impl OfflineProtocol {
     /// the internet presence watch set. Includes `Sent` records (wire-
     /// confirmed but never session-confirmed): only a presence signal can
     /// rescue those over a store-less relay.
-    /// Lifecycles older than [`WELCOME_WATCHLIST_MAX_AGE_SECS`] are excluded:
+    /// Lifecycles older than `WELCOME_WATCHLIST_MAX_AGE_SECS` are excluded:
     /// a permanently-dead peer must not occupy watch-rotation slots (and keep
     /// its parked record alive via `expires_at` pushes) forever.
     pub fn welcome_pending_peers(&self) -> Vec<String> {

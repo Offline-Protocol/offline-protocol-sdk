@@ -64,6 +64,23 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-docs
+
+      - name: Build documentation
+        run: cargo doc --workspace --no-deps --locked
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest
