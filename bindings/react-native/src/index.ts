@@ -2555,8 +2555,10 @@ export class OfflineProtocol {
    * `CreateGroupInviteLink`, `JoinGroupViaInvite`, `AckGroupInviteJoin`, …).
    *
    * Responses the SDK doesn't consume arrive as `internet_server_message`
-   * events carrying the verbatim frame; correlate request/response with your
-   * own `request_id` where the relay supports one.
+   * events carrying the verbatim frame. `GroupInfo` and `UserGroups` are also
+   * emitted on that channel in addition to their stable typed events, so
+   * application-owned extension fields remain lossless. Correlate
+   * request/response with your own `request_id` where the relay supports one.
    *
    * Do not send frame types the SDK itself manages (`SendMessage`,
    * `CreateGroup` / member deltas, `LeaveGroup`, `CheckPresence`, …): the

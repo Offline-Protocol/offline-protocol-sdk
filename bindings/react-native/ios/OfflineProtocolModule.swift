@@ -530,9 +530,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    /// Forwards a raw relay frame that is an app/server concern (invite
-    /// links, role changes, rate limiting, unknown types) to JS as the
-    /// `internet_server_message` event.
+    /// Forwards a raw relay frame apps need outside or in addition to SDK-owned
+    /// processing (group snapshot extensions, invite links, role changes,
+    /// rate limiting, unknown types) as the `internet_server_message` event.
     fileprivate func emitServerMessageEvent(_ rawJson: String) {
         guard hasListeners else { return }
         let payload: [String: Any] = [
@@ -3920,4 +3920,3 @@ extension OfflineProtocolModule {
         )
     }
 }
-

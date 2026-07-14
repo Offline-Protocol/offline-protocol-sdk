@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **React Native `GroupInfo` and `UserGroups` relay snapshots are now lossless.** Android and iOS continue emitting the existing typed `group_info` / `user_groups` projections and additionally emit the original frame as `internet_server_message`. Application-owned fields such as descriptions, avatars, profiles, membership details, pending join requests, and unknown future extensions now reach JavaScript verbatim without expanding the SDK's typed group schemas. The two events have no cross-channel ordering guarantee.
+
 ## [0.13.0] — 2026-07-13
 
 ### Added
