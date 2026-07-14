@@ -44,7 +44,7 @@ jobs:
 
       - name: Cache uniffi-bindgen
         id: cache-uniffi
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen
           key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
@@ -154,7 +154,7 @@ jobs:
 
       - name: Cache uniffi-bindgen
         id: cache-uniffi
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen
           key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
@@ -335,7 +335,7 @@ jobs:
 
       - name: Cache uniffi-bindgen
         id: cache-uniffi
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen
           key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
@@ -367,13 +367,13 @@ jobs:
           python-version: '3.12'
 
       - name: Download Python bindings
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: python-bindings
           path: bindings/python/offline_protocol_sdk/
 
       - name: Download Linux x86_64 library
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: desktop-linux-x86_64
           path: native-libs/
@@ -435,13 +435,13 @@ jobs:
           python-version: '3.12'
 
       - name: Download Python bindings
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: python-bindings
           path: bindings/python/offline_protocol_sdk/
 
       - name: Download native library
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
           path: native-libs/
@@ -497,20 +497,20 @@ jobs:
         run: git-cliff --latest --strip header -o RELEASE_NOTES.md
 
       - name: Download iOS Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ios-libs
           path: bindings/react-native/ios
 
       - name: Download Android Libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: android-jniLibs-*
           path: bindings/react-native/android/src/main/jniLibs
           merge-multiple: true
 
       - name: Download Android Bindings
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-uniffi-bindings
           path: bindings/react-native/android/src/main/java
@@ -582,8 +582,7 @@ jobs:
 
       - name: Create GitHub Release
         if: inputs.dry_run != true
-        # Pinned because this action receives contents:write and GITHUB_TOKEN.
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
           draft: false

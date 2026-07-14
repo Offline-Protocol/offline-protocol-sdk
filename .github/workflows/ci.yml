@@ -170,7 +170,7 @@ jobs:
       # toolchain (and license acceptance) doesn't drift out from under us.
       - uses: android-actions/setup-android@v3
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.9"
 
@@ -220,8 +220,7 @@ jobs:
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
 
       - name: Upload to Codecov
-        # Pinned because this action receives the CODECOV_TOKEN repository secret.
-        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
+        uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
