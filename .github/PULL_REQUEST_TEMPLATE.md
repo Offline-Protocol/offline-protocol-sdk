@@ -29,7 +29,7 @@ Closes #
 
 <!-- These mirror the CI gates — PRs that fail them will be blocked. -->
 
-- [ ] `cargo fmt --workspace -- --check` passes
+- [ ] `cargo fmt --all -- --check` passes
 - [ ] `cargo clippy --workspace -- -D warnings` passes
 - [ ] `cargo test --workspace` passes
 - [ ] `cargo-deny` is satisfied (no new license/advisory violations)

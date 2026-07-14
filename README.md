@@ -146,7 +146,7 @@ See the [docs/](docs/) directory for detailed guides:
 cargo build --workspace            # Build
 cargo test --workspace             # Test
 cargo clippy --workspace -- -D warnings  # Lint
-cargo fmt --workspace              # Format
+cargo fmt --all                    # Format
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines and [QUICKSTART.md](QUICKSTART.md) for platform-specific setup.
