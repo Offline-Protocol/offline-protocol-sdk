@@ -41,15 +41,28 @@ All communication uses BLE mesh networking. Discovery queries propagate via goss
 
 ## Running
 
+> **Note:** This example ships as **source only** — it does not include generated
+> `ios/` or `android/` native projects, so `npx react-native run-ios` /
+> `run-android` will not work as-is. Use it as a reference implementation, or run
+> its screens inside a host app that already has native projects and the SDK's
+> native libraries built.
+
+The quickest way to try it end-to-end on real hardware:
+
+1. Complete the first-time setup for the flagship
+   [`react-native-app`](../react-native-app/SETUP.md) example — it includes the
+   native projects and the mandatory native-library build.
+2. Copy this example's `src/` and `App.tsx` into that app, then run it on two
+   physical devices (BLE requires real hardware).
+
+Alternatively, scaffold native projects for this directory yourself
+(`npx react-native init` or an Expo prebuild), build the SDK's native libraries
+(`cd ../../bindings/react-native && npm run build:all`), then:
+
 ```bash
-# Install dependencies
 npm install
-
-# iOS
-npx react-native run-ios
-
-# Android
-npx react-native run-android
+npx pod-install            # iOS only
+npx react-native run-ios   # or run-android
 ```
 
 ## Testing with two devices
