@@ -8,6 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Transport abstraction layer for the Offline Protocol SDK"
 
+[lints]
+workspace = true
+
 [features]
 default = []
 test-utils = []
@@ -29,4 +32,3 @@ base64 = { workspace = true }
 [dev-dependencies]
 
 [lib]
-

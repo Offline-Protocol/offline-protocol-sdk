@@ -8,6 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 description = "MLS (Message Layer Security) integration for end-to-end encryption in the Offline Protocol SDK"
 
+[lints]
+workspace = true
+
 [dependencies]
 # Shared id-validation policy (storage-key safety)
 offline-protocol-core = { workspace = true }

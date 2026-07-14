@@ -74,6 +74,9 @@ offline-protocol-mls = { path = "crates/offline-protocol-mls" }
 offline-protocol-services = { path = "crates/offline-protocol-services" }
 offline-protocol = { path = "crates/offline-protocol" }
 
+[workspace.lints.clippy]
+unwrap_used = "deny"
+
 [profile.dev]
 opt-level = 0
 debug = true

@@ -8,6 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Main protocol engine for the Offline Protocol SDK"
 
+[lints]
+workspace = true
+
 [dependencies]
 offline-protocol-core = { workspace = true }
 offline-protocol-transport = { workspace = true }
@@ -29,4 +32,3 @@ zeroize = { workspace = true }
 offline-protocol-transport = { workspace = true, features = ["test-utils"] }
 
 [lib]
-
