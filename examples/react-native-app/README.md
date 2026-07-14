@@ -64,20 +64,30 @@ A modern, user-friendly messaging application built with the Offline Protocol SD
 
 ### Installation
 
-1. **Install Dependencies**
+> The Rust native libraries **must** be built before the first run — the app
+> fails to load the native module otherwise. See [SETUP.md](SETUP.md) for the
+> full first-time setup.
+
+1. **Build Native Libraries** (required before first run)
    ```bash
-   cd examples/react-native-app
+   cd ../../bindings/react-native
+   npm run build:all
+   cd ../../examples/react-native-app
+   ```
+
+2. **Install Dependencies**
+   ```bash
    npm install
    ```
 
-2. **iOS Setup**
+3. **iOS Setup**
    ```bash
    cd ios
    pod install
    cd ..
    ```
 
-3. **Run the App**
+4. **Run the App**
    ```bash
    # iOS
    npm run ios

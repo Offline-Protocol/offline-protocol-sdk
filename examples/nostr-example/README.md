@@ -20,12 +20,23 @@ Minimal React Native app demonstrating the Nostr relay transport for the Offline
 ## Setup
 
 ```bash
-# From the repo root
+# 1. Build the SDK's native libraries first (required before the first run —
+#    the app cannot load the native module otherwise).
+cd bindings/react-native
+npm run build:all
+cd ../..
+
+# 2. Install JS dependencies
 cd examples/nostr-example
 npm install
 npx pod-install  # iOS only
-npx react-native run-ios    # or run-android
+
+# 3. Run it (this example ships an ios/ project but no android/, so iOS only)
+npx react-native run-ios
 ```
+
+> To run on Android, scaffold an `android/` project for this directory first
+> (`npx react-native init` or an Expo prebuild).
 
 ## Default Relays
 
