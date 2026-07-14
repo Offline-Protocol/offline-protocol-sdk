@@ -193,6 +193,45 @@ cargo doc --workspace --open
 cargo doc --workspace --no-deps
 ```
 
+### Running Benchmarks
+
+Run the complete Criterion suite and build the same performance dashboard shown
+by CI:
+
+```bash
+cargo bench --package offline-protocol-bench --bench '*' --locked
+python3 scripts/benchmark_report.py \
+  --criterion-dir target/criterion \
+  --metadata benches/benchmark-metadata.json \
+  --output target/criterion/benchmark-summary.md \
+  --json-output target/criterion/benchmark-results.json
+```
+
+Open `target/criterion/report/index.html` for Criterion's interactive charts or
+read `target/criterion/benchmark-summary.md` for the compact overview. The
+dashboard reports median latency with 95% confidence intervals, throughput,
+variance, outliers, budget status, and—when Criterion has a baseline—relative
+change. Latency bars are relative to the slowest result and meaningful only
+within their benchmark group; there is intentionally no aggregate score across
+unrelated operations.
+
+Performance budgets and benchmark descriptions live in
+`benches/benchmark-metadata.json`. CI evaluates budgets against the upper bound
+of the confidence interval. Hosted-runner results are useful for spotting a
+directional change, but important regressions should be reproduced on stable,
+controlled hardware.
+
+For a controlled local before/after comparison, save a named baseline before
+editing and compare against it afterward:
+
+```bash
+cargo bench --package offline-protocol-bench --bench '*' --locked -- \
+  --save-baseline before
+# Make the change, then run:
+cargo bench --package offline-protocol-bench --bench '*' --locked -- \
+  --baseline-lenient before
+```
+
 ## Architecture Decisions
 
 When making significant changes:
@@ -229,4 +268,3 @@ merged until the CLA check is green.
 
 If you are contributing on behalf of an employer, confirm with them that you
 are authorized to grant these rights before signing.
-

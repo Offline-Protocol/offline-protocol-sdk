@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "regression_threshold_percent": 5.0,
+  "noise_cv_threshold_percent": 10.0,
+  "groups": {
+    "message_creation": {
+      "description": "Constructs protocol messages across payload sizes.",
+      "parameter": "payload bytes"
+    },
+    "message_serialization": {
+      "description": "Serializes protocol messages to JSON across payload sizes.",
+      "parameter": "payload bytes"
+    },
+    "transport_send_receive": {
+      "description": "Performs an in-memory transport send/receive round trip.",
+      "parameter": "payload bytes"
+    },
+    "protocol_creation": {
+      "description": "Creates a configured OfflineProtocol instance."
+    },
+    "protocol_start_stop": {
+      "description": "Creates, starts, and stops a protocol instance with a mock BLE transport."
+    },
+    "send_message": {
+      "description": "Sends a message through a running protocol instance."
+    },
+    "process_loop": {
+      "description": "Executes one protocol processing tick."
+    },
+    "dors_selection": {
+      "description": "Selects a transport with DORS for each message priority.",
+      "parameter": "message priority",
+      "order": ["Low", "Medium", "High"]
+    },
+    "ble_fragmentation": {
+      "description": "Fragments messages into BLE-sized frames.",
+      "parameter": "payload bytes"
+    },
+    "ble_reassembly": {
+      "description": "Processes all BLE fragments required to reassemble a message.",
+      "parameter": "payload bytes"
+    },
+    "ble_serialize_1kb": {
+      "description": "Serializes a representative 1 KB message for BLE transport."
+    },
+    "telemetry_emit_noop": {
+      "description": "Builds and emits lifecycle telemetry records to a no-op sink."
+    },
+    "telemetry_emit_routing_diagnostic": {
+      "description": "Builds and emits a diagnostic routing record with five transport scores."
+    },
+    "telemetry_build_metrics_frame": {
+      "description": "Builds the metrics frame paid for on each telemetry cadence interval."
+    }
+  },
+  "budgets": [
+    {
+      "pattern": "telemetry_emit_noop/*",
+      "name": "lifecycle telemetry emission",
+      "max_time_ns": 5000
+    },
+    {
+      "pattern": "telemetry_emit_routing_diagnostic",
+      "name": "diagnostic telemetry emission",
+      "max_time_ns": 25000
+    }
+  ]
+}

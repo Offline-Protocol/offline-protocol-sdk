@@ -2440,7 +2440,7 @@ impl OfflineProtocol {
     /// | `extension`        | `name: string, payloadJson: string` |
     ///
     /// Returns `None` when empty. The queue is bounded
-    /// ([`TELEMETRY_POLL_QUEUE_CAP`], drop-oldest on overflow) and is only
+    /// (`TELEMETRY_POLL_QUEUE_CAP`, drop-oldest on overflow) and is only
     /// populated while a sink is installed.
     pub fn poll_telemetry_frame(&self) -> Option<String> {
         recover_mutex(&self.telemetry_queue, "telemetry_queue").pop_front()
@@ -2889,7 +2889,7 @@ impl OfflineProtocol {
     /// BLE transport is not registered.
     ///
     /// **Lock handling:** this method intentionally uses
-    /// [`recover_mutex`] rather than [`Self::lock_inner`] because it is
+    /// `recover_mutex` rather than `Self::lock_inner` because it is
     /// a pure, read-only telemetry getter with an infallible return
     /// type. Propagating `LockPoisoned` as a `Result<u64, ProtocolError>`
     /// would force every dashboard call site to unwrap, and telemetry
@@ -4675,7 +4675,7 @@ impl OfflineProtocol {
 
     /// Derive a deterministic user ID from a public key.
     ///
-    /// Returns a base58-encoded string derived from SHA-256(publicKey)[0:20].
+    /// Returns a base58-encoded string derived from `SHA-256(publicKey)[0:20]`.
     /// The same public key always produces the same user ID.
     pub fn derive_user_id_from_public_key(&self, public_key: Vec<u8>) -> String {
         CoreMlsManager::derive_user_id_from_public_key(&public_key)

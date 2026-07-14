@@ -65,7 +65,7 @@ impl WelcomeReasonCode {
 pub enum SecurityWarningCode {
     /// A pinned peer presented a different public key — legitimate reinstall /
     /// new device, or a key-substitution / impersonation attempt. If the change
-    /// is legitimate, the remedy is [`OfflineProtocol::reset_tofu_for_peer`].
+    /// is legitimate, the remedy is [`crate::OfflineProtocol::reset_tofu_for_peer`].
     TofuKeyMismatch,
     /// The TOFU store is full and no entry was old enough to evict, so a new
     /// peer's key could not be pinned (it is re-verified on each contact).

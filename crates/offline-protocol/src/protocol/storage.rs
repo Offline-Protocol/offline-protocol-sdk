@@ -980,7 +980,7 @@ impl OfflineProtocol {
     ///
     /// The id is `SHA-256(secret || domain)` truncated to a 32-character hex
     /// string, where `secret` is the per-install scrub secret managed by
-    /// [`Self::restore_or_init_scrub_secret`]. The secret cannot be recovered
+    /// `Self::restore_or_init_scrub_secret`. The secret cannot be recovered
     /// from the id, and the fixed domain string keeps the id un-correlatable
     /// with opaque identifiers the scrubber produces for telemetry records:
     /// the domain contains `:`, which id validation
