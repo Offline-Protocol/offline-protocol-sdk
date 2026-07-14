@@ -124,7 +124,7 @@ interface EncryptionConfig {
   enabled?: boolean;        // Default: true
   autoKeyExchange?: boolean; // Default: true
   storePending?: boolean;    // Default: true
-  requireEncryption?: boolean; // Default: false
+  requireEncryption?: boolean; // Default: true (fail-closed)
   pendingQueue?: {
     maxPendingPerPeer?: number; // Default: 64
     maxPendingGlobal?: number;  // Default: 4096
@@ -496,29 +496,29 @@ pub enum GroupRole {
 
 ```rust
 /// Set a member's role (admin only).
-pub fn mesh_set_member_role(
+pub fn set_member_role(
     &mut self,
     group_id: &str,
     user_id: &str,
-    role: &str,  // "admin" or "member"
+    role: GroupRole,  // GroupRole::Admin or GroupRole::Member
 ) -> Result<()>
 ```
 
 ```rust
 /// Get a member's role.
-pub fn mesh_get_member_role(
+pub fn get_member_role(
     &self,
     group_id: &str,
     user_id: &str,
-) -> Result<String>
+) -> Result<GroupRole>
 ```
 
 ```rust
 /// Get all member roles in a group.
-pub fn mesh_get_group_roles(
+pub fn get_group_roles(
     &self,
     group_id: &str,
-) -> Result<HashMap<String, String>>
+) -> Result<HashMap<String, GroupRole>>
 ```
 
 ### Group Info
@@ -565,7 +565,7 @@ pub fn reset_tofu_for_peer(
 ### Security Invariants
 
 - The group creator is automatically assigned `Admin`.
-- Only admins can call `mesh_invite_to_group`, `mesh_remove_from_group`, `mesh_set_member_role`, and `rename_group`.
+- Only admins can call `invite_to_group`, `remove_from_group`, `set_member_role`, and `rename_group`.
 - The last admin cannot be demoted, removed, or leave — returns `Error::LastAdmin`.
 - If the last admin leaves unexpectedly, deterministic election promotes the lexicographically smallest member.
 

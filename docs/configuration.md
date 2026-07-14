@@ -89,7 +89,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
     enabled: true,           // Messages automatically encrypted
     autoKeyExchange: true,   // Key packages exchanged on discovery
     storePending: true,      // Queue messages until session established
-    requireEncryption: false // Best-effort by default; set true for strict mode
+    requireEncryption: true  // Fail-closed by default; set false for best-effort/plaintext
   },
   
   dors: {

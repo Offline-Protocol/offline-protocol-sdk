@@ -36,7 +36,7 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 
 # 4. Code is formatted
-cargo fmt --workspace
+cargo fmt --all
 ```
 
 ### Safety Requirements
@@ -137,7 +137,7 @@ offline-protocol-sdk/
 
 - [ ] Tests pass (`cargo test --workspace`)
 - [ ] No clippy warnings (`cargo clippy --workspace -- -D warnings`)
-- [ ] Code formatted (`cargo fmt --workspace`)
+- [ ] Code formatted (`cargo fmt --all`)
 - [ ] Documentation updated
 - [ ] Conventional commit messages
 - [ ] No breaking changes (or clearly documented)
@@ -177,10 +177,10 @@ cargo clippy --workspace -- -D warnings
 
 ```bash
 # Format all code
-cargo fmt --workspace
+cargo fmt --all
 
 # Check formatting without applying
-cargo fmt --workspace -- --check
+cargo fmt --all -- --check
 ```
 
 ### Documentation
