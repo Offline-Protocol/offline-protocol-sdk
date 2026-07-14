@@ -538,9 +538,20 @@ class InternetManager(
     
     private fun sendAuthentication() {
         val ws = webSocket ?: return
-        
-        // Use auth token if available, otherwise fall back to deviceId
-        val token = authToken ?: deviceId
+
+        // Fail closed: only ever present a real auth token (JWT). Never fall back
+        // to deviceId — the relay treats the token as the caller's identity, so
+        // sending deviceId (== userId == relay username) authenticates as an
+        // unverified, forgeable identity (impersonation). Without a token we
+        // simply don't authenticate: on the connect path the armed auth watchdog
+        // (scheduleAuthTimeout) then tears the un-authenticated socket down; on
+        // the setAuthToken(null)-while-connected path any existing session
+        // (auth'd under the prior token) is left untouched.
+        val token = authToken
+        if (token.isNullOrEmpty()) {
+            emitDiagnostic("error", "No auth token set; refusing to authenticate with deviceId (forgeable identity). Call setAuthToken with a valid token before connecting.")
+            return
+        }
         val authMessage = org.json.JSONObject().apply {
             put("type", "Authenticate")
             put("token", token)
