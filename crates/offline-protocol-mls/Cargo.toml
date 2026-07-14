@@ -34,7 +34,7 @@ bs58 = "0.5"
 sha2 = "0.10"
 
 # Ed25519 for signature verification
-ed25519-dalek = { version = "2.1", features = ["digest"] }
+ed25519-dalek = { version = "3.0", features = ["digest"] }
 
 # UUID for group IDs
 uuid = { workspace = true }
