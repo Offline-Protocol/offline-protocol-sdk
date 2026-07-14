@@ -40,6 +40,7 @@ pub(crate) mod common;
 pub mod constants;
 pub mod error;
 pub mod internet;
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 pub mod nostr;
 pub mod nostr_crypto;
@@ -61,6 +62,6 @@ pub use traits::{Transport, TransportStatus};
 pub use types::{LinkQuality, SharedCallback, TransportMetrics, TransportType};
 pub use wifi_direct::{WifiDirectConfig, WifiDirectPeer, WifiDirectTransport};
 
-// MockTransport is only available for testing
-#[cfg(test)]
+// MockTransport is only available to this crate's tests or explicit test consumers.
+#[cfg(any(test, feature = "test-utils"))]
 pub use mock::MockTransport;

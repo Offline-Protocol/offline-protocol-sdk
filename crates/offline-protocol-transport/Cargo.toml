@@ -8,6 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Transport abstraction layer for the Offline Protocol SDK"
 
+[features]
+default = []
+test-utils = []
+
 [dependencies]
 offline-protocol-core = { workspace = true }
 serde = { workspace = true }

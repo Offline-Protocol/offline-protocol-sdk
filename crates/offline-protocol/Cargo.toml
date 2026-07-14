@@ -26,6 +26,7 @@ sha2 = "0.10"
 zeroize = { workspace = true }
 
 [dev-dependencies]
+offline-protocol-transport = { workspace = true, features = ["test-utils"] }
 
 [lib]
 
