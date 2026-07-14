@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /bindings/python
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: /bindings/react-native
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: gradle
+    directory: /bindings/react-native/android
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
