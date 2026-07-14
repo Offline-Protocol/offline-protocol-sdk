@@ -31,7 +31,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Error handling
-thiserror = "1.0"
+thiserror = "2.0"
 
 # UUID generation
 uuid = { version = "1.6", features = ["v4", "serde"] }
@@ -39,14 +39,11 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
-# Async runtime (for future use)
-tokio = { version = "1.35", features = ["full"] }
+# Async runtime
+tokio = "1.35"
 
 # Logging
 tracing = "0.1"
-
-# FFI
-cbindgen = "0.26"
 
 # Benchmarking
 criterion = "0.5"
@@ -108,4 +105,3 @@ panic = "abort"
 
 [profile.bench]
 inherits = "release"
-
