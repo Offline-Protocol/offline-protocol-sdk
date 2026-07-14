@@ -44,7 +44,7 @@ jobs:
 
       - name: Cache uniffi-bindgen
         id: cache-uniffi
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen
           key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
@@ -154,7 +154,7 @@ jobs:
 
       - name: Cache uniffi-bindgen
         id: cache-uniffi
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen
           key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
@@ -335,7 +335,7 @@ jobs:
 
       - name: Cache uniffi-bindgen
         id: cache-uniffi
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen
           key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
