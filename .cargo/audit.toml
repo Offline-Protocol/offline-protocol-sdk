@@ -1,0 +1,9 @@
+[advisories]
+ignore = [
+    # hpke-rs 0.6.1 records its optional libcrux backend in Cargo.lock even
+    # though OpenMLS is compiled with hpke-rs-rust-crypto only. The vulnerable
+    # crate is absent from every workspace build graph, and the latest hpke-rs
+    # release still pins libcrux-aead 0.0.7, so no resolvable upgrade exists.
+    # Re-evaluate when hpke-rs publishes support for libcrux-aead >=0.0.8.
+    "RUSTSEC-2026-0124",
+]
