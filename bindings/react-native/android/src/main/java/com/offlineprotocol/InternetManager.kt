@@ -501,7 +501,7 @@ class InternetManager(
             // the timers only start on Authenticated).
             scheduleAuthTimeout(ws)
 
-            // Authenticate with the relay server using deviceId as the user ID
+            // Authenticate with the configured auth token (fails closed if unset).
             sendAuthentication()
         }
     }
@@ -559,9 +559,9 @@ class InternetManager(
         
         val sent = ws.send(authMessage.toString())
         if (sent) {
-            emitDiagnostic("debug", "Auth message sent", mapOf(
-                "userId" to deviceId
-            ))
+            // Don't log the token (a secret) or deviceId (not the
+            // authenticated identity) — just record that the frame went out.
+            emitDiagnostic("debug", "Auth message sent")
         } else {
             emitDiagnostic("error", "Failed to send auth message")
         }

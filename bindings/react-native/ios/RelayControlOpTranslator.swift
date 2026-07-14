@@ -35,8 +35,9 @@ final class RelayControlOpTranslator {
     /// admin-denial answering some other actor's operation can never
     /// permanently silence membership sync. If the relay rewords these,
     /// non-admin devices without the core's `is_admin` hint fall back to
-    /// re-learning the denial each connection — noisy but safe. Keep in sync
-    /// with the relay source (see docs/relay-transport-parity-spec.md).
+    /// re-learning the denial each connection — noisy but safe. These strings
+    /// are an external wire contract — keep them in sync with the denial
+    /// reasons received over the internet transport.
     static let adminDeniedReasonMarker = "Only admins"
 
     /// SDK content prefixes only the relay server (bridged by
