@@ -5,6 +5,9 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[lib]
+bench = false
+
 [[bench]]
 name = "message_throughput"
 harness = false
@@ -40,4 +43,3 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-

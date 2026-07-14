@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use offline_protocol_core::{AppId, Message, UserId};
 use offline_protocol_transport::{Transport, TransportType};
 
@@ -20,6 +20,7 @@ fn bench_message_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("message_creation");
 
     for size in [10, 100, 1000, 10000].iter() {
+        group.throughput(Throughput::Bytes(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             b.iter(|| {
                 black_box(create_test_message(size));
@@ -36,6 +37,7 @@ fn bench_message_serialization(c: &mut Criterion) {
     for size in [10, 100, 1000, 10000].iter() {
         let message = create_test_message(*size);
 
+        group.throughput(Throughput::Bytes(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
             b.iter(|| {
                 black_box(serde_json::to_vec(&message).unwrap());
@@ -53,9 +55,10 @@ fn bench_transport_send_receive(c: &mut Criterion) {
     let mut group = c.benchmark_group("transport_send_receive");
 
     for size in [10, 100, 1000].iter() {
+        group.throughput(Throughput::Bytes(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             b.iter(|| {
-                let mut transport = MockTransport::new(TransportType::BLE);
+                let transport = MockTransport::new(TransportType::BLE);
                 transport.start().unwrap();
 
                 let message = create_test_message(size);

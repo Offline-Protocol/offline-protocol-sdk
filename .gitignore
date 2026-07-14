@@ -21,6 +21,10 @@ Thumbs.db
 *.a
 *.lib
 
+# Python
+__pycache__/
+*.py[cod]
+
 # Node
 node_modules/
 examples/react-native-app/node_modules/

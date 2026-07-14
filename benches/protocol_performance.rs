@@ -22,7 +22,7 @@ fn bench_protocol_start_stop(c: &mut Criterion) {
             let mut protocol = OfflineProtocol::new(config).unwrap();
 
             // Add mock transport
-            let mut mock_transport = MockTransport::new(TransportType::BLE);
+            let mock_transport = MockTransport::new(TransportType::BLE);
             mock_transport.start().unwrap();
             protocol
                 .transport_manager_mut()
@@ -49,7 +49,7 @@ fn bench_send_message(c: &mut Criterion) {
                 let mut protocol = OfflineProtocol::new(config).unwrap();
 
                 // Add mock transport
-                let mut mock_transport = MockTransport::new(TransportType::BLE);
+                let mock_transport = MockTransport::new(TransportType::BLE);
                 mock_transport.start().unwrap();
                 protocol
                     .transport_manager_mut()
@@ -84,7 +84,7 @@ fn bench_process_loop(c: &mut Criterion) {
                 let mut protocol = OfflineProtocol::new(config).unwrap();
 
                 // Add mock transport
-                let mut mock_transport = MockTransport::new(TransportType::BLE);
+                let mock_transport = MockTransport::new(TransportType::BLE);
                 mock_transport.start().unwrap();
                 protocol
                     .transport_manager_mut()
