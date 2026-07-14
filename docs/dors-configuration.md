@@ -371,32 +371,52 @@ Platform code automatically updates metrics, but you can trigger updates:
 
 ```kotlin
 // Android - Update BLE metrics
-nativeUpdateTransportMetrics(
-    handle,
-    transportType = 1, // BLE
-    rssi = currentRssi,
-    latencyMs = measuredLatency,
-    bandwidthBps = estimatedBandwidth,
-    congestion = queuePressure,
-    queueDepth = pendingMessages,
-    successCount = successfulSends,
-    failureCount = failedSends
+val metrics = TransportMetrics(
+    packetsSent = successfulSends.toUInt(),
+    packetsReceived = 0u,
+    bytesSent = 0u,
+    bytesReceived = 0u,
+    errorRate = 0f,
+    avgLatencyMs = measuredLatency.toUInt(),
+    rssi = currentRssi.toShort(),
+    bandwidthBps = estimatedBandwidth.toULong(),
+    congestion = queuePressure.toFloat(),
+    queueDepth = pendingMessages.toUInt(),
+    batteryLevel = null,
+    isCharging = null,
+    relayConnectionCount = null,
+    isActiveRelay = null,
+    deliveryRatio = null,
+    dropRate = null,
+    averageHopCount = null,
+    energyCost = null,
 )
+protocol.updateTransportMetrics(TransportType.BLE, metrics)
 ```
 
 ```swift
 // iOS - Update BLE metrics
-offline_protocol_update_transport_metrics(
-    handle,
-    1, // BLE
-    currentRssi,
-    measuredLatency,
-    estimatedBandwidth,
-    queuePressure,
-    pendingMessages,
-    successfulSends,
-    failedSends
+let metrics = TransportMetrics(
+    packetsSent: UInt32(successfulSends),
+    packetsReceived: 0,
+    bytesSent: 0,
+    bytesReceived: 0,
+    errorRate: 0,
+    avgLatencyMs: UInt32(measuredLatency),
+    rssi: Int16(currentRssi),
+    bandwidthBps: UInt64(estimatedBandwidth),
+    congestion: Float(queuePressure),
+    queueDepth: UInt32(pendingMessages),
+    batteryLevel: nil,
+    isCharging: nil,
+    relayConnectionCount: nil,
+    isActiveRelay: nil,
+    deliveryRatio: nil,
+    dropRate: nil,
+    averageHopCount: nil,
+    energyCost: nil
 )
+try protocol.updateTransportMetrics(transportType: .ble, metrics: metrics)
 ```
 
 ## Performance Considerations
@@ -446,4 +466,3 @@ DORS automatically factors energy efficiency into scoring (30% weight for BLE).
 - [Architecture Overview](architecture.md)
 - [Transport Architecture](transport-architecture.md)
 - [Configuration Reference](configuration.md)
-

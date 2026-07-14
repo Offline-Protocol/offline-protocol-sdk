@@ -2,6 +2,10 @@
 
 Complete guide to configuring the Offline Protocol SDK for different use cases.
 
+The TypeScript examples below target the React Native package. Desktop apps on
+macOS, Linux, and Windows can use the Python binding's snake_case
+`ProtocolConfig`; see the [Python binding guide](../bindings/python/README.md).
+
 ## Configuration Structure
 
 ```typescript
@@ -430,6 +434,39 @@ The SDK validates configuration on creation:
 }
 ```
 
+### Desktop (Python)
+
+The Python binding supports macOS, Linux, and Windows. Internet/WebSocket, BLE,
+Reticulum, and Nostr are available; Wi-Fi Direct is not implemented on desktop.
+Configuration uses the generated snake_case fields:
+
+```python
+from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
+
+config = ProtocolConfig(
+    app_id="desktop-app",
+    user_id="alice",
+    ble_enabled=True,
+    wifi_direct_enabled=False,
+    internet_enabled=True,
+    reticulum_enabled=False,
+    nostr_enabled=False,
+    prefer_online=True,
+    initial_ttl=8,
+    encryption_enabled=True,
+    auto_key_exchange=True,
+    store_pending=True,
+    require_encryption=True,
+    max_pending_per_peer=64,
+    max_pending_global=4096,
+    pending_ttl_ms=120_000,
+    overflow_policy=OverflowPolicy.DROP_OLDEST,
+)
+```
+
+Build and package details are in
+[`bindings/python/README.md`](../bindings/python/README.md).
+
 ### Web
 
 **Available Transports**: Internet only
@@ -518,4 +555,3 @@ The SDK validates configuration on creation:
 - Quick transport switching
 - Lower hysteresis
 - Shorter stability window
-

@@ -175,9 +175,9 @@ Reliability layer configuration.
 
 ```rust
 pub struct ReliabilityConfig {
-    pub ack: AckConfig,      // ACK timeout: 5000ms, max pending: 1000
-    pub retry: RetryConfig,  // Max retries: 3, backoff: 2.0x
-    pub dedup: DeduplicatorConfig, // Max tracked: 10000, retention: 1 hour
+    pub ack: AckConfig,      // ACK timeout: 10000ms, max pending: 1000
+    pub retry: RetryConfig,  // Max retries: 10, backoff: 2.0x
+    pub dedup: DeduplicatorConfig, // Max tracked: 1000, retention: 1 hour
 }
 ```
 
@@ -637,4 +637,3 @@ See platform-specific documentation:
 - [React Native Integration](react-native-integration.md)
 - [iOS Integration](ios-integration.md)
 - [Android Integration](android-integration.md)
-

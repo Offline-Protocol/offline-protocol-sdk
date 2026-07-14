@@ -33,7 +33,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 - `Transport` trait (send, receive, status, metrics)
 - `TransportType` enum (BLE, WiFi Direct, Internet, Reticulum, Nostr)
 - `TransportMetrics` for monitoring
-- `MockTransport` for testing
+- `MockTransport` for consumers that explicitly enable the `test-utils` feature
 - Shared `common` module for cross-transport helper functions
 
 **Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
@@ -65,9 +65,9 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 **Purpose**: Reliable delivery guarantees.
 
 **Key Components**:
-- `AckManager` - Timeout tracking (default 5s)
-- `RetryQueue` - Exponential backoff (1s → 2s → 4s, max 30s)
-- `Deduplicator` - Message ID tracking (10,000 IDs, 1-hour retention)
+- `AckManager` - Timeout tracking (default 10s)
+- `RetryQueue` - Exponential backoff (1s → 2s → 4s, max 30s; 10 retries)
+- `Deduplicator` - Message ID tracking (1,000 IDs, 1-hour retention)
 
 **Data Structures**:
 - `BinaryHeap` for priority queue (retry queue)
@@ -78,7 +78,20 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `offline-protocol-core`
 
-### 5. offline-protocol-services
+### 5. offline-protocol-mls
+
+**Purpose**: End-to-end encryption for one-to-one and group messaging using MLS (RFC 9420).
+
+**Key Components**:
+- `MlsManager` - Session, group, key-package, encryption, and decryption lifecycle
+- `MlsStorage` - Storage-agnostic interface for platform secure storage
+- `GroupId`, `GroupInfo`, `EncryptedMessage`, and `WelcomeMessage`
+
+**Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
+
+**Dependencies**: `offline-protocol-core`, OpenMLS
+
+### 6. offline-protocol-services
 
 **Purpose**: Standalone service discovery and request/response over the mesh.
 
@@ -99,7 +112,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `offline-protocol-core`
 
-### 6. offline-protocol
+### 7. offline-protocol
 
 **Purpose**: Main SDK API integrating all components.
 
@@ -117,7 +130,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: All other crates
 
-### 7. offline-protocol-uniffi
+### 8. offline-protocol-uniffi
 
 **Purpose:** UniFFI bindings for cross-platform interoperability.
 
@@ -163,7 +176,7 @@ Distributes messages across top K relays (default 3):
 
 ```
 1. Message sent → Register pending ACK
-2. Start timeout timer (default 5s)
+2. Start timeout timer (default 10s)
 3. If ACK received → Emit MessageDelivered event
 4. If timeout → Add to retry queue
 5. If max retries → Emit MessageFailed event
@@ -176,13 +189,14 @@ Retry 0: Wait 1s
 Retry 1: Wait 2s  (1s * 2.0)
 Retry 2: Wait 4s  (2s * 2.0)
 Retry 3: Wait 8s  (4s * 2.0)
-Max: 30s
+Retry 4: Wait 16s (8s * 2.0)
+Retry 5-10: Wait 30s (maximum-delay clamp)
 ```
 
 ### Deduplication
 
 **Method**: Hash-based tracking
-**Capacity**: 10,000 message IDs
+**Capacity**: 1,000 message IDs
 **Retention**: 1 hour
 **Eviction**: FIFO when at capacity
 
@@ -294,4 +308,3 @@ Run all tests with `cargo test --workspace`.
 ### Encryption
 
 End-to-end encryption is provided via MLS (RFC 9420) with automatic key exchange and session management. See [MLS Integration Guide](mls-integration.md) for details.
-

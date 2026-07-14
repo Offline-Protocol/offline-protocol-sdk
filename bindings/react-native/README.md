@@ -366,7 +366,7 @@ async function cleanup() {
 3. **Message queued** for transmission
 4. **DORS selects transport** (BLE, WiFi Direct, or Internet)
 5. **Message sent** to connected peers
-6. **ACK tracking begins** (default 5s timeout)
+6. **ACK tracking begins** (default 10s timeout)
 7. **On ACK received**: `message_delivered` event fires
 8. **On timeout/max retries**: `message_failed` event fires
 
@@ -483,18 +483,18 @@ interface NetworkConfig {
 ```typescript
 interface ReliabilityConfig {
   ack?: {
-    defaultTimeoutMs?: number;   // default: 5000
+    defaultTimeoutMs?: number;   // default: 10000
     maxPendingAcks?: number;     // default: 1000
   };
   retry?: {
-    maxRetries?: number;         // default: 5
+    maxRetries?: number;         // default: 10
     initialDelayMs?: number;     // default: 1000
     maxDelayMs?: number;         // default: 30000
     backoffMultiplier?: number;  // default: 2.0
     outboxMaxLifetimeMs?: number; // default: 3600000
   };
   dedup?: {
-    maxTrackedMessages?: number; // default: 10000
+    maxTrackedMessages?: number; // default: 1000
     retentionTimeSecs?: number;  // default: 3600
   };
 }
@@ -505,7 +505,7 @@ interface ReliabilityConfig {
 ```typescript
 interface PathConfig {
   forwardToTopK?: number;        // default: 3
-  maxCongestionLevel?: number;   // default: 0.8
+  maxCongestionLevel?: number;   // default: 0.7
 }
 ```
 
