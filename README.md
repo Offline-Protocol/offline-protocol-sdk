@@ -5,7 +5,7 @@
 [![CI](https://github.com/Offline-Protocol/offline-protocol-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Offline-Protocol/offline-protocol-sdk/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@offline-protocol/mesh-sdk.svg?logo=npm)](https://www.npmjs.com/package/@offline-protocol/mesh-sdk)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--only%20or%20Commercial-blue.svg)](#license)
-[![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20Android%20%7C%20React%20Native-lightgrey.svg)](#building-the-sdk)
+[![Platforms](https://img.shields.io/badge/platforms-iOS%20%7C%20Android%20%7C%20macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#building-the-sdk)
 
 **Dual-licensed:** use it under [AGPL-3.0-only](LICENSE), or buy a [commercial license](LICENSE-COMMERCIAL.md), your call. The AGPL requires you to publish your source whenever you distribute the SDK or expose it over a network (section 13); the commercial license lifts that requirement for closed-source mobile apps, embedded firmware, and SaaS deployments. See the [License](#license) section for the full breakdown.
 
@@ -17,10 +17,11 @@
 - **Group Roles**: Admin/member role management with last-admin safety invariants
 - **DORS**: Dynamic Offline Relay Switch for optimal transport selection
 - **Reliability**: ACKs, retries, and deduplication built-in
+- **Cross-Platform Bindings**: React Native for iOS/Android and Python for macOS/Linux/Windows
 
 ## Quick Start
 
-### For React Native Apps:
+### For React Native Apps
 
 ```bash
 npm install @offline-protocol/mesh-sdk
@@ -47,6 +48,46 @@ const messageId = await protocol.sendMessage({
   priority: MessagePriority.Medium,
 });
 ```
+
+### For Python Desktop Apps
+
+The Python binding supports macOS, Linux, and Windows. Build and install it
+from the repository:
+
+```bash
+cd bindings/python
+bash scripts/build-desktop.sh
+pip install -e .
+```
+
+```python
+from offline_protocol_sdk import ProtocolManager
+from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
+
+config = ProtocolConfig(
+    app_id="my-app",
+    user_id="user123",
+    ble_enabled=False,
+    wifi_direct_enabled=False,
+    internet_enabled=True,
+    reticulum_enabled=False,
+    nostr_enabled=False,
+    prefer_online=True,
+    initial_ttl=8,
+    encryption_enabled=True,
+    auto_key_exchange=True,
+    store_pending=True,
+    require_encryption=False,
+    max_pending_per_peer=64,
+    max_pending_global=4096,
+    pending_ttl_ms=120_000,
+    overflow_policy=OverflowPolicy.DROP_OLDEST,
+)
+protocol = ProtocolManager(config)
+```
+
+See the [Python binding guide](bindings/python/README.md) for transport setup,
+secure storage, and complete lifecycle examples.
 
 ### Encryption Configuration
 
@@ -76,12 +117,12 @@ each plaintext send then emits a `security_warning` event with the
 
 ## Building the SDK
 
-### Prerequisites:
+### Prerequisites
 - Rust (via rustup)
 - uniffi-bindgen: `cargo install uniffi --features="cli"`
 - ndk: `cargo install cargo-ndk`
 
-### Build UniFFI Libraries:
+### Build Mobile UniFFI Libraries
 
 ```bash
 cd bindings/react-native
@@ -96,6 +137,16 @@ npm run build:uniffi:android  # Android only
 # Regenerate bindings after UDL changes
 npm run generate:bindings
 ```
+
+### Build Python Desktop Bindings
+
+```bash
+cd bindings/python
+bash scripts/build-desktop.sh
+```
+
+The desktop build produces the native `.dylib`, `.so`, or `.dll` for the host
+platform and regenerates the Python UniFFI module.
 
 
 ## Architecture
@@ -136,6 +187,7 @@ See the [docs/](docs/) directory for detailed guides:
 - [Transport Architecture](docs/transport-architecture.md)
 - [Service Discovery](docs/service-discovery.md)
 - [React Native Integration](docs/react-native-integration.md)
+- [Python Desktop Bindings](bindings/python/README.md)
 - [Reticulum Transport](docs/reticulum.md) / [Nostr Transport](docs/nostr.md)
 - [Telemetry](docs/telemetry.md)
 - [iOS Integration](docs/ios-integration.md) / [Android Integration](docs/android-integration.md)

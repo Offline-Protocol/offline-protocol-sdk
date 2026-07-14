@@ -29,7 +29,7 @@ import {
   OfflineProtocol,
   type TelemetryRecord,
   type TelemetryConfig,
-} from 'offline-protocol-react-native';
+} from '@offline-protocol/mesh-sdk';
 
 const proto = new OfflineProtocol(config);
 await proto.start();

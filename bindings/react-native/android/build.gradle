@@ -36,13 +36,6 @@ android {
         }
     }
 
-    // UniFFI libraries are pre-built Rust .so files, no CMake needed
-    // externalNativeBuild {
-    //    cmake {
-    //        path "src/main/cpp/CMakeLists.txt"
-    //    }
-    // }
-
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -91,4 +84,3 @@ dependencies {
     // that throws) — needed by RelayControlOpTranslatorTest.
     testImplementation 'org.json:json:20260522'
 }
-

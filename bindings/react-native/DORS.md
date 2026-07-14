@@ -53,7 +53,7 @@ Measures the throughput capability of each transport. Higher bandwidth transport
 - Reticulum (LoRa): ~0.7 KB/s typical, ~2.7 KB/s peak (20 points default)
 - BLE: ~150 KB/s baseline (40 points default)
 - Wi-Fi Direct: ~2 MB/s baseline (90 points default)
-- Internet: Assumed high bandwidth (100 points default)
+- Internet: 50 points by default, or 70 when `preferOnline` is enabled
 
 ### Congestion
 Indicates how backed up the transport queue is. Less congested paths receive higher scores to distribute load and reduce latency.
@@ -219,9 +219,6 @@ const config = {
 | `ttlEscalationHoldSecs` | 20 | How long TTL escalation flag stays active |
 | `historyWindowSize` | 10 | Number of historical samples for smoothing |
 | `queueRecoveryRatio` | 0.5 | Queue ratio that clears congestion flag |
-| `lowBatteryThreshold` | 20 | Battery percentage considered low |
-| `relayMinBatteryLevel` | 30 | Minimum battery for high-power transports |
-| `relayOptimalConnectionCount` | 4 | Target relay connections before saturation |
 | `preferOnline` | false | Prefer Internet transport when available |
 
 ## Listening to Transport Events
@@ -257,4 +254,3 @@ Lower congestion thresholds and enable faster escalation to Wi-Fi Direct for ban
 - **Battery Impact**: DORS itself is lightweight; transport choices have the primary impact
 
 DORS is designed to be a transparent, intelligent layer that optimizes message routing without requiring application-level intervention.
-

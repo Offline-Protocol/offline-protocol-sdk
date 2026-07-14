@@ -378,7 +378,9 @@ impl EncryptedMessage {
             if *pos + 4 > data.len() {
                 return Err(err("unexpected end of data reading u32".to_string()));
             }
-            let val = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&data[*pos..*pos + 4]);
+            let val = u32::from_le_bytes(bytes);
             *pos += 4;
             Ok(val)
         };
@@ -387,7 +389,9 @@ impl EncryptedMessage {
             if *pos + 8 > data.len() {
                 return Err(err("unexpected end of data reading u64".to_string()));
             }
-            let val = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[*pos..*pos + 8]);
+            let val = u64::from_le_bytes(bytes);
             *pos += 8;
             Ok(val)
         };

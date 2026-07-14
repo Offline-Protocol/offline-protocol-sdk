@@ -161,7 +161,9 @@ impl MediaChunkPlaintext {
             if pos + 4 > data.len() {
                 return Err("unexpected end of data reading metadata length".to_string());
             }
-            let meta_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            let mut length_bytes = [0u8; 4];
+            length_bytes.copy_from_slice(&data[pos..pos + 4]);
+            let meta_len = u32::from_le_bytes(length_bytes) as usize;
             pos += 4;
             if meta_len > MAX_METADATA_JSON_LEN {
                 return Err(format!(

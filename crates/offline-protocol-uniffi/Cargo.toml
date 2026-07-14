@@ -8,6 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 description = "UniFFI bindings for the Offline Protocol SDK"
 
+[lints]
+workspace = true
+
 [dependencies]
 offline-protocol = { workspace = true }
 offline-protocol-core = { workspace = true }
@@ -32,4 +35,3 @@ name = "offline_protocol_uniffi"
 
 [features]
 default = []
-

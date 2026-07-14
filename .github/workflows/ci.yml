@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 # Cancel outdated runs on the same PR — only latest commit matters
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
@@ -49,13 +52,40 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --locked -- -D warnings
 
-  test:
-    name: Test
+  msrv:
+    name: MSRV (Rust 1.87)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@1.87.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-msrv
+
+      - name: Check workspace on MSRV
+        run: cargo check --workspace --all-targets --locked
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            release_target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            release_target: aarch64-apple-darwin
+          - os: windows-latest
+            release_target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.release_target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -63,6 +93,9 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+      - name: Build release cdylib
+        run: cargo build --release --locked --target ${{ matrix.release_target }} --package offline-protocol-uniffi
 
   security:
     name: Dependency Audit
@@ -100,6 +133,19 @@ jobs:
           if ! git diff --exit-code -- bindings/python/offline_protocol_sdk/offline_protocol.py; then
             echo "::error::bindings/python/offline_protocol_sdk/offline_protocol.py is out of date."
             echo "Run: bash bindings/python/scripts/build-desktop.sh and commit the regenerated file."
+            exit 1
+          fi
+
+      - name: Regenerate Swift and Kotlin bindings
+        run: bash bindings/react-native/scripts/generate-bindings.sh
+
+      - name: Fail on stale Swift or Kotlin bindings
+        run: |
+          if ! git diff --exit-code -- \
+            bindings/react-native/ios/Generated/ \
+            bindings/react-native/android/src/main/java/uniffi/; then
+            echo "::error::Committed Swift/Kotlin UniFFI bindings are out of date."
+            echo "Run: bash bindings/react-native/scripts/generate-bindings.sh"
             exit 1
           fi
 
@@ -151,7 +197,7 @@ jobs:
         run: swift test --package-path bindings/react-native/ios
 
   coverage:
-    name: Code Coverage
+    name: Coverage Report
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -166,13 +212,16 @@ jobs:
           shared-key: ci-coverage
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        # Keep third-party installers immutable in CI. Update the SHA when
+        # intentionally upgrading taiki-e/install-action v2.
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
 
       - name: Generate coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
 
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v7
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: lcov.info
-          fail_ci_if_error: false
+          name: rust-lcov
+          path: lcov.info
+          retention-days: 14

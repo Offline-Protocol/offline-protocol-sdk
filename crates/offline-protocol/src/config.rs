@@ -380,6 +380,32 @@ impl ProtocolConfig {
             ));
         }
 
+        if self.reliability.dedup.use_bloom_filter {
+            if self.reliability.dedup.bloom_filter_bits == 0 {
+                return Err(crate::Error::InvalidConfiguration(
+                    "reliability.dedup.bloom_filter_bits must be greater than 0".to_string(),
+                ));
+            }
+
+            if self.reliability.dedup.bloom_hash_count == 0 {
+                return Err(crate::Error::InvalidConfiguration(
+                    "reliability.dedup.bloom_hash_count must be greater than 0".to_string(),
+                ));
+            }
+
+            if self.reliability.dedup.bloom_filter_count == 0 {
+                return Err(crate::Error::InvalidConfiguration(
+                    "reliability.dedup.bloom_filter_count must be greater than 0".to_string(),
+                ));
+            }
+
+            if self.reliability.dedup.bloom_rotation_secs == 0 {
+                return Err(crate::Error::InvalidConfiguration(
+                    "reliability.dedup.bloom_rotation_secs must be greater than 0".to_string(),
+                ));
+            }
+        }
+
         if self.encryption.require_encryption && !self.encryption.enabled {
             return Err(crate::Error::InvalidConfiguration(
                 "encryption.require_encryption requires encryption.enabled=true".to_string(),
@@ -645,6 +671,23 @@ mod tests {
         let mut config = ProtocolConfig::new("test-app", "user123");
         config.reliability.retry.backoff_multiplier = 0.5;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_rejects_zero_bloom_parameters() {
+        let mutations: [fn(&mut DeduplicatorConfig); 4] = [
+            |dedup: &mut DeduplicatorConfig| dedup.bloom_filter_bits = 0,
+            |dedup: &mut DeduplicatorConfig| dedup.bloom_hash_count = 0,
+            |dedup: &mut DeduplicatorConfig| dedup.bloom_filter_count = 0,
+            |dedup: &mut DeduplicatorConfig| dedup.bloom_rotation_secs = 0,
+        ];
+
+        for mutate in mutations {
+            let mut config = ProtocolConfig::new("test-app", "user123");
+            config.reliability.dedup.use_bloom_filter = true;
+            mutate(&mut config.reliability.dedup);
+            assert!(config.validate().is_err());
+        }
     }
 
     #[test]

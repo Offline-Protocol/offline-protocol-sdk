@@ -45,7 +45,7 @@ Measures the throughput capability of each transport. Higher bandwidth transport
 - BLE: ~150 KB/s baseline (40 points default)
 - Nostr (relay-bounded): ~1 MB/s practical (40 points default)
 - Wi-Fi Direct: ~2 MB/s baseline (90 points default)
-- Internet: Assumed high bandwidth (100 points default)
+- Internet: 50 points by default, or 70 when `prefer_online` is enabled
 
 ### Congestion
 Indicates how backed up the transport queue is. Less congested paths receive higher scores to distribute load and reduce latency.
@@ -237,4 +237,3 @@ DORS emits events when transports are switched:
 - **Battery Impact**: DORS itself is lightweight; transport choices have the primary impact
 
 DORS is designed to be a transparent, intelligent layer that optimizes message routing without requiring application-level intervention.
-
