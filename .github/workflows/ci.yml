@@ -81,6 +81,21 @@ jobs:
       - name: Build documentation
         run: cargo doc --workspace --no-deps --locked
 
+  benchmarks:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-benchmarks
+
+      - name: Compile benchmarks
+        run: cargo bench --package offline-protocol-bench --no-run --locked
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest
