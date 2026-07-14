@@ -6,9 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-07-14
+
 ### Fixed
 
 - **React Native `GroupInfo` and `UserGroups` relay snapshots are now lossless.** Android and iOS continue emitting the existing typed `group_info` / `user_groups` projections and additionally emit the original frame as `internet_server_message`. Application-owned fields such as descriptions, avatars, profiles, membership details, pending join requests, and unknown future extensions now reach JavaScript verbatim without expanding the SDK's typed group schemas. The two events have no cross-channel ordering guarantee.
+
+- **Relay authentication now fails closed when no token is configured.** The Android and iOS internet bridges previously fell back to sending `deviceId` as the authentication token, allowing a forgeable identifier to be presented as an authenticated identity. They now refuse to authenticate without a non-empty token and let the existing authentication watchdog close the unauthenticated connection. Clearing a token on an already-authenticated connection does not invalidate the current session.
+
+- **Invalid Bloom-filter deduplication settings no longer panic.** Top-level protocol configuration now rejects zero-sized filters, zero hash/filter counts, and zero rotation intervals. Direct users of the reliability crate fall back to exact `HashMap` tracking when given invalid Bloom settings.
+
+- **Local Android builds now install the UniFFI library under the name the generated loader expects.** `build-android.sh` writes `libuniffi_offline_protocol.so`, matching release artifacts and preventing successful local builds from failing when the app loads the native library.
+
+- **Python dependency metadata is consistent and installable on Windows.** The reproducible requirements now respect the manifest's Bleak range, and the unsupported Bless peripheral backend is excluded on Windows to avoid incompatible WinRT dependency pins.
+
+### Changed
+
+- **Breaking for direct Rust users: `MockTransport` now requires the `test-utils` feature.** The production `offline-protocol-transport` API no longer exposes test-only mock machinery by default. Tests and development tools that import `MockTransport` must enable `offline-protocol-transport/test-utils`.
+
+- **Build and release checks are stricter.** CI now verifies Rust 1.87 compatibility, generated Swift/Kotlin/Python binding freshness, release-library builds on Linux, macOS, and Windows, dependency policy, and unwrap-free library code. Release credentials are scoped to the publishing job, privileged actions are pinned, and tag-derived versions are validated before use.
 
 ## [0.13.0] — 2026-07-13
 
