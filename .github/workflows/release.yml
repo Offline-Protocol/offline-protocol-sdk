@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -479,13 +479,17 @@ jobs:
     name: Create Release & Publish to npm
     needs: [build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # Pre-built binary — no Rust toolchain needed
-      - uses: taiki-e/install-action@v2
+      # Pinned because this job later receives release credentials. Update the
+      # SHA when intentionally upgrading taiki-e/install-action v2.
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: git-cliff
 
@@ -544,16 +548,25 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+            VERSION="${GITHUB_REF#refs/tags/v}"
           elif [[ -n "$INPUT_VERSION" ]]; then
-            echo "VERSION=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
+            VERSION="$INPUT_VERSION"
           else
-            echo "VERSION=0.0.0-dev" >> "$GITHUB_OUTPUT"
+            VERSION="0.0.0-dev"
           fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid semantic version: $VERSION"
+            exit 1
+          fi
+
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Update package.json version
         working-directory: bindings/react-native
-        run: npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version --allow-same-version
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: npm version "$PACKAGE_VERSION" --no-git-tag-version --allow-same-version
 
       - name: Install dependencies
         working-directory: bindings/react-native
@@ -569,7 +582,8 @@ jobs:
 
       - name: Create GitHub Release
         if: inputs.dry_run != true
-        uses: softprops/action-gh-release@v2
+        # Pinned because this action receives contents:write and GITHUB_TOKEN.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           body_path: RELEASE_NOTES.md
           draft: false
