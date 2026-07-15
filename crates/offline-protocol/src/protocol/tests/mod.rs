@@ -10827,6 +10827,58 @@ fn test_relay_forwards_third_party_message() {
 }
 
 #[test]
+fn relay_restamps_binary_for_capable_third_party() {
+    // A relayed message must be (re-)stamped from the relay's own per-peer
+    // negotiation for the next hop — not left on whatever codec it arrived with.
+    // Here we relay a third-party message to bob, who advertised binary support,
+    // and assert the frame that leaves is a binary frame.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let transport_handle = mock.clone();
+
+    // From alice to bob — a third party, since we are user123 — so it is relayed
+    // rather than delivered locally.
+    let msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "relay me",
+    );
+    mock.queue_message(msg);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    // Bob (the physical next hop in this single-hop relay) advertised binary.
+    protocol
+        .transport_manager_mut()
+        .mark_peer_binary_wire("bob", true);
+    protocol.start().unwrap();
+
+    assert!(
+        protocol.receive_message().is_none(),
+        "third-party message should be relayed, not returned"
+    );
+
+    // Isolate the frame relayed to bob (any incidental control sends go to other
+    // recipients) and assert it was re-stamped binary.
+    let sent = transport_handle.sent_messages();
+    let to_bob: Vec<_> = sent
+        .iter()
+        .filter(|m| m.recipient.as_str() == "bob")
+        .collect();
+    assert_eq!(to_bob.len(), 1, "exactly one frame relayed to bob");
+    assert_eq!(to_bob[0].content, "relay me");
+    assert_eq!(
+        to_bob[0].wire_codec(),
+        offline_protocol_core::WireCodec::BinaryV1,
+        "relay re-stamps binary for a capable next hop"
+    );
+}
+
+#[test]
 fn test_relay_drops_exhausted_ttl() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 

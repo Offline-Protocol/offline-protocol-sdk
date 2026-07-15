@@ -261,6 +261,10 @@ mod tests {
         );
         // transport_peer_id is never carried on the wire.
         assert!(decoded.transport_peer_id().is_none());
+        // A decoded frame carries no wire-codec stamp: it defaults back to JSON
+        // so a relaying node re-negotiates the codec for its *next* hop rather
+        // than blindly re-emitting binary to a possibly-legacy peer.
+        assert_eq!(decoded.wire_codec(), crate::WireCodec::Json);
     }
 
     #[test]

@@ -2127,6 +2127,56 @@ mod tests {
     }
 
     #[test]
+    fn test_ble_fragment_roundtrip_binary_wire() {
+        // A binary-stamped message must survive fragmentation and reassembly:
+        // the wire-v1 magic byte rides in the first fragment's payload and the
+        // reassembly path auto-detects it, so the frame decodes back intact.
+        let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("bob"));
+        let sender = UserId::new("alice").unwrap();
+        let recipient = UserId::new("bob").unwrap();
+        let app_id = AppId::new("app").unwrap();
+        let content = "x".repeat(512);
+
+        let mut message = Message::builder(sender, recipient, app_id)
+            .content(content.clone())
+            .priority(MessagePriority::High)
+            .ttl(TTL::new(8).unwrap())
+            .build();
+        // Stamp binary, exactly as the transport manager does for a peer that
+        // advertised support; `fragment_message` serializes via
+        // `serialize_message_with`, which honors the stamp.
+        message.set_wire_codec(offline_protocol_core::WireCodec::BinaryV1);
+        assert_eq!(
+            transport.serialize_message(&message).unwrap().first(),
+            Some(&offline_protocol_core::WIRE_V1_MAGIC),
+            "a binary-stamped message serializes to a wire-v1 frame"
+        );
+
+        let fragments = transport.fragment_message(&message).unwrap();
+        assert!(
+            fragments.len() > 1,
+            "512-byte content must span multiple BLE fragments"
+        );
+
+        let mut reconstructed = None;
+        for fragment in fragments {
+            if let Some(msg) = transport.process_fragment(&fragment).unwrap() {
+                reconstructed = Some(msg);
+            }
+        }
+        let reconstructed = reconstructed.expect("Expected complete message");
+        assert_eq!(reconstructed.content, content);
+        assert_eq!(reconstructed.id, message.id);
+        // Reassembly decodes back to a plain message; the codec stamp is not
+        // carried on the wire (it defaults to JSON), matching the JSON path.
+        assert_eq!(
+            reconstructed.wire_codec(),
+            offline_protocol_core::WireCodec::Json
+        );
+    }
+
+    #[test]
     fn test_ble_process_fragment_invalid_magic() {
         let transport = BleTransport::new("test-device");
         let mut bad = vec![0x00, 0x00, 1, 0, 0, 0, 0, 0, 0, 0]; // wrong magic
