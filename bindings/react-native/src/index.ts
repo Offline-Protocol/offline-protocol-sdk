@@ -102,10 +102,12 @@ interface NativeConfig {
   nostrEnabled: boolean;
   preferOnline: boolean;
   initialTtl: number;
+  binaryWireEnabled: boolean;
   encryptionEnabled?: boolean;
   autoKeyExchange?: boolean;
   storePending?: boolean;
   requireEncryption?: boolean;
+  compactEnvelopeEnabled: boolean;
   maxPendingPerPeer?: number;
   maxPendingGlobal?: number;
   pendingTtlMs?: number;
@@ -297,11 +299,13 @@ export class OfflineProtocol {
       nostrEnabled: this.config.transports?.nostr?.enabled ?? false,
       preferOnline: dorsSource?.preferOnline ?? false,
       initialTtl: this.config.network?.initialTtl ?? 8,
+      binaryWireEnabled: this.config.binaryWireEnabled ?? true,
       encryptionEnabled: this.config.encryption?.enabled ?? true,
       autoKeyExchange: this.config.encryption?.autoKeyExchange ?? true,
       storePending: this.config.encryption?.storePending ?? true,
       // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
       requireEncryption: this.config.encryption?.requireEncryption ?? true,
+      compactEnvelopeEnabled: this.config.encryption?.compactEnvelopeEnabled ?? true,
       maxPendingPerPeer: this.config.encryption?.pendingQueue?.maxPendingPerPeer ?? 64,
       maxPendingGlobal: this.config.encryption?.pendingQueue?.maxPendingGlobal ?? 4096,
       pendingTtlMs: this.config.encryption?.pendingQueue?.pendingTtlMs ?? 120000,

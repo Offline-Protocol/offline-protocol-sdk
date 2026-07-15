@@ -117,6 +117,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         val requireEncryption = encryptionJson?.let {
             it.optBooleanCompat("requireEncryption", "require_encryption") ?: true
         } ?: true
+        // Wire-format kill switches (default on). Like the pending-queue fields,
+        // read the nested home first, then the top level — the JS wrapper sends
+        // the flat shape; direct native callers may follow the nested config.
+        val binaryWireEnabled =
+            json.optBooleanCompat("binaryWireEnabled", "binary_wire_enabled") ?: true
+        val compactEnvelopeEnabled = encryptionJson?.optBooleanCompat(
+            "compactEnvelopeEnabled",
+            "compact_envelope_enabled"
+        ) ?: json.optBooleanCompat("compactEnvelopeEnabled", "compact_envelope_enabled") ?: true
         val pendingQueueJson = encryptionJson?.optJSONObject("pendingQueue")
             ?: encryptionJson?.optJSONObject("pending_queue")
         val maxPendingPerPeer = pendingQueueJson?.optLongCompat(
@@ -158,7 +167,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             maxPendingPerPeer = maxPendingPerPeer.toULong(),
             maxPendingGlobal = maxPendingGlobal.toULong(),
             pendingTtlMs = pendingTtlMs.toULong(),
-            overflowPolicy = overflowPolicy
+            overflowPolicy = overflowPolicy,
+            binaryWireEnabled = binaryWireEnabled,
+            compactEnvelopeEnabled = compactEnvelopeEnabled
         )
 
         return ParsedConfig(config, json)
