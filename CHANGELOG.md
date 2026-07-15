@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Compact binary wire codec for messages, negotiated per peer.** Messages can now be serialized with a postcard-based binary encoding (wire v1) instead of JSON, cutting the message envelope roughly 3–4× on small and media messages and correspondingly reducing BLE fragment counts. JSON remains the permanent interoperability floor: receivers auto-detect the codec from the first byte, and binary is only ever sent to a peer that advertises support via `wire_versions` in its signed key package. Controlled by `TransportConfig::binary_wire_enabled` (default on); a mixed fleet stays on JSON automatically, and the internet relay path stays JSON. Decoding of binary frames is always enabled. No persistence, FFI, or relay-protocol changes.
+
 ## [0.13.1] — 2026-07-14
 
 ### Fixed
