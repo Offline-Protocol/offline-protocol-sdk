@@ -15,14 +15,16 @@ following licenses, at your option:
 2. **Commercial License** — for organizations that cannot or do not wish to comply
    with the AGPL-3.0 (for example, shipping the SDK inside a proprietary mobile
    application, embedding it in closed-source firmware, or operating a SaaS without
-   releasing source). A separate commercial license grants the right to use,
-   modify, and distribute the SDK without the AGPL-3.0 obligations.
+   releasing source). A separate commercial license from **Offline Protocol, Inc.**
+   grants the right to use, modify, and distribute the SDK without the AGPL-3.0
+   obligations.
 
 You only need **one** of the two licenses, not both.
 
 ## Obtaining a Commercial License
 
-To request a quote or discuss commercial terms, contact:
+Commercial licenses are offered by **Offline Protocol, Inc.** To request a quote
+or discuss commercial terms, contact:
 
 - **Email:** legal@offlineprotocol.com
 
@@ -31,8 +33,8 @@ model, expected scale) so we can scope the license appropriately.
 
 ## Contributions
 
-Contributors grant the project the right to sublicense their contributions under
-this Commercial License alongside the AGPL-3.0. The full terms are in
+Contributors grant **Offline Protocol, Inc.** the right to sublicense their
+contributions under this Commercial License alongside the AGPL-3.0. The full terms are in
 [`CLA.md`](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/CLA.md);
 see [`CONTRIBUTING.md`](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/CONTRIBUTING.md)
 for the signing flow.
