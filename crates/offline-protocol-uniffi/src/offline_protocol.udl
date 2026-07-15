@@ -396,6 +396,12 @@ dictionary ProtocolConfig {
     u32 max_group_members = 256;
     boolean group_relay_enabled = true;
     boolean require_transport_identity = false;
+    // Kill switch for the compact binary wire codec (default on). Negotiated
+    // per-peer, so a mixed fleet stays on JSON automatically; decoding of
+    // binary frames is always on regardless. Exposed here so an app can disable
+    // advertising/emitting at runtime without an SDK release if a field interop
+    // issue ever surfaces. Defaulted so existing callers keep compiling.
+    boolean binary_wire_enabled = true;
 };
 
 // Extended protocol configuration with all options

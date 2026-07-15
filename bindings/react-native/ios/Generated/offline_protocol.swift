@@ -4138,10 +4138,11 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var maxGroupMembers: UInt32
     public var groupRelayEnabled: Bool
     public var requireTransportIdentity: Bool
+    public var binaryWireEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -4162,6 +4163,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.maxGroupMembers = maxGroupMembers
         self.groupRelayEnabled = groupRelayEnabled
         self.requireTransportIdentity = requireTransportIdentity
+        self.binaryWireEnabled = binaryWireEnabled
     }
 
     
@@ -4197,7 +4199,8 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 overflowPolicy: FfiConverterTypeOverflowPolicy.read(from: &buf), 
                 maxGroupMembers: FfiConverterUInt32.read(from: &buf), 
                 groupRelayEnabled: FfiConverterBool.read(from: &buf), 
-                requireTransportIdentity: FfiConverterBool.read(from: &buf)
+                requireTransportIdentity: FfiConverterBool.read(from: &buf), 
+                binaryWireEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -4222,6 +4225,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.maxGroupMembers, into: &buf)
         FfiConverterBool.write(value.groupRelayEnabled, into: &buf)
         FfiConverterBool.write(value.requireTransportIdentity, into: &buf)
+        FfiConverterBool.write(value.binaryWireEnabled, into: &buf)
     }
 }
 
