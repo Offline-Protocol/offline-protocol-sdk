@@ -14203,6 +14203,103 @@ fn compact_envelope_interop_legacy_recipient_and_ungated_parsing() {
     );
 }
 
+/// Durable size/fragment report for encrypted text DMs across the four
+/// envelope x wire-codec combinations, using a real OpenMLS ciphertext and
+/// realistic identifier lengths (27-char base58 user ids). Prints the table
+/// under `--nocapture` and pins the headline win with margin-tolerant
+/// assertions so a regression in either lever fails loudly.
+///
+/// BLE fragment math: usable payload per fragment is
+/// `BLE_MAX_FRAGMENT_SIZE - FRAGMENT_HEADER_FIXED - 36` (the header carries
+/// the 36-char message id), which reproduces the measured fragment counts
+/// from the wire-codec PR (#187): 313B->3, 93B->1, 3986B->29, 1117B->9.
+#[test]
+fn wire_size_and_fragment_report_for_encrypted_dms() {
+    use offline_protocol_transport::constants::{BLE_MAX_FRAGMENT_SIZE, FRAGMENT_HEADER_FIXED};
+
+    let alice_id = "3sK9vT2mQ8xW5nRbY7cJ4dHpZ1e"; // 27 chars, base58-shaped
+    let bob_id = "9fLm2wN6qA1sD4gK8jP3xC7vB5t";
+
+    // A real MLS session so the ciphertext has authentic OpenMLS overhead.
+    let alice_mgr =
+        crate::mls::MlsManager::new(alice_id, Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+    let bob_mgr =
+        crate::mls::MlsManager::new(bob_id, Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let bob_kp = bob_mgr.generate_key_package().unwrap();
+    alice_mgr
+        .import_key_package(bob_id, &bob_kp.key_package_data)
+        .unwrap();
+    let welcome = alice_mgr.create_session(bob_id).unwrap();
+    bob_mgr.join_session(&welcome).unwrap();
+
+    let plaintext = "Hey! Are we still on for tonight at 8?";
+    let encrypted = alice_mgr
+        .encrypt_for_user(bob_id, plaintext.as_bytes())
+        .unwrap();
+
+    let legacy_body = serde_json::to_string(&encrypted).unwrap();
+    let compact_body = base64_encode(&encrypted.to_bytes());
+
+    let usable = BLE_MAX_FRAGMENT_SIZE - FRAGMENT_HEADER_FIXED - 36;
+    let build = |body: &str| {
+        Message::new(
+            UserId::new(alice_id).unwrap(),
+            UserId::new(bob_id).unwrap(),
+            AppId::new("com.example.chat").unwrap(),
+            format!("{}{}", internal_prefixes::ENCRYPTED, body),
+        )
+    };
+    let frags = |len: usize| len.div_ceil(usable);
+
+    let legacy_msg = build(&legacy_body);
+    let compact_msg = build(&compact_body);
+    let legacy_json = legacy_msg.to_bytes().unwrap().len();
+    let legacy_bin = legacy_msg.to_wire_v1_bytes().unwrap().len();
+    let compact_json = compact_msg.to_bytes().unwrap().len();
+    let compact_bin = compact_msg.to_wire_v1_bytes().unwrap().len();
+
+    println!(
+        "ciphertext: {}B raw for a {}-char plaintext",
+        encrypted.ciphertext.len(),
+        plaintext.len()
+    );
+    println!("envelope x wire        bytes  BLE frags (usable {usable}B/frag)");
+    println!(
+        "legacy  x JSON      : {legacy_json:>6}  {}",
+        frags(legacy_json)
+    );
+    println!(
+        "legacy  x binary v1 : {legacy_bin:>6}  {}",
+        frags(legacy_bin)
+    );
+    println!(
+        "compact x JSON      : {compact_json:>6}  {}",
+        frags(compact_json)
+    );
+    println!(
+        "compact x binary v1 : {compact_bin:>6}  {}",
+        frags(compact_bin)
+    );
+
+    // Monotonic: each lever only ever helps.
+    assert!(legacy_bin < legacy_json);
+    assert!(compact_json < legacy_json);
+    assert!(compact_bin < compact_json);
+    // Headline: compact+binary at least halves today's best (legacy+binary)
+    // and cuts BLE fragments for a short text DM.
+    assert!(
+        compact_bin * 2 <= legacy_bin,
+        "compact+binary ({compact_bin}B) must halve legacy+binary ({legacy_bin}B)"
+    );
+    assert!(
+        frags(compact_bin) < frags(legacy_bin),
+        "fragment count must drop: {} vs {}",
+        frags(compact_bin),
+        frags(legacy_bin)
+    );
+}
+
 #[test]
 fn test_send_media_requires_confirmed_session() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
