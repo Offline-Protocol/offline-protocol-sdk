@@ -139,9 +139,13 @@ class OfflineProtocolModule: RCTEventEmitter {
         // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
         let requireEncryption = encryptionDict["requireEncryption"] as? Bool
                                 ?? encryptionDict["require_encryption"] as? Bool ?? true
-        // Wire-format kill switches (default on). Like the pending-queue fields,
-        // read the nested home first, then the top level — the JS wrapper sends
-        // the flat shape; direct native callers may follow the nested config.
+        // Wire-format kill switches (default on), accepted in camelCase or
+        // snake_case. compactEnvelopeEnabled: nested home under `encryption`
+        // first, then top level (the JS wrapper sends the flat shape; direct
+        // native callers may follow the nested config). binaryWireEnabled:
+        // top level only — that IS its home in both the JS config and the
+        // flat UniFFI dictionary. Mirrors ProtocolConfigParser.kt on Android;
+        // keep the read order and precedence in sync.
         let binaryWireEnabled = raw["binaryWireEnabled"] as? Bool
             ?? raw["binary_wire_enabled"] as? Bool ?? true
         let compactEnvelopeEnabled = encryptionDict["compactEnvelopeEnabled"] as? Bool
