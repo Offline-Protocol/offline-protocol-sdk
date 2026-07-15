@@ -29,6 +29,8 @@ rust-version = "1.87"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Compact binary wire codec (Message envelope v1)
+postcard = { version = "1.0", features = ["alloc"] }
 
 # Error handling
 thiserror = "2.0"
