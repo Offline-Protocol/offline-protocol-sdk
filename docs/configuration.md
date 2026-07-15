@@ -16,6 +16,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
   
   // Optional configurations
   transports?: TransportsConfig,
+  binaryWireEnabled?: boolean,    // Binary wire-codec kill switch (default: true)
   encryption?: EncryptionConfig,  // NEW: Auto-encryption settings
   dors?: DorsConfig,
   relay?: RelayConfig,
@@ -282,6 +283,7 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 | `autoKeyExchange` | boolean | true | Auto-exchange key packages on peer discovery |
 | `storePending` | boolean | true | Queue messages when no session exists |
 | `requireEncryption` | boolean | true | Fail send unless encryption is applied (fail-closed) |
+| `compactEnvelopeEnabled` | boolean | true | Emit the compact MLS envelope to recipients that advertise support (kill switch — see [Wire Format Kill Switches](#wire-format-kill-switches)) |
 | `pendingQueue.maxPendingPerPeer` | number | 64 | Max queued encrypted pre-session messages per peer |
 | `pendingQueue.maxPendingGlobal` | number | 4096 | Max queued encrypted pre-session messages across all peers |
 | `pendingQueue.pendingTtlMs` | number | 120000 | TTL for queued encrypted pre-session messages |
@@ -331,6 +333,32 @@ Rust migration note:
     autoKeyExchange: false,  // Must manually exchange key packages
     storePending: true,
     // requireEncryption defaults to true (strict, fail-closed)
+  }
+}
+```
+
+### Wire Format Kill Switches
+
+The compact wire formats are negotiated per peer via the signed key package and
+can be disabled at runtime — without an SDK release — if a field interop issue
+ever surfaces:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `binaryWireEnabled` (top level) | boolean | true | Emit the compact binary wire codec on mesh hops to peers that advertise support (`wire_versions`) |
+| `encryption.compactEnvelopeEnabled` | boolean | true | Emit the compact MLS envelope on encrypted messages to recipients that advertise support (`env_versions`) |
+
+Disabling a switch stops **advertising and emitting** that format, so both
+directions fall back to the permanent JSON floor as key packages refresh.
+Parsing of inbound compact formats stays on regardless — the switches can never
+make a device unable to read a peer, and a disabled fleet interoperates with an
+enabled one automatically.
+
+```typescript
+{
+  binaryWireEnabled: false,         // Hop-local: mesh framing back to JSON
+  encryption: {
+    compactEnvelopeEnabled: false,  // End-to-end: MLS envelope back to JSON
   }
 }
 ```
