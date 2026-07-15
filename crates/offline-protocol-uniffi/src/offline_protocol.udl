@@ -402,6 +402,13 @@ dictionary ProtocolConfig {
     // advertising/emitting at runtime without an SDK release if a field interop
     // issue ever surfaces. Defaulted so existing callers keep compiling.
     boolean binary_wire_enabled = true;
+    // Kill switch for the compact MLS envelope on encrypted messages (default
+    // on). The end-to-end sibling of binary_wire_enabled with the same shape:
+    // negotiated per-recipient via the key package, parsing of inbound compact
+    // envelopes is always on, and disabling stops advertising and emitting so
+    // both directions fall back to the JSON envelope. Defaulted so existing
+    // callers keep compiling.
+    boolean compact_envelope_enabled = true;
 };
 
 // Extended protocol configuration with all options
