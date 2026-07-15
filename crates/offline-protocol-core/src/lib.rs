@@ -18,7 +18,9 @@ pub mod types;
 pub mod wire;
 
 pub use error::{Error, Result};
-pub use message::{ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority};
+pub use message::{
+    ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, WireCodec,
+};
 pub use service::{ServiceDescriptor, ServiceId};
 pub use sync::{MutexExt, RwLockExt};
 pub use types::{

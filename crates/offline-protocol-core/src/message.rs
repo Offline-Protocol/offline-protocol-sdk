@@ -232,6 +232,22 @@ impl MessagePriority {
     }
 }
 
+/// Wire codec selected for encoding a message on its next send.
+///
+/// Carried in-process only (never serialized) and defaults to
+/// [`WireCodec::Json`], the universally-understood encoding. The transport
+/// manager stamps [`WireCodec::BinaryV1`] just before send when the recipient is
+/// known to support the compact binary format; mesh transports honor the stamp
+/// at drain time while the internet transport always emits JSON.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WireCodec {
+    /// Legacy JSON encoding — the permanent interoperability floor.
+    #[default]
+    Json,
+    /// Compact binary wire codec, version 1 (see [`crate::wire`]).
+    BinaryV1,
+}
+
 /// A message in the Offline Protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -313,6 +329,13 @@ pub struct Message {
     /// to interact with it.
     #[serde(skip)]
     transport_peer_id: Option<String>,
+
+    /// Wire codec to use when this message is next serialized for the wire.
+    ///
+    /// In-process only (`#[serde(skip)]`); stamped by the transport manager from
+    /// per-peer capability just before send. Defaults to [`WireCodec::Json`].
+    #[serde(skip)]
+    wire_codec: WireCodec,
 }
 
 fn default_requires_ack() -> bool {
@@ -353,6 +376,7 @@ impl Message {
             reply_to_msg: None,
             forwarded_from: None,
             transport_peer_id: None,
+            wire_codec: WireCodec::Json,
         }
     }
 
@@ -435,6 +459,21 @@ impl Message {
     /// Returns the transport-verified peer identity, if set.
     pub fn transport_peer_id(&self) -> Option<&str> {
         self.transport_peer_id.as_deref()
+    }
+
+    /// Selects the wire codec used the next time this message is serialized.
+    ///
+    /// Stamped by the transport manager from negotiated per-peer capability.
+    /// Application code should not call this: an incorrect choice can make a
+    /// message undecodable to a peer that does not support the codec.
+    #[doc(hidden)]
+    pub fn set_wire_codec(&mut self, codec: WireCodec) {
+        self.wire_codec = codec;
+    }
+
+    /// Returns the wire codec selected for this message's next serialization.
+    pub fn wire_codec(&self) -> WireCodec {
+        self.wire_codec
     }
 
     /// Serializes the message to binary (MessagePack-like JSON bytes).
@@ -539,6 +578,7 @@ impl Message {
             reply_to_msg: wire.reply_to_msg.map(MessageId::from_bytes),
             forwarded_from,
             transport_peer_id: None,
+            wire_codec: WireCodec::Json,
         })
     }
 }
@@ -661,6 +701,7 @@ impl MessageBuilder {
             reply_to_msg: self.reply_to_msg,
             forwarded_from: self.forwarded_from,
             transport_peer_id: None,
+            wire_codec: WireCodec::Json,
         }
     }
 }

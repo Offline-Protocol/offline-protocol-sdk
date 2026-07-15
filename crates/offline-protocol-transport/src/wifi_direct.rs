@@ -180,7 +180,7 @@ impl WifiDirectTransport {
 
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
-        crate::common::serialize_message(message)
+        crate::common::serialize_message_with(message)
     }
 
     /// Checks if there are messages to send.

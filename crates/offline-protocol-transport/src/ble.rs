@@ -494,7 +494,7 @@ impl BleTransport {
 
     /// Serializes a message to bytes (JSON).
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
-        crate::common::serialize_message(message)
+        crate::common::serialize_message_with(message)
     }
 
     /// Fragments a message into chunks suitable for BLE transmission.
