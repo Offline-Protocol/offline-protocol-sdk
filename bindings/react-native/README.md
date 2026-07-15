@@ -147,6 +147,11 @@ await protocol.start(); // MLS auto-initialized when encryption.enabled is true
 // Key packages are exchanged automatically when peers are discovered.
 ```
 
+Both wire-format kill switches — top-level `binaryWireEnabled` and
+`encryption.compactEnvelopeEnabled` (default `true`) — disable the compact
+binary codec / compact MLS envelope at runtime; see
+[Wire Format Kill Switches](../../docs/configuration.md#wire-format-kill-switches).
+
 See the [MLS Integration Guide](../../docs/mls-integration.md) for advanced usage.
 
 ---
@@ -406,6 +411,8 @@ interface ProtocolConfig {
   appId: string;
   userId: string;
   transports?: TransportsConfig;
+  binaryWireEnabled?: boolean;  // binary wire-codec kill switch (default: true)
+  encryption?: EncryptionConfig;
   dors?: DorsConfig;
   network?: NetworkConfig;
   reliability?: ReliabilityConfig;
