@@ -139,6 +139,15 @@ class OfflineProtocolModule: RCTEventEmitter {
         // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
         let requireEncryption = encryptionDict["requireEncryption"] as? Bool
                                 ?? encryptionDict["require_encryption"] as? Bool ?? true
+        // Wire-format kill switches (default on). Like the pending-queue fields,
+        // read the nested home first, then the top level — the JS wrapper sends
+        // the flat shape; direct native callers may follow the nested config.
+        let binaryWireEnabled = raw["binaryWireEnabled"] as? Bool
+            ?? raw["binary_wire_enabled"] as? Bool ?? true
+        let compactEnvelopeEnabled = encryptionDict["compactEnvelopeEnabled"] as? Bool
+            ?? encryptionDict["compact_envelope_enabled"] as? Bool
+            ?? raw["compactEnvelopeEnabled"] as? Bool
+            ?? raw["compact_envelope_enabled"] as? Bool ?? true
         let pendingQueueDict = encryptionDict["pendingQueue"] as? [String: Any]
             ?? encryptionDict["pending_queue"] as? [String: Any]
         let maxPendingPerPeer = UInt64(
@@ -192,7 +201,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             maxPendingPerPeer: maxPendingPerPeer,
             maxPendingGlobal: maxPendingGlobal,
             pendingTtlMs: pendingTtlMs,
-            overflowPolicy: overflowPolicy
+            overflowPolicy: overflowPolicy,
+            binaryWireEnabled: binaryWireEnabled,
+            compactEnvelopeEnabled: compactEnvelopeEnabled
         )
 
         return (config, raw)

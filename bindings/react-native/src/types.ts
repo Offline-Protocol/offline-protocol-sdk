@@ -272,6 +272,15 @@ export interface EncryptionConfig {
    */
   requireEncryption?: boolean;
   /**
+   * Kill switch for the compact MLS envelope on encrypted messages
+   * (default: true). Negotiated per recipient via the key package; parsing
+   * of inbound compact envelopes is always on. Disabling stops advertising
+   * and emitting, so both directions fall back to the legacy JSON envelope
+   * without an SDK release if a field interop issue ever surfaces. The
+   * end-to-end sibling of `binaryWireEnabled` on `ProtocolConfig`.
+   */
+  compactEnvelopeEnabled?: boolean;
+  /**
    * Bounds and policy for encrypted messages received before session readiness.
    */
   pendingQueue?: PendingQueueConfig;
@@ -306,6 +315,15 @@ export interface ProtocolConfig {
   userId: string;
   /** Transport configuration (optional) */
   transports?: TransportsConfig;
+  /**
+   * Kill switch for the compact binary wire codec on mesh hops
+   * (default: true). Negotiated per peer via the key package; decoding of
+   * inbound binary frames is always on. Disabling stops advertising and
+   * emitting, so both directions fall back to JSON framing without an SDK
+   * release if a field interop issue ever surfaces. The hop-local sibling
+   * of `encryption.compactEnvelopeEnabled`.
+   */
+  binaryWireEnabled?: boolean;
   /** File transfer configuration (optional) */
   fileTransfer?: FileTransferConfig;
   /**
