@@ -1272,6 +1272,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         timestamp_ms: 0,
         session_reset: false,
         wire_versions,
+        env_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -1341,6 +1342,174 @@ fn binary_wire_kill_switch_prevents_recording() {
         .peer_supports_binary_wire("peer-bin"));
 }
 
+/// Helper: like [`feed_key_package`] but advertising `env_versions`
+/// (compact-MLS-envelope capability) instead of wire versions.
+#[cfg(test)]
+fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_versions: Vec<u8>) {
+    let payload = KeyPackagePayload {
+        user_id: sender.to_string(),
+        key_package_data: vec![1, 2, 3, 4],
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: false,
+        wire_versions: Vec::new(),
+        env_versions,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    );
+    let message = Message::new(
+        UserId::new(sender).unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+    protocol.process_internal_message(&message);
+}
+
+/// Fixture `EncryptedMessage` with a realistic ciphertext size.
+#[cfg(test)]
+fn sample_encrypted_message() -> offline_protocol_mls::EncryptedMessage {
+    offline_protocol_mls::EncryptedMessage {
+        group_id: offline_protocol_mls::GroupId::new("session:alice:bob").unwrap(),
+        message_type: offline_protocol_mls::MlsMessageType::Application,
+        epoch: 3,
+        ciphertext: (0u8..=255).collect(),
+        sender_id: "alice".to_string(),
+        timestamp_ms: 1_700_000_000_000,
+    }
+}
+
+#[test]
+fn compact_envelope_negotiation_marks_capable_peer() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    // compact_envelope_enabled defaults to true.
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    feed_key_package_with_env(&mut protocol, "peer-compact", vec![MLS_ENVELOPE_COMPACT_V1]);
+
+    assert!(protocol.peer_compact_envelope.contains("peer-compact"));
+}
+
+#[test]
+fn compact_envelope_negotiation_ignores_legacy_peer() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Legacy peer omits env_versions (empty) -> stays on the JSON envelope.
+    feed_key_package_with_env(&mut protocol, "peer-legacy", Vec::new());
+
+    assert!(!protocol.peer_compact_envelope.contains("peer-legacy"));
+}
+
+#[test]
+fn compact_envelope_kill_switch_prevents_recording_and_sealing() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    config.encryption.compact_envelope_enabled = false; // kill switch off
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Peer advertises the capability, but with the flag off we do not record it.
+    feed_key_package_with_env(&mut protocol, "peer-compact", vec![MLS_ENVELOPE_COMPACT_V1]);
+    assert!(!protocol.peer_compact_envelope.contains("peer-compact"));
+
+    // Defense in depth: even a (stale) recorded capability must not produce a
+    // compact envelope while the flag is off.
+    protocol
+        .peer_compact_envelope
+        .insert("peer-compact".to_string());
+    let sealed = protocol
+        .seal_encrypted_content("peer-compact", &sample_encrypted_message())
+        .unwrap();
+    let body = sealed.strip_prefix(internal_prefixes::ENCRYPTED).unwrap();
+    assert!(
+        body.starts_with('{'),
+        "kill switch must force the JSON envelope"
+    );
+}
+
+#[test]
+fn compact_envelope_downgrade_removes_capability() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    feed_key_package_with_env(&mut protocol, "peer", vec![MLS_ENVELOPE_COMPACT_V1]);
+    assert!(protocol.peer_compact_envelope.contains("peer"));
+
+    // A fresh key package without the capability (peer downgraded or flipped
+    // its own kill switch) must remove it.
+    feed_key_package_with_env(&mut protocol, "peer", Vec::new());
+    assert!(!protocol.peer_compact_envelope.contains("peer"));
+}
+
+#[test]
+fn seal_encrypted_content_picks_envelope_per_recipient_capability() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let encrypted = sample_encrypted_message();
+
+    // Unknown capability -> legacy JSON envelope (the permanent floor).
+    let sealed = protocol.seal_encrypted_content("peer", &encrypted).unwrap();
+    let body = sealed.strip_prefix(internal_prefixes::ENCRYPTED).unwrap();
+    assert!(body.starts_with('{'));
+
+    // Advertised capability -> compact envelope: base64, never '{', and far
+    // smaller than the JSON form (whose ciphertext is an integer array).
+    feed_key_package_with_env(&mut protocol, "peer", vec![MLS_ENVELOPE_COMPACT_V1]);
+    let sealed = protocol.seal_encrypted_content("peer", &encrypted).unwrap();
+    let body = sealed.strip_prefix(internal_prefixes::ENCRYPTED).unwrap();
+    assert!(!body.starts_with('{'));
+    let json_len = serde_json::to_string(&encrypted).unwrap().len();
+    assert!(
+        body.len() * 2 < json_len,
+        "compact envelope ({}) should be well under half the JSON form ({})",
+        body.len(),
+        json_len
+    );
+
+    // And the receive path reads it back, field for field.
+    let parsed = OfflineProtocol::parse_encrypted_payload(body).unwrap();
+    assert_eq!(parsed.ciphertext, encrypted.ciphertext);
+    assert_eq!(parsed.group_id.as_str(), encrypted.group_id.as_str());
+    assert_eq!(parsed.epoch, encrypted.epoch);
+    assert_eq!(parsed.sender_id, encrypted.sender_id);
+    assert_eq!(parsed.timestamp_ms, encrypted.timestamp_ms);
+}
+
+#[test]
+fn parse_encrypted_payload_reads_legacy_compact_and_wrapped_json_forms() {
+    let encrypted = sample_encrypted_message();
+    let json = serde_json::to_string(&encrypted).unwrap();
+    let compact = base64_encode(&encrypted.to_bytes());
+    // Historical layout: base64-wrapped JSON (`EncryptedMessage::from_base64`).
+    let wrapped_json = encrypted.to_base64().unwrap();
+
+    for body in [json.as_str(), compact.as_str(), wrapped_json.as_str()] {
+        let parsed = OfflineProtocol::parse_encrypted_payload(body)
+            .unwrap_or_else(|| panic!("form must parse: {}", &body[..20.min(body.len())]));
+        assert_eq!(parsed.ciphertext, encrypted.ciphertext);
+        assert_eq!(parsed.group_id.as_str(), encrypted.group_id.as_str());
+    }
+
+    // Hostile shapes are rejected, never panicked on.
+    assert!(OfflineProtocol::parse_encrypted_payload("").is_none());
+    assert!(OfflineProtocol::parse_encrypted_payload("not base64 !!!").is_none());
+    assert!(OfflineProtocol::parse_encrypted_payload(&base64_encode(&[0xFF; 8])).is_none());
+    let mut truncated = encrypted.to_bytes();
+    truncated.truncate(truncated.len() - 5);
+    assert!(OfflineProtocol::parse_encrypted_payload(&base64_encode(&truncated)).is_none());
+}
+
 #[test]
 fn test_process_internal_message_key_package() {
     let mut config = create_test_config();
@@ -1357,6 +1526,7 @@ fn test_process_internal_message_key_package() {
         timestamp_ms: 12345,
         session_reset: false,
         wire_versions: Vec::new(),
+        env_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -7513,6 +7683,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         timestamp_ms: 12345,
         session_reset: false,
         wire_versions: Vec::new(),
+        env_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -7738,6 +7909,7 @@ fn test_key_package_remaining_lifetime_ms() {
         timestamp_ms: 12345,
         session_reset: false,
         wire_versions: Vec::new(),
+        env_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -7818,6 +7990,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             timestamp_ms: 0,
             session_reset: false,
             wire_versions: Vec::new(),
+            env_versions: Vec::new(),
         };
         let content = format!(
             "{}{}",
@@ -7906,6 +8079,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         timestamp_ms: 0,
         session_reset: false,
         wire_versions: Vec::new(),
+        env_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -7957,6 +8131,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         timestamp_ms: 0,
         session_reset: false,
         wire_versions: Vec::new(),
+        env_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -8111,6 +8286,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             timestamp_ms: 0,
             session_reset: false,
             wire_versions: Vec::new(),
+            env_versions: Vec::new(),
         };
         let content = format!(
             "{}{}",
@@ -13893,6 +14069,138 @@ fn legacy_chunk_message(sender: &str, recipient: &str, data: &[u8]) -> Message {
     msg.content_type = ContentType::FileChunk;
     msg.binary_content = Some(chunk.to_bytes());
     msg
+}
+
+#[test]
+fn compact_envelope_end_to_end_with_negotiated_peers() {
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    // Alice learned bob's compact-envelope capability from his key package.
+    feed_key_package_with_env(&mut alice, "bob", vec![MLS_ENVELOPE_COMPACT_V1]);
+
+    alice
+        .send_message(
+            "bob",
+            "hello over compact",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("an __MLS_ENC__ message must reach the wire");
+    let body = enc
+        .content
+        .strip_prefix(internal_prefixes::ENCRYPTED)
+        .unwrap();
+    assert!(
+        !body.starts_with('{'),
+        "negotiated recipient must get the compact envelope"
+    );
+
+    // Bob decrypts it through the normal inbound path.
+    let result = bob.process_internal_message(enc);
+    assert!(
+        matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "hello over compact"),
+        "compact envelope must decrypt end-to-end, got {result:?}"
+    );
+}
+
+#[test]
+fn compact_envelope_interop_legacy_recipient_and_ungated_parsing() {
+    // Alice (compact on) -> bob, who never advertised the capability: the
+    // envelope must stay legacy JSON and still decrypt.
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    alice
+        .send_message(
+            "bob",
+            "hello legacy",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("an __MLS_ENC__ message must reach the wire");
+    let body = enc
+        .content
+        .strip_prefix(internal_prefixes::ENCRYPTED)
+        .unwrap();
+    assert!(
+        body.starts_with('{'),
+        "unadvertised capability must fall back to the JSON envelope"
+    );
+    let result = bob.process_internal_message(enc);
+    assert!(
+        matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "hello legacy")
+    );
+
+    // Reverse direction with carol, whose OWN kill switch is off: parsing is
+    // never gated, so a compact envelope sent to her still decrypts. (This is
+    // also the safety net if a stale capability record ever mis-gates a send.)
+    let mut carol_config = create_test_config_for_user("carol");
+    carol_config.encryption.enabled = true;
+    carol_config.encryption.compact_envelope_enabled = false;
+    let mut carol = OfflineProtocol::new(carol_config).unwrap();
+    carol
+        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+    let (mut dave, dave_handle) = media_test_protocol("dave");
+    // establish_media_session hardcodes alice/bob ids; wire dave<->carol by hand.
+    let carol_kp = {
+        let mls = carol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager.generate_key_package().unwrap()
+    };
+    let welcome = {
+        let mls = dave.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("carol", &carol_kp.key_package_data)
+            .unwrap();
+        manager.create_session("carol").unwrap()
+    };
+    {
+        let mls = carol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager.process_welcome(&welcome).unwrap();
+    }
+    dave.confirm_session_state("carol", "test_setup").unwrap();
+    carol.confirm_session_state("dave", "test_setup").unwrap();
+    feed_key_package_with_env(&mut dave, "carol", vec![MLS_ENVELOPE_COMPACT_V1]);
+
+    dave.send_message(
+        "carol",
+        "compact anyway",
+        None::<MessagePriority>,
+        None::<String>,
+    )
+    .unwrap();
+    let sent = dave_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .unwrap();
+    let body = enc
+        .content
+        .strip_prefix(internal_prefixes::ENCRYPTED)
+        .unwrap();
+    assert!(!body.starts_with('{'));
+    let result = carol.process_internal_message(enc);
+    assert!(
+        matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "compact anyway"),
+        "flag-off receiver must still parse the compact envelope, got {result:?}"
+    );
 }
 
 #[test]

@@ -247,7 +247,33 @@ pub(crate) struct KeyPackagePayload {
     /// The negotiation is a performance optimization, never a security control.
     #[serde(default)]
     pub(crate) wire_versions: Vec<u8>,
+
+    /// MLS envelope formats the sender can parse (e.g. `[1]` for the compact
+    /// envelope, [`MLS_ENVELOPE_COMPACT_V1`]). Absent on legacy nodes
+    /// (`#[serde(default)]` → empty → legacy JSON envelope only), so an old
+    /// peer is never sent an envelope it cannot parse.
+    ///
+    /// Distinct from `wire_versions`: that one is hop-local (which *frames*
+    /// the peer decodes), this one is end-to-end (which `__MLS_ENC__` payload
+    /// encodings the *recipient* parses after any number of relay hops).
+    ///
+    /// Trust boundary: identical to `wire_versions` above — a plaintext
+    /// envelope field, not signature-bound. Stripping it downgrades to the
+    /// JSON envelope (harmless); forging it onto a legacy peer makes us emit
+    /// envelopes that peer rejects with a `message_decryption_failed`
+    /// event (a targeted delivery DoS an attacker in that position already
+    /// has). A performance optimization, never a security control.
+    #[serde(default)]
+    pub(crate) env_versions: Vec<u8>,
 }
+
+/// Compact MLS envelope version advertised in
+/// [`KeyPackagePayload::env_versions`]: the `__MLS_ENC__` payload is base64 of
+/// [`offline_protocol_mls::EncryptedMessage::to_bytes`] instead of the legacy
+/// JSON form (whose `ciphertext` field renders as a ~3.6x integer array).
+/// Receivers distinguish the two by the byte after the prefix — `{` opens the
+/// JSON envelope and never occurs in base64.
+pub(crate) const MLS_ENVELOPE_COMPACT_V1: u8 = 1;
 
 /// Payload for a connection request message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +421,7 @@ pub(crate) struct ReceivedKeyPackage {
 }
 
 /// Result of processing an internal protocol message.
+#[derive(Debug)]
 pub(crate) enum InternalMessageResult {
     /// Message was consumed internally (don't surface to app).
     Consumed,
