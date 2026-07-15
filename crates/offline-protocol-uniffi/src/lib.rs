@@ -1708,6 +1708,10 @@ pub struct ProtocolConfig {
     /// Kill switch for the compact binary wire codec (default on). See the UDL
     /// dictionary and `TransportConfig::binary_wire_enabled` for semantics.
     pub binary_wire_enabled: bool,
+    /// Kill switch for the compact MLS envelope (default on). See the UDL
+    /// dictionary and `EncryptionConfig::compact_envelope_enabled` for
+    /// semantics.
+    pub compact_envelope_enabled: bool,
 }
 
 /// Extended protocol configuration with all options
@@ -1732,6 +1736,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.transport.reticulum_enabled = config.reticulum_enabled;
         core_config.transport.nostr_enabled = config.nostr_enabled;
         core_config.transport.binary_wire_enabled = config.binary_wire_enabled;
+        core_config.encryption.compact_envelope_enabled = config.compact_envelope_enabled;
         core_config.dors.prefer_online = config.prefer_online;
         core_config.initial_ttl = config.initial_ttl;
         core_config.encryption.enabled = config.encryption_enabled;
@@ -5337,6 +5342,7 @@ mod tests {
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: true,
@@ -5363,6 +5369,7 @@ mod tests {
     fn create_ble_only_config() -> ProtocolConfig {
         ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: true,
@@ -5697,6 +5704,7 @@ mod tests {
     fn create_reticulum_config() -> ProtocolConfig {
         ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: false,
@@ -6016,6 +6024,7 @@ mod tests {
         // Sender protocol sends a message; we capture serialized bytes
         let sender_config = ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "sender-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6041,6 +6050,7 @@ mod tests {
         // Receiver protocol blocks the sender before ingesting data
         let receiver_config = ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6067,6 +6077,7 @@ mod tests {
         // via reticulum_message_received.
         let sender_config = ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "sender-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6092,6 +6103,7 @@ mod tests {
         // Receiver protocol ingests the serialized bytes
         let receiver_config = ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6125,6 +6137,7 @@ mod tests {
         // will be created.
         let config = ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             reticulum_enabled: false,
             ble_enabled: true,
             ..create_reticulum_config()
@@ -6174,6 +6187,7 @@ mod tests {
     fn serialized_message_from(sender_id: &str, recipient: &str) -> Vec<u8> {
         let sender = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: sender_id.to_string(),
             ..create_test_config()
         })
@@ -6258,6 +6272,7 @@ mod tests {
     fn test_internet_control_frame_spoofed_sender_rejected() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6284,6 +6299,7 @@ mod tests {
     fn test_internet_control_frame_matching_sender_passes_gate() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6309,6 +6325,7 @@ mod tests {
     fn test_internet_control_frame_relayed_carrier_mismatch_passes_gate() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6338,6 +6355,7 @@ mod tests {
     fn test_internet_message_received_empty_sender_falls_back_to_unattributed() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6382,6 +6400,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6411,6 +6430,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6488,6 +6508,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_reticulum_config()
         })
@@ -6511,6 +6532,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             nostr_enabled: true,
             ..create_test_config()
@@ -6539,6 +6561,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6569,6 +6592,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6617,6 +6641,7 @@ mod tests {
     fn test_internet_confirm_in_same_batch_suppresses_redundant_welcome() {
         let owner = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "owner-user".to_string(),
             ..create_test_config()
         })
@@ -6630,6 +6655,7 @@ mod tests {
 
         let peer = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            compact_envelope_enabled: true,
             user_id: "peer-user".to_string(),
             ..create_test_config()
         })
