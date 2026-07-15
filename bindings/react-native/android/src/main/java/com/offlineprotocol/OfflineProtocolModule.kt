@@ -43,7 +43,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
     
     private object Constants {
-        const val DEFAULT_INITIAL_TTL = 8
         const val MIN_BATTERY_LEVEL = 0
         const val MAX_BATTERY_LEVEL = 100
         const val MIN_HISTORY_WINDOW = 1L
@@ -91,88 +90,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun removeListeners(count: Double) {
         listenerCount = (listenerCount - count.toInt()).coerceAtLeast(0)
-    }
-
-    /**
-     * Parse JSON config into ProtocolConfig
-     */
-    private data class ParsedConfig(
-        val coreConfig: ProtocolConfig,
-        val rawJson: JSONObject
-    )
-
-    private fun parseConfig(configJson: String): ParsedConfig {
-        val json = JSONObject(configJson)
-
-        // Parse encryption config with defaults (enabled by default)
-        val encryptionJson = json.optJSONObject("encryption")
-        val encryptionEnabled = encryptionJson?.optBoolean("enabled", true) ?: true
-        val autoKeyExchange = encryptionJson?.let {
-            it.optBooleanCompat("autoKeyExchange", "auto_key_exchange") ?: true
-        } ?: true
-        val storePending = encryptionJson?.let {
-            it.optBooleanCompat("storePending", "store_pending") ?: true
-        } ?: true
-        // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
-        val requireEncryption = encryptionJson?.let {
-            it.optBooleanCompat("requireEncryption", "require_encryption") ?: true
-        } ?: true
-        // Wire-format kill switches (default on). Like the pending-queue fields,
-        // read the nested home first, then the top level — the JS wrapper sends
-        // the flat shape; direct native callers may follow the nested config.
-        val binaryWireEnabled =
-            json.optBooleanCompat("binaryWireEnabled", "binary_wire_enabled") ?: true
-        val compactEnvelopeEnabled = encryptionJson?.optBooleanCompat(
-            "compactEnvelopeEnabled",
-            "compact_envelope_enabled"
-        ) ?: json.optBooleanCompat("compactEnvelopeEnabled", "compact_envelope_enabled") ?: true
-        val pendingQueueJson = encryptionJson?.optJSONObject("pendingQueue")
-            ?: encryptionJson?.optJSONObject("pending_queue")
-        val maxPendingPerPeer = pendingQueueJson?.optLongCompat(
-            "maxPendingPerPeer",
-            "max_pending_per_peer"
-        ) ?: json.optLongCompat("maxPendingPerPeer", "max_pending_per_peer") ?: 64L
-        val maxPendingGlobal = pendingQueueJson?.optLongCompat(
-            "maxPendingGlobal",
-            "max_pending_global"
-        ) ?: json.optLongCompat("maxPendingGlobal", "max_pending_global") ?: 4096L
-        val pendingTtlMs = pendingQueueJson?.optLongCompat(
-            "pendingTtlMs",
-            "pending_ttl_ms"
-        ) ?: json.optLongCompat("pendingTtlMs", "pending_ttl_ms") ?: 120_000L
-        val overflowPolicyRaw = pendingQueueJson?.optStringCompat(
-            "overflowPolicy",
-            "overflow_policy"
-        ) ?: json.optStringCompat("overflowPolicy", "overflow_policy")
-        val overflowPolicy = when (overflowPolicyRaw?.lowercase()) {
-            "drop_newest" -> OverflowPolicy.DROP_NEWEST
-            "dropoldest", "drop_oldest", null, "" -> OverflowPolicy.DROP_OLDEST
-            else -> OverflowPolicy.DROP_OLDEST
-        }
-
-        val config = ProtocolConfig(
-            appId = json.safeOptString("appId", json.safeOptString("app_id")),
-            userId = json.safeOptString("userId", json.safeOptString("user_id")),
-            bleEnabled = json.optBoolean("bleEnabled", json.optBoolean("ble_enabled", true)),
-            wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),
-            internetEnabled = json.optBoolean("internetEnabled", json.optBoolean("internet_enabled", true)),
-            reticulumEnabled = json.optBoolean("reticulumEnabled", json.optBoolean("reticulum_enabled", false)),
-            nostrEnabled = json.optBoolean("nostrEnabled", json.optBoolean("nostr_enabled", false)),
-            preferOnline = json.optBoolean("preferOnline", json.optBoolean("prefer_online", false)),
-            initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", Constants.DEFAULT_INITIAL_TTL)).toUByte(),
-            encryptionEnabled = encryptionEnabled,
-            autoKeyExchange = autoKeyExchange,
-            storePending = storePending,
-            requireEncryption = requireEncryption,
-            maxPendingPerPeer = maxPendingPerPeer.toULong(),
-            maxPendingGlobal = maxPendingGlobal.toULong(),
-            pendingTtlMs = pendingTtlMs.toULong(),
-            overflowPolicy = overflowPolicy,
-            binaryWireEnabled = binaryWireEnabled,
-            compactEnvelopeEnabled = compactEnvelopeEnabled
-        )
-
-        return ParsedConfig(config, json)
     }
 
     private fun normalizeRelayPriority(priority: String?): RelayPriority? {
@@ -301,7 +218,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun create(configJson: String, promise: Promise) {
         try {
-            val parsed = parseConfig(configJson)
+            val parsed = ProtocolConfigParser.parse(configJson)
             val config = parsed.coreConfig
             val proto = OfflineProtocol(config)
             currentConfig = config
