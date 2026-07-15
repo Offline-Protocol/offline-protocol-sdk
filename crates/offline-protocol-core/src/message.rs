@@ -33,6 +33,19 @@ impl MessageId {
     pub fn as_str(&self) -> String {
         self.0.to_string()
     }
+
+    /// Returns the 16-byte representation of the underlying UUID.
+    ///
+    /// Used by the binary wire codec to carry the id as 16 raw bytes instead of
+    /// the 36-character hyphenated string the JSON encoding uses.
+    pub fn as_bytes(&self) -> [u8; 16] {
+        *self.0.as_bytes()
+    }
+
+    /// Reconstructs a message id from its 16-byte representation.
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(Uuid::from_bytes(bytes))
+    }
 }
 
 impl Default for MessageId {
@@ -219,6 +232,22 @@ impl MessagePriority {
     }
 }
 
+/// Wire codec selected for encoding a message on its next send.
+///
+/// Carried in-process only (never serialized) and defaults to
+/// [`WireCodec::Json`], the universally-understood encoding. The transport
+/// manager stamps [`WireCodec::BinaryV1`] just before send when the recipient is
+/// known to support the compact binary format; mesh transports honor the stamp
+/// at drain time while the internet transport always emits JSON.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WireCodec {
+    /// Legacy JSON encoding — the permanent interoperability floor.
+    #[default]
+    Json,
+    /// Compact binary wire codec, version 1 (see [`crate::wire`]).
+    BinaryV1,
+}
+
 /// A message in the Offline Protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -300,6 +329,13 @@ pub struct Message {
     /// to interact with it.
     #[serde(skip)]
     transport_peer_id: Option<String>,
+
+    /// Wire codec to use when this message is next serialized for the wire.
+    ///
+    /// In-process only (`#[serde(skip)]`); stamped by the transport manager from
+    /// per-peer capability just before send. Defaults to [`WireCodec::Json`].
+    #[serde(skip)]
+    wire_codec: WireCodec,
 }
 
 fn default_requires_ack() -> bool {
@@ -340,6 +376,7 @@ impl Message {
             reply_to_msg: None,
             forwarded_from: None,
             transport_peer_id: None,
+            wire_codec: WireCodec::Json,
         }
     }
 
@@ -424,6 +461,21 @@ impl Message {
         self.transport_peer_id.as_deref()
     }
 
+    /// Selects the wire codec used the next time this message is serialized.
+    ///
+    /// Stamped by the transport manager from negotiated per-peer capability.
+    /// Application code should not call this: an incorrect choice can make a
+    /// message undecodable to a peer that does not support the codec.
+    #[doc(hidden)]
+    pub fn set_wire_codec(&mut self, codec: WireCodec) {
+        self.wire_codec = codec;
+    }
+
+    /// Returns the wire codec selected for this message's next serialization.
+    pub fn wire_codec(&self) -> WireCodec {
+        self.wire_codec
+    }
+
     /// Serializes the message to binary (MessagePack-like JSON bytes).
     pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(|e| crate::Error::SerializationError(e.to_string()))
@@ -432,6 +484,102 @@ impl Message {
     /// Deserializes a message from binary.
     pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
         serde_json::from_slice(bytes).map_err(|e| crate::Error::DeserializationError(e.to_string()))
+    }
+
+    /// Serializes the message using the compact binary wire codec (v1).
+    ///
+    /// See [`crate::wire`] for the format. This is an additive alternative to
+    /// [`to_bytes`](Self::to_bytes) (JSON); the two are distinguishable by their
+    /// first byte, so a receiver can accept either without negotiation.
+    pub fn to_wire_v1_bytes(&self) -> crate::Result<Vec<u8>> {
+        let media_metadata_json =
+            match &self.media_metadata {
+                Some(m) => Some(serde_json::to_vec(m).map_err(|e| {
+                    crate::Error::SerializationError(format!("media_metadata: {e}"))
+                })?),
+                None => None,
+            };
+        let forwarded_from_json =
+            match &self.forwarded_from {
+                Some(f) => Some(serde_json::to_vec(f).map_err(|e| {
+                    crate::Error::SerializationError(format!("forwarded_from: {e}"))
+                })?),
+                None => None,
+            };
+        let mut metadata: Vec<(String, String)> = self
+            .metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // Deterministic order (a HashMap iterates nondeterministically).
+        metadata.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let wire = crate::wire::WireMessageV1 {
+            id: self.id.as_bytes(),
+            sender: self.sender.as_str().to_string(),
+            recipient: self.recipient.as_str().to_string(),
+            app_id: self.app_id.as_str().to_string(),
+            priority: crate::wire::priority_to_u8(self.priority),
+            ttl: self.ttl.value(),
+            hop_count: self.hop_count.value(),
+            timestamp: self.timestamp.as_millis(),
+            lamport_clock: self.lamport_clock.value(),
+            content_type: crate::wire::content_type_to_u8(self.content_type),
+            content: self.content.clone(),
+            binary_content: self.binary_content.clone(),
+            media_metadata_json,
+            metadata,
+            requires_ack: self.requires_ack,
+            reply_to_msg: self.reply_to_msg.as_ref().map(|m| m.as_bytes()),
+            forwarded_from_json,
+            ext: Vec::new(),
+        };
+        crate::wire::encode(&wire)
+    }
+
+    /// Deserializes a message from a compact binary wire frame (v1).
+    ///
+    /// Runs the same identifier and Lamport-clock validation as the JSON path by
+    /// routing every field through its validating constructor, so a hostile
+    /// binary frame is rejected identically to a hostile JSON one. The
+    /// transport-verified peer identity is never on the wire and is left unset.
+    pub fn from_wire_v1_bytes(data: &[u8]) -> crate::Result<Self> {
+        let wire = crate::wire::decode(data)?;
+        let media_metadata =
+            match wire.media_metadata_json {
+                Some(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
+                    crate::Error::DeserializationError(format!("media_metadata: {e}"))
+                })?),
+                None => None,
+            };
+        let forwarded_from =
+            match wire.forwarded_from_json {
+                Some(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
+                    crate::Error::DeserializationError(format!("forwarded_from: {e}"))
+                })?),
+                None => None,
+            };
+        Ok(Self {
+            id: MessageId::from_bytes(wire.id),
+            sender: UserId::new(wire.sender)?,
+            recipient: UserId::new(wire.recipient)?,
+            app_id: AppId::new(wire.app_id)?,
+            priority: crate::wire::priority_from_u8(wire.priority),
+            ttl: TTL::from_value(wire.ttl),
+            hop_count: HopCount::from_value(wire.hop_count),
+            timestamp: Timestamp::from_millis(wire.timestamp),
+            lamport_clock: LamportClock::from_value(wire.lamport_clock),
+            content_type: crate::wire::content_type_from_u8(wire.content_type),
+            content: wire.content,
+            binary_content: wire.binary_content,
+            media_metadata,
+            metadata: wire.metadata.into_iter().collect(),
+            requires_ack: wire.requires_ack,
+            reply_to_msg: wire.reply_to_msg.map(MessageId::from_bytes),
+            forwarded_from,
+            transport_peer_id: None,
+            wire_codec: WireCodec::Json,
+        })
     }
 }
 
@@ -553,6 +701,7 @@ impl MessageBuilder {
             reply_to_msg: self.reply_to_msg,
             forwarded_from: self.forwarded_from,
             transport_peer_id: None,
+            wire_codec: WireCodec::Json,
         }
     }
 }

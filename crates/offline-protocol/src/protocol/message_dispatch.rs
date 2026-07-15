@@ -24,6 +24,19 @@ impl OfflineProtocol {
         if let Ok(payload) = serde_json::from_str::<KeyPackagePayload>(data) {
             debug!(sender = %sender, session_reset = %payload.session_reset, "Received key package");
 
+            // Record whether this peer can decode our binary wire frames, so the
+            // transport manager may stamp binary for messages addressed to them.
+            // Gated by our own config: with the codec disabled we neither
+            // advertise nor record capability, so both directions stay on JSON.
+            if self.config.transport.binary_wire_enabled {
+                self.transport_manager.mark_peer_binary_wire(
+                    sender,
+                    payload
+                        .wire_versions
+                        .contains(&offline_protocol_core::WIRE_VERSION_V1),
+                );
+            }
+
             // If the sender has reset their session (e.g. after unblocking us),
             // we must discard our stale local session so both sides converge on
             // a fresh MLS group.

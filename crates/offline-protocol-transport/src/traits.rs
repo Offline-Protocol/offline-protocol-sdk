@@ -54,6 +54,17 @@ pub trait Transport: Send + Sync + Any {
     /// otherwise (e.g. the transport is not `Available`). `Ok` means
     /// enqueued, not delivered — the platform bridge confirms or fails
     /// delivery asynchronously.
+    ///
+    /// # Delivery model and wire-codec safety
+    ///
+    /// The built-in mesh transports **unicast to `message.recipient`** and
+    /// require it to be a directly connected peer (they error otherwise). The
+    /// per-peer binary wire-codec negotiation depends on this: capability is
+    /// recorded against `recipient`, so a binary frame only ever reaches the
+    /// peer whose support was confirmed — never a legacy bystander. A transport
+    /// that instead *broadcasts* serialized bytes to every neighbor would break
+    /// that assumption and must re-establish per-link codec safety before
+    /// emitting anything other than JSON.
     fn send(&self, message: &Message) -> Result<()>;
 
     /// Attempts to receive a message from this transport.

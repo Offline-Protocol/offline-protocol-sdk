@@ -29,6 +29,12 @@ rust-version = "1.87"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Compact binary wire codec (Message envelope v1).
+# `default-features = false` drops postcard's default `heapless-cas` feature,
+# which otherwise pulls heapless 0.7 -> atomic-polyfill (unmaintained,
+# RUSTSEC-2023-0089). We only use the alloc-backed `to_allocvec`/`from_bytes`,
+# so `alloc` alone is sufficient and the heapless flavor is dead weight.
+postcard = { version = "1.0", default-features = false, features = ["alloc"] }
 
 # Error handling
 thiserror = "2.0"

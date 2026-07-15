@@ -229,6 +229,18 @@ impl TTL {
         self.0
     }
 
+    /// Reconstructs a TTL from a raw wire value **without** enforcing the
+    /// nonzero invariant.
+    ///
+    /// The JSON wire path deserializes `TTL` via a derived, transparent
+    /// `Deserialize` that performs no validation, so a received `ttl` of 0 is
+    /// representable on the wire. This constructor mirrors that behavior for the
+    /// binary wire codec, keeping the two encodings equivalent in what they
+    /// accept. Prefer [`TTL::new`] for locally-originated values.
+    pub fn from_value(value: u8) -> Self {
+        Self(value)
+    }
+
     /// Decrements the TTL by 1.
     ///
     /// # Returns
@@ -267,6 +279,15 @@ impl HopCount {
     /// Returns the hop count value.
     pub fn value(&self) -> u8 {
         self.0
+    }
+
+    /// Reconstructs a hop count from a raw wire value.
+    ///
+    /// Mirrors the derived, transparent `Deserialize` used on the JSON wire path
+    /// so the binary wire codec accepts the same values. Prefer [`HopCount::new`]
+    /// for locally-originated counters.
+    pub fn from_value(value: u8) -> Self {
+        Self(value)
     }
 
     /// Increments the hop count by 1.

@@ -2434,6 +2434,11 @@ impl OfflineProtocol {
             remaining_lifetime_ms: key_pkg.remaining_lifetime_ms(),
             timestamp_ms: Utc::now().timestamp_millis() as u64,
             session_reset,
+            wire_versions: if self.config.transport.binary_wire_enabled {
+                vec![offline_protocol_core::WIRE_VERSION_V1]
+            } else {
+                Vec::new()
+            },
         };
 
         let serialized =

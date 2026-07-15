@@ -9,14 +9,14 @@ use crate::events::{DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCod
 use crate::telemetry::routing::{RoutingDecision, RoutingPhase, RoutingReasonCode};
 use crate::{Error, Result};
 use chrono::Utc;
-use offline_protocol_core::Message;
+use offline_protocol_core::{Message, WireCodec};
 use offline_protocol_router::{
     display_routing_score, DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector,
 };
 use offline_protocol_transport::{
     Error as TransportError, Transport, TransportMetrics, TransportStatus, TransportType,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, warn};
@@ -56,10 +56,21 @@ pub struct TransportManager {
 
     /// Last escalation trigger event emitted (reason, time) for dedupe window.
     last_escalation_trigger_emitted: Option<(DorsEscalationReasonCode, std::time::Instant)>,
+
+    /// Peers known to decode the binary wire codec (from their signed key
+    /// package). Messages addressed to a listed peer are stamped
+    /// [`WireCodec::BinaryV1`] at send; all others stay JSON.
+    peer_binary_wire: HashSet<String>,
 }
 
 /// Dedupe window: don't re-emit same escalation trigger reason within this duration.
 const ESCALATION_TRIGGER_DEDUPE_SECS: u64 = 30;
+
+/// Cap on the per-peer binary-wire capability set. Keyed by the wire-claimed
+/// peer id, so — like `key_package_sent_to` — it is cleared at capacity to bound
+/// a forged-sender flood; the only cost of forgetting a peer is re-learning its
+/// capability from the next key package (one JSON send in the meantime).
+const MAX_PEER_BINARY_WIRE_ENTRIES: usize = 4096;
 
 #[derive(Debug, Default, Clone)]
 struct ObservedStats {
@@ -164,6 +175,30 @@ impl TransportManager {
             routing_decision_callback: None,
             routing_diagnostic: false,
             last_escalation_trigger_emitted: None,
+            peer_binary_wire: HashSet::new(),
+        }
+    }
+
+    /// Returns whether a peer is recorded as able to decode the binary wire
+    /// codec (and would therefore be sent binary frames).
+    pub fn peer_supports_binary_wire(&self, peer_id: &str) -> bool {
+        self.peer_binary_wire.contains(peer_id)
+    }
+
+    /// Records whether a peer can decode our binary wire frames, learned from
+    /// its signed key package. Messages addressed to a capable peer are stamped
+    /// [`WireCodec::BinaryV1`] at send; all others stay JSON.
+    pub fn mark_peer_binary_wire(&mut self, peer_id: &str, supported: bool) {
+        if supported {
+            // Bound the wire-keyed set: clear at capacity, then insert.
+            if !self.peer_binary_wire.contains(peer_id)
+                && self.peer_binary_wire.len() >= MAX_PEER_BINARY_WIRE_ENTRIES
+            {
+                self.peer_binary_wire.clear();
+            }
+            self.peer_binary_wire.insert(peer_id.to_string());
+        } else {
+            self.peer_binary_wire.remove(peer_id);
         }
     }
 
@@ -369,6 +404,37 @@ impl TransportManager {
     /// Retry/re-routing for those messages is handled by the higher-level
     /// outbox retry mechanism.
     pub fn send(&mut self, message: &Message) -> Result<()> {
+        // Stamp the negotiated wire codec for this recipient. The clone happens
+        // only on the binary path (peers known to support it); JSON and unknown
+        // peers reuse the borrowed message. The internet transport ignores the
+        // stamp (its relay bridge is JSON-only), and mesh transports only ever
+        // emit to a recipient that is a directly connected peer, so `recipient`
+        // is the physical peer whose capability was recorded — keying by it
+        // matches the same peer-string the MTU path already keys by.
+        //
+        // The codec travels on the message, and both `Transport::send` and this
+        // method take `&Message` as public API, so carrying the stamp across
+        // that boundary needs an owned message — hence this clone. Note it is a
+        // full-message clone: it copies `binary_content` (up to the max message
+        // size), not just the envelope, so for media-sized payloads sent to a
+        // binary-capable peer it is a real payload memcpy on the hot path. It is
+        // a deliberate tradeoff: threading the codec as a separate argument would
+        // shave the clone but is a breaking change to the public `Transport`
+        // trait every downstream implementor relies on. The transport's own
+        // queue-clone is unaffected either way. If profiling ever flags this,
+        // stamp via a lightweight wrapper rather than cloning the payload.
+        let stamped;
+        let message = if message.wire_codec() != WireCodec::BinaryV1
+            && self.peer_binary_wire.contains(message.recipient.as_str())
+        {
+            let mut m = message.clone();
+            m.set_wire_codec(WireCodec::BinaryV1);
+            stamped = m;
+            &stamped
+        } else {
+            message
+        };
+
         let available = self.get_available_transports();
         if available.is_empty() {
             return Err(Error::Transport(TransportError::TransportNotAvailable(
@@ -951,6 +1017,67 @@ mod tests {
         let message = create_test_message();
         let result = manager.send(&message);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn send_stamps_binary_only_for_capable_peer() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        // Unknown peer -> JSON (the default).
+        manager.send(&create_test_message()).unwrap();
+        // Peer recorded as binary-capable -> the send is stamped binary.
+        manager.mark_peer_binary_wire("bob", true);
+        manager.send(&create_test_message()).unwrap();
+
+        let mock = manager
+            .transports
+            .get(&TransportType::BLE)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<MockTransport>()
+            .unwrap();
+        let sent = mock.sent_messages();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].wire_codec(), WireCodec::Json);
+        assert_eq!(sent[1].wire_codec(), WireCodec::BinaryV1);
+    }
+
+    #[test]
+    fn send_reverts_to_json_after_peer_downgrades() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        // Learn the peer is binary-capable -> the next send is stamped binary.
+        manager.mark_peer_binary_wire("bob", true);
+        assert!(manager.peer_supports_binary_wire("bob"));
+        manager.send(&create_test_message()).unwrap();
+
+        // A later key package that no longer advertises support downgrades the
+        // peer (e.g. after a session reset, or the codec being turned off on
+        // their side); subsequent sends must fall back to JSON, not keep
+        // emitting binary a legacy build could not decode.
+        manager.mark_peer_binary_wire("bob", false);
+        assert!(!manager.peer_supports_binary_wire("bob"));
+        manager.send(&create_test_message()).unwrap();
+
+        let mock = manager
+            .transports
+            .get(&TransportType::BLE)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<MockTransport>()
+            .unwrap();
+        let sent = mock.sent_messages();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].wire_codec(), WireCodec::BinaryV1);
+        assert_eq!(sent[1].wire_codec(), WireCodec::Json);
     }
 
     #[test]

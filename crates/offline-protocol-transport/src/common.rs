@@ -7,7 +7,7 @@
 
 use crate::constants::DEFAULT_MAX_MESSAGE_SIZE;
 use crate::{Error, Result, TransportMetrics};
-use offline_protocol_core::{Message, MutexExt};
+use offline_protocol_core::{Message, MutexExt, WireCodec, WIRE_V1_MAGIC};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
@@ -75,14 +75,35 @@ pub fn on_data_received_from(
     }
 }
 
-/// Serialises a message to JSON bytes.
+/// Serialises a message to JSON bytes (the legacy, universally-understood wire
+/// encoding and the permanent interoperability floor).
 pub fn serialize_message(message: &Message) -> Result<Vec<u8>> {
     serde_json::to_vec(message)
         .map_err(|e| Error::SerializationError(format!("Failed to serialize message: {}", e)))
 }
 
-/// Deserialises a message from JSON bytes.
+/// Serialises a message using the codec selected on the message
+/// ([`Message::wire_codec`]): binary wire v1 when the recipient is known to
+/// support it, JSON otherwise. Mesh transports call this; the internet transport
+/// keeps [`serialize_message`] (JSON) because its relay bridge treats the payload
+/// as UTF-8 text.
+pub fn serialize_message_with(message: &Message) -> Result<Vec<u8>> {
+    match message.wire_codec() {
+        WireCodec::BinaryV1 => message.to_wire_v1_bytes().map_err(Error::from),
+        WireCodec::Json => serialize_message(message),
+    }
+}
+
+/// Deserialises a message, auto-detecting the wire codec from the first byte.
+///
+/// A leading [`WIRE_V1_MAGIC`] (`0xF5`) selects the binary codec; every other
+/// input falls through to the JSON decoder unchanged. JSON documents begin with
+/// `{` (`0x7B`) and `0xF5` is an invalid UTF-8/JSON leading byte, so the two
+/// encodings can never be confused and no negotiation is needed to decode.
 pub fn deserialize_message(data: &[u8]) -> Result<Message> {
+    if data.first() == Some(&WIRE_V1_MAGIC) {
+        return Message::from_wire_v1_bytes(data).map_err(Error::from);
+    }
     serde_json::from_slice(data)
         .map_err(|e| Error::SerializationError(format!("Failed to deserialize message: {}", e)))
 }
@@ -104,5 +125,64 @@ pub fn recalculate_delivery_ratios(metrics: &mut TransportMetrics) {
         let ratio = metrics.success_count as f32 / total as f32;
         metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
         metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use offline_protocol_core::{AppId, UserId};
+
+    fn sample() -> Message {
+        Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("app").unwrap(),
+            "hello",
+        )
+    }
+
+    #[test]
+    fn deserialize_dispatches_binary_frames_by_magic() {
+        let m = sample();
+        let bytes = m.to_wire_v1_bytes().unwrap();
+        assert_eq!(bytes[0], WIRE_V1_MAGIC);
+        let decoded = deserialize_message(&bytes).unwrap();
+        assert_eq!(decoded.id, m.id);
+        assert_eq!(decoded.content, "hello");
+    }
+
+    #[test]
+    fn deserialize_still_reads_json_frames() {
+        let m = sample();
+        let bytes = serialize_message(&m).unwrap();
+        assert_eq!(bytes[0], b'{');
+        let decoded = deserialize_message(&bytes).unwrap();
+        assert_eq!(decoded.id, m.id);
+    }
+
+    #[test]
+    fn binary_frame_is_smaller_than_json_frame() {
+        let m = sample();
+        assert!(m.to_wire_v1_bytes().unwrap().len() < serialize_message(&m).unwrap().len());
+    }
+
+    #[test]
+    fn deserialize_rejects_garbage_that_is_neither_json_nor_v1() {
+        // First byte is not 0xF5 and the payload is not valid JSON, so it is
+        // reported as an error (callers drop such frames).
+        assert!(deserialize_message(&[0xFE, 0x01, 0x02]).is_err());
+    }
+
+    #[test]
+    fn serialize_message_with_honors_stamped_codec() {
+        let mut m = sample();
+        // Default (unstamped) is JSON.
+        assert_eq!(serialize_message_with(&m).unwrap()[0], b'{');
+        // Stamped binary -> a v1 frame that round-trips through the decoder.
+        m.set_wire_codec(WireCodec::BinaryV1);
+        let bytes = serialize_message_with(&m).unwrap();
+        assert_eq!(bytes[0], WIRE_V1_MAGIC);
+        assert_eq!(deserialize_message(&bytes).unwrap().id, m.id);
     }
 }

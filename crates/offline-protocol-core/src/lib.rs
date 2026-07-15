@@ -15,12 +15,16 @@ pub mod message;
 pub mod service;
 pub mod sync;
 pub mod types;
+pub mod wire;
 
 pub use error::{Error, Result};
-pub use message::{ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority};
+pub use message::{
+    ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, WireCodec,
+};
 pub use service::{ServiceDescriptor, ServiceId};
 pub use sync::{MutexExt, RwLockExt};
 pub use types::{
     validate_id_chars, AppId, HopCount, IdValidationError, LamportClock, LocalInstant, Timestamp,
     UserId, WallClockTimestamp, MAX_ID_LEN, TTL,
 };
+pub use wire::{WIRE_V1_MAGIC, WIRE_VERSION_V1};

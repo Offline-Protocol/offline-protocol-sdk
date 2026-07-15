@@ -480,7 +480,7 @@ impl InternetTransportBuilder {
 mod tests {
     use super::*;
     use crate::constants::DEFAULT_MAX_MESSAGE_SIZE;
-    use offline_protocol_core::{AppId, UserId};
+    use offline_protocol_core::{AppId, UserId, WireCodec};
 
     fn create_test_message() -> Message {
         Message::new(
@@ -489,6 +489,29 @@ mod tests {
             AppId::new("test").unwrap(),
             "Test message",
         )
+    }
+
+    /// The internet transport is the relay path, and its platform bridge treats
+    /// the payload as UTF-8 text. It must therefore always emit JSON — even when
+    /// the message carries a `BinaryV1` stamp from per-peer negotiation (only the
+    /// mesh transports honor that stamp). This locks the "internet relay stays
+    /// JSON" invariant against a refactor that swaps `serialize_message` for the
+    /// codec-aware `serialize_message_with`.
+    #[test]
+    fn serialize_stays_json_even_when_message_stamped_binary() {
+        let transport = InternetTransport::new("test-device");
+        let mut message = create_test_message();
+        message.set_wire_codec(WireCodec::BinaryV1);
+
+        let data = transport.serialize_message(&message).unwrap();
+
+        assert_eq!(
+            data.first(),
+            Some(&b'{'),
+            "internet transport must emit JSON regardless of the wire-codec stamp"
+        );
+        // And the emitted bytes must still round-trip through the JSON decoder.
+        assert_eq!(transport.deserialize_message(&data).unwrap().id, message.id);
     }
 
     #[test]
