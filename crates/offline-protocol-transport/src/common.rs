@@ -175,6 +175,22 @@ mod tests {
     }
 
     #[test]
+    fn binary_frame_reconstructs_base64_content_tail_exactly() {
+        // MLS-envelope-shaped content: prefix + long canonical-base64 tail.
+        // The v1 encoder carries the tail raw (ext TLV tag 1); the decoded
+        // message must be byte-identical and the frame clearly smaller than
+        // the JSON encoding of the same message.
+        let mut m = sample();
+        m.content = format!("__MLS_ENC__{}", "QUJD".repeat(30));
+        m.set_wire_codec(WireCodec::BinaryV1);
+        let bytes = serialize_message_with(&m).unwrap();
+        assert_eq!(bytes[0], WIRE_V1_MAGIC);
+        let decoded = deserialize_message(&bytes).unwrap();
+        assert_eq!(decoded.content, m.content);
+        assert!(bytes.len() * 2 < serialize_message(&m).unwrap().len());
+    }
+
+    #[test]
     fn serialize_message_with_honors_stamped_codec() {
         let mut m = sample();
         // Default (unstamped) is JSON.

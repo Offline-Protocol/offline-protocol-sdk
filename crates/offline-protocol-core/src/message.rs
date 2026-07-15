@@ -514,6 +514,15 @@ impl Message {
         // Deterministic order (a HashMap iterates nondeterministically).
         metadata.sort_by(|a, b| a.0.cmp(&b.0));
 
+        // A long canonical-base64 content tail (an MLS envelope, typically)
+        // rides raw in the ext TLV instead of paying the 4/3 base64 inflation;
+        // the split is verified byte-exact at encode time, so decoding
+        // reconstructs the identical string. See [`crate::wire::EXT_TAG_B64_TAIL`].
+        let (content, ext) = match crate::wire::split_b64_tail(&self.content) {
+            Some((head, raw)) => (head.to_string(), vec![(crate::wire::EXT_TAG_B64_TAIL, raw)]),
+            None => (self.content.clone(), Vec::new()),
+        };
+
         let wire = crate::wire::WireMessageV1 {
             id: self.id.as_bytes(),
             sender: self.sender.as_str().to_string(),
@@ -525,14 +534,14 @@ impl Message {
             timestamp: self.timestamp.as_millis(),
             lamport_clock: self.lamport_clock.value(),
             content_type: crate::wire::content_type_to_u8(self.content_type),
-            content: self.content.clone(),
+            content,
             binary_content: self.binary_content.clone(),
             media_metadata_json,
             metadata,
             requires_ack: self.requires_ack,
             reply_to_msg: self.reply_to_msg.as_ref().map(|m| m.as_bytes()),
             forwarded_from_json,
-            ext: Vec::new(),
+            ext,
         };
         crate::wire::encode(&wire)
     }
@@ -545,6 +554,18 @@ impl Message {
     /// transport-verified peer identity is never on the wire and is left unset.
     pub fn from_wire_v1_bytes(data: &[u8]) -> crate::Result<Self> {
         let wire = crate::wire::decode(data)?;
+        // Reassemble a base64 content tail carried raw in the ext TLV. Senders
+        // emit at most one tag-1 entry; only the first is honored so a hostile
+        // frame cannot splice several. Unknown tags are ignored (forward
+        // compatibility — see the tag registry on `EXT_TAG_B64_TAIL`).
+        let mut content = wire.content;
+        if let Some((_, raw)) = wire
+            .ext
+            .iter()
+            .find(|(tag, _)| *tag == crate::wire::EXT_TAG_B64_TAIL)
+        {
+            content.push_str(&crate::wire::encode_b64_tail(raw));
+        }
         let media_metadata =
             match wire.media_metadata_json {
                 Some(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
@@ -570,7 +591,7 @@ impl Message {
             timestamp: Timestamp::from_millis(wire.timestamp),
             lamport_clock: LamportClock::from_value(wire.lamport_clock),
             content_type: crate::wire::content_type_from_u8(wire.content_type),
-            content: wire.content,
+            content,
             binary_content: wire.binary_content,
             media_metadata,
             metadata: wire.metadata.into_iter().collect(),
