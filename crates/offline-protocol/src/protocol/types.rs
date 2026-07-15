@@ -236,6 +236,15 @@ pub(crate) struct KeyPackagePayload {
     /// Wire-format versions the sender can decode (e.g. `[1]` for binary v1).
     /// Absent on legacy nodes (`#[serde(default)]` → empty → JSON only), so an
     /// old peer is never sent a binary frame it cannot parse.
+    ///
+    /// Trust boundary: this rides in the plaintext `KeyPackagePayload` envelope
+    /// *alongside* the signed MLS `key_package_data`, not *inside* the
+    /// signature, so it is not cryptographically bound to the sender. A MITM on
+    /// the pre-session bootstrap could strip it (harmless JSON downgrade) or
+    /// forge `[1]` onto a legacy peer (making us emit binary that peer drops —
+    /// a targeted delivery DoS). This grants no new capability: such an attacker
+    /// already controls key-package delivery and could deny service outright.
+    /// The negotiation is a performance optimization, never a security control.
     #[serde(default)]
     pub(crate) wire_versions: Vec<u8>,
 }

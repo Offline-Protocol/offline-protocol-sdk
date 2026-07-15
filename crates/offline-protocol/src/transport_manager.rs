@@ -414,11 +414,15 @@ impl TransportManager {
         //
         // The codec travels on the message, and both `Transport::send` and this
         // method take `&Message` as public API, so carrying the stamp across
-        // that boundary needs an owned message — hence this single clone. It is
+        // that boundary needs an owned message — hence this clone. Note it is a
+        // full-message clone: it copies `binary_content` (up to the max message
+        // size), not just the envelope, so for media-sized payloads sent to a
+        // binary-capable peer it is a real payload memcpy on the hot path. It is
         // a deliberate tradeoff: threading the codec as a separate argument would
         // shave the clone but is a breaking change to the public `Transport`
         // trait every downstream implementor relies on. The transport's own
-        // queue-clone is unaffected either way.
+        // queue-clone is unaffected either way. If profiling ever flags this,
+        // stamp via a lightweight wrapper rather than cloning the payload.
         let stamped;
         let message = if message.wire_codec() != WireCodec::BinaryV1
             && self.peer_binary_wire.contains(message.recipient.as_str())
