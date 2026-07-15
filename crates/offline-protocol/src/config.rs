@@ -108,6 +108,19 @@ pub struct EncryptionConfig {
 
     /// Bounds and eviction policy for pending inbound encrypted messages.
     pub pending_queue: PendingQueueConfig,
+
+    /// Whether to negotiate and emit the compact MLS envelope for encrypted
+    /// messages (base64 of the binary `EncryptedMessage` form instead of JSON
+    /// with an integer-array ciphertext — roughly 2.7x smaller).
+    ///
+    /// Defaults to `true`. It only takes effect toward recipients that
+    /// advertise support in their key package (`env_versions`), so a mixed
+    /// fleet automatically stays on the JSON envelope. Parsing of inbound
+    /// compact envelopes is always on, independent of this flag; this gates
+    /// only advertising and emitting. The end-to-end sibling of
+    /// [`TransportConfig::binary_wire_enabled`], with an independent kill
+    /// switch because the two degrade separately.
+    pub compact_envelope_enabled: bool,
 }
 
 impl Default for EncryptionConfig {
@@ -120,6 +133,7 @@ impl Default for EncryptionConfig {
             // silently degrade to plaintext because MLS was left uninitialized.
             require_encryption: true,
             pending_queue: PendingQueueConfig::default(),
+            compact_envelope_enabled: true,
         }
     }
 }
@@ -133,6 +147,7 @@ impl EncryptionConfig {
             store_pending: false,
             require_encryption: false,
             pending_queue: PendingQueueConfig::default(),
+            compact_envelope_enabled: false,
         }
     }
 }

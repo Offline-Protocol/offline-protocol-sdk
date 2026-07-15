@@ -1,12 +1,13 @@
 //! Message dispatch handlers for internal protocol messages.
 
 use super::{
-    internal_prefixes, lock_shared_state, ConnectionAcceptedPayload, ConnectionRequestPayload,
-    GroupCreatedPayload, GroupErrorPayload, GroupInfoPayload, GroupMemberAddedPayload,
-    GroupMemberRemovedPayload, GroupMessageReceivedPayload, InternalMessageResult,
-    KeyPackagePayload, OfflineProtocol, PresencePayload, ReadReceiptPayload, ReceivedKeyPackage,
-    TypingIndicatorPayload, UserGroupsPayload, MAX_KEY_PACKAGE_LIFETIME_MS,
-    MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
+    base64_decode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
+    ConnectionRequestPayload, GroupCreatedPayload, GroupErrorPayload, GroupInfoPayload,
+    GroupMemberAddedPayload, GroupMemberRemovedPayload, GroupMessageReceivedPayload,
+    InternalMessageResult, KeyPackagePayload, OfflineProtocol, PresencePayload, ReadReceiptPayload,
+    ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload, MAX_KEY_PACKAGE_LIFETIME_MS,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
+    MLS_ENVELOPE_COMPACT_V1,
 };
 use crate::events::{DecryptionFailureCode, Event};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
@@ -35,6 +36,27 @@ impl OfflineProtocol {
                         .wire_versions
                         .contains(&offline_protocol_core::WIRE_VERSION_V1),
                 );
+            }
+
+            // Record whether this peer parses the compact MLS envelope, so
+            // `seal_encrypted_content` may emit it for messages encrypted to
+            // them. Same shape as the binary-wire capability above: gated by
+            // our own config so a kill switch stops both directions, and
+            // removed when a fresh key package no longer advertises it (peer
+            // downgrade). Bounded like `key_package_sent_to` — the set is
+            // keyed by the wire-claimed sender, and forgetting a peer only
+            // costs a fallback to the JSON envelope.
+            if self.config.encryption.compact_envelope_enabled
+                && payload.env_versions.contains(&MLS_ENVELOPE_COMPACT_V1)
+            {
+                if !self.peer_compact_envelope.contains(sender)
+                    && self.peer_compact_envelope.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_compact_envelope.clear();
+                }
+                self.peer_compact_envelope.insert(sender.to_string());
+            } else {
+                self.peer_compact_envelope.remove(sender);
             }
 
             // If the sender has reset their session (e.g. after unblocking us),
@@ -499,6 +521,28 @@ impl OfflineProtocol {
         }
     }
 
+    /// Parses an `__MLS_ENC__` payload in either envelope form.
+    ///
+    /// The legacy envelope is a JSON object; the compact envelope (negotiated
+    /// via `env_versions` in the key package) is base64 of
+    /// [`EncryptedMessage::to_bytes`]. base64's alphabet has no `{`, so the
+    /// first byte disambiguates. Parsing is never capability-gated: whatever a
+    /// peer chose to send, we try to read. The compact branch keeps a JSON
+    /// fallback after decoding, covering any sender that base64-wrapped the
+    /// JSON form (the `EncryptedMessage::from_base64` layout). Trying compact
+    /// first is safe: base64-wrapped JSON starts with `{"`, whose bytes read
+    /// as a group_id length far above `from_bytes`'s 4 KB cap, so it is
+    /// rejected deterministically and falls through to the JSON parse.
+    pub(super) fn parse_encrypted_payload(data: &str) -> Option<EncryptedMessage> {
+        if data.starts_with('{') {
+            return serde_json::from_str::<EncryptedMessage>(data).ok();
+        }
+        let bytes = base64_decode(data).ok()?;
+        EncryptedMessage::from_bytes(&bytes)
+            .ok()
+            .or_else(|| serde_json::from_slice::<EncryptedMessage>(&bytes).ok())
+    }
+
     /// Handles an encrypted MLS message, returning the decrypted result.
     pub(crate) fn handle_encrypted_message(
         &mut self,
@@ -506,7 +550,7 @@ impl OfflineProtocol {
         data: &str,
         message: &Message,
     ) -> Option<InternalMessageResult> {
-        if let Ok(encrypted) = serde_json::from_str::<EncryptedMessage>(data) {
+        if let Some(encrypted) = Self::parse_encrypted_payload(data) {
             // Track state to update after releasing MLS lock
             enum DecryptResult {
                 Success {

@@ -1364,6 +1364,7 @@ mod tests {
             timestamp_ms: 0,
             session_reset: true,
             wire_versions: Vec::new(),
+            env_versions: Vec::new(),
         };
         let content = serde_json::to_string(&reset_payload).unwrap();
 

@@ -1,11 +1,11 @@
 //! Send pipeline, outbox management, and delivery tracking.
 
 use super::{
-    internal_prefixes, lock_shared_state, ConnectionAcceptedPayload, ConnectionRequestPayload,
-    KeyPackagePayload, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
-    OutboxEntry, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
-    TypingIndicatorPayload, WelcomeDeliveryState, MAX_KEY_PACKAGE_SENT_TO, MAX_READ_RECEIPT_IDS,
-    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    base64_encode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
+    ConnectionRequestPayload, KeyPackagePayload, OfflineProtocol, OutboundMediaTransfer,
+    OutboundSendPreparation, OutboxEntry, PendingMessage, PresencePayload, ProtocolState,
+    ReadReceiptPayload, TypingIndicatorPayload, WelcomeDeliveryState, MAX_KEY_PACKAGE_SENT_TO,
+    MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
 };
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
@@ -542,7 +542,7 @@ impl OfflineProtocol {
         _priority: MessagePriority,
     ) -> Result<String> {
         let encrypted = self.encrypt_bytes_for_recipient(recipient, content.as_bytes())?;
-        Self::seal_encrypted_content(&encrypted)
+        self.seal_encrypted_content(recipient, &encrypted)
     }
 
     /// Bytes-level core of [`Self::encrypt_content_for_recipient`]: initiates
@@ -698,8 +698,31 @@ impl OfflineProtocol {
     }
 
     /// Serializes an [`EncryptedMessage`] into the prefixed string form used
-    /// by the text path (`__MLS_ENC__` + JSON).
-    fn seal_encrypted_content(encrypted: &EncryptedMessage) -> Result<String> {
+    /// by the text path.
+    ///
+    /// Recipients that advertised [`MLS_ENVELOPE_COMPACT_V1`] in their key
+    /// package (with our own `compact_envelope_enabled` on) get the compact
+    /// envelope — `__MLS_ENC__` + base64 of [`EncryptedMessage::to_bytes`] —
+    /// roughly 2.7x smaller than the legacy JSON form, whose `ciphertext`
+    /// field renders as an integer array. Everyone else gets `__MLS_ENC__` +
+    /// JSON, the permanent floor. Receivers sniff the byte after the prefix
+    /// (`{` = JSON), so no per-message signaling is needed, and the choice is
+    /// per-recipient end-to-end state, valid however the message is later
+    /// routed or retried.
+    pub(super) fn seal_encrypted_content(
+        &self,
+        recipient: &str,
+        encrypted: &EncryptedMessage,
+    ) -> Result<String> {
+        if self.config.encryption.compact_envelope_enabled
+            && self.peer_compact_envelope.contains(recipient)
+        {
+            return Ok(format!(
+                "{}{}",
+                internal_prefixes::ENCRYPTED,
+                base64_encode(&encrypted.to_bytes())
+            ));
+        }
         let serialized =
             serde_json::to_string(encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
@@ -763,7 +786,7 @@ impl OfflineProtocol {
         content: &str,
     ) -> Result<String> {
         let encrypted = self.encrypt_bytes_for_recipient_strict(recipient, content.as_bytes())?;
-        Self::seal_encrypted_content(&encrypted)
+        self.seal_encrypted_content(recipient, &encrypted)
     }
 
     /// Bytes-level core of [`Self::encrypt_content_for_recipient_strict`]:
@@ -2436,6 +2459,11 @@ impl OfflineProtocol {
             session_reset,
             wire_versions: if self.config.transport.binary_wire_enabled {
                 vec![offline_protocol_core::WIRE_VERSION_V1]
+            } else {
+                Vec::new()
+            },
+            env_versions: if self.config.encryption.compact_envelope_enabled {
+                vec![MLS_ENVELOPE_COMPACT_V1]
             } else {
                 Vec::new()
             },

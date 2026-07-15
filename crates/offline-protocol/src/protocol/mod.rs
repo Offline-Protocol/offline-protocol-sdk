@@ -104,6 +104,15 @@ pub struct OfflineProtocol {
     /// Only encrypt messages when the session is confirmed to avoid race conditions.
     confirmed_sessions: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised the compact MLS envelope
+    /// ([`MLS_ENVELOPE_COMPACT_V1`] in `env_versions`), so
+    /// `seal_encrypted_content` may emit it instead of the legacy JSON form.
+    /// In-memory only, like the transport manager's binary-wire registry:
+    /// forgotten on restart and re-learned from the next key-package exchange,
+    /// degrading to the JSON envelope in the meantime. Bounded like
+    /// `key_package_sent_to` (it is keyed by the wire-claimed sender).
+    peer_compact_envelope: std::collections::HashSet<String>,
+
     /// Peers already flagged with a `PlaintextSend` security warning, so the
     /// explicit-opt-out plaintext path warns once per peer instead of once
     /// per message.
@@ -332,6 +341,7 @@ impl OfflineProtocol {
             key_package_sent_to: std::collections::HashSet::new(),
             known_peers: HashMap::new(),
             confirmed_sessions: std::collections::HashSet::new(),
+            peer_compact_envelope: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
             pending_queue: PendingDecryptionQueue::default(),
