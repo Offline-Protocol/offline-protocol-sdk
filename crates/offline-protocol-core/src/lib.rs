@@ -27,4 +27,4 @@ pub use types::{
     validate_id_chars, AppId, HopCount, IdValidationError, LamportClock, LocalInstant, Timestamp,
     UserId, WallClockTimestamp, MAX_ID_LEN, TTL,
 };
-pub use wire::WIRE_V1_MAGIC;
+pub use wire::{WIRE_V1_MAGIC, WIRE_VERSION_V1};

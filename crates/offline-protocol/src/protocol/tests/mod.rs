@@ -1261,6 +1261,86 @@ fn test_internal_prefixes_are_correct() {
     assert_eq!(offline_protocol_services::SVC_RESPONSE, "__SVC_RESP__");
 }
 
+/// Helper: feed `protocol` a signed-shape key package from `sender` advertising
+/// `wire_versions`, exercising the negotiation path in `handle_key_package_message`.
+#[cfg(test)]
+fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions: Vec<u8>) {
+    let payload = KeyPackagePayload {
+        user_id: sender.to_string(),
+        key_package_data: vec![1, 2, 3, 4],
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: false,
+        wire_versions,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    );
+    let message = Message::new(
+        UserId::new(sender).unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+    protocol.process_internal_message(&message);
+}
+
+#[test]
+fn binary_wire_negotiation_marks_capable_peer() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    // binary_wire_enabled defaults to true.
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    feed_key_package(
+        &mut protocol,
+        "peer-bin",
+        vec![offline_protocol_core::WIRE_VERSION_V1],
+    );
+
+    assert!(protocol
+        .transport_manager
+        .peer_supports_binary_wire("peer-bin"));
+}
+
+#[test]
+fn binary_wire_negotiation_ignores_legacy_peer() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Legacy peer omits wire_versions (empty) -> stays on JSON.
+    feed_key_package(&mut protocol, "peer-legacy", Vec::new());
+
+    assert!(!protocol
+        .transport_manager
+        .peer_supports_binary_wire("peer-legacy"));
+}
+
+#[test]
+fn binary_wire_kill_switch_prevents_recording() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    config.transport.binary_wire_enabled = false; // kill switch off
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Peer advertises binary, but with the codec disabled we do not record it.
+    feed_key_package(
+        &mut protocol,
+        "peer-bin",
+        vec![offline_protocol_core::WIRE_VERSION_V1],
+    );
+
+    assert!(!protocol
+        .transport_manager
+        .peer_supports_binary_wire("peer-bin"));
+}
+
 #[test]
 fn test_process_internal_message_key_package() {
     let mut config = create_test_config();
@@ -1276,6 +1356,7 @@ fn test_process_internal_message_key_package() {
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
         session_reset: false,
+        wire_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -7431,6 +7512,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
         session_reset: false,
+        wire_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -7655,6 +7737,7 @@ fn test_key_package_remaining_lifetime_ms() {
         remaining_lifetime_ms: 0,
         timestamp_ms: 12345,
         session_reset: false,
+        wire_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -7734,6 +7817,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
             session_reset: false,
+            wire_versions: Vec::new(),
         };
         let content = format!(
             "{}{}",
@@ -7821,6 +7905,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         remaining_lifetime_ms: 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        wire_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -7871,6 +7956,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         remaining_lifetime_ms: u64::MAX, // attacker claims a maximal lifetime
         timestamp_ms: 0,
         session_reset: false,
+        wire_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -8024,6 +8110,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
             session_reset: false,
+            wire_versions: Vec::new(),
         };
         let content = format!(
             "{}{}",

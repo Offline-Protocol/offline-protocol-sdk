@@ -232,6 +232,12 @@ pub(crate) struct KeyPackagePayload {
     /// converge on a single fresh MLS group.
     #[serde(default)]
     pub(crate) session_reset: bool,
+
+    /// Wire-format versions the sender can decode (e.g. `[1]` for binary v1).
+    /// Absent on legacy nodes (`#[serde(default)]` → empty → JSON only), so an
+    /// old peer is never sent a binary frame it cannot parse.
+    #[serde(default)]
+    pub(crate) wire_versions: Vec<u8>,
 }
 
 /// Payload for a connection request message.

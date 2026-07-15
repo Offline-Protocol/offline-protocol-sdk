@@ -200,6 +200,14 @@ pub struct TransportConfig {
     /// Defaults to `false` because Nostr requires relay configuration
     /// and a secp256k1 keypair.
     pub nostr_enabled: bool,
+
+    /// Whether to negotiate and emit the compact binary wire codec.
+    ///
+    /// Defaults to `true`. It only takes effect between two peers that both
+    /// advertise support (via their signed key package), so a mixed fleet
+    /// automatically stays on JSON. Decoding of binary frames is always on,
+    /// independent of this flag; this gates only advertising and emitting.
+    pub binary_wire_enabled: bool,
 }
 
 impl Default for TransportConfig {
@@ -210,6 +218,7 @@ impl Default for TransportConfig {
             internet_enabled: true,
             reticulum_enabled: false,
             nostr_enabled: false,
+            binary_wire_enabled: true,
         }
     }
 }

@@ -44,6 +44,12 @@ use serde::{Deserialize, Serialize};
 /// leaving room for eleven wire versions before the range is exhausted.
 pub const WIRE_V1_MAGIC: u8 = 0xF5;
 
+/// Logical wire-format version advertised during capability negotiation,
+/// corresponding to [`WIRE_V1_MAGIC`]. Peers exchange the set of versions they
+/// can decode in their signed key package; a peer that lists this value can
+/// decode `WIRE_V1_MAGIC` frames, so it is safe to send it binary.
+pub const WIRE_VERSION_V1: u8 = 1;
+
 /// Flat, fixed-layout DTO mirroring [`Message`](crate::Message) for wire v1.
 ///
 /// See the [module docs](self) for the field-stability contract. Fields are
