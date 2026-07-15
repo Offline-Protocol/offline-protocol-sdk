@@ -32,7 +32,7 @@ Original text found [here](https://www.apache.org/licenses/icla.pdf)
 
 By commenting **“I have read the CLA Document and I hereby sign the CLA”**
 on a Pull Request, **you (“Contributor”) agree to the following terms** for any
-past and future “Contributions” submitted to **Offline Protocol SDK (the “Project”)**.
+past and future “Contributions” submitted to **Offline Protocol, Inc. (the “Project”)**, the company that maintains the Offline Protocol SDK.
 
 ---
 
