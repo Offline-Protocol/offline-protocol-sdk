@@ -411,6 +411,14 @@ impl TransportManager {
         // emit to a recipient that is a directly connected peer, so `recipient`
         // is the physical peer whose capability was recorded — keying by it
         // matches the same peer-string the MTU path already keys by.
+        //
+        // The codec travels on the message, and both `Transport::send` and this
+        // method take `&Message` as public API, so carrying the stamp across
+        // that boundary needs an owned message — hence this single clone. It is
+        // a deliberate tradeoff: threading the codec as a separate argument would
+        // shave the clone but is a breaking change to the public `Transport`
+        // trait every downstream implementor relies on. The transport's own
+        // queue-clone is unaffected either way.
         let stamped;
         let message = if message.wire_codec() != WireCodec::BinaryV1
             && self.peer_binary_wire.contains(message.recipient.as_str())
@@ -1032,6 +1040,40 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].wire_codec(), WireCodec::Json);
         assert_eq!(sent[1].wire_codec(), WireCodec::BinaryV1);
+    }
+
+    #[test]
+    fn send_reverts_to_json_after_peer_downgrades() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        // Learn the peer is binary-capable -> the next send is stamped binary.
+        manager.mark_peer_binary_wire("bob", true);
+        assert!(manager.peer_supports_binary_wire("bob"));
+        manager.send(&create_test_message()).unwrap();
+
+        // A later key package that no longer advertises support downgrades the
+        // peer (e.g. after a session reset, or the codec being turned off on
+        // their side); subsequent sends must fall back to JSON, not keep
+        // emitting binary a legacy build could not decode.
+        manager.mark_peer_binary_wire("bob", false);
+        assert!(!manager.peer_supports_binary_wire("bob"));
+        manager.send(&create_test_message()).unwrap();
+
+        let mock = manager
+            .transports
+            .get(&TransportType::BLE)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<MockTransport>()
+            .unwrap();
+        let sent = mock.sent_messages();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].wire_codec(), WireCodec::BinaryV1);
+        assert_eq!(sent[1].wire_codec(), WireCodec::Json);
     }
 
     #[test]
