@@ -1350,6 +1350,7 @@ dependencies = [
 name = "offline-protocol-core"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "chrono",
  "postcard",
  "serde",

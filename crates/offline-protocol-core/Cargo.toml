@@ -15,6 +15,7 @@ workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 postcard = { workspace = true }
+base64 = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

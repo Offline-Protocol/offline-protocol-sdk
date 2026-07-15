@@ -33,6 +33,7 @@
 //! likewise a frozen wire contract.
 
 use crate::message::{ContentType, MessagePriority};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 
 /// Magic/version byte prefixed to every wire-format-v1 binary frame.
@@ -49,6 +50,86 @@ pub const WIRE_V1_MAGIC: u8 = 0xF5;
 /// can decode in their signed key package; a peer that lists this value can
 /// decode `WIRE_V1_MAGIC` frames, so it is safe to send it binary.
 pub const WIRE_VERSION_V1: u8 = 1;
+
+/// `ext` TLV tag: the trailing base64 run of `content`, carried as raw bytes.
+///
+/// Emitted by `Message::to_wire_v1_bytes` when `content` ends in a long
+/// canonical-base64 tail (an MLS envelope, for example): the wire `content`
+/// keeps only the head and the decoded tail rides here, saving the 4/3 base64
+/// inflation. `Message::from_wire_v1_bytes` re-encodes the bytes and appends
+/// them to `content`, reconstructing the original string byte-for-byte — the
+/// split is only taken when [`split_b64_tail`] verifies that property at
+/// encode time.
+///
+/// # Tag registry (wire v1)
+///
+/// | tag | meaning                            |
+/// |-----|------------------------------------|
+/// | 1   | base64 tail of `content`, decoded  |
+///
+/// Tag 1 ships in wire v1's *first* release, so advertising [`WIRE_VERSION_V1`]
+/// implies understanding it. Note the constraint that imposes on future tags:
+/// a decoder that ignores tag 1 would reconstruct a truncated `content`, which
+/// is only safe because no v1 decoder without tag-1 support ever shipped. A
+/// future tag whose absence changes meaning (rather than merely costing
+/// efficiency) cannot piggyback on v1 — it needs a new wire version.
+pub(crate) const EXT_TAG_B64_TAIL: u16 = 1;
+
+/// Minimum length (in base64 characters, including padding) of a trailing
+/// base64 run before [`split_b64_tail`] moves it to the ext TLV. Short tails
+/// save a handful of bytes at the cost of a TLV entry and an alphabet scan on
+/// every hop; 64 characters (48 raw bytes) is where the trade clearly wins.
+const B64_TAIL_MIN_LEN: usize = 64;
+
+/// Splits `content` into `(head, raw)` such that
+/// `head + BASE64.encode(raw) == content`, byte-for-byte.
+///
+/// Returns `Some` only when `content` ends in a run of at least
+/// [`B64_TAIL_MIN_LEN`] standard-alphabet base64 characters (4-aligned, with
+/// canonical `=` padding only at the very end) that strict-decodes **and**
+/// re-encodes to exactly the original tail. That re-encode comparison makes
+/// the split correct by construction for arbitrary input: non-canonical
+/// padding, foreign alphabets, or lookalike text simply fail the comparison
+/// and the content rides as plain text. A run longer than needed for
+/// 4-alignment sheds its leading remainder into the head, which preserves the
+/// reconstruction property.
+pub(crate) fn split_b64_tail(content: &str) -> Option<(&str, Vec<u8>)> {
+    let bytes = content.as_bytes();
+    if bytes.len() < B64_TAIL_MIN_LEN {
+        return None;
+    }
+    // Canonical padding (at most two '='), only at the very end.
+    let mut run_end = bytes.len();
+    let mut pad = 0;
+    while pad < 2 && run_end > 0 && bytes[run_end - 1] == b'=' {
+        run_end -= 1;
+        pad += 1;
+    }
+    let is_b64 = |b: u8| b.is_ascii_alphanumeric() || b == b'+' || b == b'/';
+    let mut start = run_end;
+    while start > 0 && is_b64(bytes[start - 1]) {
+        start -= 1;
+    }
+    // Base64 decodes in 4-character quanta; align by shedding the leading
+    // remainder of the run into the head. All run characters are ASCII, so
+    // both `start` and the shifted index stay on char boundaries.
+    start += (bytes.len() - start) % 4;
+    let tail = &content[start..];
+    if tail.len() < B64_TAIL_MIN_LEN {
+        return None;
+    }
+    let raw = BASE64.decode(tail).ok()?;
+    if BASE64.encode(&raw) != tail {
+        return None;
+    }
+    Some((&content[..start], raw))
+}
+
+/// Re-encodes a tag-1 ext value for appending to `content`; the exact inverse
+/// of [`split_b64_tail`]'s decode.
+pub(crate) fn encode_b64_tail(raw: &[u8]) -> String {
+    BASE64.encode(raw)
+}
 
 /// Flat, fixed-layout DTO mirroring [`Message`](crate::Message) for wire v1.
 ///
@@ -346,6 +427,129 @@ mod tests {
     fn wire_v1_decode_rejects_non_v1_frames() {
         assert!(decode(&[0x7B, 0x00]).is_err()); // a JSON '{'
         assert!(decode(&[]).is_err()); // empty
+    }
+
+    #[test]
+    fn b64_tail_split_and_reconstruct_is_byte_identical() {
+        // 50 raw bytes -> 68 base64 chars incl. one '=' pad.
+        let raw: Vec<u8> = (0u8..50).collect();
+        let content = format!("__MLS_ENC__{}", BASE64.encode(&raw));
+        let (head, tail_raw) = split_b64_tail(&content).expect("tail must split");
+        assert_eq!(head, "__MLS_ENC__");
+        assert_eq!(tail_raw, raw);
+        assert_eq!(format!("{head}{}", encode_b64_tail(&tail_raw)), content);
+    }
+
+    #[test]
+    fn b64_tail_split_sheds_run_remainder_into_head_and_handles_headless() {
+        // A 66-char run: the leading 2 chars shed into the head so the tail
+        // stays 4-aligned, and reconstruction is still byte-identical.
+        let content = format!("!{}", "A".repeat(66));
+        let (head, raw) = split_b64_tail(&content).expect("aligned suffix splits");
+        assert_eq!(head, "!AA");
+        assert_eq!(format!("{head}{}", encode_b64_tail(&raw)), content);
+
+        // No head at all: the whole content is the tail.
+        let content = "A".repeat(64);
+        let (head, raw) = split_b64_tail(&content).expect("headless splits");
+        assert!(head.is_empty());
+        assert_eq!(encode_b64_tail(&raw), content);
+    }
+
+    #[test]
+    fn b64_tail_split_is_utf8_boundary_safe() {
+        let content = format!("héllo → {}", "A".repeat(64));
+        let (head, raw) = split_b64_tail(&content).expect("ascii tail after unicode head");
+        assert_eq!(head, "héllo → ");
+        assert_eq!(format!("{head}{}", encode_b64_tail(&raw)), content);
+    }
+
+    #[test]
+    fn b64_tail_split_rejects_short_nonaligned_and_noncanonical() {
+        // Too short overall.
+        assert!(split_b64_tail("AAAA").is_none());
+        // Run of 63: alignment trims to 60, under the 64-char minimum.
+        assert!(split_b64_tail(&format!("!{}", "A".repeat(63))).is_none());
+        // Legacy JSON int-array content: '}' and ']' break the run.
+        let json_like = format!("__MLS_ENC__{{\"ciphertext\":[{}]}}", "57,".repeat(60));
+        assert!(split_b64_tail(&json_like).is_none());
+        // Non-canonical tail (trailing bits / bogus padding) must not split:
+        // either the strict decode fails or the re-encode comparison does.
+        assert!(split_b64_tail(&format!("!{}=", "B".repeat(63))).is_none());
+        // Padding not at the very end breaks the run before it.
+        assert!(split_b64_tail(&format!("{}={}", "A".repeat(64), "A".repeat(3))).is_none());
+        // Only '=' beyond the minimum length: nothing decodable.
+        assert!(split_b64_tail(&"=".repeat(64)).is_none());
+    }
+
+    #[test]
+    fn wire_v1_round_trips_b64_tail_content_through_message() {
+        let mut m = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("app").unwrap(),
+            format!("__MLS_ENC__{}", BASE64.encode(vec![7u8; 90])),
+        );
+        m.requires_ack = true;
+        let bytes = m.to_wire_v1_bytes().unwrap();
+
+        // On the wire: content holds only the head, the raw tail rides in ext.
+        let wire = decode(&bytes).unwrap();
+        assert_eq!(wire.content, "__MLS_ENC__");
+        assert_eq!(wire.ext.len(), 1);
+        assert_eq!(wire.ext[0].0, EXT_TAG_B64_TAIL);
+        assert_eq!(wire.ext[0].1, vec![7u8; 90]);
+
+        // Decoded: byte-identical content, and the frame beats the base64 form.
+        let decoded = Message::from_wire_v1_bytes(&bytes).unwrap();
+        assert_eq!(decoded.content, m.content);
+        assert!(bytes.len() < m.to_bytes().unwrap().len());
+    }
+
+    #[test]
+    fn wire_v1_plain_content_emits_no_ext_entries() {
+        let m = sample_message();
+        let wire = decode(&m.to_wire_v1_bytes().unwrap()).unwrap();
+        assert!(wire.ext.is_empty());
+    }
+
+    #[test]
+    fn wire_v1_decode_ignores_unknown_ext_tags_and_extra_tag1_entries() {
+        // Unknown tags are skipped; only the FIRST tag-1 entry is honored, so
+        // a hostile frame cannot splice multiple tails into content.
+        let mut wire = base_dto();
+        wire.content = "head:".into();
+        wire.ext = vec![
+            (99, vec![1, 2, 3]),
+            (EXT_TAG_B64_TAIL, b"AB".to_vec()),
+            (EXT_TAG_B64_TAIL, b"ZZ".to_vec()),
+        ];
+        let bytes = encode(&wire).unwrap();
+        let decoded = Message::from_wire_v1_bytes(&bytes).unwrap();
+        assert_eq!(decoded.content, format!("head:{}", BASE64.encode(b"AB")));
+    }
+
+    #[test]
+    fn wire_v1_golden_layout_with_b64_tail_ext_is_frozen() {
+        // Freezes the ext-TLV encoding for tag 1 (base64 content tail). Same
+        // contract as `wire_v1_golden_layout_is_frozen`: a mismatch means the
+        // wire format changed — bump the magic byte, do not edit the bytes.
+        let mut wire = base_dto();
+        wire.content = String::new();
+        wire.ext = vec![(EXT_TAG_B64_TAIL, vec![0xDE, 0xAD])];
+        let expected_tail: &[u8] = &[
+            0x01, // ext: len 1
+            0x01, // tag 1 (varint u16)
+            0x02, 0xDE, 0xAD, // value: len 2 + raw bytes
+        ];
+        let encoded = encode(&wire).unwrap();
+        assert_eq!(
+            &encoded[encoded.len() - expected_tail.len()..],
+            expected_tail
+        );
+        // And the decoder reattaches the tail as canonical base64.
+        let decoded = Message::from_wire_v1_bytes(&encoded).unwrap();
+        assert_eq!(decoded.content, BASE64.encode([0xDE, 0xAD]));
     }
 
     #[test]
