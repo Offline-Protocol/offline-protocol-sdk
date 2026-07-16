@@ -5,9 +5,9 @@ use super::{
     ConnectionRequestPayload, KeyPackagePayload, OfflineProtocol, OutboundMediaTransfer,
     OutboundSendPreparation, OutboxEntry, PendingConnectionRequest, PendingMessage,
     PresencePayload, ProtocolState, ReadReceiptPayload, TypingIndicatorPayload,
-    WelcomeDeliveryState, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS,
-    MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO,
+    MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1,
+    PENDING_CONNECTION_REQUEST_TTL, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
 };
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
@@ -2226,7 +2226,9 @@ impl OfflineProtocol {
     /// * `key_package` - Optional MLS key package for encrypted session setup
     /// * `initial_message` - Optional first message shown with the request
     ///   (surfaced verbatim in the recipient's `ConnectionRequestReceived`
-    ///   event; apps typically seed the conversation with it on accept)
+    ///   event; apps typically seed the conversation with it on accept).
+    ///   At most [`MAX_INITIAL_MESSAGE_BYTES`] UTF-8 bytes — longer input
+    ///   is rejected with `Error::InvalidArgument`.
     ///
     /// # Encryption
     ///
@@ -2241,6 +2243,16 @@ impl OfflineProtocol {
         key_package: Option<Vec<u8>>,
         initial_message: Option<String>,
     ) -> Result<MessageId> {
+        if let Some(msg) = initial_message.as_deref() {
+            if msg.len() > MAX_INITIAL_MESSAGE_BYTES {
+                return Err(Error::InvalidArgument(format!(
+                    "initial_message exceeds {} bytes (got {})",
+                    MAX_INITIAL_MESSAGE_BYTES,
+                    msg.len()
+                )));
+            }
+        }
+
         // Connection requests are internal control messages (not user content),
         // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
