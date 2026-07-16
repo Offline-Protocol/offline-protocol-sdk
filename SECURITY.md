@@ -50,4 +50,4 @@ The following are in scope for security reports:
 
 The SDK enforces `#![deny(unsafe_code)]` in all core crates. Only the UniFFI FFI boundary (`offline-protocol-uniffi`) allows unsafe code, limited to generated scaffolding.
 
-Cryptographic operations use audited RustCrypto primitives (Ed25519-dalek, SHA-256, AES-256-GCM) via the OpenMLS (RFC 9420) implementation.
+Cryptographic operations use the OpenMLS (RFC 9420) implementation with its `openmls_rust_crypto` provider. The default ciphersuite is `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`: X25519 key agreement, AES-128-GCM authenticated encryption, SHA-256 hashing, and Ed25519 signatures. The underlying primitives come from `ed25519-dalek`/`x25519-dalek` (dalek-cryptography) and the RustCrypto project's AES-GCM and SHA-2 crates.

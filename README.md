@@ -11,13 +11,15 @@
 
 ## Features
 
-- **Multi-Transport**: Seamlessly switches between BLE, WiFi Direct, Internet, Reticulum, and Nostr relays
+- **Multi-Transport**: Automatically switches between BLE, WiFi Direct, Internet, Reticulum, and Nostr relays
 - **Mesh Networking**: Automatic peer discovery and message relay
 - **End-to-End Encryption**: Automatic MLS encryption with forward secrecy (RFC 9420)
 - **Group Roles**: Admin/member role management with last-admin safety invariants
 - **DORS**: Dynamic Offline Relay Switch for optimal transport selection
 - **Reliability**: ACKs, retries, and deduplication built-in
 - **Cross-Platform Bindings**: React Native for iOS/Android and Python for macOS/Linux/Windows
+
+> **What you must implement:** the Rust crates are I/O-free protocol engines — they queue, route, encrypt, and select transports, but never open a socket or touch a radio. A *platform bridge* does the actual I/O: it drains each transport's outbound queue, performs the send, reports the outcome, and injects inbound bytes. The React Native binding ships these bridges for iOS and Android (BLE, WiFi Direct, Internet, Nostr, Reticulum), and the Python binding ships BLE and Internet bridges. If you consume the Rust crates directly via `cargo add`, you write the bridge yourself — the contract is documented in the [`offline-protocol-transport`](crates/offline-protocol-transport/src/lib.rs) crate docs.
 
 ## Quick Start
 
