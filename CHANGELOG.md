@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Binary wire frames carry base64 content tails raw (ext TLV tag 1).** When a message's `content` ends in a long canonical-base64 run (the compact MLS envelope, Welcome blobs, and similar), wire-v1 frames now carry the decoded bytes in the frame's extension section instead of paying the 4/3 base64 inflation, reconstructing the exact original string on decode. The split is verified byte-for-byte at encode time, so arbitrary content is safe by construction. `WireMessageV1`'s frozen layout is unchanged; tag 1 ships inside wire v1's first release, so advertising v1 implies understanding it.
 
+### Fixed
+
+- **React Native encryption settings now actually reach the protocol core.** The JS wrapper sent `encryption.enabled`, `autoKeyExchange`, `storePending`, and `requireEncryption` as flat top-level keys while the iOS and Android bridges read them only from the nested `encryption` object, so every app-set value was silently discarded and the all-true defaults won. The wrapper now sends the nested shape alongside the flat keys (kept in lockstep), and both bridges accept either shape in camelCase or snake_case, locked by unit tests on both platforms. The sibling flags also now default to the value of `enabled`, so `encryption: { enabled: false }` alone yields the coherent fully-disabled posture (mirroring Rust's `EncryptionConfig::disabled()`) instead of a node whose every send fails with `EncryptFailed`; explicitly combining `enabled: false` with `requireEncryption: true` is rejected loudly at `create()` by the existing core validation.
+
 ## [0.13.1] — 2026-07-14
 
 ### Fixed

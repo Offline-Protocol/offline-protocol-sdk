@@ -5,11 +5,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Locks down the wire-format kill-switch parsing: a silent regression here
- * reverts a switch to its default with no error anywhere, which is exactly
- * how the legacy nested-only encryption fields drifted. Read order under
- * test: compactEnvelopeEnabled nested under `encryption` first then top
- * level, binaryWireEnabled top level only, both in camelCase or snake_case.
+ * Locks down the create()-config parsing: a silent regression here reverts a
+ * field to its default with no error anywhere — exactly what happened to the
+ * four encryption flags, which were read nested-only while the JS wrapper
+ * sent the flat shape, silently discarding every app-set value. Read order
+ * under test: encryption flags and compactEnvelopeEnabled nested under
+ * `encryption` first then top level, binaryWireEnabled top level only, all
+ * in camelCase or snake_case.
  */
 class ProtocolConfigParserTest {
 
@@ -68,5 +70,70 @@ class ProtocolConfigParserTest {
             """{"appId":"app","userId":"alice","compactEnvelopeEnabled":false,"encryption":{"enabled":true}}"""
         )
         assertFalse(config.compactEnvelopeEnabled)
+    }
+
+    @Test
+    fun encryptionFlagsDefaultOnWhenOmitted() {
+        val config = parse("""{"appId":"app","userId":"alice"}""")
+        assertTrue(config.encryptionEnabled)
+        assertTrue(config.autoKeyExchange)
+        assertTrue(config.storePending)
+        assertTrue(config.requireEncryption)
+    }
+
+    @Test
+    fun encryptionFlagsReadTheFlatCamelCaseShapeTheJsWrapperSends() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","encryptionEnabled":false,"autoKeyExchange":false,"storePending":false,"requireEncryption":false}"""
+        )
+        assertFalse(config.encryptionEnabled)
+        assertFalse(config.autoKeyExchange)
+        assertFalse(config.storePending)
+        assertFalse(config.requireEncryption)
+    }
+
+    @Test
+    fun encryptionFlagsReadTheirNestedHome() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","encryption":{"enabled":false,"autoKeyExchange":false,"storePending":false,"requireEncryption":false}}"""
+        )
+        assertFalse(config.encryptionEnabled)
+        assertFalse(config.autoKeyExchange)
+        assertFalse(config.storePending)
+        assertFalse(config.requireEncryption)
+    }
+
+    @Test
+    fun encryptionFlagsReadFlatSnakeCase() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","encryption_enabled":false,"auto_key_exchange":false,"store_pending":false,"require_encryption":false}"""
+        )
+        assertFalse(config.encryptionEnabled)
+        assertFalse(config.autoKeyExchange)
+        assertFalse(config.storePending)
+        assertFalse(config.requireEncryption)
+    }
+
+    @Test
+    fun nestedEncryptionFlagsWinOverFlat() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","encryptionEnabled":true,"autoKeyExchange":true,"storePending":true,"requireEncryption":true,"encryption":{"enabled":false,"autoKeyExchange":false,"storePending":false,"requireEncryption":false}}"""
+        )
+        assertFalse(config.encryptionEnabled)
+        assertFalse(config.autoKeyExchange)
+        assertFalse(config.storePending)
+        assertFalse(config.requireEncryption)
+    }
+
+    @Test
+    fun encryptionSectionWithoutTheFlagsFallsThroughToFlatKeys() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","encryptionEnabled":false,"requireEncryption":false,"encryption":{"compactEnvelopeEnabled":true}}"""
+        )
+        assertFalse(config.encryptionEnabled)
+        assertFalse(config.requireEncryption)
+        assertTrue(config.compactEnvelopeEnabled)
+        assertTrue(config.autoKeyExchange)
+        assertTrue(config.storePending)
     }
 }
