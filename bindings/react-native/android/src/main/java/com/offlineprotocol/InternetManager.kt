@@ -1056,35 +1056,13 @@ class InternetManager(
                 ))
             }
 
-            "TypingUpdate" -> {
-                // Bridge the relay's server-mediated typing event (produced by
-                // SetTyping/ClearTyping relay clients) into the SDK's __TYPING__
-                // path, so apps receive the same typing_indicator_received event
-                // regardless of which stack the sender uses.
-                val typingUserId = json.safeOptString("user_id")
-                val conversationId = json.safeOptString("conversation_id")
-                // Strict "typing" check: if the relay renames or drops the
-                // field, that must surface as a diagnostic instead of silently
-                // degrading every event to typing=false.
-                val typing = json.opt("typing") as? Boolean
-                if (typingUserId.isEmpty() || conversationId.isEmpty() || typing == null) {
-                    emitDiagnostic("warning", "Invalid TypingUpdate format: missing user_id/conversation_id/typing")
-                    return
-                }
-                val typingPayload = org.json.JSONObject().apply {
-                    put("conversation_id", conversationId)
-                    put("is_typing", typing)
-                    put("timestamp_ms", System.currentTimeMillis())
-                }
-                injectGroupInternalMessage(typingUserId, "__TYPING__", typingPayload)
-                // A typing peer is provably online — same inbound-proof rule
-                // as MessageReceived: stop spending CheckPresence slots on it.
-                presenceWatch.unwatch(typingUserId)
-                emitDiagnostic("debug", "Typing update bridged from relay", mapOf(
-                    "userId" to typingUserId,
-                    "typing" to typing
-                ))
-            }
+            // TypingUpdate is deliberately unhandled: SDK peers send
+            // __TYPING__ verbatim as signed SendMessage frames (arriving via
+            // MessageReceived), and the relay only produces TypingUpdate
+            // from the relay-native SetTyping/ClearTyping frames pre-SDK
+            // clients used. The old rebuild injected an unsigned gated
+            // control message the core dropped for TOFU-pinned senders
+            // anyway.
 
             // Relay-native Connection* frames (ConnectionRequestReceived /
             // ConnectionAccepted / ConnectionRejected / ConnectionRequestError)
