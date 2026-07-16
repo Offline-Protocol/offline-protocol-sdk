@@ -2139,6 +2139,156 @@ fn test_stale_pending_connection_request_does_not_emit_undeliverable() {
     );
 }
 
+/// Retry exhaustion is the terminal outcome for a connection request that
+/// never got an authoritative DeliveryError: the typed undeliverable event
+/// must fire alongside the generic message_failed, so fast offline feedback
+/// and slow retry exhaustion surface through the same typed channel.
+#[test]
+fn test_max_retries_settles_pending_connection_request_with_undeliverable() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+
+    protocol.handle_max_retries_exceeded(&sent_id, 10).unwrap();
+
+    let captured = events.lock().unwrap();
+    let undeliverable = captured
+        .iter()
+        .find_map(|e| match e {
+            Event::ConnectionRequestUndeliverable {
+                recipient,
+                message_id,
+                reason,
+            } => Some((recipient.clone(), message_id.clone(), reason.clone())),
+            _ => None,
+        })
+        .expect("retry exhaustion on a pending connection request must emit undeliverable");
+    assert_eq!(undeliverable.0, "bob");
+    assert_eq!(undeliverable.1, sent_id.as_str());
+    assert_eq!(undeliverable.2, "max_retries_exceeded");
+    assert!(
+        captured
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "the generic message_failed must still fire alongside the typed event"
+    );
+    drop(captured);
+
+    assert!(
+        protocol.pending_connection_requests.is_empty(),
+        "retry exhaustion must settle the pending entry"
+    );
+}
+
+/// An ordinary message exhausting its retries is not a connection request
+/// and must produce only the generic message_failed.
+#[test]
+fn test_max_retries_on_ordinary_message_does_not_emit_undeliverable() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_message("bob", "Hello!", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    protocol.handle_max_retries_exceeded(&sent_id, 10).unwrap();
+
+    let captured = events.lock().unwrap();
+    assert!(
+        captured
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "retry exhaustion must emit the generic message_failed"
+    );
+    assert!(
+        !captured
+            .iter()
+            .any(|e| matches!(e, Event::ConnectionRequestUndeliverable { .. })),
+        "an ordinary message must not emit ConnectionRequestUndeliverable"
+    );
+}
+
+/// A pending entry past the TTL is dropped at retry exhaustion without a
+/// typed event — a signal that stale belongs to a request the app has long
+/// stopped waiting on (mirrors the on_transport_send_failed behavior).
+#[test]
+fn test_max_retries_on_stale_pending_connection_request_does_not_emit_undeliverable() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+
+    // Age the entry past the TTL. On a host whose monotonic clock started
+    // more recently than the TTL no such Instant exists — skip, the
+    // scenario cannot occur there either.
+    let Some(stale) = std::time::Instant::now()
+        .checked_sub(PENDING_CONNECTION_REQUEST_TTL + Duration::from_secs(1))
+    else {
+        return;
+    };
+    protocol
+        .pending_connection_requests
+        .get_mut(&sent_id.as_str())
+        .unwrap()
+        .sent_at = stale;
+
+    protocol.handle_max_retries_exceeded(&sent_id, 10).unwrap();
+
+    assert!(
+        protocol.pending_connection_requests.is_empty(),
+        "a stale entry must be dropped at retry exhaustion"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::ConnectionRequestUndeliverable { .. })),
+        "a stale entry must not emit ConnectionRequestUndeliverable at retry exhaustion"
+    );
+}
+
 #[test]
 fn test_accept_connection_request_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();

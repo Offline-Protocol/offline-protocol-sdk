@@ -296,8 +296,14 @@ pub(crate) struct PendingConnectionRequest {
 /// `send_connection_request` — a request can dwell in the internet outbox
 /// (device offline, relay reconnecting) before its wire attempt, and this
 /// window must cover that dwell plus the bridge's correlation window.
+///
+/// Also deliberately wider than the worst-case default ACK retry schedule
+/// (10 retries, 1s initial delay, x2 backoff capped at 30s — up to ~290s
+/// end to end): retry exhaustion is the last settlement point that can
+/// still emit a typed undeliverable event, so the window must outlive it
+/// with headroom.
 pub(crate) const PENDING_CONNECTION_REQUEST_TTL: std::time::Duration =
-    std::time::Duration::from_secs(300);
+    std::time::Duration::from_secs(600);
 
 /// Cap on tracked outbound connection requests (oldest evicted first).
 pub(crate) const MAX_PENDING_CONNECTION_REQUESTS: usize = 64;
