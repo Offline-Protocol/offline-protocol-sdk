@@ -568,6 +568,36 @@ enum MessagePriority {
 }
 ```
 
+### Connection Requests
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `sendConnectionRequest(params)` | `Promise<string>` | Send a connection request, returns message ID |
+| `acceptConnectionRequest(params)` | `Promise<string>` | Accept a received request |
+| `rejectConnectionRequest(params)` | `Promise<string>` | Reject a received request |
+| `cancelConnectionRequest(params)` | `Promise<string>` | Cancel a request you sent |
+
+`recipient` is always the target's canonical user id — the value they
+supplied as `ProtocolConfig.userId`, which is exactly what
+`neighbor_discovered` reports as `peer_id` (see [Identity](#identity)).
+
+The message ID returned by `sendConnectionRequest` is the correlation key
+for the request's outcome events:
+
+| Outcome | Event | Correlate by |
+|---------|-------|--------------|
+| Recipient offline (relay delivery error) | `connection_request_undeliverable` (`reason` starts with `recipient_unreachable`) | `message_id` |
+| Retry budget exhausted | `connection_request_undeliverable` (`reason: 'max_retries_exceeded'`) **and** `message_failed` | `message_id` |
+| Reached the recipient's device | `message_delivered` | `message_id` |
+| Recipient accepted | `connection_accepted` | `accepted_by` (peer id) |
+| Recipient rejected | `connection_rejected` | `rejected_by` (peer id) |
+| Sender cancelled (recipient side) | `connection_request_cancelled` | `cancelled_by` (peer id) |
+
+`connection_request_undeliverable` is a status signal, not proof of
+permanent failure: the retry machinery may still deliver the original if
+the peer comes back online, so a user-initiated resend can duplicate the
+original request on the recipient's side.
+
 ### Transport Management
 
 | Method | Returns | Description |
@@ -742,6 +772,13 @@ interface NeighborDiscoveredEvent {
 }
 ```
 
+<a name="identity"></a>
+**Identity contract**: `peer_id` is the peer's canonical user id — the
+same value the peer supplied as `ProtocolConfig.userId`, regardless of
+which transport discovered them. Use it directly as `recipient` in
+`sendMessage` and `sendConnectionRequest`; there is no separate
+transport-level address to resolve.
+
 #### neighbor_lost
 
 ```typescript
@@ -763,6 +800,72 @@ interface NetworkMetricsEvent {
 }
 ```
 
+### Connection Events
+
+See [Connection Requests](#connection-requests) for the full outcome table.
+
+#### connection_request_received
+
+Fires on the recipient's side when a connection request arrives.
+
+```typescript
+interface ConnectionRequestReceivedEvent {
+  type: 'connection_request_received';
+  sender: string;
+  sender_name: string;
+  timestamp: number;
+  key_package?: number[];
+  initial_message?: string;
+}
+```
+
+#### connection_request_undeliverable
+
+Fires on the sender's side when a request could not be delivered — the
+recipient is offline (`reason` starts with `recipient_unreachable`) or the
+retry budget ran out (`reason: 'max_retries_exceeded'`, alongside a
+generic `message_failed`). Correlate via the message ID returned by
+`sendConnectionRequest`. This is a status signal, not proof of permanent
+failure.
+
+```typescript
+interface ConnectionRequestUndeliverableEvent {
+  type: 'connection_request_undeliverable';
+  recipient: string;
+  message_id: string;
+  reason: string;
+}
+```
+
+#### connection_accepted
+
+```typescript
+interface ConnectionAcceptedEvent {
+  type: 'connection_accepted';
+  accepted_by: string;
+  accepted_by_name: string;
+  timestamp: number;
+  key_package?: number[];
+}
+```
+
+#### connection_rejected
+
+```typescript
+interface ConnectionRejectedEvent {
+  type: 'connection_rejected';
+  rejected_by: string;
+}
+```
+
+#### connection_request_cancelled
+
+```typescript
+interface ConnectionRequestCancelledEvent {
+  type: 'connection_request_cancelled';
+  cancelled_by: string;
+}
+```
 
 ### File Events
 

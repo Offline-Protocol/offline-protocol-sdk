@@ -629,6 +629,13 @@ export interface RelayDemotedEvent extends BaseEvent {
  */
 export interface NeighborDiscoveredEvent extends BaseEvent {
   type: 'neighbor_discovered';
+  /**
+   * The peer's canonical user id — the same value the peer supplied as
+   * `ProtocolConfig.userId`. This is the one identifier the SDK uses on
+   * every surface: use it directly as `recipient` in `sendMessage` and
+   * `sendConnectionRequest`, regardless of which transport discovered
+   * the peer.
+   */
   peer_id: string;
   transport: string;
   rssi?: number;
@@ -870,17 +877,22 @@ export interface ConnectionRequestReceivedEvent extends BaseEvent {
 /**
  * An outbound connection request could not be delivered: the transport
  * reported the recipient unreachable (e.g. the relay's DeliveryError for an
- * offline peer). Correlate via the message id returned by
- * sendConnectionRequest. This is a status signal, not proof of permanent
- * failure — the original request may still be delivered by the retry
- * machinery if the peer comes back online, so treat a user-initiated
- * resend as potentially duplicating the original on the recipient's side.
+ * offline peer), or the request exhausted its retry budget (a generic
+ * `message_failed` also fires for the same id in that case). Correlate via
+ * the message id returned by sendConnectionRequest. This is a status
+ * signal, not proof of permanent failure — the original request may still
+ * be delivered by the retry machinery if the peer comes back online, so
+ * treat a user-initiated resend as potentially duplicating the original on
+ * the recipient's side.
  */
 export interface ConnectionRequestUndeliverableEvent extends BaseEvent {
   type: 'connection_request_undeliverable';
   recipient: string;
   message_id: string;
-  /** Transport-level reason; starts with `recipient_unreachable`. */
+  /**
+   * Failure reason: starts with `recipient_unreachable` (transport-level
+   * offline signal) or is `max_retries_exceeded` (retry budget exhausted).
+   */
   reason: string;
 }
 

@@ -854,6 +854,18 @@ export class OfflineProtocol {
   /**
    * Sends a connection request
    *
+   * `params.recipient` must be the target's canonical user id — the value
+   * they supplied as `ProtocolConfig.userId`, which is also what
+   * `neighbor_discovered` reports as `peer_id`.
+   *
+   * The returned message id is the correlation key for the request's
+   * outcome events: `connection_request_undeliverable` (recipient offline
+   * or retry budget exhausted), `message_delivered` (reached the
+   * recipient's device), and `message_failed` (generic retry exhaustion,
+   * fires alongside the typed event). The recipient's answer arrives as
+   * `connection_accepted` / `connection_rejected`, which correlate by peer
+   * id (`accepted_by` / `rejected_by`), not by message id.
+   *
    * @param params - Connection request parameters
    * @returns Message ID
    * @throws Error if request fails to send

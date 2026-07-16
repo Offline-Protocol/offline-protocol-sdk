@@ -382,7 +382,9 @@ pub enum Event {
 
     /// A new neighbor was discovered.
     NeighborDiscovered {
-        /// Peer ID of the neighbor.
+        /// The peer's canonical user id — the same value the peer supplied
+        /// as `ProtocolConfig.user_id`, on every transport. Valid directly
+        /// as the `recipient` of `send_message` / `send_connection_request`.
         peer_id: String,
         /// Transport used to discover.
         transport: String,
@@ -631,18 +633,21 @@ pub enum Event {
 
     /// An outbound connection request could not be delivered: the transport
     /// reported the recipient unreachable (e.g. the relay's DeliveryError
-    /// for an offline peer). This is a status signal, not proof of
-    /// permanent failure — the original request may still be delivered by
-    /// the retry machinery if the peer comes back online. Apps typically
-    /// surface "user is offline"; a user-initiated resend can therefore
-    /// arrive alongside the retried original (the recipient sees the
-    /// request event again, which accept/reject flows already tolerate).
+    /// for an offline peer), or the request exhausted its ACK retry budget
+    /// (in which case a generic `MessageFailed` also fires for the same
+    /// id). This is a status signal, not proof of permanent failure — the
+    /// original request may still be delivered by the retry machinery if
+    /// the peer comes back online. Apps typically surface "user is
+    /// offline"; a user-initiated resend can therefore arrive alongside the
+    /// retried original (the recipient sees the request event again, which
+    /// accept/reject flows already tolerate).
     ConnectionRequestUndeliverable {
         /// Recipient the request was addressed to.
         recipient: String,
         /// Message id returned by `send_connection_request`.
         message_id: String,
-        /// Transport-level reason (starts with `recipient_unreachable`).
+        /// Failure reason: starts with `recipient_unreachable`, or is
+        /// `max_retries_exceeded` when the retry budget ran out.
         reason: String,
     },
 

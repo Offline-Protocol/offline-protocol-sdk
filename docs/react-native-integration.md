@@ -243,7 +243,9 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 | **once** | `once(eventType, listener): this` | Registers a one-time listener. |
 | **removeAllListeners** | `removeAllListeners(eventType?: EventType \| 'all'): this` | Removes listeners for a type or all. |
 
-**Event types**: `message_sent`, `message_received`, `message_delivered`, `message_failed`, `transport_switched`, `relay_promoted`, `relay_demoted`, `neighbor_discovered`, `neighbor_lost`, `network_metrics`, `file_progress`, `file_received`, `diagnostic`, `secure_session_established`, `secure_session_failed`, `group_created`, `group_message_received`, `group_member_added`, `group_member_removed`, `group_message_sent`, `group_message_partial_failure`, `group_epoch_fork_detected`, `group_epoch_fork_resolved`, `group_role_changed`, `service_discovered`, `service_request_received`, `service_response_received`, `presence_updated`, `typing_indicator_received`, `read_receipt_received`, `message_relayed`, `message_deferred`.
+**Event types**: `message_sent`, `message_received`, `message_delivered`, `message_failed`, `transport_switched`, `relay_promoted`, `relay_demoted`, `neighbor_discovered`, `neighbor_lost`, `network_metrics`, `file_progress`, `file_received`, `diagnostic`, `secure_session_established`, `secure_session_failed`, `connection_request_received`, `connection_request_undeliverable`, `connection_accepted`, `connection_rejected`, `connection_request_cancelled`, `group_created`, `group_message_received`, `group_member_added`, `group_member_removed`, `group_message_sent`, `group_message_partial_failure`, `group_epoch_fork_detected`, `group_epoch_fork_resolved`, `group_role_changed`, `service_discovered`, `service_request_received`, `service_response_received`, `presence_updated`, `typing_indicator_received`, `read_receipt_received`, `message_relayed`, `message_deferred`.
+
+**Identity**: `neighbor_discovered.peer_id` is the peer's canonical user id — the same value the peer supplied as `ProtocolConfig.userId`, on every transport — and is what you pass as `recipient` to `sendMessage` / `sendConnectionRequest`.
 
 ---
 
@@ -264,6 +266,12 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 |--------|-----------|-------------|
 | **sendMessage** | `sendMessage(params: SendMessageParams): Promise<string>` | Sends a message; returns message ID. `params`: `recipient`, `content`, `priority?`, `replyToMsg?`. |
 | **receiveMessage** | `receiveMessage(): Promise<MessageReceivedEvent \| null>` | Polls for the next received message. |
+| **sendConnectionRequest** | `sendConnectionRequest(params: SendConnectionRequestParams): Promise<string>` | Sends a connection request; returns the message ID that correlates all outcome events. `params`: `recipient` (the target's canonical user id), `senderName`, `keyPackage?`, `initialMessage?`. |
+| **acceptConnectionRequest** | `acceptConnectionRequest(params): Promise<string>` | Accepts a received request. `params`: `recipient`, `accepterName`, `keyPackage?`. |
+| **rejectConnectionRequest** | `rejectConnectionRequest(params): Promise<string>` | Rejects a received request. `params`: `recipient`. |
+| **cancelConnectionRequest** | `cancelConnectionRequest(params): Promise<string>` | Cancels a request you sent. `params`: `recipient`. |
+
+Connection-request failure contract: recipient offline emits `connection_request_undeliverable` (`reason` starts with `recipient_unreachable`); retry exhaustion emits it with `reason: 'max_retries_exceeded'` alongside the generic `message_failed`. Both carry the message ID returned by `sendConnectionRequest`. Answers arrive as `connection_accepted` / `connection_rejected`, correlated by peer id (`accepted_by` / `rejected_by`), not message ID.
 
 ---
 
