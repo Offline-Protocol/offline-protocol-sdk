@@ -2675,6 +2675,46 @@ mod tests {
         }
     }
 
+    /// Pins the JSON wire shape the RN `types.ts` declarations model
+    /// (`ConnectionRequestUndeliverableEvent` / `initial_message` on
+    /// `ConnectionRequestReceivedEvent`) — events cross the FFI as JSON, so
+    /// this contract is otherwise enforced only by convention.
+    #[test]
+    fn test_connection_request_event_wire_shapes() {
+        let event = Event::connection_request_undeliverable(
+            "bob".to_string(),
+            "m1".to_string(),
+            "recipient_unreachable: User is offline".to_string(),
+        );
+        let json: serde_json::Value = serde_json::from_str(&event.to_json().unwrap()).unwrap();
+        assert_eq!(json["type"], "connection_request_undeliverable");
+        assert_eq!(json["recipient"], "bob");
+        assert_eq!(json["message_id"], "m1");
+        assert_eq!(json["reason"], "recipient_unreachable: User is offline");
+
+        let received = Event::connection_request_received(
+            "alice".to_string(),
+            "Alice".to_string(),
+            12345,
+            None,
+            Some("hey".to_string()),
+        );
+        let json: serde_json::Value = serde_json::from_str(&received.to_json().unwrap()).unwrap();
+        assert_eq!(json["type"], "connection_request_received");
+        assert_eq!(json["initial_message"], "hey");
+
+        // None must omit the key entirely (skip_serializing_if), keeping the
+        // event byte-shape identical to pre-initial-message builds.
+        let received = Event::connection_request_received(
+            "alice".to_string(),
+            "Alice".to_string(),
+            12345,
+            None,
+            None,
+        );
+        assert!(!received.to_json().unwrap().contains("initial_message"));
+    }
+
     #[test]
     fn test_network_metrics_event() {
         let event = Event::network_metrics(10, 3, 0.95, 150);

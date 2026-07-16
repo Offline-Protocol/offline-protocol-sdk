@@ -1889,6 +1889,74 @@ fn test_connection_request_generic_send_failure_does_not_emit_undeliverable() {
     );
 }
 
+/// `initial_message` is a plaintext control-frame payload, so oversized
+/// input must fail loudly at the API instead of fragmenting over BLE or
+/// dying at a relay frame limit after a message id was already returned.
+#[test]
+fn test_send_connection_request_rejects_oversized_initial_message() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let oversized = "x".repeat(MAX_INITIAL_MESSAGE_BYTES + 1);
+    let result = protocol.send_connection_request("bob", "Alice", None, Some(oversized));
+    assert!(
+        matches!(result, Err(crate::Error::InvalidArgument(_))),
+        "oversized initial_message must be rejected with InvalidArgument, got {:?}",
+        result
+    );
+
+    // Exactly at the cap is accepted.
+    let at_cap = "x".repeat(MAX_INITIAL_MESSAGE_BYTES);
+    assert!(protocol
+        .send_connection_request("bob", "Alice", None, Some(at_cap))
+        .is_ok());
+}
+
+/// The pending-request map is bounded: past the cap the oldest entry is
+/// evicted first, so a burst of requests can neither grow the map
+/// unboundedly nor displace the newest (most likely still relevant) entry.
+#[test]
+fn test_pending_connection_request_cap_evicts_oldest_first() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let mut ids = Vec::new();
+    for i in 0..=MAX_PENDING_CONNECTION_REQUESTS {
+        let id = protocol
+            .send_connection_request(&format!("peer{}", i), "Alice", None, None)
+            .unwrap();
+        ids.push(id.as_str());
+    }
+
+    assert_eq!(
+        protocol.pending_connection_requests.len(),
+        MAX_PENDING_CONNECTION_REQUESTS,
+        "map must stay at the cap after cap+1 sends"
+    );
+    assert!(
+        !protocol.pending_connection_requests.contains_key(&ids[0]),
+        "the oldest entry must be the one evicted"
+    );
+    assert!(
+        protocol
+            .pending_connection_requests
+            .contains_key(ids.last().unwrap()),
+        "the newest entry must survive eviction"
+    );
+}
+
 #[test]
 fn test_accept_connection_request_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();

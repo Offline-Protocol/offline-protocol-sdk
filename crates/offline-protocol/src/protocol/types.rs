@@ -290,11 +290,24 @@ pub(crate) struct PendingConnectionRequest {
 /// transport failure. Past this window the entry is pruned: a DeliveryError
 /// that stale belongs to a request the app has long stopped showing a
 /// spinner for.
+///
+/// Deliberately wider than the bridges' 60s `RecipientInFlightTracker` TTL:
+/// that window anchors at the socket write, while this one anchors at
+/// `send_connection_request` — a request can dwell in the internet outbox
+/// (device offline, relay reconnecting) before its wire attempt, and this
+/// window must cover that dwell plus the bridge's correlation window.
 pub(crate) const PENDING_CONNECTION_REQUEST_TTL: std::time::Duration =
     std::time::Duration::from_secs(300);
 
 /// Cap on tracked outbound connection requests (oldest evicted first).
 pub(crate) const MAX_PENDING_CONNECTION_REQUESTS: usize = 64;
+
+/// Upper bound (UTF-8 bytes) for `initial_message` on a connection request.
+/// The request is a plaintext High-priority control frame; an unbounded
+/// first message would fragment heavily over BLE and can exceed relay frame
+/// limits after the SDK already returned a message id, so oversized input
+/// fails loudly at the API instead.
+pub(crate) const MAX_INITIAL_MESSAGE_BYTES: usize = 4096;
 
 /// Payload for a connection request message.
 #[derive(Debug, Clone, Serialize, Deserialize)]

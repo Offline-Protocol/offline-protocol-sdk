@@ -26,10 +26,11 @@
 //!
 //! - **Content and display fields are left raw**: `content`, `file_data`,
 //!   `name`, `new_name`/`old_name`, `group_name`, `sender_name`,
-//!   `accepted_by_name`, `file_name`, `reason`/`reason_detail`, `method`,
-//!   `body`, `version`. Scrubbing payload is out of scope for `scrub_ids`;
-//!   if that ever needs to change it belongs behind a separate `emit_content`
-//!   knob so the two concerns don't get conflated.
+//!   `accepted_by_name`, `file_name`, `initial_message`,
+//!   `reason`/`reason_detail`, `method`, `body`, `version`. Scrubbing
+//!   payload is out of scope for `scrub_ids`; if that ever needs to change
+//!   it belongs behind a separate `emit_content` knob so the two concerns
+//!   don't get conflated.
 //!
 //! - **Enum-ish string fields are left raw**: `transport`, `content_type`,
 //!   `role`/`new_role`, `priority`, `status` — finite value sets, not
@@ -49,6 +50,14 @@
 //!   effectively logs an unscrubbed identifier, regardless of the
 //!   `scrub_ids` setting. Treat key packages as sensitive payload, not as
 //!   metadata.
+//!
+//! - **Pre-session plaintext user prose**: `initial_message` on
+//!   [`Event::ConnectionRequestReceived`] is user-authored text that was
+//!   never end-to-end encrypted (connection requests precede the MLS
+//!   session). It follows the content-fields-stay-raw rule above, so a
+//!   sink that ships events off-device must treat it exactly like
+//!   `content` on a decrypted message — as message payload, never as
+//!   loggable metadata.
 //!
 //! - **Free-form strings that may interpolate identifiers**: `reason` /
 //!   `reason_detail` fields are produced by upstream error paths. If an
