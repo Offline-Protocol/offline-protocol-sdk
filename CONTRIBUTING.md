@@ -7,8 +7,8 @@ Thank you for your interest in contributing! This document provides guidelines f
 ### Prerequisites
 
 - Rust 1.87+ (`rustup default stable`)
-- For mobile: Android NDK, Xcode
-- For web: wasm-pack
+- For mobile bindings: Android NDK, Xcode
+- For regenerating UniFFI bindings: `cargo install uniffi --features="cli"` and `cargo install cargo-ndk`
 
 ### Clone and Build
 
