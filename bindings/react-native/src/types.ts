@@ -871,8 +871,10 @@ export interface ConnectionRequestReceivedEvent extends BaseEvent {
  * An outbound connection request could not be delivered: the transport
  * reported the recipient unreachable (e.g. the relay's DeliveryError for an
  * offline peer). Correlate via the message id returned by
- * sendConnectionRequest; apps typically surface "user is offline" and let
- * the user retry.
+ * sendConnectionRequest. This is a status signal, not proof of permanent
+ * failure — the original request may still be delivered by the retry
+ * machinery if the peer comes back online, so treat a user-initiated
+ * resend as potentially duplicating the original on the recipient's side.
  */
 export interface ConnectionRequestUndeliverableEvent extends BaseEvent {
   type: 'connection_request_undeliverable';

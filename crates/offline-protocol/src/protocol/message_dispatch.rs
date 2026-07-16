@@ -866,6 +866,13 @@ impl OfflineProtocol {
 
     /// Handles a connection accepted message.
     pub(crate) fn handle_connection_accepted(&mut self, sender: &str, data: &str) {
+        // The peer answered, so any request we still track toward them is
+        // settled — drop it (keyed by recipient: the frame carries no
+        // request id) so a later stale unreachable signal cannot fire a
+        // false ConnectionRequestUndeliverable. Before the parse: the
+        // authenticated frame itself is the proof, even if malformed.
+        self.pending_connection_requests
+            .retain(|_, p| p.recipient != sender);
         if let Ok(payload) = serde_json::from_str::<ConnectionAcceptedPayload>(data) {
             info!(sender = %sender, accepted_by_name = %payload.accepted_by_name, "Connection request accepted");
             if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -883,6 +890,10 @@ impl OfflineProtocol {
 
     /// Handles a connection rejected message.
     pub(crate) fn handle_connection_rejected(&mut self, sender: &str) {
+        // Same settlement rule as handle_connection_accepted: the peer
+        // answered, so the tracked request toward them is resolved.
+        self.pending_connection_requests
+            .retain(|_, p| p.recipient != sender);
         info!(sender = %sender, "Connection request rejected");
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::connection_rejected(sender.to_string()));
