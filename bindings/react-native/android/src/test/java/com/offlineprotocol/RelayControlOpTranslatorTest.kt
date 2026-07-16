@@ -23,40 +23,27 @@ class RelayControlOpTranslatorTest {
         }
     }
 
+    /**
+     * Connection ops are no longer server-plane: they ship verbatim as
+     * signed SendMessage frames, so the translator must pass them through
+     * untouched (they should never even be tagged by the core).
+     */
     @Test
-    fun connectionOpsTranslateToRelayNativeFrames() {
+    fun connectionOpsPassThroughVerbatim() {
         val translator = RelayControlOpTranslator("alice")
-
-        val req = translator.translate(
-            "conn_req",
-            """{"sender_name":"Alice","timestamp_ms":1,"key_package":[1,2,3]}""",
-            "bob"
+        val cases = listOf(
+            "conn_req" to """{"sender_name":"Alice","timestamp_ms":1,"key_package":[1,2,3]}""",
+            "conn_acc" to """{"accepted_by_name":"Alice","timestamp_ms":1}""",
+            "conn_rej" to "",
+            "conn_can" to ""
         )
-        assertTrue(req is RelayControlOpTranslator.Translation.Replace)
-        val reqFrame = frames(req).single()
-        assertEquals("SendConnectionRequest", reqFrame.getString("type"))
-        assertEquals("bob", reqFrame.getString("recipient"))
-        assertEquals("Alice", reqFrame.getString("sender_name"))
-        assertEquals(3, reqFrame.getJSONArray("key_package").length())
-
-        val acc = translator.translate(
-            "conn_acc",
-            """{"accepted_by_name":"Alice","timestamp_ms":1}""",
-            "bob"
-        )
-        val accFrame = frames(acc).single()
-        assertEquals("AcceptConnectionRequest", accFrame.getString("type"))
-        assertEquals("bob", accFrame.getString("requester_id"))
-        assertEquals("Alice", accFrame.getString("accepter_name"))
-        assertTrue(!accFrame.has("key_package"))
-
-        val rej = frames(translator.translate("conn_rej", "", "bob")).single()
-        assertEquals("RejectConnectionRequest", rej.getString("type"))
-        assertEquals("bob", rej.getString("requester_id"))
-
-        val can = frames(translator.translate("conn_can", "", "bob")).single()
-        assertEquals("CancelConnectionRequest", can.getString("type"))
-        assertEquals("bob", can.getString("recipient"))
+        for ((op, payload) in cases) {
+            assertTrue(
+                "$op must pass through as a verbatim SendMessage",
+                translator.translate(op, payload, "bob")
+                    is RelayControlOpTranslator.Translation.PassThrough
+            )
+        }
     }
 
     @Test
@@ -344,10 +331,6 @@ class RelayControlOpTranslatorTest {
 
         // Ordered: g1 is registered before the ops that reference it.
         val cases = listOf(
-            Triple("conn_req", """{"sender_name":"Alice"}""", "bob"),
-            Triple("conn_acc", """{"accepted_by_name":"Alice"}""", "bob"),
-            Triple("conn_rej", "", "bob"),
-            Triple("conn_can", "", "bob"),
             Triple(
                 "group_relay_register",
                 """{"group_id":"g1","group_name":"Trip","members":["alice","bob"]}""",
@@ -375,7 +358,7 @@ class RelayControlOpTranslatorTest {
     fun malformedPayloadAndUnknownOpFallBackToPassThrough() {
         val translator = RelayControlOpTranslator("alice")
         assertTrue(
-            translator.translate("conn_req", "not-json", "bob")
+            translator.translate("group_relay_broadcast", "not-json", "alice")
                 is RelayControlOpTranslator.Translation.PassThrough
         )
         assertTrue(

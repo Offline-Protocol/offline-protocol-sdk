@@ -30,41 +30,27 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         return false
     }
 
-    func testConnectionOpsTranslateToRelayNativeFrames() {
+    /// Connection ops are no longer server-plane: they ship verbatim as
+    /// signed SendMessage frames, so the translator must pass them through
+    /// untouched (they should never even be tagged by the core).
+    func testConnectionOpsPassThroughVerbatim() {
         let translator = RelayControlOpTranslator(selfId: "alice")
-
-        let reqTranslation = translator.translate(
-            controlOp: "conn_req",
-            controlPayload: #"{"sender_name":"Alice","timestamp_ms":1,"key_package":[1,2,3]}"#,
-            recipientId: "bob"
-        )
-        guard case .replace = reqTranslation else {
-            return XCTFail("conn_req must be a replace, not passThrough/tap")
+        for (op, payload) in [
+            ("conn_req", #"{"sender_name":"Alice","timestamp_ms":1,"key_package":[1,2,3]}"#),
+            ("conn_acc", #"{"accepted_by_name":"Alice","timestamp_ms":1}"#),
+            ("conn_rej", ""),
+            ("conn_can", "")
+        ] {
+            let translation = translator.translate(
+                controlOp: op,
+                controlPayload: payload,
+                recipientId: "bob"
+            )
+            XCTAssertTrue(
+                isPassThrough(translation),
+                "\(op) must pass through as a verbatim SendMessage"
+            )
         }
-        let req = frames(reqTranslation)
-        XCTAssertEqual(req.count, 1)
-        XCTAssertEqual(req[0]["type"] as? String, "SendConnectionRequest")
-        XCTAssertEqual(req[0]["recipient"] as? String, "bob")
-        XCTAssertEqual(req[0]["sender_name"] as? String, "Alice")
-        XCTAssertEqual((req[0]["key_package"] as? [Any])?.count, 3)
-
-        let acc = frames(translator.translate(
-            controlOp: "conn_acc",
-            controlPayload: #"{"accepted_by_name":"Alice","timestamp_ms":1}"#,
-            recipientId: "bob"
-        ))
-        XCTAssertEqual(acc[0]["type"] as? String, "AcceptConnectionRequest")
-        XCTAssertEqual(acc[0]["requester_id"] as? String, "bob")
-        XCTAssertEqual(acc[0]["accepter_name"] as? String, "Alice")
-        XCTAssertNil(acc[0]["key_package"])
-
-        let rej = frames(translator.translate(controlOp: "conn_rej", controlPayload: "", recipientId: "bob"))
-        XCTAssertEqual(rej[0]["type"] as? String, "RejectConnectionRequest")
-        XCTAssertEqual(rej[0]["requester_id"] as? String, "bob")
-
-        let can = frames(translator.translate(controlOp: "conn_can", controlPayload: "", recipientId: "bob"))
-        XCTAssertEqual(can[0]["type"] as? String, "CancelConnectionRequest")
-        XCTAssertEqual(can[0]["recipient"] as? String, "bob")
     }
 
     func testRegisterTranslatesToCreateGroupPlusMemberDeltas() {
@@ -272,10 +258,6 @@ final class RelayControlOpTranslatorTests: XCTestCase {
 
         // Ordered: g1 is registered before the ops that reference it.
         let cases: [(op: String, payload: String, recipient: String)] = [
-            ("conn_req", #"{"sender_name":"Alice"}"#, "bob"),
-            ("conn_acc", #"{"accepted_by_name":"Alice"}"#, "bob"),
-            ("conn_rej", "", "bob"),
-            ("conn_can", "", "bob"),
             ("group_relay_register", #"{"group_id":"g1","group_name":"Trip","members":["alice","bob"]}"#, "alice"),
             ("group_relay_broadcast", #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":1}"#, "alice"),
             ("group_mls_leave", #"{"group_id":"g1","leaving_member":"alice"}"#, "bob"),
@@ -298,7 +280,7 @@ final class RelayControlOpTranslatorTests: XCTestCase {
     func testMalformedPayloadAndUnknownOpFallBackToPassThrough() {
         let translator = RelayControlOpTranslator(selfId: "alice")
         XCTAssertTrue(isPassThrough(
-            translator.translate(controlOp: "conn_req", controlPayload: "not-json", recipientId: "bob")
+            translator.translate(controlOp: "group_relay_broadcast", controlPayload: "not-json", recipientId: "alice")
         ))
         XCTAssertTrue(isPassThrough(
             translator.translate(controlOp: "some_future_op", controlPayload: "{}", recipientId: "bob")

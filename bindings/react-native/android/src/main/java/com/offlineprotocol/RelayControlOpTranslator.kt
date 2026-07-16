@@ -13,8 +13,6 @@ import org.json.JSONObject
  * adapter" the core's relay-optimized group path was designed against.
  *
  * Semantics per op:
- * - `conn_req`/`conn_acc`/`conn_rej`/`conn_can` — [Translation.Replace] with
- *   the relay-native connection-request op.
  * - `group_relay_register` — [Translation.Replace] with `CreateGroup` (the
  *   relay treats a member's re-sync as idempotent and answers `GroupCreated`,
  *   which is the core's sync acknowledgment) plus `AddGroupMember`/
@@ -163,36 +161,6 @@ class RelayControlOpTranslator(private val selfId: String) {
     ): Translation = synchronized(lock) {
         try {
             when (controlOp) {
-                "conn_req" -> {
-                    val payload = JSONObject(controlPayload)
-                    Translation.Replace(listOf(JSONObject().apply {
-                        put("type", "SendConnectionRequest")
-                        put("recipient", recipientId)
-                        put("sender_name", payload.optString("sender_name", selfId))
-                        payload.optJSONArray("key_package")?.let { put("key_package", it) }
-                    }))
-                }
-
-                "conn_acc" -> {
-                    val payload = JSONObject(controlPayload)
-                    Translation.Replace(listOf(JSONObject().apply {
-                        put("type", "AcceptConnectionRequest")
-                        put("requester_id", recipientId)
-                        put("accepter_name", payload.optString("accepted_by_name", selfId))
-                        payload.optJSONArray("key_package")?.let { put("key_package", it) }
-                    }))
-                }
-
-                "conn_rej" -> Translation.Replace(listOf(JSONObject().apply {
-                    put("type", "RejectConnectionRequest")
-                    put("requester_id", recipientId)
-                }))
-
-                "conn_can" -> Translation.Replace(listOf(JSONObject().apply {
-                    put("type", "CancelConnectionRequest")
-                    put("recipient", recipientId)
-                }))
-
                 "group_relay_register" -> translateRegister(controlPayload)
 
                 "group_relay_broadcast" -> {

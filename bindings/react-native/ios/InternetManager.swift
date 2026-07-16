@@ -149,8 +149,8 @@ public class InternetManager: NSObject, TransportManager {
     private let consecutivePingFailures = AtomicCounter()
     private let MAX_CONSECUTIVE_FAILURES: Int64 = 2  // Trigger disconnect after 2 consecutive failures
 
-    // Correlates the relay's recipient-keyed failure signals (DeliveryError /
-    // ConnectionRequestError carry no message_id) back to in-flight sends.
+    // Correlates the relay's recipient-keyed failure signal (DeliveryError
+    // carries no message_id) back to in-flight sends.
     private let inFlightTracker = RecipientInFlightTracker()
 
     // Which peers to query via CheckPresence, and how many per tick.
@@ -1134,7 +1134,6 @@ public class InternetManager: NSObject, TransportManager {
             handleRecipientUnreachable(
                 recipient: recipient,
                 reason: reason,
-                plane: .data,
                 source: "DeliveryError"
             )
 
@@ -1204,117 +1203,12 @@ public class InternetManager: NSObject, TransportManager {
                 "typing": typing
             ])
 
-        case "ConnectionRequestReceived":
-            // Process like MessageReceived: build internal message and feed to protocol so it emits connection_request_received
-            let senderId = json["sender"] as? String ?? ""
-            let senderName = json["sender_name"] as? String ?? senderId
-            let timestampStr = json["timestamp"] as? String ?? ""
-            let keyPackage = json["key_package"] as? [Int]
-            guard !senderId.isEmpty else {
-                emitDiagnostic("warning", "Invalid ConnectionRequestReceived format: missing sender", context: [:])
-                return
-            }
-            let timestampMs = parseTimestampToMs(timestampStr)
-            var payloadDict: [String: Any] = [
-                "sender_name": senderName,
-                "timestamp_ms": timestampMs
-            ]
-            if let kp = keyPackage {
-                payloadDict["key_package"] = kp.map { $0 & 0xFF }
-            }
-            guard let payloadData = try? JSONSerialization.data(withJSONObject: payloadDict),
-                  let payloadStr = String(data: payloadData, encoding: .utf8) else { return }
-            let content = "__CONN_REQ__" + payloadStr
-            messageQueue.async { [weak self] in
-                guard let self = self else { return }
-                do {
-                    let messageData = try self.buildInternalMessageData(senderId: senderId, content: content)
-                    let bytes = [UInt8](messageData)
-                    try self.protocolInstance.internetMessageReceived(senderId: senderId, data: bytes)
-                    self.emitDiagnostic("debug", "Connection request received from relay", context: [
-                        "sender": senderId,
-                        "sender_name": senderName
-                    ])
-                } catch {
-                    self.emitDiagnostic("error", "Error processing ConnectionRequestReceived", context: [
-                        "error": error.localizedDescription
-                    ])
-                }
-            }
-            
-        case "ConnectionAccepted":
-            let acceptedBy = json["accepted_by"] as? String ?? json["sender"] as? String ?? ""
-            let acceptedByName = json["accepted_by_name"] as? String ?? json["sender_name"] as? String ?? acceptedBy
-            let timestampStr = json["timestamp"] as? String ?? ""
-            let keyPackage = json["key_package"] as? [Int]
-            guard !acceptedBy.isEmpty else {
-                emitDiagnostic("warning", "Invalid ConnectionAccepted format: missing accepted_by", context: [:])
-                return
-            }
-            let timestampMs = parseTimestampToMs(timestampStr)
-            var payloadDict: [String: Any] = [
-                "accepted_by_name": acceptedByName,
-                "timestamp_ms": timestampMs
-            ]
-            if let kp = keyPackage {
-                payloadDict["key_package"] = kp.map { $0 & 0xFF }
-            }
-            guard let payloadData = try? JSONSerialization.data(withJSONObject: payloadDict),
-                  let payloadStr = String(data: payloadData, encoding: .utf8) else { return }
-            let content = "__CONN_ACC__" + payloadStr
-            messageQueue.async { [weak self] in
-                guard let self = self else { return }
-                do {
-                    let messageData = try self.buildInternalMessageData(senderId: acceptedBy, content: content)
-                    let bytes = [UInt8](messageData)
-                    try self.protocolInstance.internetMessageReceived(senderId: acceptedBy, data: bytes)
-                    self.emitDiagnostic("debug", "Connection accepted from relay", context: [
-                        "accepted_by": acceptedBy,
-                        "accepted_by_name": acceptedByName
-                    ])
-                } catch {
-                    self.emitDiagnostic("error", "Error processing ConnectionAccepted", context: [
-                        "error": error.localizedDescription
-                    ])
-                }
-            }
-            
-        case "ConnectionRejected":
-            let rejectedBy = json["rejected_by"] as? String ?? json["sender"] as? String ?? ""
-            guard !rejectedBy.isEmpty else {
-                emitDiagnostic("warning", "Invalid ConnectionRejected format: missing rejected_by", context: [:])
-                return
-            }
-            let content = "__CONN_REJ__"
-            messageQueue.async { [weak self] in
-                guard let self = self else { return }
-                do {
-                    let messageData = try self.buildInternalMessageData(senderId: rejectedBy, content: content)
-                    let bytes = [UInt8](messageData)
-                    try self.protocolInstance.internetMessageReceived(senderId: rejectedBy, data: bytes)
-                    self.emitDiagnostic("debug", "Connection rejected from relay", context: [
-                        "rejected_by": rejectedBy
-                    ])
-                } catch {
-                    self.emitDiagnostic("error", "Error processing ConnectionRejected", context: [
-                        "error": error.localizedDescription
-                    ])
-                }
-            }
-            
-        case "ConnectionRequestError":
-            // Same authoritative offline signal as DeliveryError, for
-            // relay-native connection-request ops (the relay does not store
-            // requests for offline recipients).
-            let recipient = json["recipient"] as? String ?? ""
-            let reason = json["reason"] as? String ?? "Unknown error"
-            handleRecipientUnreachable(
-                recipient: recipient,
-                reason: reason,
-                plane: .connReq,
-                source: "ConnectionRequestError"
-            )
-            
+        // Relay-native Connection* frames (ConnectionRequestReceived /
+        // ConnectionAccepted / ConnectionRejected / ConnectionRequestError)
+        // are deliberately unhandled: connection ops travel verbatim as
+        // signed SendMessage frames and arrive via MessageReceived, so a
+        // relay-native connection frame can only come from a pre-SDK client.
+
         case "GroupCreated":
             guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
             let name = json["name"] as? String ?? ""
@@ -1691,7 +1585,6 @@ public class InternetManager: NSObject, TransportManager {
         inFlightTracker.recordSent(
             recipient: recipientId,
             messageId: messageId,
-            plane: .data,
             nowMs: monotonicNowMs()
         )
 
@@ -1818,27 +1711,9 @@ public class InternetManager: NSObject, TransportManager {
                 ])
                 return
             }
-            // Plane tag: connection-request primaries are answered by the
-            // relay's recipient-keyed ConnectionRequestError, so they are
-            // tracked (CONN_REQ, recorded BEFORE the write — same fast-answer
-            // race as sendMessage). Group-scoped primaries (CreateGroup /
-            // SendGroupMessage) answer on the group-scoped GroupError channel
-            // and are never recorded here.
-            let isConnectionRequestOp: Bool
-            switch controlOp {
-            case "conn_req", "conn_acc", "conn_rej", "conn_can":
-                isConnectionRequestOp = true
-            default:
-                isConnectionRequestOp = false
-            }
-            if isConnectionRequestOp {
-                inFlightTracker.recordSent(
-                    recipient: recipientId,
-                    messageId: messageId,
-                    plane: .connReq,
-                    nowMs: monotonicNowMs()
-                )
-            }
+            // Group-scoped primaries (CreateGroup / SendGroupMessage) answer
+            // on the group-scoped GroupError channel and are never recorded
+            // in the recipient-keyed in-flight tracker.
             // Hold the poll loop until the primary's outcome lands: the
             // extra frames and the commit are handed off only from the
             // SUCCESS completion below.
@@ -1867,9 +1742,6 @@ public class InternetManager: NSObject, TransportManager {
                         // out-of-order registration state, and committing
                         // would record membership the relay never saw.
                         self.rateLimiter.refund()
-                        if isConnectionRequestOp {
-                            self.inFlightTracker.unrecord(recipient: recipientId, messageId: messageId)
-                        }
                         let failures = self.consecutiveSendFailures.increment()
                         self.protocolInstance.internetSendFailed(messageId: messageId)
                         self.emitDiagnostic("error", "Failed to send relay-native control op", context: [
@@ -2029,7 +1901,6 @@ public class InternetManager: NSObject, TransportManager {
             inFlightTracker.recordSent(
                 recipient: recipient,
                 messageId: id,
-                plane: .data,
                 nowMs: monotonicNowMs()
             )
             sentinel = (recipient, id)
@@ -2053,18 +1924,15 @@ public class InternetManager: NSObject, TransportManager {
 
     // MARK: - Presence Watch
 
-    /// Fail-fast handler for the relay's recipient-keyed offline signals
-    /// (DeliveryError / ConnectionRequestError). Fails every live in-flight
-    /// message to the recipient ON THE SIGNAL'S PLANE (DeliveryError answers
-    /// data frames, ConnectionRequestError answers conn ops — neither may
-    /// sweep the other's entries) with the recipient_unreachable reason (the
-    /// core classifies it as per-peer no-carrier and parks welcomes without
-    /// burning budget), ingests an authoritative offline presence, and adds
-    /// the recipient to the presence watch set.
+    /// Fail-fast handler for the relay's recipient-keyed offline signal
+    /// (DeliveryError). Fails every live in-flight message to the recipient
+    /// with the recipient_unreachable reason (the core classifies it as
+    /// per-peer no-carrier and parks welcomes without burning budget),
+    /// ingests an authoritative offline presence, and adds the recipient to
+    /// the presence watch set.
     private func handleRecipientUnreachable(
         recipient: String,
         reason: String,
-        plane: RecipientInFlightTracker.Plane,
         source: String
     ) {
         guard !recipient.isEmpty else {
@@ -2075,7 +1943,7 @@ public class InternetManager: NSObject, TransportManager {
             return
         }
         let now = monotonicNowMs()
-        let failedIds = inFlightTracker.drainRecipient(recipient, plane: plane, nowMs: now)
+        let failedIds = inFlightTracker.drainRecipient(recipient, nowMs: now)
         for id in failedIds {
             // Sentinel entries track app-authored raw SendMessage frames
             // only to keep the per-recipient FIFO honest for MessageSent
