@@ -3,9 +3,11 @@
 use super::{
     base64_encode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
     ConnectionRequestPayload, KeyPackagePayload, OfflineProtocol, OutboundMediaTransfer,
-    OutboundSendPreparation, OutboxEntry, PendingMessage, PresencePayload, ProtocolState,
-    ReadReceiptPayload, TypingIndicatorPayload, WelcomeDeliveryState, MAX_KEY_PACKAGE_SENT_TO,
-    MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    OutboundSendPreparation, OutboxEntry, PendingConnectionRequest, PendingMessage,
+    PresencePayload, ProtocolState, ReadReceiptPayload, TypingIndicatorPayload,
+    WelcomeDeliveryState, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS,
+    MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
 };
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
@@ -1806,12 +1808,43 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// Handles asynchronous transport send failures for pending welcome sends.
+    /// Handles asynchronous transport send failures for pending welcome
+    /// sends and outbound connection requests.
     pub fn on_transport_send_failed(
         &mut self,
         message_id: &str,
         transport_error: Option<String>,
     ) -> Result<()> {
+        // Connection requests first: the relay's "recipient offline"
+        // DeliveryError is the only fast, authoritative failure signal a
+        // request gets (there is no ACK from an offline peer — the app
+        // would otherwise wait out the full retry budget for a generic
+        // message_failed). Non-unreachable errors stay with the generic
+        // retry machinery: the request is queued/retried and may still
+        // deliver.
+        if let Some(pending) = self.pending_connection_requests.get(message_id) {
+            let unreachable = transport_error
+                .as_deref()
+                .is_some_and(|r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
+            if unreachable {
+                let recipient = pending.recipient.clone();
+                self.pending_connection_requests.remove(message_id);
+                warn!(
+                    recipient = %recipient,
+                    message_id = %message_id,
+                    "Connection request undeliverable: recipient unreachable"
+                );
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::connection_request_undeliverable(
+                        recipient,
+                        message_id.to_string(),
+                        transport_error.unwrap_or_default(),
+                    ));
+                }
+                return Ok(());
+            }
+        }
+
         let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
             return Ok(());
         };
@@ -2226,8 +2259,36 @@ impl OfflineProtocol {
         let content = format!("{}{}", internal_prefixes::CONN_REQUEST, serialized);
 
         let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
+        self.track_pending_connection_request(&message_id, recipient);
         info!(recipient = %recipient, "Sent connection request");
         Ok(message_id)
+    }
+
+    /// Records an outbound connection request so a later transport-level
+    /// "recipient offline" verdict can be surfaced as a typed event
+    /// (see `on_transport_send_failed`). TTL-prunes and caps the map here,
+    /// on the write path, so it needs no periodic sweep.
+    fn track_pending_connection_request(&mut self, message_id: &MessageId, recipient: &str) {
+        let now = std::time::Instant::now();
+        self.pending_connection_requests
+            .retain(|_, p| now.duration_since(p.sent_at) <= PENDING_CONNECTION_REQUEST_TTL);
+        if self.pending_connection_requests.len() >= MAX_PENDING_CONNECTION_REQUESTS {
+            if let Some(oldest) = self
+                .pending_connection_requests
+                .iter()
+                .min_by_key(|(_, p)| p.sent_at)
+                .map(|(id, _)| id.clone())
+            {
+                self.pending_connection_requests.remove(&oldest);
+            }
+        }
+        self.pending_connection_requests.insert(
+            message_id.as_str(),
+            PendingConnectionRequest {
+                recipient: recipient.to_string(),
+                sent_at: now,
+            },
+        );
     }
 
     /// Accepts a connection request from another user via any available transport.

@@ -629,6 +629,20 @@ pub enum Event {
         initial_message: Option<String>,
     },
 
+    /// An outbound connection request could not be delivered: the transport
+    /// reported the recipient unreachable (e.g. the relay's DeliveryError
+    /// for an offline peer). The request is not retried automatically past
+    /// the normal retry machinery — apps typically surface "user is
+    /// offline" and let the user retry.
+    ConnectionRequestUndeliverable {
+        /// Recipient the request was addressed to.
+        recipient: String,
+        /// Message id returned by `send_connection_request`.
+        message_id: String,
+        /// Transport-level reason (starts with `recipient_unreachable`).
+        reason: String,
+    },
+
     /// A previously sent connection request was accepted.
     ConnectionAccepted {
         /// User ID of the accepting party.
@@ -1355,6 +1369,19 @@ impl Event {
         }
     }
 
+    /// Creates a ConnectionRequestUndeliverable event.
+    pub fn connection_request_undeliverable(
+        recipient: String,
+        message_id: String,
+        reason: String,
+    ) -> Self {
+        Self::ConnectionRequestUndeliverable {
+            recipient,
+            message_id,
+            reason,
+        }
+    }
+
     /// Creates a ConnectionAccepted event.
     pub fn connection_accepted(
         accepted_by: String,
@@ -1780,6 +1807,9 @@ impl Event {
             Self::WelcomeSendFailed { .. } => "protocol.welcome.send_failed",
             Self::WelcomeSendExpired { .. } => "protocol.welcome.send_expired",
             Self::ConnectionRequestReceived { .. } => "protocol.connection.request_received",
+            Self::ConnectionRequestUndeliverable { .. } => {
+                "protocol.connection.request_undeliverable"
+            }
             Self::ConnectionAccepted { .. } => "protocol.connection.accepted",
             Self::ConnectionRejected { .. } => "protocol.connection.rejected",
             Self::ConnectionRequestCancelled { .. } => "protocol.connection.request_cancelled",
@@ -2194,6 +2224,16 @@ impl fmt::Debug for Event {
                 .field("timestamp", timestamp)
                 .field("has_key_package", &key_package.is_some())
                 .field("has_initial_message", &initial_message.is_some())
+                .finish(),
+            Self::ConnectionRequestUndeliverable {
+                recipient: _,
+                message_id,
+                reason,
+            } => f
+                .debug_struct("ConnectionRequestUndeliverable")
+                .field("recipient", &"[REDACTED]")
+                .field("message_id", message_id)
+                .field("reason", reason)
                 .finish(),
             Self::ConnectionAccepted {
                 accepted_by: _,

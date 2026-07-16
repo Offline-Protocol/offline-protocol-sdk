@@ -321,6 +321,13 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         } => {
             hash_string(sender, scrubber);
         }
+        Event::ConnectionRequestUndeliverable {
+            recipient,
+            message_id: _,
+            reason: _,
+        } => {
+            hash_string(recipient, scrubber);
+        }
         Event::ConnectionAccepted {
             accepted_by,
             accepted_by_name: _,
@@ -584,6 +591,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::WelcomeSendFailed { .. }
         | Event::WelcomeSendExpired { .. }
         | Event::ConnectionRequestReceived { .. }
+        | Event::ConnectionRequestUndeliverable { .. }
         | Event::ConnectionAccepted { .. }
         | Event::ConnectionRejected { .. }
         | Event::ConnectionRequestCancelled { .. }

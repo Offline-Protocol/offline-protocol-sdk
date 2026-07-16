@@ -147,6 +147,16 @@ pub struct OfflineProtocol {
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
+    /// Outbound connection requests still awaiting a transport outcome,
+    /// keyed by message id → recipient. Lets `on_transport_send_failed`
+    /// turn the relay's authoritative "recipient offline" DeliveryError
+    /// into a typed `ConnectionRequestUndeliverable` event instead of
+    /// silently discarding it (the welcome-only path never matches a
+    /// connection request's message id). Entries are dropped on emission
+    /// and TTL-pruned on insert; bounded, so an app spamming requests
+    /// cannot grow it unboundedly.
+    pending_connection_requests: HashMap<String, PendingConnectionRequest>,
+
     /// Backoff state for presence-driven welcome rescue, keyed by peer id.
     /// Bounds how often an online-but-never-confirming peer triggers a
     /// welcome re-arm/re-send (see `on_peer_presence`). Entries are dropped
@@ -350,6 +360,7 @@ impl OfflineProtocol {
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
+            pending_connection_requests: HashMap::new(),
             welcome_presence_rescue: HashMap::new(),
             both_create_awaiting_decrypt: std::collections::HashSet::new(),
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),

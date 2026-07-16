@@ -868,6 +868,21 @@ export interface ConnectionRequestReceivedEvent extends BaseEvent {
 }
 
 /**
+ * An outbound connection request could not be delivered: the transport
+ * reported the recipient unreachable (e.g. the relay's DeliveryError for an
+ * offline peer). Correlate via the message id returned by
+ * sendConnectionRequest; apps typically surface "user is offline" and let
+ * the user retry.
+ */
+export interface ConnectionRequestUndeliverableEvent extends BaseEvent {
+  type: 'connection_request_undeliverable';
+  recipient: string;
+  message_id: string;
+  /** Transport-level reason; starts with `recipient_unreachable`. */
+  reason: string;
+}
+
+/**
  * Connection accepted event
  */
 export interface ConnectionAcceptedEvent extends BaseEvent {
@@ -1318,6 +1333,7 @@ export type ProtocolEvent =
   | WelcomeSendFailedEvent
   | WelcomeSendExpiredEvent
   | ConnectionRequestReceivedEvent
+  | ConnectionRequestUndeliverableEvent
   | ConnectionAcceptedEvent
   | ConnectionRejectedEvent
   | ConnectionRequestCancelledEvent
