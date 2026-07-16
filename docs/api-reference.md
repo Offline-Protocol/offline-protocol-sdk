@@ -79,6 +79,11 @@ pub struct ProtocolConfig {
 }
 ```
 
+`user_id` is the device's canonical identity on every surface: it is
+stamped as the sender on outbound messages, it is what peers see as
+`NeighborDiscovered.peer_id` when they discover this device (on any
+transport), and it is the `recipient` string others use to reach it.
+
 **Builder API**:
 ```rust
 let config = ProtocolConfig::builder("my-app", "user123")
@@ -452,6 +457,64 @@ NetworkMetrics {
 ```
 
 Periodic network statistics.
+
+#### NeighborDiscovered
+
+```rust
+NeighborDiscovered {
+    peer_id: String,
+    transport: String,
+    rssi: Option<i16>,
+}
+```
+
+Emitted when a peer becomes reachable. `peer_id` is the peer's canonical
+user id — the same value the peer supplied as `ProtocolConfig.user_id`,
+on every transport — and is valid directly as the `recipient` of
+`send_message` / `send_connection_request`.
+
+#### Connection Request Events
+
+```rust
+ConnectionRequestReceived {
+    sender: String,
+    sender_name: String,
+    timestamp: i64,
+    key_package: Option<Vec<u8>>,
+    initial_message: Option<String>,
+}
+
+ConnectionRequestUndeliverable {
+    recipient: String,
+    message_id: String,   // id returned by send_connection_request
+    reason: String,       // starts with "recipient_unreachable", or "max_retries_exceeded"
+}
+
+ConnectionAccepted {
+    accepted_by: String,
+    accepted_by_name: String,
+    timestamp: i64,
+    key_package: Option<Vec<u8>>,
+}
+
+ConnectionRejected {
+    rejected_by: String,
+}
+
+ConnectionRequestCancelled {
+    cancelled_by: String,
+}
+```
+
+Sender-side failure contract: recipient offline emits
+`ConnectionRequestUndeliverable` (reason starts with
+`recipient_unreachable`); retry exhaustion emits it with reason
+`max_retries_exceeded` alongside the generic `MessageFailed`. Both
+correlate with the message id returned by `send_connection_request`.
+Answers (`ConnectionAccepted` / `ConnectionRejected`) correlate by peer
+id, not message id. Undeliverable is a status signal, not proof of
+permanent failure — the retried original may still arrive if the peer
+comes back online.
 
 #### GroupRoleChanged
 

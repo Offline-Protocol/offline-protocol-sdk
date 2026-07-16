@@ -285,6 +285,13 @@ pub struct ProtocolConfig {
     pub app_id: String,
 
     /// User identifier (required).
+    ///
+    /// This exact string is the device's canonical identity on every
+    /// surface: it is stamped as `Message.sender` on outbound frames, it is
+    /// what peers see as `NeighborDiscovered.peer_id` when they discover
+    /// this device (on any transport), and it is the `recipient` string
+    /// others use to reach it. Discovery, blocking, and outbox flushing all
+    /// key on this one namespace.
     pub user_id: String,
 
     /// Transport configuration.
