@@ -112,6 +112,19 @@ interface NativeConfig {
   maxPendingGlobal?: number;
   pendingTtlMs?: number;
   overflowPolicy?: 'drop_oldest' | 'drop_newest';
+  encryption: {
+    enabled: boolean;
+    autoKeyExchange: boolean;
+    storePending: boolean;
+    requireEncryption: boolean;
+    compactEnvelopeEnabled: boolean;
+    pendingQueue: {
+      maxPendingPerPeer: number;
+      maxPendingGlobal: number;
+      pendingTtlMs: number;
+      overflowPolicy: 'drop_oldest' | 'drop_newest';
+    };
+  };
   dors?: {
     preferOnline: boolean;
     switchHysteresis: number;
@@ -289,6 +302,30 @@ export class OfflineProtocol {
         : null;
     this.initialRuntimeConfigApplied = false;
 
+    // Effective encryption posture. The sibling flags default to the value
+    // of `enabled` so that `encryption: { enabled: false }` alone yields the
+    // fully-disabled posture (mirroring Rust's EncryptionConfig::disabled());
+    // with unconditional all-true defaults it would instead trip the Rust
+    // create()-time validation that rejects requireEncryption without
+    // enabled. Explicit values always win over these derived defaults.
+    const encryptionSource = this.config.encryption;
+    const encryptionOn = encryptionSource?.enabled ?? true;
+    const encryption = {
+      enabled: encryptionOn,
+      autoKeyExchange: encryptionSource?.autoKeyExchange ?? encryptionOn,
+      storePending: encryptionSource?.storePending ?? encryptionOn,
+      // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
+      requireEncryption: encryptionSource?.requireEncryption ?? encryptionOn,
+      compactEnvelopeEnabled: encryptionSource?.compactEnvelopeEnabled ?? true,
+      pendingQueue: {
+        maxPendingPerPeer: encryptionSource?.pendingQueue?.maxPendingPerPeer ?? 64,
+        maxPendingGlobal: encryptionSource?.pendingQueue?.maxPendingGlobal ?? 4096,
+        pendingTtlMs: encryptionSource?.pendingQueue?.pendingTtlMs ?? 120000,
+        overflowPolicy:
+          encryptionSource?.pendingQueue?.overflowPolicy ?? 'drop_oldest',
+      },
+    };
+
     const nativeConfig: NativeConfig = {
       appId: this.config.appId,
       userId: this.config.userId,
@@ -300,16 +337,20 @@ export class OfflineProtocol {
       preferOnline: dorsSource?.preferOnline ?? false,
       initialTtl: this.config.network?.initialTtl ?? 8,
       binaryWireEnabled: this.config.binaryWireEnabled ?? true,
-      encryptionEnabled: this.config.encryption?.enabled ?? true,
-      autoKeyExchange: this.config.encryption?.autoKeyExchange ?? true,
-      storePending: this.config.encryption?.storePending ?? true,
-      // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
-      requireEncryption: this.config.encryption?.requireEncryption ?? true,
-      compactEnvelopeEnabled: this.config.encryption?.compactEnvelopeEnabled ?? true,
-      maxPendingPerPeer: this.config.encryption?.pendingQueue?.maxPendingPerPeer ?? 64,
-      maxPendingGlobal: this.config.encryption?.pendingQueue?.maxPendingGlobal ?? 4096,
-      pendingTtlMs: this.config.encryption?.pendingQueue?.pendingTtlMs ?? 120000,
-      overflowPolicy: this.config.encryption?.pendingQueue?.overflowPolicy ?? 'drop_oldest',
+      // The nested `encryption` object is the documented home for these
+      // fields (what the native bridges read first); the flat keys carry the
+      // same effective values for readers of the historical flat shape. Keep
+      // the two in lockstep — they must never diverge.
+      encryptionEnabled: encryption.enabled,
+      autoKeyExchange: encryption.autoKeyExchange,
+      storePending: encryption.storePending,
+      requireEncryption: encryption.requireEncryption,
+      compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
+      maxPendingPerPeer: encryption.pendingQueue.maxPendingPerPeer,
+      maxPendingGlobal: encryption.pendingQueue.maxPendingGlobal,
+      pendingTtlMs: encryption.pendingQueue.pendingTtlMs,
+      overflowPolicy: encryption.pendingQueue.overflowPolicy,
+      encryption,
     };
 
     if (dorsConfig) {
