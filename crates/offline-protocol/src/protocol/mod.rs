@@ -1760,6 +1760,18 @@ impl OfflineProtocol {
         message_id: &MessageId,
         retry_count: u32,
     ) -> Result<()> {
+        // Retry exhaustion is terminal for a connection request: settle the
+        // pending entry and surface the typed undeliverable signal alongside
+        // the generic message_failed, so apps keep connection-request
+        // context without parsing reason strings. The TTL still gates
+        // emission — a signal that stale belongs to a request the app has
+        // long stopped waiting on.
+        let undeliverable_recipient = self
+            .pending_connection_requests
+            .remove(&message_id.as_str())
+            .filter(|pending| pending.sent_at.elapsed() <= PENDING_CONNECTION_REQUEST_TTL)
+            .map(|pending| pending.recipient);
+
         let state = lock_shared_state(&self.shared_state).map_err(|e| {
             error!(
                 "Failed to lock shared state for message failed event: {}",
@@ -1772,6 +1784,18 @@ impl OfflineProtocol {
             "Max retries exceeded".to_string(),
             retry_count,
         ));
+        if let Some(recipient) = undeliverable_recipient {
+            warn!(
+                recipient = %recipient,
+                message_id = %message_id,
+                "Connection request undeliverable: max retries exceeded"
+            );
+            state.emit_event(Event::connection_request_undeliverable(
+                recipient,
+                message_id.as_str(),
+                "max_retries_exceeded".to_string(),
+            ));
+        }
         drop(state);
 
         self.handle_outbound_media_chunk_failed(message_id, "max retries exceeded");
