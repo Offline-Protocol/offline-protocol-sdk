@@ -285,6 +285,10 @@ pub(crate) struct ConnectionRequestPayload {
     /// Optional MLS key package data for encrypted session setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) key_package: Option<Vec<u8>>,
+    /// Optional first message sent along with the request (`default` keeps
+    /// payloads from pre-initial-message senders parseable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) initial_message: Option<String>,
 }
 
 /// Payload for a connection accepted message.

@@ -750,7 +750,7 @@ interface OfflineProtocol {
 
     // Connection requests (transport-agnostic, routed via DORS)
     [Throws=ProtocolError]
-    string send_connection_request(string recipient, string sender_name, sequence<u8>? key_package);
+    string send_connection_request(string recipient, string sender_name, sequence<u8>? key_package, string? initial_message);
 
     [Throws=ProtocolError]
     string accept_connection_request(string recipient, string accepter_name, sequence<u8>? key_package);

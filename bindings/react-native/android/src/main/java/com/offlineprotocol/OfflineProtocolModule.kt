@@ -1012,7 +1012,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun sendConnectionRequest(recipient: String, senderName: String, keyPackage: ReadableArray?, promise: Promise) {
+    fun sendConnectionRequest(recipient: String, senderName: String, keyPackage: ReadableArray?, initialMessage: String?, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             val keyPackageData = if (keyPackage != null) {
@@ -1024,7 +1024,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             } else {
                 null
             }
-            val messageId = proto.sendConnectionRequest(recipient, senderName, keyPackageData)
+            val messageId = proto.sendConnectionRequest(recipient, senderName, keyPackageData, initialMessage)
             promise.resolve(messageId)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_CONNECTION_REQUEST", "Failed to send connection request")

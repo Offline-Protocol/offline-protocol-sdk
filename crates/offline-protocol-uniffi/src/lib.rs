@@ -2651,10 +2651,11 @@ impl OfflineProtocol {
         recipient: String,
         sender_name: String,
         key_package: Option<Vec<u8>>,
+        initial_message: Option<String>,
     ) -> Result<String, ProtocolError> {
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
-            .send_connection_request(&recipient, &sender_name, key_package)
+            .send_connection_request(&recipient, &sender_name, key_package, initial_message)
             .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }

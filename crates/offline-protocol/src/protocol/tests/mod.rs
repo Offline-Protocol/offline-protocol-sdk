@@ -1568,6 +1568,7 @@ fn test_process_internal_message_connection_request_event() {
         sender_name: "Alice".to_string(),
         timestamp_ms: 12345,
         key_package: Some(vec![9, 8, 7]),
+        initial_message: Some("hey, it's Alice from the trail".to_string()),
     };
     let content = format!(
         "{}{}",
@@ -1593,14 +1594,34 @@ fn test_process_internal_message_connection_request_event() {
             sender_name,
             timestamp,
             key_package,
+            initial_message,
         } => {
             assert_eq!(sender, "alice");
             assert_eq!(sender_name, "Alice");
             assert_eq!(*timestamp, 12345);
             assert_eq!(key_package.as_ref(), Some(&vec![9, 8, 7]));
+            assert_eq!(
+                initial_message.as_deref(),
+                Some("hey, it's Alice from the trail")
+            );
         }
         _ => panic!("Wrong event type"),
     }
+}
+
+/// A payload from a pre-initial-message sender (no `initial_message` key)
+/// must still parse and surface `None` — the field is additive.
+#[test]
+fn test_connection_request_payload_without_initial_message_parses() {
+    let legacy = r#"{"sender_name":"Alice","timestamp_ms":12345,"key_package":[9,8,7]}"#;
+    let payload: ConnectionRequestPayload = serde_json::from_str(legacy).unwrap();
+    assert_eq!(payload.sender_name, "Alice");
+    assert_eq!(payload.initial_message, None);
+
+    // And None round-trips without emitting the key at all, so new senders
+    // stay byte-compatible with old receivers unless the feature is used.
+    let serialized = serde_json::to_string(&payload).unwrap();
+    assert!(!serialized.contains("initial_message"));
 }
 
 #[test]
@@ -1735,7 +1756,7 @@ fn test_send_connection_request_success() {
 
     protocol.start().unwrap();
 
-    let result = protocol.send_connection_request("bob", "Alice", None);
+    let result = protocol.send_connection_request("bob", "Alice", None, None);
     assert!(result.is_ok());
 }
 
@@ -1743,7 +1764,7 @@ fn test_send_connection_request_success() {
 fn test_send_connection_request_not_started() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-    let result = protocol.send_connection_request("bob", "Alice", None);
+    let result = protocol.send_connection_request("bob", "Alice", None, None);
     assert!(result.is_err());
 }
 
@@ -1760,7 +1781,7 @@ fn test_send_connection_request_with_key_package() {
     protocol.start().unwrap();
 
     let key_package = vec![1, 2, 3, 4, 5];
-    let result = protocol.send_connection_request("bob", "Alice", Some(key_package));
+    let result = protocol.send_connection_request("bob", "Alice", Some(key_package), None);
     assert!(result.is_ok());
 }
 
@@ -1897,10 +1918,10 @@ fn test_send_connection_request_returns_unique_ids() {
     protocol.start().unwrap();
 
     let id1 = protocol
-        .send_connection_request("bob", "Alice", None)
+        .send_connection_request("bob", "Alice", None, None)
         .unwrap();
     let id2 = protocol
-        .send_connection_request("carol", "Alice", None)
+        .send_connection_request("carol", "Alice", None, None)
         .unwrap();
     assert_ne!(id1, id2);
 }
@@ -3043,7 +3064,7 @@ fn test_require_encryption_allows_connection_control_messages() {
 
     // Connection control messages are internal protocol messages (not user
     // content), so they must work even with require_encryption=true.
-    let request_result = protocol.send_connection_request("bob", "alice", None);
+    let request_result = protocol.send_connection_request("bob", "alice", None, None);
     assert!(request_result.is_ok());
 
     let accept_result = protocol.accept_connection_request("bob", "alice", None);
@@ -7767,6 +7788,7 @@ fn test_receive_internal_connection_request_sends_delivery_ack() {
         sender_name: "Alice".to_string(),
         timestamp_ms: 12345,
         key_package: None,
+        initial_message: None,
     };
     let content = format!(
         "{}{}",
@@ -10773,6 +10795,7 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
         sender_name: "Alice".to_string(),
         timestamp_ms: 12345,
         key_package: None,
+        initial_message: None,
     };
     let mut message = Message::new(
         UserId::new("alice").unwrap(),

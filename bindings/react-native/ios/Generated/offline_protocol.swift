@@ -1004,7 +1004,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func reticulumStatusChanged(isConnected: Bool) throws 
     
-    func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?) throws  -> String
+    func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?, initialMessage: String?) throws  -> String
     
     func sendFile(recipient: String, fileData: [UInt8], fileName: String) throws  -> String
     
@@ -2106,13 +2106,14 @@ open func reticulumStatusChanged(isConnected: Bool)throws   {try rustCallWithErr
 }
 }
     
-open func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?)throws  -> String  {
+open func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?, initialMessage: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterString.lower(senderName),
-        FfiConverterOptionSequenceUInt8.lower(keyPackage),$0
+        FfiConverterOptionSequenceUInt8.lower(keyPackage),
+        FfiConverterOptionString.lower(initialMessage),$0
     )
 })
 }
@@ -9043,7 +9044,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 32395) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 11042) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 18268) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 11824) {

@@ -1210,7 +1210,7 @@ mod tests {
 
         proto.block_user("mallory").unwrap();
 
-        let result = proto.send_connection_request("mallory", "Alice", None);
+        let result = proto.send_connection_request("mallory", "Alice", None, None);
         assert!(matches!(
             result,
             Err(crate::Error::UserBlocked(ref id)) if id == "mallory"

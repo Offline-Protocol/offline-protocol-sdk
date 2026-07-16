@@ -856,6 +856,7 @@ impl OfflineProtocol {
                     payload.sender_name,
                     payload.timestamp_ms,
                     payload.key_package,
+                    payload.initial_message,
                 ));
             }
         } else {

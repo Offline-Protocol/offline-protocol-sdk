@@ -317,6 +317,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             sender_name: _,
             timestamp: _,
             key_package: _,
+            initial_message: _,
         } => {
             hash_string(sender, scrubber);
         }
@@ -898,6 +899,7 @@ mod tests {
             sender_name: "Alice A.".into(),
             timestamp: 0,
             key_package: None,
+            initial_message: None,
         };
         let accept = Event::ConnectionAccepted {
             accepted_by: "bob".into(),
