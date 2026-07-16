@@ -10731,6 +10731,76 @@ fn test_relayed_signed_control_passes_when_identity_required() {
     );
 }
 
+/// End-to-end regression for the internet relay path: a SIGNED __CONN_REQ__
+/// from a TOFU-pinned sender, in exactly the shape the bridge delivers relay
+/// ingest (hop 0, transport_peer_id stamped with the relay-authenticated
+/// uploader), must pass the gate and emit ConnectionRequestReceived. This is
+/// the wire shape connection requests use now that they ship verbatim — the
+/// former relay-native translation arrived unsigned and was dropped as a
+/// signature downgrade precisely for pinned senders.
+#[test]
+fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
+    alice.initialize_mls(storage_a).unwrap();
+
+    // Pin alice's key first — any prior signed control contact does this,
+    // which is what made the unsigned relay-native rebuild undeliverable.
+    let mut pin_msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        format!("{}{{\"data\":\"first\"}}", internal_prefixes::CONN_REQUEST),
+    );
+    alice.sign_control_message(&mut pin_msg).unwrap();
+    assert!(matches!(
+        protocol.verify_control_message(&pin_msg),
+        Ok(true)
+    ));
+    assert!(protocol.known_peer_public_keys.contains_key("alice"));
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let payload = ConnectionRequestPayload {
+        sender_name: "Alice".to_string(),
+        timestamp_ms: 12345,
+        key_package: None,
+    };
+    let mut message = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::CONN_REQUEST,
+            serde_json::to_string(&payload).unwrap()
+        ),
+    );
+    alice.sign_control_message(&mut message).unwrap();
+    message.set_transport_peer_id("alice".to_string()).unwrap();
+
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+    let captured = events.lock().unwrap();
+    assert!(
+        captured.iter().any(|e| matches!(
+            e,
+            Event::ConnectionRequestReceived { sender, sender_name, .. }
+                if sender == "alice" && sender_name == "Alice"
+        )),
+        "signed conn request from pinned sender must emit ConnectionRequestReceived"
+    );
+}
+
 #[test]
 fn test_enable_message_persistence_restores_tofu_keys() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
@@ -15942,28 +16012,24 @@ fn test_internet_control_op_classification() {
     };
     let make = |recipient: &str, content: &str| make_from("user123", recipient, content);
 
-    // Self-originated connection ops classify for any recipient,
-    // payload = JSON after prefix.
-    let msg = make("bob", "__CONN_REQ__{\"sender_name\":\"Alice\"}");
-    assert_eq!(
-        protocol.internet_control_op(&msg),
-        Some(("conn_req", "{\"sender_name\":\"Alice\"}".to_string()))
-    );
-    let msg = make("bob", "__CONN_ACC__{\"accepted_by_name\":\"Alice\"}");
-    assert_eq!(
-        protocol.internet_control_op(&msg),
-        Some(("conn_acc", "{\"accepted_by_name\":\"Alice\"}".to_string()))
-    );
-    let msg = make("bob", "__CONN_REJ__");
-    assert_eq!(
-        protocol.internet_control_op(&msg),
-        Some(("conn_rej", String::new()))
-    );
-    let msg = make("bob", "__CONN_CAN__");
-    assert_eq!(
-        protocol.internet_control_op(&msg),
-        Some(("conn_can", String::new()))
-    );
+    // Connection ops ship verbatim so the Ed25519 control signature in the
+    // message metadata survives to the receiver's security gate — a
+    // relay-native replacement would arrive unsigned and be rejected as a
+    // signature downgrade once the sender's key is TOFU-pinned.
+    for content in [
+        "__CONN_REQ__{\"sender_name\":\"Alice\"}",
+        "__CONN_ACC__{\"accepted_by_name\":\"Alice\"}",
+        "__CONN_REJ__",
+        "__CONN_CAN__",
+    ] {
+        let msg = make("bob", content);
+        assert_eq!(
+            protocol.internet_control_op(&msg),
+            None,
+            "connection op {:?} must stay a verbatim SendMessage",
+            content
+        );
+    }
 
     // Leave is a tap op: classified for the per-member notification.
     let msg = make("bob", "__GRP_MLS_LEAVE__{\"group_id\":\"g1\"}");
@@ -16070,10 +16136,6 @@ fn test_internet_control_op_registry_is_closed() {
     }
 
     let expected: std::collections::BTreeSet<&str> = [
-        "conn_req",
-        "conn_acc",
-        "conn_rej",
-        "conn_can",
         "group_mls_leave",
         "group_relay_register",
         "group_relay_broadcast",
@@ -16097,10 +16159,6 @@ fn test_relayed_frame_with_hops_never_classifies() {
     // leaves send_internal_message at hop 0, so a nonzero hop count must
     // veto classification no matter what the sender field claims.
     for (recipient, content) in [
-        ("carol", "__CONN_REQ__{\"sender_name\":\"Mallory\"}"),
-        ("carol", "__CONN_ACC__{}"),
-        ("carol", "__CONN_REJ__"),
-        ("carol", "__CONN_CAN__"),
         ("carol", "__GRP_MLS_LEAVE__{\"group_id\":\"g1\"}"),
         ("user123", "__GRP_RELAY_REG__{\"group_id\":\"g1\"}"),
         ("user123", "__GRP_RELAY_BCAST__{\"group_id\":\"g1\"}"),
@@ -16153,7 +16211,7 @@ fn test_inbound_frame_forging_our_origin_is_not_relayed() {
         UserId::new("user123").unwrap(),
         UserId::new("carol").unwrap(),
         AppId::new("test-app").unwrap(),
-        "__CONN_CAN__",
+        "__GRP_MLS_LEAVE__{\"group_id\":\"g1\"}",
     );
     mock.queue_message(msg);
 

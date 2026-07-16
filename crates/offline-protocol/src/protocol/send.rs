@@ -1854,9 +1854,6 @@ impl OfflineProtocol {
     /// send verbatim.
     ///
     /// Ops and their bridge semantics:
-    /// - `conn_req` / `conn_acc` / `conn_rej` / `conn_can` — REPLACE with the
-    ///   relay-native connection-request op so the relay's server-side state
-    ///   (error feedback, legacy-client interop) participates.
     /// - `group_relay_register` / `group_relay_broadcast` — self-addressed
     ///   relay hints (`send_group_message` optimization); REPLACE with
     ///   relay-native `CreateGroup`+member deltas / `SendGroupMessage`. The
@@ -1867,14 +1864,25 @@ impl OfflineProtocol {
     ///   sends one relay-native `LeaveGroup` so the relay's group registry
     ///   (which feeds invite links and broadcast fan-out) doesn't go stale.
     ///
+    /// Connection ops (`__CONN_REQ__`/`__CONN_ACC__`/`__CONN_REJ__`/
+    /// `__CONN_CAN__`) deliberately do NOT classify: they ship verbatim as
+    /// opaque `SendMessage` frames so the Ed25519 control signature in the
+    /// message metadata survives to the receiver's security gate. The former
+    /// relay-native translation (`SendConnectionRequest` & co.) rebuilt them
+    /// unsigned on the receiving bridge, which the gate rejects as a
+    /// signature downgrade once the sender's key is TOFU-pinned. Verbatim
+    /// also gains the relay's push-notification fallback for offline
+    /// recipients, which the relay-native connection frames never had. The
+    /// cost is that pre-SDK relay clients (which only speak the relay-native
+    /// frames) no longer interoperate with connection ops — an accepted
+    /// trade: the SDK's internet transport is the only supported relay
+    /// client.
+    ///
     /// Only frames *originated by this device* classify. The mesh relays
-    /// third-party messages verbatim (`try_relay_message`), and a relayed
-    /// `__CONN_REQ__` from B to C transiting our internet outbox must stay
-    /// an opaque `SendMessage` — a relay-native replacement would be issued
-    /// on OUR authenticated connection and misattribute the request to us.
-    /// The relay-hint ops additionally require the self-addressed recipient
-    /// (that is how the core marks them as hints rather than traffic), so
-    /// they classify only when sender AND recipient are both this device.
+    /// third-party messages verbatim (`try_relay_message`). The relay-hint
+    /// ops additionally require the self-addressed recipient (that is how
+    /// the core marks them as hints rather than traffic), so they classify
+    /// only when sender AND recipient are both this device.
     ///
     /// Self-origination is proven by `hop_count == 0`, not by the `sender`
     /// field: `sender` is an unauthenticated wire field, so a mesh peer
@@ -1889,18 +1897,6 @@ impl OfflineProtocol {
         }
         let content = message.content.as_str();
         if message.sender.as_str() == self.config.user_id {
-            if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_REQUEST) {
-                return Some(("conn_req", payload.to_string()));
-            }
-            if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_ACCEPT) {
-                return Some(("conn_acc", payload.to_string()));
-            }
-            if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_REJECT) {
-                return Some(("conn_rej", payload.to_string()));
-            }
-            if let Some(payload) = content.strip_prefix(internal_prefixes::CONN_CANCEL) {
-                return Some(("conn_can", payload.to_string()));
-            }
             if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_MLS_LEAVE) {
                 return Some(("group_mls_leave", payload.to_string()));
             }
