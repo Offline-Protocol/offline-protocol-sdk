@@ -2191,16 +2191,22 @@ impl OfflineProtocol {
     /// * `recipient` - The user ID of the recipient
     /// * `sender_name` - Display name of the sender
     /// * `key_package` - Optional MLS key package for encrypted session setup
+    /// * `initial_message` - Optional first message shown with the request
+    ///   (surfaced verbatim in the recipient's `ConnectionRequestReceived`
+    ///   event; apps typically seed the conversation with it on accept)
     ///
     /// # Encryption
     ///
     /// Connection requests are internal control messages sent in plaintext,
-    /// exempt from `require_encryption` (same as key packages and welcome messages).
+    /// exempt from `require_encryption` (same as key packages and welcome
+    /// messages) — an `initial_message` is therefore NOT end-to-end
+    /// encrypted and should be treated like the sender display name.
     pub fn send_connection_request(
         &mut self,
         recipient: &str,
         sender_name: &str,
         key_package: Option<Vec<u8>>,
+        initial_message: Option<String>,
     ) -> Result<MessageId> {
         // Connection requests are internal control messages (not user content),
         // so they are exempt from require_encryption — same as key packages.
@@ -2212,6 +2218,7 @@ impl OfflineProtocol {
             sender_name: sender_name.to_string(),
             timestamp_ms: Utc::now().timestamp_millis(),
             key_package,
+            initial_message,
         };
 
         let serialized =

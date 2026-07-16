@@ -56,6 +56,7 @@ RCT_EXTERN_METHOD(forwardMessage:(NSString *)originalMessageJson
 RCT_EXTERN_METHOD(sendConnectionRequest:(NSString *)recipient
                   senderName:(NSString *)senderName
                   keyPackage:(NSArray *)keyPackage
+                  initialMessage:(NSString *)initialMessage
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

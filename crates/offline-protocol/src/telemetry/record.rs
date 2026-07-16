@@ -524,6 +524,7 @@ mod tests {
                 sender_name: String::new(),
                 timestamp: 0,
                 key_package: None,
+                initial_message: None,
             },
             Event::ConnectionAccepted {
                 accepted_by: String::new(),

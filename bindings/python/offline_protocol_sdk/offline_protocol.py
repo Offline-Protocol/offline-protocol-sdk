@@ -751,7 +751,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 53848:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 25570:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 12846:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 55106:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1990,6 +1990,7 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_st
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_status_changed.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request.argtypes = (
     ctypes.c_uint64,
+    _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
     _UniffiRustBuffer,
@@ -8271,7 +8272,7 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def reticulum_status_changed(self, is_connected: bool) -> None:
         raise NotImplementedError
-    def send_connection_request(self, recipient: str,sender_name: str,key_package: typing.Optional[typing.List[int]]) -> str:
+    def send_connection_request(self, recipient: str,sender_name: str,key_package: typing.Optional[typing.List[int]],initial_message: typing.Optional[str]) -> str:
         raise NotImplementedError
     def send_file(self, recipient: str,file_data: typing.List[int],file_name: str) -> str:
         raise NotImplementedError
@@ -10067,18 +10068,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def send_connection_request(self, recipient: str,sender_name: str,key_package: typing.Optional[typing.List[int]]) -> str:
+    def send_connection_request(self, recipient: str,sender_name: str,key_package: typing.Optional[typing.List[int]],initial_message: typing.Optional[str]) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
         
         _UniffiFfiConverterString.check_lower(sender_name)
         
         _UniffiFfiConverterOptionalSequenceUInt8.check_lower(key_package)
+        
+        _UniffiFfiConverterOptionalString.check_lower(initial_message)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
             _UniffiFfiConverterString.lower(recipient),
             _UniffiFfiConverterString.lower(sender_name),
             _UniffiFfiConverterOptionalSequenceUInt8.lower(key_package),
+            _UniffiFfiConverterOptionalString.lower(initial_message),
         )
         _uniffi_lift_return = _UniffiFfiConverterString.lift
         _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError

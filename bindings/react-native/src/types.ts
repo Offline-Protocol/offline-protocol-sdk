@@ -444,6 +444,12 @@ export interface SendConnectionRequestParams {
   senderName: string;
   /** Optional MLS key package bytes */
   keyPackage?: number[];
+  /**
+   * Optional first message shown with the request. Delivered in the
+   * recipient's connection_request_received event; like the sender name it
+   * travels in plaintext (connection requests precede the MLS session).
+   */
+  initialMessage?: string;
 }
 
 /**
@@ -857,6 +863,8 @@ export interface ConnectionRequestReceivedEvent extends BaseEvent {
   sender_name: string;
   timestamp: number;
   key_package?: number[];
+  /** First message sent along with the request, if any. */
+  initial_message?: string;
 }
 
 /**

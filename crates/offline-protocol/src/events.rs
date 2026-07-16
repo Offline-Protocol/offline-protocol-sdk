@@ -624,6 +624,9 @@ pub enum Event {
         /// MLS key package data (if provided for encrypted session setup).
         #[serde(skip_serializing_if = "Option::is_none")]
         key_package: Option<Vec<u8>>,
+        /// Optional first message sent along with the request.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        initial_message: Option<String>,
     },
 
     /// A previously sent connection request was accepted.
@@ -1341,12 +1344,14 @@ impl Event {
         sender_name: String,
         timestamp: i64,
         key_package: Option<Vec<u8>>,
+        initial_message: Option<String>,
     ) -> Self {
         Self::ConnectionRequestReceived {
             sender,
             sender_name,
             timestamp,
             key_package,
+            initial_message,
         }
     }
 
@@ -2181,12 +2186,14 @@ impl fmt::Debug for Event {
                 sender_name: _,
                 timestamp,
                 key_package,
+                initial_message,
             } => f
                 .debug_struct("ConnectionRequestReceived")
                 .field("sender", &"[REDACTED]")
                 .field("sender_name", &"[REDACTED]")
                 .field("timestamp", timestamp)
                 .field("has_key_package", &key_package.is_some())
+                .field("has_initial_message", &initial_message.is_some())
                 .finish(),
             Self::ConnectionAccepted {
                 accepted_by: _,

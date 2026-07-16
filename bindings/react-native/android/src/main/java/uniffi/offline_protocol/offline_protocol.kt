@@ -1465,7 +1465,7 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,`initialMessage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -2029,7 +2029,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 32395.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 11042.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 18268.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 11824.toShort()) {
@@ -3273,7 +3273,7 @@ public interface OfflineProtocolInterface {
     
     fun `reticulumStatusChanged`(`isConnected`: kotlin.Boolean)
     
-    fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
+    fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?, `initialMessage`: kotlin.String?): kotlin.String
     
     fun `sendFile`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String): kotlin.String
     
@@ -4949,13 +4949,13 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String {
+    @Throws(ProtocolException::class)override fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?, `initialMessage`: kotlin.String?): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`senderName`),FfiConverterOptionalSequenceUByte.lower(`keyPackage`),_status)
+        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`senderName`),FfiConverterOptionalSequenceUByte.lower(`keyPackage`),FfiConverterOptionalString.lower(`initialMessage`),_status)
 }
     }
     )

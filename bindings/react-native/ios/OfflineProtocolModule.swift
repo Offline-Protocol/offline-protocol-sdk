@@ -875,6 +875,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func sendConnectionRequest(_ recipient: String,
                                      senderName: String,
                                      keyPackage: [NSNumber]?,
+                                     initialMessage: String?,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
         do {
@@ -887,7 +888,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.sendConnectionRequest(
                 recipient: recipient,
                 senderName: senderName,
-                keyPackage: keyPackageData
+                keyPackage: keyPackageData,
+                initialMessage: initialMessage
             )
             resolver(messageId)
         } catch {
