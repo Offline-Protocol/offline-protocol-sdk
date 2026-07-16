@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-07-16
+
 ### Added
 
 - **Compact binary wire codec for messages, negotiated per peer.** Messages can now be serialized with a postcard-based binary encoding (wire v1) instead of JSON, cutting the message envelope roughly 3–4× on small and media messages and correspondingly reducing BLE fragment counts. JSON remains the permanent interoperability floor: receivers auto-detect the codec from the first byte, and binary is only ever sent to a peer that advertises support via `wire_versions` in its signed key package. Controlled by `TransportConfig::binary_wire_enabled` (default on); a mixed fleet stays on JSON automatically, and the internet relay path stays JSON. Decoding of binary frames is always enabled. No persistence, FFI, or relay-protocol changes.
@@ -37,6 +39,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **React Native encryption settings now actually reach the protocol core.** The JS wrapper sent `encryption.enabled`, `autoKeyExchange`, `storePending`, and `requireEncryption` as flat top-level keys while the iOS and Android bridges read them only from the nested `encryption` object, so every app-set value was silently discarded and the all-true defaults won. The wrapper now sends the nested shape alongside the flat keys (kept in lockstep), and both bridges accept either shape in camelCase or snake_case, locked by unit tests on both platforms. The sibling flags also now default to the value of `enabled`, so `encryption: { enabled: false }` alone yields the coherent fully-disabled posture (mirroring Rust's `EncryptionConfig::disabled()`) instead of a node whose every send fails with `EncryptFailed`; explicitly combining `enabled: false` with `requireEncryption: true` is rejected loudly at `create()` by the existing core validation.
 
 - **Connection requests over the internet relay now reach peers you have already talked to.** The mobile bridges used to translate connection ops into relay-native frames, stripping the Ed25519 control signature from the message metadata; the receiving bridge rebuilt them unsigned, and the security gate correctly dropped the rebuild as a signature downgrade once the sender's key was TOFU-pinned — which any prior signed contact (e.g. an MLS key-package exchange) does. Connection requests therefore failed for exactly the peers a session already existed with, while plain messages kept working. Shipping the ops verbatim keeps the signature intact end to end, and offline recipients additionally gain the relay's push-notification fallback, which the relay-native connection frames never had.
+
+- **The shipped commercial-license copies now name the licensor.** The `LICENSE-COMMERCIAL.md` files packaged in the React Native npm tarball and the Python wheel previously granted rights from "the project" without naming a legal entity; all copies now name Offline Protocol, Inc., matching the root license and the CLA.
 
 - **Nostr transport pubkeys no longer leak into discovery.** When a Nostr frame failed to deserialize, the ingest fallback surfaced the sender's per-install transport signing pubkey as `neighbor_discovered.peer_id` — a value that is not a protocol identity and breaks everything keyed by user id (self-suppression, blocking, outbox flush). An undecodable frame now surfaces no discovery at all.
 
