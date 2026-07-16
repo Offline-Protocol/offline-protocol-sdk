@@ -121,8 +121,8 @@ each plaintext send then emits a `security_warning` event with the
 
 ### Prerequisites
 - Rust (via rustup)
-- uniffi-bindgen: `cargo install uniffi --features="cli"`
-- ndk: `cargo install cargo-ndk`
+- uniffi-bindgen: `cargo install uniffi --version 0.30.0 --features cli --locked` (must match the workspace `uniffi = "0.30"` pin)
+- For Android: the Android NDK (set `ANDROID_NDK_HOME`); for iOS: Xcode
 
 ### Build Mobile UniFFI Libraries
 

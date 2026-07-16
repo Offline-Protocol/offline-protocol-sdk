@@ -45,7 +45,7 @@ npm run build:uniffi:android      # Android only
 npm run generate:bindings         # regenerate after UDL changes
 ```
 
-Prerequisites: `cargo install uniffi --features="cli"`, `cargo install cargo-ndk`, Android NDK, Xcode.
+Prerequisites: `cargo install uniffi --version 0.30.0 --features cli --locked` (must match the workspace `uniffi = "0.30"` pin), Android NDK (`ANDROID_NDK_HOME`), Xcode.
 
 ## Architecture
 
