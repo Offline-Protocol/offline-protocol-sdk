@@ -631,9 +631,12 @@ pub enum Event {
 
     /// An outbound connection request could not be delivered: the transport
     /// reported the recipient unreachable (e.g. the relay's DeliveryError
-    /// for an offline peer). The request is not retried automatically past
-    /// the normal retry machinery — apps typically surface "user is
-    /// offline" and let the user retry.
+    /// for an offline peer). This is a status signal, not proof of
+    /// permanent failure — the original request may still be delivered by
+    /// the retry machinery if the peer comes back online. Apps typically
+    /// surface "user is offline"; a user-initiated resend can therefore
+    /// arrive alongside the retried original (the recipient sees the
+    /// request event again, which accept/reject flows already tolerate).
     ConnectionRequestUndeliverable {
         /// Recipient the request was addressed to.
         recipient: String,

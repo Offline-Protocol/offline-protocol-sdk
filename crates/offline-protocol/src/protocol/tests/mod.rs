@@ -1957,6 +1957,188 @@ fn test_pending_connection_request_cap_evicts_oldest_first() {
     );
 }
 
+/// Proof of delivery settles the pending entry: after the request's
+/// delivery ack, a late recipient_unreachable for the same id must not
+/// emit ConnectionRequestUndeliverable — the recipient already has the
+/// request.
+#[test]
+fn test_delivery_ack_settles_pending_connection_request() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+
+    let ack = Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .metadata(ACK_FOR_KEY, sent_id.as_str())
+    .build();
+    protocol.handle_ack_message(&ack);
+    assert!(
+        !protocol
+            .pending_connection_requests
+            .contains_key(&sent_id.as_str()),
+        "delivery ack must settle the pending connection request"
+    );
+
+    protocol
+        .on_transport_send_failed(
+            &sent_id.as_str(),
+            Some("recipient_unreachable: User is offline".to_string()),
+        )
+        .unwrap();
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::ConnectionRequestUndeliverable { .. })),
+        "a delivered request must never emit ConnectionRequestUndeliverable"
+    );
+}
+
+/// An authenticated answer from the peer settles every request tracked
+/// toward them (the accept/reject frame carries no request id, so
+/// settlement is recipient-keyed): accept clears bob's entry while
+/// carol's survives, reject clears carol's — and a late unreachable for
+/// a settled id stays quiet.
+#[test]
+fn test_connection_answer_settles_pending_requests() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let id_bob = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+    let id_carol = protocol
+        .send_connection_request("carol", "Alice", None, None)
+        .unwrap();
+
+    protocol.handle_connection_accepted("bob", r#"{"accepted_by_name":"Bob","timestamp_ms":1}"#);
+    assert!(
+        !protocol
+            .pending_connection_requests
+            .contains_key(&id_bob.as_str()),
+        "accept must settle the request tracked toward the accepter"
+    );
+    assert!(
+        protocol
+            .pending_connection_requests
+            .contains_key(&id_carol.as_str()),
+        "requests toward other peers must survive"
+    );
+
+    protocol.handle_connection_rejected("carol");
+    assert!(
+        protocol.pending_connection_requests.is_empty(),
+        "reject must settle the request tracked toward the rejecter"
+    );
+
+    protocol
+        .on_transport_send_failed(
+            &id_bob.as_str(),
+            Some("recipient_unreachable: User is offline".to_string()),
+        )
+        .unwrap();
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::ConnectionRequestUndeliverable { .. })),
+        "an answered request must never emit ConnectionRequestUndeliverable"
+    );
+}
+
+/// The TTL holds at read time too: the insert-path prune only runs on the
+/// next send, so an idle map can hold an entry past the correlation
+/// window — a recipient_unreachable that stale must drop the entry
+/// without emitting.
+#[test]
+fn test_stale_pending_connection_request_does_not_emit_undeliverable() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+
+    // Age the entry past the TTL. On a host whose monotonic clock started
+    // more recently than the TTL no such Instant exists — skip, the
+    // scenario cannot occur there either.
+    let Some(stale) = std::time::Instant::now()
+        .checked_sub(PENDING_CONNECTION_REQUEST_TTL + Duration::from_secs(1))
+    else {
+        return;
+    };
+    protocol
+        .pending_connection_requests
+        .get_mut(&sent_id.as_str())
+        .unwrap()
+        .sent_at = stale;
+
+    protocol
+        .on_transport_send_failed(
+            &sent_id.as_str(),
+            Some("recipient_unreachable: User is offline".to_string()),
+        )
+        .unwrap();
+
+    assert!(
+        protocol.pending_connection_requests.is_empty(),
+        "a stale entry must be dropped at read time"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::ConnectionRequestUndeliverable { .. })),
+        "a stale entry must not emit ConnectionRequestUndeliverable"
+    );
+}
+
 #[test]
 fn test_accept_connection_request_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();

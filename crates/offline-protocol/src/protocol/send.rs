@@ -1823,25 +1823,34 @@ impl OfflineProtocol {
         // retry machinery: the request is queued/retried and may still
         // deliver.
         if let Some(pending) = self.pending_connection_requests.get(message_id) {
-            let unreachable = transport_error
-                .as_deref()
-                .is_some_and(|r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
-            if unreachable {
-                let recipient = pending.recipient.clone();
+            // The TTL must hold at read time too: the insert-path prune only
+            // runs on the next `send_connection_request`, so an idle map can
+            // hold an entry far past the correlation window — a failure
+            // signal that stale belongs to a request the app has long
+            // stopped waiting on and must not fire the event.
+            if pending.sent_at.elapsed() > PENDING_CONNECTION_REQUEST_TTL {
                 self.pending_connection_requests.remove(message_id);
-                warn!(
-                    recipient = %recipient,
-                    message_id = %message_id,
-                    "Connection request undeliverable: recipient unreachable"
-                );
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::connection_request_undeliverable(
-                        recipient,
-                        message_id.to_string(),
-                        transport_error.unwrap_or_default(),
-                    ));
+            } else {
+                let unreachable = transport_error
+                    .as_deref()
+                    .is_some_and(|r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE));
+                if unreachable {
+                    let recipient = pending.recipient.clone();
+                    self.pending_connection_requests.remove(message_id);
+                    warn!(
+                        recipient = %recipient,
+                        message_id = %message_id,
+                        "Connection request undeliverable: recipient unreachable"
+                    );
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::connection_request_undeliverable(
+                            recipient,
+                            message_id.to_string(),
+                            transport_error.unwrap_or_default(),
+                        ));
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
         }
 
@@ -2099,6 +2108,14 @@ impl OfflineProtocol {
     pub(super) fn handle_ack_message(&mut self, message: &Message) {
         if let Some(ack_for) = message.metadata.get(ACK_FOR_KEY) {
             if let Ok(message_id) = MessageId::from_str(ack_for) {
+                // A delivery ack settles an outbound connection request:
+                // the recipient provably received it, so a later stale
+                // recipient_unreachable signal must not fire a false
+                // ConnectionRequestUndeliverable. Outside the ack_manager
+                // branch — a duplicate ack (second transport) or one
+                // arriving after retry exhaustion is still proof.
+                self.pending_connection_requests
+                    .remove(&message_id.as_str());
                 if let Some(pending) = self.ack_manager.remove_ack(&message_id) {
                     let latency = Utc::now()
                         .signed_duration_since(pending.sent_at)

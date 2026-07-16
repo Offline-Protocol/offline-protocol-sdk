@@ -153,8 +153,10 @@ pub struct OfflineProtocol {
     /// into a typed `ConnectionRequestUndeliverable` event instead of
     /// silently discarding it (the welcome-only path never matches a
     /// connection request's message id). Entries are dropped on emission
-    /// and TTL-pruned on insert; bounded, so an app spamming requests
-    /// cannot grow it unboundedly.
+    /// and on proof of delivery (the request's delivery ack, or an inbound
+    /// accept/reject from the recipient), and TTL-pruned on insert and at
+    /// read; bounded, so an app spamming requests cannot grow it
+    /// unboundedly.
     pending_connection_requests: HashMap<String, PendingConnectionRequest>,
 
     /// Backoff state for presence-driven welcome rescue, keyed by peer id.
