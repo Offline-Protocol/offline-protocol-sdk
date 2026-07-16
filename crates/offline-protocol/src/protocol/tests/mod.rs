@@ -9970,6 +9970,54 @@ fn test_data_plane_prefixes_bypass_security_gate() {
         result.is_none(),
         "Security gate must NOT block __MLS_ENC__ messages — MLS provides its own authentication"
     );
+
+    // __GROUP_MSG__ is data-plane too: the relay's fan-out re-emits it per
+    // member without the origin's Ed25519 metadata, and MLS authenticates
+    // the payload after the gate instead.
+    let msg = pending_test_message(
+        "alice",
+        &format!(
+            "{}{{\"group_id\":\"g1\",\"sender\":\"alice\",\"content\":\"AAECAw==\"}}",
+            internal_prefixes::GROUP_MSG
+        ),
+    );
+    let result = protocol.security_gate_control_message(&msg);
+    assert!(
+        result.is_none(),
+        "Security gate must NOT block __GROUP_MSG__ fan-out — MLS authenticates it after the gate"
+    );
+}
+
+/// Regression for the relay group fan-out drop: a `GroupMessageReceived`
+/// frame is rebuilt by the bridge as an unsigned `__GROUP_MSG__` (hop 0,
+/// transport identity = the relay-authenticated sender). Before
+/// `__GROUP_MSG__` was data-plane, a TOFU-pinned sender made the gate drop
+/// the whole frame as a signature downgrade — group messages over the relay
+/// silently vanished for exactly the peers you'd already talked to. The
+/// frame must now reach dispatch (not SecurityRejected); sender
+/// authentication is MLS's job at decrypt time.
+#[test]
+fn test_unsigned_group_msg_from_pinned_sender_reaches_dispatch() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    protocol.tofu_check_or_pin("alice", vec![1u8; 32]).unwrap();
+    assert!(protocol.known_peer_public_keys.contains_key("alice"));
+
+    let mut msg = pending_test_message(
+        "alice",
+        &format!(
+            "{}{{\"group_id\":\"g1\",\"sender\":\"alice\",\"content\":\"AAECAw==\"}}",
+            internal_prefixes::GROUP_MSG
+        ),
+    );
+    msg.set_transport_peer_id("alice".to_string()).unwrap();
+
+    let result = protocol.process_internal_message(&msg);
+    assert!(
+        !matches!(result, Some(InternalMessageResult::SecurityRejected)),
+        "unsigned __GROUP_MSG__ from a pinned sender must not be gate-dropped, got {:?}",
+        result
+    );
 }
 
 #[test]

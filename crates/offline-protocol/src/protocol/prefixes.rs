@@ -118,13 +118,27 @@ define_internal_prefixes! {
 /// Data-plane prefixes that are **excluded** from the security gate.
 ///
 /// These prefixes rely on MLS for authentication (not Ed25519 control-message
-/// signing) and are sent via `send_message`, not `send_internal_message`, so
-/// they are never signed outbound. Listing them here rather than maintaining a
-/// separate `SECURITY_GATED_PREFIXES` array ensures that any new prefix added
-/// to `INTERNAL_PREFIXES` is automatically security-gated unless explicitly
+/// signing). Listing them here rather than maintaining a separate
+/// `SECURITY_GATED_PREFIXES` array ensures that any new prefix added to
+/// `INTERNAL_PREFIXES` is automatically security-gated unless explicitly
 /// excluded here.
 ///
-/// **Maintenance note:** Only add prefixes here if they are MLS-authenticated
-/// data-plane messages. All other internal prefixes are control-plane and
+/// - `ENCRYPTED` (`__MLS_ENC__`): 1:1 MLS envelopes, sent via `send_message`
+///   and never signed outbound.
+/// - `GROUP_MSG` (`__GROUP_MSG__`): the relay's group fan-out. The relay
+///   re-emits it per member from only `{group_id, sender, content}`, so the
+///   bridge-rebuilt frame is structurally unsigned — Ed25519-gating it
+///   silently dropped fan-out from every TOFU-pinned sender. Authentication
+///   happens after the gate instead: `handle_relay_group_message_with_mls`
+///   MLS-decrypts and binds the wire-claimed sender to the MLS-authenticated
+///   sender (`SenderIdentityMismatch` → rejected), and plaintext naming an
+///   MLS-secured group is dropped as spoofing. Residual: groups with no MLS
+///   state accept unauthenticated plaintext on this prefix — identical to
+///   the pre-gate legacy behavior for unpinned senders, and unreachable in
+///   deployments where every group is MLS.
+///
+/// **Maintenance note:** Only add prefixes here if their handler enforces
+/// MLS authentication. All other internal prefixes are control-plane and
 /// require signature verification + TOFU enforcement.
-pub(crate) const DATA_PLANE_PREFIXES: &[&str] = &[internal_prefixes::ENCRYPTED];
+pub(crate) const DATA_PLANE_PREFIXES: &[&str] =
+    &[internal_prefixes::ENCRYPTED, internal_prefixes::GROUP_MSG];
