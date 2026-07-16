@@ -1785,6 +1785,110 @@ fn test_send_connection_request_with_key_package() {
     assert!(result.is_ok());
 }
 
+/// The relay's "recipient offline" DeliveryError (bridged as a
+/// `recipient_unreachable` transport failure) must surface as a typed
+/// ConnectionRequestUndeliverable event — before this path existed the
+/// signal was welcome-only and a connection request to an offline peer
+/// produced no feedback until generic retry exhaustion.
+#[test]
+fn test_connection_request_recipient_unreachable_emits_undeliverable() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed(
+            &sent_id.as_str(),
+            Some("recipient_unreachable: User is offline".to_string()),
+        )
+        .unwrap();
+
+    let captured = events.lock().unwrap();
+    let undeliverable = captured
+        .iter()
+        .find_map(|e| match e {
+            Event::ConnectionRequestUndeliverable {
+                recipient,
+                message_id,
+                reason,
+            } => Some((recipient.clone(), message_id.clone(), reason.clone())),
+            _ => None,
+        })
+        .expect("recipient_unreachable must emit ConnectionRequestUndeliverable");
+    assert_eq!(undeliverable.0, "bob");
+    assert_eq!(undeliverable.1, sent_id.as_str());
+    assert!(undeliverable.2.starts_with("recipient_unreachable"));
+    drop(captured);
+
+    // The entry is consumed on emission: a duplicate DeliveryError for the
+    // same id must not double-emit.
+    protocol
+        .on_transport_send_failed(
+            &sent_id.as_str(),
+            Some("recipient_unreachable: User is offline".to_string()),
+        )
+        .unwrap();
+    let captured = events.lock().unwrap();
+    assert_eq!(
+        captured
+            .iter()
+            .filter(|e| matches!(e, Event::ConnectionRequestUndeliverable { .. }))
+            .count(),
+        1
+    );
+}
+
+/// A non-unreachable transport failure stays with the generic retry
+/// machinery — the request may still deliver, so no undeliverable event.
+#[test]
+fn test_connection_request_generic_send_failure_does_not_emit_undeliverable() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed(&sent_id.as_str(), Some("socket closed".to_string()))
+        .unwrap();
+
+    let captured = events.lock().unwrap();
+    assert!(
+        !captured
+            .iter()
+            .any(|e| matches!(e, Event::ConnectionRequestUndeliverable { .. })),
+        "generic transport failures must not emit ConnectionRequestUndeliverable"
+    );
+}
+
 #[test]
 fn test_accept_connection_request_success() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();

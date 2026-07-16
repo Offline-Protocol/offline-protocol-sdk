@@ -275,6 +275,27 @@ pub(crate) struct KeyPackagePayload {
 /// JSON envelope and never occurs in base64.
 pub(crate) const MLS_ENVELOPE_COMPACT_V1: u8 = 1;
 
+/// An outbound connection request awaiting a transport outcome (see
+/// `OfflineProtocol::pending_connection_requests`).
+#[derive(Debug, Clone)]
+pub(crate) struct PendingConnectionRequest {
+    /// Recipient the request was addressed to.
+    pub(crate) recipient: String,
+    /// When the request was sent — entries older than
+    /// [`PENDING_CONNECTION_REQUEST_TTL`] are pruned on insert.
+    pub(crate) sent_at: std::time::Instant,
+}
+
+/// How long an outbound connection request stays correlatable to a
+/// transport failure. Past this window the entry is pruned: a DeliveryError
+/// that stale belongs to a request the app has long stopped showing a
+/// spinner for.
+pub(crate) const PENDING_CONNECTION_REQUEST_TTL: std::time::Duration =
+    std::time::Duration::from_secs(300);
+
+/// Cap on tracked outbound connection requests (oldest evicted first).
+pub(crate) const MAX_PENDING_CONNECTION_REQUESTS: usize = 64;
+
 /// Payload for a connection request message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ConnectionRequestPayload {

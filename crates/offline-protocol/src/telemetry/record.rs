@@ -135,6 +135,7 @@ mod tests {
         "protocol.welcome.send_failed",
         "protocol.welcome.send_expired",
         "protocol.connection.request_received",
+        "protocol.connection.request_undeliverable",
         "protocol.connection.accepted",
         "protocol.connection.rejected",
         "protocol.connection.request_cancelled",
@@ -304,6 +305,7 @@ mod tests {
             | Event::WelcomeSendFailed { .. }
             | Event::WelcomeSendExpired { .. }
             | Event::ConnectionRequestReceived { .. }
+            | Event::ConnectionRequestUndeliverable { .. }
             | Event::ConnectionAccepted { .. }
             | Event::ConnectionRejected { .. }
             | Event::ConnectionRequestCancelled { .. }
@@ -525,6 +527,11 @@ mod tests {
                 timestamp: 0,
                 key_package: None,
                 initial_message: None,
+            },
+            Event::ConnectionRequestUndeliverable {
+                recipient: String::new(),
+                message_id: String::new(),
+                reason: String::new(),
             },
             Event::ConnectionAccepted {
                 accepted_by: String::new(),
