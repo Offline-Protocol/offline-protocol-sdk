@@ -3618,9 +3618,10 @@ impl OfflineProtocol {
 
     /// Called by the platform when data is received from a Nostr relay.
     ///
-    /// `sender_id` is the Nostr pubkey hex of the sender (used for
-    /// `NeighborDiscovered` events). The real protocol-level sender
-    /// is extracted from the deserialized `Message.sender` field.
+    /// `sender_id` is the Nostr pubkey hex of the sender (diagnostics only).
+    /// The identity surfaced via `NeighborDiscovered` is always the
+    /// deserialized `Message.sender`; a frame that fails to deserialize
+    /// surfaces no discovery at all.
     ///
     /// Unlike BLE/Reticulum, the Nostr pubkey is the sender's per-install
     /// transport signing key — not the protocol user ID. Setting it as
@@ -3657,14 +3658,24 @@ impl OfflineProtocol {
             )));
         }
 
-        // Use the real sender (from protocol message) for identity, falling
-        // back to the Nostr pubkey if deserialization failed.
-        let peer_id = real_sender.unwrap_or(sender_id);
-
         {
             let mut protocol = self.lock_inner()?;
             while protocol.receive_message().is_some() {}
         }
+
+        // Discovery must only ever surface the canonical protocol user id
+        // (`Message.sender`): `NeighborDiscovered.peer_id` feeds
+        // self-suppression, user blocking, and outbox flush, which all key
+        // on that namespace. A frame that fails to deserialize has no such
+        // id — and the Nostr pubkey is a per-install signing key, not an
+        // identity — so it surfaces no discovery at all.
+        let Some(peer_id) = real_sender else {
+            tracing::warn!(
+                nostr_pubkey = %sender_id,
+                "Undecodable Nostr frame; skipping neighbor discovery"
+            );
+            return Ok(());
+        };
 
         self.notify_neighbor_reachable(&peer_id, "Nostr", None)
     }
@@ -6553,6 +6564,32 @@ mod tests {
         assert!(
             !core.is_known_peer("nostr-routing-pubkey"),
             "the Nostr routing pubkey is not a protocol identity and must not be tracked"
+        );
+    }
+
+    #[test]
+    fn test_nostr_undecodable_frame_surfaces_no_discovery() {
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+
+        receiver
+            .nostr_message_received(
+                "nostr-routing-pubkey".to_string(),
+                b"not a protocol message".to_vec(),
+            )
+            .unwrap();
+
+        assert!(
+            !receiver
+                .lock_inner()
+                .unwrap()
+                .is_known_peer("nostr-routing-pubkey"),
+            "an undecodable frame must not surface the Nostr pubkey as a discovered peer"
         );
     }
 
