@@ -10,9 +10,10 @@ import uniffi.offline_protocol.ProtocolConfig
  *
  * Extracted from [OfflineProtocolModule] so the dual-shape/dual-case field
  * reads are JVM unit testable — a silent parse regression here reverts a
- * field to its default with no error anywhere. The iOS bridge keeps the same
- * logic inline in OfflineProtocolModule.swift `parseConfig`; keep the read
- * order and precedence in sync.
+ * field to its default with no error anywhere. The iOS bridge mirrors the
+ * encryption-section reads in EncryptionConfigReader.swift (covered by the
+ * SwiftPM suite) and keeps the rest inline in OfflineProtocolModule.swift
+ * `parseConfig`; keep the read order and precedence in sync.
  */
 internal object ProtocolConfigParser {
 
@@ -26,25 +27,33 @@ internal object ProtocolConfigParser {
     fun parse(configJson: String): ParsedConfig {
         val json = JSONObject(configJson)
 
-        // Parse encryption config with defaults (enabled by default)
+        // Encryption flags (default on): nested home under `encryption`
+        // first, then top level, in camelCase or snake_case. The JS wrapper
+        // sends both shapes with identical values; direct native callers may
+        // send either. Accepting both is what keeps a sender-side shape
+        // change from silently reverting a flag to its default — these four
+        // were nested-only while the wrapper sent flat, so every app-set
+        // value was dropped.
         val encryptionJson = json.optJSONObject("encryption")
-        val encryptionEnabled = encryptionJson?.optBoolean("enabled", true) ?: true
-        val autoKeyExchange = encryptionJson?.let {
-            it.optBooleanCompat("autoKeyExchange", "auto_key_exchange") ?: true
-        } ?: true
-        val storePending = encryptionJson?.let {
-            it.optBooleanCompat("storePending", "store_pending") ?: true
-        } ?: true
+        val encryptionEnabled = encryptionJson?.optBooleanCompat("enabled")
+            ?: json.optBooleanCompat("encryptionEnabled", "encryption_enabled")
+            ?: true
+        val autoKeyExchange =
+            encryptionJson?.optBooleanCompat("autoKeyExchange", "auto_key_exchange")
+                ?: json.optBooleanCompat("autoKeyExchange", "auto_key_exchange")
+                ?: true
+        val storePending = encryptionJson?.optBooleanCompat("storePending", "store_pending")
+            ?: json.optBooleanCompat("storePending", "store_pending")
+            ?: true
         // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
-        val requireEncryption = encryptionJson?.let {
-            it.optBooleanCompat("requireEncryption", "require_encryption") ?: true
-        } ?: true
-        // Wire-format kill switches (default on), accepted in camelCase or
-        // snake_case. compactEnvelopeEnabled: nested home under `encryption`
-        // first, then top level (the JS wrapper sends the flat shape; direct
-        // native callers may follow the nested config). binaryWireEnabled:
-        // top level only — that IS its home in both the JS config and the
-        // flat UniFFI dictionary.
+        val requireEncryption =
+            encryptionJson?.optBooleanCompat("requireEncryption", "require_encryption")
+                ?: json.optBooleanCompat("requireEncryption", "require_encryption")
+                ?: true
+        // Wire-format kill switches (default on), same shape rules as above
+        // for compactEnvelopeEnabled. binaryWireEnabled: top level only —
+        // that IS its home in both the JS config and the flat UniFFI
+        // dictionary.
         val binaryWireEnabled =
             json.optBooleanCompat("binaryWireEnabled", "binary_wire_enabled") ?: true
         val compactEnvelopeEnabled = encryptionJson?.optBooleanCompat(

@@ -48,6 +48,7 @@ let package = Package(
                 "tests"
             ],
             sources: [
+                "EncryptionConfigReader.swift",
                 "LegacyRelayMessage.swift",
                 "PresenceWatchPolicy.swift",
                 "RecipientInFlightTracker.swift",
@@ -70,6 +71,7 @@ let package = Package(
                 "ProtocolErrorBridgeTests.swift"
             ],
             sources: [
+                "EncryptionConfigReaderTests.swift",
                 "LegacyRelayMessageTests.swift",
                 "PresenceWatchPolicyTests.swift",
                 "RecipientInFlightTrackerTests.swift",

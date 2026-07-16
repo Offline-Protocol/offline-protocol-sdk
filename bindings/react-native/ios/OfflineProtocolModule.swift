@@ -129,65 +129,24 @@ class OfflineProtocolModule: RCTEventEmitter {
                          userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
         }
         
-        // Parse encryption config with defaults (enabled by default)
-        let encryptionDict = raw["encryption"] as? [String: Any] ?? [:]
-        let encryptionEnabled = encryptionDict["enabled"] as? Bool ?? true
-        let autoKeyExchange = encryptionDict["autoKeyExchange"] as? Bool 
-                              ?? encryptionDict["auto_key_exchange"] as? Bool ?? true
-        let storePending = encryptionDict["storePending"] as? Bool 
-                           ?? encryptionDict["store_pending"] as? Bool ?? true
-        // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
-        let requireEncryption = encryptionDict["requireEncryption"] as? Bool
-                                ?? encryptionDict["require_encryption"] as? Bool ?? true
-        // Wire-format kill switches (default on), accepted in camelCase or
-        // snake_case. compactEnvelopeEnabled: nested home under `encryption`
-        // first, then top level (the JS wrapper sends the flat shape; direct
-        // native callers may follow the nested config). binaryWireEnabled:
-        // top level only — that IS its home in both the JS config and the
-        // flat UniFFI dictionary. Mirrors ProtocolConfigParser.kt on Android;
-        // keep the read order and precedence in sync.
-        let binaryWireEnabled = raw["binaryWireEnabled"] as? Bool
-            ?? raw["binary_wire_enabled"] as? Bool ?? true
-        let compactEnvelopeEnabled = encryptionDict["compactEnvelopeEnabled"] as? Bool
-            ?? encryptionDict["compact_envelope_enabled"] as? Bool
-            ?? raw["compactEnvelopeEnabled"] as? Bool
-            ?? raw["compact_envelope_enabled"] as? Bool ?? true
-        let pendingQueueDict = encryptionDict["pendingQueue"] as? [String: Any]
-            ?? encryptionDict["pending_queue"] as? [String: Any]
-        let maxPendingPerPeer = UInt64(
-            (pendingQueueDict?["maxPendingPerPeer"] as? NSNumber)?.uint64Value
-                ?? (pendingQueueDict?["max_pending_per_peer"] as? NSNumber)?.uint64Value
-                ?? (raw["maxPendingPerPeer"] as? NSNumber)?.uint64Value
-                ?? (raw["max_pending_per_peer"] as? NSNumber)?.uint64Value
-                ?? 64
-        )
-        let maxPendingGlobal = UInt64(
-            (pendingQueueDict?["maxPendingGlobal"] as? NSNumber)?.uint64Value
-                ?? (pendingQueueDict?["max_pending_global"] as? NSNumber)?.uint64Value
-                ?? (raw["maxPendingGlobal"] as? NSNumber)?.uint64Value
-                ?? (raw["max_pending_global"] as? NSNumber)?.uint64Value
-                ?? 4096
-        )
-        let pendingTtlMs = UInt64(
-            (pendingQueueDict?["pendingTtlMs"] as? NSNumber)?.uint64Value
-                ?? (pendingQueueDict?["pending_ttl_ms"] as? NSNumber)?.uint64Value
-                ?? (raw["pendingTtlMs"] as? NSNumber)?.uint64Value
-                ?? (raw["pending_ttl_ms"] as? NSNumber)?.uint64Value
-                ?? 120_000
-        )
-        let overflowPolicyRaw = (pendingQueueDict?["overflowPolicy"] as? String)
-            ?? (pendingQueueDict?["overflow_policy"] as? String)
-            ?? (raw["overflowPolicy"] as? String)
-            ?? (raw["overflow_policy"] as? String)
-            ?? "drop_oldest"
+        // Encryption section (four flags, compact-envelope kill switch,
+        // pending queue): read by EncryptionConfigReader — Foundation-only so
+        // the SwiftPM suite covers it; mirrors ProtocolConfigParser.kt on
+        // Android, keep the read order and precedence in sync.
+        let encryption = EncryptionConfigReader.read(raw)
         let overflowPolicy: OverflowPolicy
-        switch overflowPolicyRaw.lowercased() {
+        switch encryption.overflowPolicyRaw.lowercased() {
         case "drop_newest":
             overflowPolicy = .dropNewest
         default:
             overflowPolicy = .dropOldest
         }
-        
+        // binaryWireEnabled (kill switch, default on): top level only — that
+        // IS its home in both the JS config and the flat UniFFI dictionary.
+        // camelCase or snake_case.
+        let binaryWireEnabled = raw["binaryWireEnabled"] as? Bool
+            ?? raw["binary_wire_enabled"] as? Bool ?? true
+
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
             userId: raw["userId"] as? String ?? raw["user_id"] as? String ?? "",
@@ -198,16 +157,16 @@ class OfflineProtocolModule: RCTEventEmitter {
             nostrEnabled: raw["nostrEnabled"] as? Bool ?? raw["nostr_enabled"] as? Bool ?? false,
             preferOnline: raw["preferOnline"] as? Bool ?? raw["prefer_online"] as? Bool ?? false,
             initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8),
-            encryptionEnabled: encryptionEnabled,
-            autoKeyExchange: autoKeyExchange,
-            storePending: storePending,
-            requireEncryption: requireEncryption,
-            maxPendingPerPeer: maxPendingPerPeer,
-            maxPendingGlobal: maxPendingGlobal,
-            pendingTtlMs: pendingTtlMs,
+            encryptionEnabled: encryption.enabled,
+            autoKeyExchange: encryption.autoKeyExchange,
+            storePending: encryption.storePending,
+            requireEncryption: encryption.requireEncryption,
+            maxPendingPerPeer: encryption.maxPendingPerPeer,
+            maxPendingGlobal: encryption.maxPendingGlobal,
+            pendingTtlMs: encryption.pendingTtlMs,
             overflowPolicy: overflowPolicy,
             binaryWireEnabled: binaryWireEnabled,
-            compactEnvelopeEnabled: compactEnvelopeEnabled
+            compactEnvelopeEnabled: encryption.compactEnvelopeEnabled
         )
 
         return (config, raw)
