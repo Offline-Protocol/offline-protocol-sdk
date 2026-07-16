@@ -4,8 +4,8 @@
 //
 // Decides which peers to query for relay presence (CheckPresence) each tick.
 //
-// Watch sources: recipients the relay reported unreachable (DeliveryError /
-// ConnectionRequestError) plus the core watchlist (peers with undelivered or
+// Watch sources: recipients the relay reported unreachable (DeliveryError)
+// plus the core watchlist (peers with undelivered or
 // session-unproven MLS welcomes) merged at tick time. A peer leaves the set
 // on an online presence answer, on inbound traffic from the peer, or after
 // the idle TTL.

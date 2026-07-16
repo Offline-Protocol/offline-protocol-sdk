@@ -126,8 +126,8 @@ class InternetManager(
     // Failure tracking for DORS
     private var consecutiveSendFailures = AtomicInteger(0)
 
-    // Correlates the relay's recipient-keyed failure signals (DeliveryError /
-    // ConnectionRequestError carry no message_id) back to in-flight sends.
+    // Correlates the relay's recipient-keyed failure signal (DeliveryError
+    // carries no message_id) back to in-flight sends.
     private val inFlightTracker = RecipientInFlightTracker()
 
     // Which peers to query via CheckPresence, and how many per tick.
@@ -1020,10 +1020,7 @@ class InternetManager(
                 // burning their retry budget) and start watching presence.
                 val recipient = json.safeOptString("recipient")
                 val reason = json.safeOptString("reason", "Unknown error")
-                handleRecipientUnreachable(
-                    recipient, reason, "DeliveryError",
-                    RecipientInFlightTracker.Plane.DATA
-                )
+                handleRecipientUnreachable(recipient, reason, "DeliveryError")
             }
 
             "PresenceStatus", "PresenceStatusWithLastSeen" -> {
@@ -1089,114 +1086,12 @@ class InternetManager(
                 ))
             }
 
-            "ConnectionRequestReceived" -> {
-                // Forward connection request to JavaScript with full data so it emits connection_request_received
-                val senderId = json.safeOptString("sender")
-                val senderName = json.safeOptString("sender_name", senderId)
-                val timestampStr = json.safeOptString("timestamp")
-                val keyPackage = if (json.has("key_package")) {
-                    try {
-                        val keyPackageArray = json.getJSONArray("key_package")
-                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it).toByte() }
-                    } catch (e: Exception) { null }
-                } else null
-                if (senderId.isEmpty()) {
-                    emitDiagnostic("warning", "Invalid ConnectionRequestReceived format: missing sender")
-                    return
-                }
-                val timestampMs = parseTimestampToMs(timestampStr)
-                val payloadJson = org.json.JSONObject().apply {
-                    put("sender_name", senderName)
-                    put("timestamp_ms", timestampMs)
-                    if (keyPackage != null) {
-                        put("key_package", org.json.JSONArray(keyPackage.map { it.toInt().and(0xFF) }))
-                    }
-                }
-                val content = "__CONN_REQ__" + payloadJson.toString()
-                try {
-                    val messageBytes = buildInternalMessageBytes(senderId, content)
-                    protocol.internetMessageReceived(senderId, messageBytes.map { it.toUByte() })
-                    emitDiagnostic("debug", "Connection request received from relay", mapOf(
-                        "sender" to senderId,
-                        "sender_name" to senderName
-                    ))
-                } catch (e: Exception) {
-                    emitDiagnostic("error", "Error processing ConnectionRequestReceived", mapOf(
-                        "error" to (e.message ?: "unknown")
-                    ))
-                }
-            }
-            
-            "ConnectionAccepted" -> {
-                val sender = json.safeOptString("sender")
-                val acceptedBy = json.safeOptString("accepted_by", sender)
-                val acceptedByName = json.safeOptString("accepted_by_name", json.safeOptString("sender_name", acceptedBy))
-                val timestampStr = json.safeOptString("timestamp")
-                val keyPackage = if (json.has("key_package")) {
-                    try {
-                        val keyPackageArray = json.getJSONArray("key_package")
-                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it).toByte() }
-                    } catch (e: Exception) { null }
-                } else null
-                if (acceptedBy.isEmpty()) {
-                    emitDiagnostic("warning", "Invalid ConnectionAccepted format: missing accepted_by")
-                    return
-                }
-                val timestampMs = parseTimestampToMs(timestampStr)
-                val payloadJson = org.json.JSONObject().apply {
-                    put("accepted_by_name", acceptedByName)
-                    put("timestamp_ms", timestampMs)
-                    if (keyPackage != null) {
-                        put("key_package", org.json.JSONArray(keyPackage.map { it.toInt().and(0xFF) }))
-                    }
-                }
-                val content = "__CONN_ACC__" + payloadJson.toString()
-                try {
-                    val messageBytes = buildInternalMessageBytes(acceptedBy, content)
-                    protocol.internetMessageReceived(acceptedBy, messageBytes.map { it.toUByte() })
-                    emitDiagnostic("debug", "Connection accepted from relay", mapOf(
-                        "accepted_by" to acceptedBy,
-                        "accepted_by_name" to acceptedByName
-                    ))
-                } catch (e: Exception) {
-                    emitDiagnostic("error", "Error processing ConnectionAccepted", mapOf(
-                        "error" to (e.message ?: "unknown")
-                    ))
-                }
-            }
-            
-            "ConnectionRejected" -> {
-                val rejectedBy = json.safeOptString("rejected_by", json.safeOptString("sender"))
-                if (rejectedBy.isEmpty()) {
-                    emitDiagnostic("warning", "Invalid ConnectionRejected format: missing rejected_by")
-                    return
-                }
-                val content = "__CONN_REJ__"
-                try {
-                    val messageBytes = buildInternalMessageBytes(rejectedBy, content)
-                    protocol.internetMessageReceived(rejectedBy, messageBytes.map { it.toUByte() })
-                    emitDiagnostic("debug", "Connection rejected from relay", mapOf(
-                        "rejected_by" to rejectedBy
-                    ))
-                } catch (e: Exception) {
-                    emitDiagnostic("error", "Error processing ConnectionRejected", mapOf(
-                        "error" to (e.message ?: "unknown")
-                    ))
-                }
-            }
-            
-            "ConnectionRequestError" -> {
-                // Same authoritative offline signal as DeliveryError, for
-                // relay-native connection-request ops (the relay does not
-                // store requests for offline recipients).
-                val recipient = json.safeOptString("recipient")
-                val reason = json.safeOptString("reason", "Unknown error")
-                handleRecipientUnreachable(
-                    recipient, reason, "ConnectionRequestError",
-                    RecipientInFlightTracker.Plane.CONN_REQ
-                )
-            }
-            
+            // Relay-native Connection* frames (ConnectionRequestReceived /
+            // ConnectionAccepted / ConnectionRejected / ConnectionRequestError)
+            // are deliberately unhandled: connection ops travel verbatim as
+            // signed SendMessage frames and arrive via MessageReceived, so a
+            // relay-native connection frame can only come from a pre-SDK client.
+
             "GroupCreated" -> {
                 val groupId = json.safeOptString("group_id")
                 val name = json.safeOptString("name")
@@ -1381,12 +1276,7 @@ class InternetManager(
             val recipient = parsed.optString("recipient")
             if (recipient.isNotEmpty()) {
                 val id = RAW_SEND_SENTINEL_PREFIX + java.util.UUID.randomUUID()
-                inFlightTracker.recordSent(
-                    recipient,
-                    id,
-                    RecipientInFlightTracker.Plane.DATA,
-                    monotonicNowMs()
-                )
+                inFlightTracker.recordSent(recipient, id, monotonicNowMs())
                 sentinel = recipient to id
             }
         }
@@ -1560,10 +1450,7 @@ class InternetManager(
             messagesSent.incrementAndGet()
             // Track for recipient-keyed failure correlation: a later
             // DeliveryError for this recipient fails-fast this message id.
-            inFlightTracker.recordSent(
-                recipientId, messageId,
-                RecipientInFlightTracker.Plane.DATA, monotonicNowMs()
-            )
+            inFlightTracker.recordSent(recipientId, messageId, monotonicNowMs())
             try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
             
             emitDiagnostic("debug", "Message sent via relay", mapOf(
@@ -1656,21 +1543,13 @@ class InternetManager(
                     consecutiveSendFailures.set(0)
                     bytesSent.addAndGet(primaryJson.toByteArray(Charsets.UTF_8).size.toLong())
                     messagesSent.incrementAndGet()
-                    // Only connection-request primaries are tracked: their
-                    // failure channel is the recipient-keyed
-                    // ConnectionRequestError. Group primaries (CreateGroup /
-                    // SendGroupMessage / LeaveGroup) answer on the
-                    // group-scoped GroupError channel instead — tracked
-                    // here, one would absorb a data frame's MessageSent (the
-                    // oldest-first fallback) and leave the delivered message
-                    // for a later DeliveryError to false-fail.
-                    when (controlOp) {
-                        "conn_req", "conn_acc", "conn_rej", "conn_can" ->
-                            inFlightTracker.recordSent(
-                                recipientId, messageId,
-                                RecipientInFlightTracker.Plane.CONN_REQ, monotonicNowMs()
-                            )
-                    }
+                    // Group primaries (CreateGroup / SendGroupMessage /
+                    // LeaveGroup) are never recorded in the recipient-keyed
+                    // in-flight tracker: they answer on the group-scoped
+                    // GroupError channel instead — tracked here, one would
+                    // absorb a data frame's MessageSent (the oldest-first
+                    // fallback) and leave the delivered message for a later
+                    // DeliveryError to false-fail.
                     try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
                     enqueueControlFrames(controlOp, translation.frames.drop(1), translation.commit)
                     emitDiagnostic("debug", "Control op sent relay-native", mapOf(
@@ -1759,19 +1638,17 @@ class InternetManager(
     // MARK: - Presence Watch
 
     /**
-     * Fail-fast handler for the relay's recipient-keyed offline signals
-     * (DeliveryError / ConnectionRequestError). Fails every live in-flight
-     * message of the signal's [plane] to the recipient with the
-     * recipient_unreachable reason (the core classifies it as per-peer
-     * no-carrier and parks welcomes without burning budget), ingests an
-     * authoritative offline presence, and adds the recipient to the
-     * presence watch set.
+     * Fail-fast handler for the relay's recipient-keyed offline signal
+     * (DeliveryError). Fails every live in-flight message to the recipient
+     * with the recipient_unreachable reason (the core classifies it as
+     * per-peer no-carrier and parks welcomes without burning budget),
+     * ingests an authoritative offline presence, and adds the recipient to
+     * the presence watch set.
      */
     private fun handleRecipientUnreachable(
         recipient: String,
         reason: String,
-        source: String,
-        plane: RecipientInFlightTracker.Plane
+        source: String
     ) {
         if (recipient.isEmpty()) {
             emitDiagnostic("warning", "Recipient-unreachable signal without recipient", mapOf(
@@ -1781,7 +1658,7 @@ class InternetManager(
             return
         }
         val now = monotonicNowMs()
-        val failedIds = inFlightTracker.drainRecipient(recipient, plane, now)
+        val failedIds = inFlightTracker.drainRecipient(recipient, now)
         for (id in failedIds) {
             // Sentinel entries track app-authored raw SendMessage frames
             // only to keep the per-recipient FIFO honest for MessageSent

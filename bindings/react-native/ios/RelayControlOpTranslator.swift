@@ -113,42 +113,6 @@ final class RelayControlOpTranslator {
         let payload = parseJson(controlPayload)
 
         switch controlOp {
-        case "conn_req":
-            guard let payload = payload else { return .passThrough }
-            var frame: [String: Any] = [
-                "type": "SendConnectionRequest",
-                "recipient": recipientId,
-                "sender_name": (payload["sender_name"] as? String) ?? selfId
-            ]
-            if let keyPackage = payload["key_package"] as? [Any] {
-                frame["key_package"] = keyPackage
-            }
-            return .replace([frame], nil)
-
-        case "conn_acc":
-            guard let payload = payload else { return .passThrough }
-            var frame: [String: Any] = [
-                "type": "AcceptConnectionRequest",
-                "requester_id": recipientId,
-                "accepter_name": (payload["accepted_by_name"] as? String) ?? selfId
-            ]
-            if let keyPackage = payload["key_package"] as? [Any] {
-                frame["key_package"] = keyPackage
-            }
-            return .replace([frame], nil)
-
-        case "conn_rej":
-            return .replace([[
-                "type": "RejectConnectionRequest",
-                "requester_id": recipientId
-            ]], nil)
-
-        case "conn_can":
-            return .replace([[
-                "type": "CancelConnectionRequest",
-                "recipient": recipientId
-            ]], nil)
-
         case "group_relay_register":
             guard let payload = payload,
                   let groupId = payload["group_id"] as? String, !groupId.isEmpty else {
