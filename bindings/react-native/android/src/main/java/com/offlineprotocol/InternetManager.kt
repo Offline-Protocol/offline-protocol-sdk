@@ -49,6 +49,12 @@ class InternetManager(
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val MAX_CONSECUTIVE_FAILURES = 2  // Trigger disconnect after 2 consecutive failures
         private const val AUTH_RESPONSE_TIMEOUT_MS = 10_000L
+        // Forced presence checks: how long a checkPresence(force = true)
+        // may park waiting for authenticated + rate-admitted, and how often
+        // the parked queue re-attempts. Mirror the iOS bridge's
+        // forcedCheckDeadlineMs / forcedCheckRetryInterval — keep in sync.
+        private const val FORCED_CHECK_DEADLINE_MS = 8_000L
+        private const val FORCED_CHECK_RETRY_INTERVAL_MS = 500L
         // Tracker ids for app-authored raw SendMessage frames (sendRawCommand):
         // recorded to keep the per-recipient FIFO honest, never reported to
         // the core. Mirrors InternetManager.swift — keep in sync.
@@ -141,6 +147,26 @@ class InternetManager(
     // frame takes a token before the socket write (a server-side drop after
     // a "successful" local write is invisible to the sender).
     private val rateLimiter = RelayRateLimiter()
+
+    // Forced presence checks (checkPresence(force = true)): explicit
+    // app-driven queries that must survive the chat-open/focus window where
+    // the socket is still resuming or the token bucket is momentarily
+    // empty. Main-confined (like the rest of the timer state); each entry
+    // retries until its deadline, then resolves false. Never bypasses the
+    // rate limiter — the client bucket mirrors the relay's server bucket,
+    // and an over-budget frame is dropped server-side *after* the local
+    // write "succeeded", which is strictly worse than deferring.
+    private data class PendingForcedPresenceCheck(
+        val userId: String,
+        val deadlineMs: Long,
+        val callback: (Boolean) -> Unit
+    )
+    private val pendingForcedChecks = mutableListOf<PendingForcedPresenceCheck>()
+    private var forcedCheckRetryScheduled = false
+    private val forcedCheckRetryRunnable = Runnable {
+        forcedCheckRetryScheduled = false
+        serviceForcedChecks()
+    }
 
     /**
      * Time source for the rate limiter, the in-flight tracker, and the
@@ -354,6 +380,17 @@ class InternetManager(
         // this, a stop/start cycle spends up to the idle TTL of CheckPresence
         // tokens on the previous session's peers.
         presenceWatch.clear()
+        // Parked forced presence checks resolve false immediately: an
+        // explicit stop() ends the session, and dangling their RN promises
+        // until the deadline helps nobody. (A mere disconnect keeps them —
+        // the deadline gives the reconnect its chance.)
+        mainHandler.removeCallbacks(forcedCheckRetryRunnable)
+        forcedCheckRetryScheduled = false
+        if (pendingForcedChecks.isNotEmpty()) {
+            val checks = pendingForcedChecks.toList()
+            pendingForcedChecks.clear()
+            checks.forEach { it.callback(false) }
+        }
 
         if (wasActive) {
             // Notify protocol
@@ -607,6 +644,12 @@ class InternetManager(
                 // This ensures messages queued during disconnection are sent promptly
                 pollAndSendMessages()
             }
+
+            // Forced presence checks parked during the reconnect window can
+            // go now — even while paused: they are explicit app actions
+            // with a bounded deadline, not a recurring timer the pause gate
+            // exists for.
+            serviceForcedChecks()
 
             emitDiagnostic("info", "Authenticated with relay server", mapOf(
                 "userId" to userId,
@@ -1726,8 +1769,38 @@ class InternetManager(
      * matching relay semantics. Returns true if the query was written to the
      * socket.
      */
-    fun checkPresence(userId: String): Boolean {
-        if (userId.isEmpty() || !isConnected.get() || !isAuthenticated.get()) return false
+    /**
+     * One-shot CheckPresence. Non-forced calls fail fast (`false`) when the
+     * socket isn't authenticated+connected or the token bucket is
+     * momentarily empty. `force` exists for the chat-open/focus window (the
+     * socket is often still resuming exactly when the app wants a fresh
+     * header): the query is parked and retried until authenticated and
+     * rate-admitted, up to [FORCED_CHECK_DEADLINE_MS], then resolves false.
+     * Forced checks stay one-shot — they never join the watch set. Mirrors
+     * the iOS bridge's checkPresence(userId:force:completion:) — keep in
+     * sync.
+     */
+    fun checkPresence(userId: String, force: Boolean, callback: (Boolean) -> Unit) {
+        if (userId.isEmpty()) {
+            callback(false)
+            return
+        }
+        if (!force) {
+            callback(sendPresenceCheckNow(userId))
+            return
+        }
+        val deadlineMs = monotonicNowMs() + FORCED_CHECK_DEADLINE_MS
+        mainHandler.post {
+            attemptForcedCheck(PendingForcedPresenceCheck(userId, deadlineMs, callback))
+        }
+    }
+
+    /**
+     * Admits and writes one CheckPresence frame. Returns true only when the
+     * frame was admitted and OkHttp accepted the enqueue.
+     */
+    private fun sendPresenceCheckNow(userId: String): Boolean {
+        if (!isConnected.get() || !isAuthenticated.get()) return false
         val ws = webSocket ?: return false
         if (!rateLimiter.tryAcquire(monotonicNowMs())) return false
         val checkMessage = org.json.JSONObject().apply {
@@ -1737,6 +1810,46 @@ class InternetManager(
         val sent = ws.send(checkMessage.toString())
         if (!sent) rateLimiter.refund()
         return sent
+    }
+
+    /**
+     * Main-confined. Sends the forced check if currently admissible;
+     * otherwise parks it (or expires it past its deadline).
+     */
+    private fun attemptForcedCheck(check: PendingForcedPresenceCheck) {
+        if (sendPresenceCheckNow(check.userId)) {
+            check.callback(true)
+            return
+        }
+        if (monotonicNowMs() >= check.deadlineMs) {
+            check.callback(false)
+            return
+        }
+        pendingForcedChecks.add(check)
+        scheduleForcedCheckRetry()
+    }
+
+    /**
+     * Main-confined. One retry tick services the whole queue; the scheduled
+     * flag keeps ticks from stacking.
+     */
+    private fun scheduleForcedCheckRetry() {
+        if (pendingForcedChecks.isEmpty() || forcedCheckRetryScheduled) return
+        forcedCheckRetryScheduled = true
+        mainHandler.postDelayed(forcedCheckRetryRunnable, FORCED_CHECK_RETRY_INTERVAL_MS)
+    }
+
+    /**
+     * Main-confined. Re-attempts every parked forced check;
+     * attemptForcedCheck re-parks the still-unsendable ones.
+     */
+    private fun serviceForcedChecks() {
+        if (pendingForcedChecks.isEmpty()) return
+        val checks = pendingForcedChecks.toList()
+        pendingForcedChecks.clear()
+        for (check in checks) {
+            attemptForcedCheck(check)
+        }
     }
 
     // MARK: - State Management

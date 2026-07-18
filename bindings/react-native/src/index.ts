@@ -2582,28 +2582,53 @@ export class OfflineProtocol {
   /**
    * Asks the internet relay for a peer's presence (one-shot CheckPresence).
    *
-   * Fire-and-event: the answer arrives as a `presence_updated` event
-   * (including `last_seen_ms` when the relay knows it) rather than in the
-   * returned promise — matching relay semantics. The SDK also self-drives
-   * presence checks for peers with undelivered traffic; this method is for
-   * app UI needs (last-seen display, pre-send checks).
+   * ## Contract
    *
-   * Caveat: the core suppresses presence for blocked peers and your own
-   * user id — for those, this resolves `true` (the query was sent) but no
-   * `presence_updated` event will follow. Don't await the event
-   * unconditionally.
+   * - **Always fresh.** The SDK never throttles or dedupes manual checks:
+   *   every accepted call sends a new `CheckPresence` frame to the relay,
+   *   regardless of how recently the same peer was queried. (The automatic
+   *   watch loop's tick/TTL policy does not apply here.)
+   * - **Fire-and-event.** The answer arrives as a `presence_updated` event
+   *   with `source: 'internet'` (including `last_seen_ms` when the relay
+   *   knows it) rather than in the returned promise. Every relay answer
+   *   re-emits the event **even when nothing changed** — safe to drive a
+   *   chat-header refresh from. Subscribe before calling; events have no
+   *   replay.
+   * - **Exceptions.** The core suppresses presence for blocked peers and
+   *   your own user id — for those, this resolves `true` (the query was
+   *   sent) but no `presence_updated` follows. And `true` means the query
+   *   reached the socket, not that an answer will arrive: a connection
+   *   dropped before the relay replies loses the answer (call again).
+   * - **Rate limiting is never bypassed**, force or not: the SDK's
+   *   client-side limiter mirrors the relay's per-connection budget, and an
+   *   over-budget frame would be dropped server-side *after* a locally
+   *   "successful" write — strictly worse than deferring.
+   *
+   * `options.force` is for chat open/focus: exactly when the app wants a
+   * fresh header, the socket is often still resuming from background. A
+   * non-forced call fails fast (`false`) in that window; a forced call is
+   * parked and retried until the transport is authenticated and the
+   * limiter admits it (up to ~8s), only then resolving `false`. Forced
+   * checks stay one-shot — they never join the SDK's automatic watch set.
    *
    * @param userId - Peer's user ID
+   * @param options - `force`: park through the reconnect/rate-limit window
+   *          instead of failing fast (default false)
    * @returns true once the socket accepted the query (write-confirmed on
    *          iOS, enqueue-confirmed on Android — the closest OkHttp offers);
-   *          false otherwise — an empty `userId` (never sent), not
-   *          connected+authenticated, or the SDK's client-side rate limiter
-   *          deferred it (safe to retry after a short delay)
+   *          false otherwise — an empty `userId` (never sent), or not
+   *          connected+authenticated / rate-limiter-deferred past the
+   *          force deadline (non-forced: immediately; safe to retry)
    * @throws when the internet transport was never initialized (enable it via
    *         `transports.internet` before calling)
    */
-  async checkInternetPresence(userId: string): Promise<boolean> {
-    return await OfflineProtocolNativeModule.checkInternetPresence(userId);
+  async checkInternetPresence(
+    userId: string,
+    options?: { force?: boolean }
+  ): Promise<boolean> {
+    return await OfflineProtocolNativeModule.checkInternetPresence(userId, {
+      force: options?.force === true,
+    });
   }
 
   /**
