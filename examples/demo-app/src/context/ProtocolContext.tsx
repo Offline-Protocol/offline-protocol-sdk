@@ -772,7 +772,11 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
               ...existing,
               presenceStatus: status,
               // Prefer the relay's actual last-seen over our local clock.
-              lastSeen: event.last_seen_ms ?? Date.now(),
+              // An offline answer without one (the relay doesn't know)
+              // must not fabricate "seen just now" — keep the prior value.
+              lastSeen:
+                event.last_seen_ms ??
+                (status === 'offline' ? existing.lastSeen : Date.now()),
               // Only a peer's own report proves nearby contact; a relay
               // answer says nothing about mesh proximity.
               isNearby:
