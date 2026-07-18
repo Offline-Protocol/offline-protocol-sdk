@@ -177,18 +177,15 @@ public class InternetManager: NSObject, TransportManager {
 
     // Forced presence checks (checkPresence(force:)): explicit app-driven
     // queries that must survive the chat-open/focus window where the socket
-    // is still resuming or the token bucket is momentarily empty. Both
-    // messageQueue-confined (like pendingControlFrames); each entry retries
-    // until its deadline, then resolves false. Never bypasses the rate
-    // limiter — the client bucket mirrors the relay's server bucket, and an
-    // over-budget frame is dropped server-side *after* the local write
-    // "succeeds", which is strictly worse than deferring.
-    private struct PendingForcedPresenceCheck {
-        let userId: String
-        let deadlineMs: Int64
-        let completion: (Bool) -> Void
-    }
-    private var pendingForcedChecks: [PendingForcedPresenceCheck] = []
+    // is still resuming or the token bucket is momentarily empty. The
+    // park/expire/fail-fast/drain policy lives in the dispatch-free
+    // ForcedPresenceCheckQueue (SwiftPM-tested); only the DispatchQueue
+    // shell — the retry tick and its no-stacking work item — is here. Both
+    // messageQueue-confined (like pendingControlFrames). Never bypasses the
+    // rate limiter — the client bucket mirrors the relay's server bucket,
+    // and an over-budget frame is dropped server-side *after* the local
+    // write "succeeds", which is strictly worse than deferring.
+    private let forcedChecks = ForcedPresenceCheckQueue()
     private var forcedCheckRetryWorkItem: DispatchWorkItem?
     static let forcedCheckDeadlineMs: Int64 = 8_000
     static let forcedCheckRetryInterval: TimeInterval = 0.5
@@ -474,13 +471,7 @@ public class InternetManager: NSObject, TransportManager {
             // bridge's removeCallbacks in stopUnsafe — keep in sync).
             self?.forcedCheckRetryWorkItem?.cancel()
             self?.forcedCheckRetryWorkItem = nil
-            if let self = self, !self.pendingForcedChecks.isEmpty {
-                let checks = self.pendingForcedChecks
-                self.pendingForcedChecks.removeAll()
-                for check in checks {
-                    check.completion(false)
-                }
-            }
+            self?.forcedChecks.drainAll()
         }
         // The watch set survives *reconnects* on purpose (pending traffic is
         // still pending), but an explicit stop() ends the session: without
@@ -2089,7 +2080,7 @@ public class InternetManager: NSObject, TransportManager {
                 completion(false)
                 return
             }
-            self.attemptForcedCheck(PendingForcedPresenceCheck(
+            self.attemptForcedCheck(ForcedPresenceCheckQueue.Entry(
                 userId: userId, deadlineMs: deadlineMs, completion: completion
             ))
         }
@@ -2122,10 +2113,11 @@ public class InternetManager: NSObject, TransportManager {
     }
 
     /// messageQueue-confined. Sends the forced check if currently
-    /// admissible; otherwise parks it (or expires it past its deadline). A
-    /// write failure re-parks: the socket died mid-write and the reconnect
-    /// gets a chance until the deadline.
-    private func attemptForcedCheck(_ check: PendingForcedPresenceCheck) {
+    /// admissible; otherwise the queue policy parks it, expires it, fails
+    /// it fast on a stopping/stopped transport, or rejects it at capacity.
+    /// A write failure re-parks: the socket died mid-write and the
+    /// reconnect gets a chance until the deadline.
+    private func attemptForcedCheck(_ check: ForcedPresenceCheckQueue.Entry) {
         let sent = sendPresenceCheckNow(userId: check.userId) { [weak self] written in
             if written {
                 check.completion(true)
@@ -2144,28 +2136,20 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
 
-    /// messageQueue-confined.
-    private func parkOrExpireForcedCheck(_ check: PendingForcedPresenceCheck) {
-        // A stopping/stopped transport has no reconnect coming: fail fast
-        // instead of letting the check burn its full deadline parked.
-        // (state is lock-guarded — safe to read off main.)
-        if state == .stopping || state == .stopped {
-            check.completion(false)
-            return
+    /// messageQueue-confined. (state is lock-guarded — safe to read off
+    /// main.)
+    private func parkOrExpireForcedCheck(_ check: ForcedPresenceCheckQueue.Entry) {
+        let stopped = state == .stopping || state == .stopped
+        if forcedChecks.parkOrExpire(check, transportStopped: stopped, nowMs: monotonicNowMs()) {
+            scheduleForcedCheckRetry()
         }
-        guard monotonicNowMs() < check.deadlineMs else {
-            check.completion(false)
-            return
-        }
-        pendingForcedChecks.append(check)
-        scheduleForcedCheckRetry()
     }
 
     /// messageQueue-confined. One retry tick services the whole queue; the
     /// stored work item keeps ticks from stacking and lets stop() cancel
     /// the pending tick.
     private func scheduleForcedCheckRetry() {
-        guard !pendingForcedChecks.isEmpty, forcedCheckRetryWorkItem == nil else { return }
+        guard !forcedChecks.isEmpty, forcedCheckRetryWorkItem == nil else { return }
         let item = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             self.forcedCheckRetryWorkItem = nil
@@ -2178,10 +2162,7 @@ public class InternetManager: NSObject, TransportManager {
     /// messageQueue-confined. Re-attempts every parked forced check;
     /// attemptForcedCheck re-parks the still-unsendable ones.
     private func serviceForcedChecks() {
-        guard !pendingForcedChecks.isEmpty else { return }
-        let checks = pendingForcedChecks
-        pendingForcedChecks.removeAll()
-        for check in checks {
+        for check in forcedChecks.takeAll() {
             attemptForcedCheck(check)
         }
     }
