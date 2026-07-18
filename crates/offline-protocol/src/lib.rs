@@ -29,7 +29,7 @@ pub use config::{
 pub use error::{Error, EstablishmentState, Result, SessionStateError};
 pub use events::{
     DecryptionFailureCode, DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event,
-    EventCallback, GroupInfoMember, PresenceStatus, UserGroupSummary,
+    EventCallback, GroupInfoMember, PresenceSource, PresenceStatus, UserGroupSummary,
 };
 pub use offline_protocol_services::MeshServices;
 pub use protocol::OfflineProtocol;

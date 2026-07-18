@@ -489,6 +489,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             status: _,
             timestamp: _,
             last_seen_ms: _,
+            source: _,
         } => {
             hash_string(peer_id, scrubber);
         }
@@ -1038,6 +1039,7 @@ mod tests {
                 status: PresenceStatus::Online,
                 timestamp: 0,
                 last_seen_ms: None,
+                source: crate::events::PresenceSource::Internet,
             },
         ];
         let scrubber = scrubber_enabled();
