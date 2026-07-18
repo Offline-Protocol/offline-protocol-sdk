@@ -1132,8 +1132,11 @@ export type PresenceStatus = 'online' | 'away' | 'offline';
 /**
  * Which channel produced a `presence_updated` event.
  *
- * - `internet`: the relay's authoritative answer (`CheckPresence` /
- *   `PresenceStatusWithLastSeen`), observed by the relay itself.
+ * - `internet`: relay-observed presence — the relay's authoritative answer
+ *   to `CheckPresence` (`PresenceStatus` / `PresenceStatusWithLastSeen`),
+ *   or relay-derived reachability (a `DeliveryError` naming the recipient
+ *   unreachable also reports `offline` here, so a failed send can produce
+ *   an `internet`-sourced offline event without any explicit query).
  * - `peer`: a peer-sent `__PRESENCE__` self-report. Transport-agnostic —
  *   it may arrive over BLE, WiFi Direct, or even relay-forwarded frames,
  *   hence "peer", not "mesh".

@@ -884,11 +884,15 @@ interface PresenceUpdatedEvent {
 }
 ```
 
-- `source: 'internet'` — the relay's authoritative answer, produced by the
-  SDK's automatic watch loop or an explicit `checkInternetPresence()`.
-  Carries `last_seen_ms` when the relay knows it (the relay can
-  legitimately not know — e.g. the peer hasn't connected since the relay
-  last restarted — so render "Last seen" defensively).
+- `source: 'internet'` — relay-observed presence, produced by the SDK's
+  automatic watch loop, an explicit `checkInternetPresence()`, **or a
+  failed send**: when the relay reports a delivery error naming the
+  recipient unreachable, the SDK emits an `internet`-sourced `offline`
+  event for that peer (no `last_seen_ms`) — so headers can see an
+  internet/offline event they never queried for. Carries `last_seen_ms`
+  when the relay knows it (the relay can legitimately not know — e.g. the
+  peer hasn't connected since the relay last restarted — so render "Last
+  seen" defensively).
 - `source: 'peer'` — a peer-sent self-report (`sendPresenceUpdate`),
   arriving over any transport.
 
