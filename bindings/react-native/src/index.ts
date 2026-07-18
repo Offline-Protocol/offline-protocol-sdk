@@ -2608,8 +2608,10 @@ export class OfflineProtocol {
    * fresh header, the socket is often still resuming from background. A
    * non-forced call fails fast (`false`) in that window; a forced call is
    * parked and retried until the transport is authenticated and the
-   * limiter admits it (up to ~8s), only then resolving `false`. Forced
-   * checks stay one-shot — they never join the SDK's automatic watch set.
+   * limiter admits it (up to ~8s), only then resolving `false`. On a
+   * stopped transport (no reconnect coming) even forced calls fail fast.
+   * Forced checks stay one-shot — they never join the SDK's automatic
+   * watch set.
    *
    * @param userId - Peer's user ID
    * @param options - `force`: park through the reconnect/rate-limit window
