@@ -151,17 +151,14 @@ class InternetManager(
     // Forced presence checks (checkPresence(force = true)): explicit
     // app-driven queries that must survive the chat-open/focus window where
     // the socket is still resuming or the token bucket is momentarily
-    // empty. Main-confined (like the rest of the timer state); each entry
-    // retries until its deadline, then resolves false. Never bypasses the
-    // rate limiter — the client bucket mirrors the relay's server bucket,
-    // and an over-budget frame is dropped server-side *after* the local
-    // write "succeeded", which is strictly worse than deferring.
-    private data class PendingForcedPresenceCheck(
-        val userId: String,
-        val deadlineMs: Long,
-        val callback: (Boolean) -> Unit
-    )
-    private val pendingForcedChecks = mutableListOf<PendingForcedPresenceCheck>()
+    // empty. The park/expire/fail-fast/drain policy lives in the Looper-free
+    // ForcedPresenceCheckQueue (JVM-tested); only the Handler shell — the
+    // retry tick and its no-stacking flag — is here. Main-confined (like the
+    // rest of the timer state). Never bypasses the rate limiter — the client
+    // bucket mirrors the relay's server bucket, and an over-budget frame is
+    // dropped server-side *after* the local write "succeeded", which is
+    // strictly worse than deferring.
+    private val forcedChecks = ForcedPresenceCheckQueue()
     private var forcedCheckRetryScheduled = false
     private val forcedCheckRetryRunnable = Runnable {
         forcedCheckRetryScheduled = false
@@ -386,11 +383,7 @@ class InternetManager(
         // the deadline gives the reconnect its chance.)
         mainHandler.removeCallbacks(forcedCheckRetryRunnable)
         forcedCheckRetryScheduled = false
-        if (pendingForcedChecks.isNotEmpty()) {
-            val checks = pendingForcedChecks.toList()
-            pendingForcedChecks.clear()
-            checks.forEach { it.callback(false) }
-        }
+        forcedChecks.drainAll()
 
         if (wasActive) {
             // Notify protocol
@@ -1786,7 +1779,7 @@ class InternetManager(
         }
         val deadlineMs = monotonicNowMs() + FORCED_CHECK_DEADLINE_MS
         mainHandler.post {
-            attemptForcedCheck(PendingForcedPresenceCheck(userId, deadlineMs, callback))
+            attemptForcedCheck(ForcedPresenceCheckQueue.Entry(userId, deadlineMs, callback))
         }
     }
 
@@ -1809,25 +1802,19 @@ class InternetManager(
 
     /**
      * Main-confined. Sends the forced check if currently admissible;
-     * otherwise parks it (or expires it past its deadline).
+     * otherwise the queue policy parks it, expires it, fails it fast on a
+     * stopping/stopped transport (no reconnect coming), or rejects it at
+     * capacity.
      */
-    private fun attemptForcedCheck(check: PendingForcedPresenceCheck) {
+    private fun attemptForcedCheck(check: ForcedPresenceCheckQueue.Entry) {
         if (sendPresenceCheckNow(check.userId)) {
             check.callback(true)
             return
         }
-        // A stopping/stopped transport has no reconnect coming: fail fast
-        // instead of letting the check burn its full deadline parked.
-        if (state == TransportState.STOPPING || state == TransportState.STOPPED) {
-            check.callback(false)
-            return
+        val stopped = state == TransportState.STOPPING || state == TransportState.STOPPED
+        if (forcedChecks.parkOrExpire(check, stopped, monotonicNowMs())) {
+            scheduleForcedCheckRetry()
         }
-        if (monotonicNowMs() >= check.deadlineMs) {
-            check.callback(false)
-            return
-        }
-        pendingForcedChecks.add(check)
-        scheduleForcedCheckRetry()
     }
 
     /**
@@ -1835,7 +1822,7 @@ class InternetManager(
      * flag keeps ticks from stacking.
      */
     private fun scheduleForcedCheckRetry() {
-        if (pendingForcedChecks.isEmpty() || forcedCheckRetryScheduled) return
+        if (forcedChecks.isEmpty || forcedCheckRetryScheduled) return
         forcedCheckRetryScheduled = true
         mainHandler.postDelayed(forcedCheckRetryRunnable, FORCED_CHECK_RETRY_INTERVAL_MS)
     }
@@ -1845,10 +1832,7 @@ class InternetManager(
      * attemptForcedCheck re-parks the still-unsendable ones.
      */
     private fun serviceForcedChecks() {
-        if (pendingForcedChecks.isEmpty()) return
-        val checks = pendingForcedChecks.toList()
-        pendingForcedChecks.clear()
-        for (check in checks) {
+        for (check in forcedChecks.takeAll()) {
             attemptForcedCheck(check)
         }
     }

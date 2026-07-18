@@ -49,6 +49,7 @@ let package = Package(
             ],
             sources: [
                 "EncryptionConfigReader.swift",
+                "ForcedPresenceCheckQueue.swift",
                 "LegacyRelayMessage.swift",
                 "PresenceWatchPolicy.swift",
                 "RecipientInFlightTracker.swift",
@@ -72,6 +73,7 @@ let package = Package(
             ],
             sources: [
                 "EncryptionConfigReaderTests.swift",
+                "ForcedPresenceCheckQueueTests.swift",
                 "LegacyRelayMessageTests.swift",
                 "PresenceWatchPolicyTests.swift",
                 "RecipientInFlightTrackerTests.swift",
