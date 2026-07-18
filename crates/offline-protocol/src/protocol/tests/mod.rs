@@ -1,6 +1,6 @@
 use super::*;
 use crate::constants::ACK_FOR_KEY;
-use crate::events::{DecryptionFailureCode, PresenceStatus, SecurityWarningCode};
+use crate::events::{DecryptionFailureCode, PresenceSource, PresenceStatus, SecurityWarningCode};
 use crate::mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsLifecycleEvent, MlsOperationContext,
 };
@@ -2472,11 +2472,13 @@ fn test_process_internal_message_presence_update_event() {
             status,
             timestamp,
             last_seen_ms,
+            source,
         } => {
             assert_eq!(peer_id, "alice");
             assert_eq!(*status, PresenceStatus::Online);
             assert_eq!(*timestamp, 12345);
             assert_eq!(*last_seen_ms, None);
+            assert_eq!(*source, PresenceSource::Peer);
         }
         _ => panic!("Wrong event type"),
     }
@@ -16537,14 +16539,16 @@ fn test_peer_presence_emits_unified_event_with_last_seen() {
                 peer_id,
                 status,
                 last_seen_ms,
+                source,
                 ..
-            } => Some((peer_id.clone(), *status, *last_seen_ms)),
+            } => Some((peer_id.clone(), *status, *last_seen_ms, *source)),
             _ => None,
         })
         .expect("presence_updated event must be emitted");
     assert_eq!(presence.0, "carol");
     assert_eq!(presence.1, PresenceStatus::Offline);
     assert_eq!(presence.2, Some(98_765));
+    assert_eq!(presence.3, PresenceSource::Internet);
 
     // Self and empty peer ids are ignored entirely.
     drop(captured);
@@ -16552,6 +16556,54 @@ fn test_peer_presence_emits_unified_event_with_last_seen() {
     protocol.on_peer_presence("user123", true, None);
     protocol.on_peer_presence("", true, None);
     assert!(events.lock().unwrap().is_empty());
+}
+
+/// Contract: every relay presence answer produces a `presence_updated`
+/// event, even when nothing changed since the previous answer. Apps drive
+/// chat-header refreshes off this (manual `CheckPresence` on chat open must
+/// always yield a fresh event); a changed-status dedup here would silently
+/// break them.
+#[test]
+fn test_peer_presence_unchanged_status_reemits_event() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    protocol.on_peer_presence("dave", false, Some(11_111));
+    protocol.on_peer_presence("dave", false, Some(11_111));
+    protocol.on_peer_presence("dave", true, None);
+    protocol.on_peer_presence("dave", true, None);
+
+    let captured = events.lock().unwrap();
+    let presence_events: Vec<(PresenceStatus, Option<i64>)> = captured
+        .iter()
+        .filter_map(|e| match e {
+            Event::PresenceUpdated {
+                peer_id,
+                status,
+                last_seen_ms,
+                source,
+                ..
+            } if peer_id == "dave" => {
+                assert_eq!(*source, PresenceSource::Internet);
+                Some((*status, *last_seen_ms))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        presence_events,
+        vec![
+            (PresenceStatus::Offline, Some(11_111)),
+            (PresenceStatus::Offline, Some(11_111)),
+            (PresenceStatus::Online, None),
+            (PresenceStatus::Online, None),
+        ],
+        "identical repeated answers must each re-emit presence_updated"
+    );
 }
 
 #[test]

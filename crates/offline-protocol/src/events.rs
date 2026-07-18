@@ -20,6 +20,25 @@ pub enum PresenceStatus {
     Offline,
 }
 
+/// Where a `PresenceUpdated` event came from.
+///
+/// Apps that render relay-style presence UI (e.g. a direct-chat header's
+/// "Online" / "Last seen …") should filter on `Internet` so a nearby peer's
+/// self-report can't flip a header that is defined as relay-observed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceSource {
+    /// The internet relay's authoritative answer (`CheckPresence` /
+    /// `PresenceStatusWithLastSeen`), observed by the relay itself.
+    Internet,
+    /// A peer-sent `__PRESENCE__` self-report. Transport-agnostic: it may
+    /// arrive over BLE, WiFi Direct, or even relay-forwarded frames — hence
+    /// "peer", not "mesh". Default for deserializing legacy events that
+    /// predate the field.
+    #[default]
+    Peer,
+}
+
 /// Event callback type for handling protocol events.
 pub type EventCallback = Arc<dyn Fn(Event) + Send + Sync>;
 
@@ -885,6 +904,11 @@ pub enum Event {
         /// peer-sent `__PRESENCE__` updates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_seen_ms: Option<i64>,
+        /// Which channel produced this update: the internet relay's
+        /// authoritative answer, or a peer-sent self-report. Always
+        /// serialized; defaults to `peer` when deserializing legacy events.
+        #[serde(default)]
+        source: PresenceSource,
     },
 
     /// A typing indicator was received from a peer.
@@ -1415,18 +1439,20 @@ impl Event {
         Self::ConnectionRequestCancelled { cancelled_by }
     }
 
-    /// Creates a PresenceUpdated event.
+    /// Creates a PresenceUpdated event for a peer-sent `__PRESENCE__`
+    /// self-report (`source: peer`).
     pub fn presence_updated(peer_id: String, status: PresenceStatus, timestamp: i64) -> Self {
         Self::PresenceUpdated {
             peer_id,
             status,
             timestamp,
             last_seen_ms: None,
+            source: PresenceSource::Peer,
         }
     }
 
     /// Creates a PresenceUpdated event carrying a last-seen timestamp
-    /// (relay-sourced presence).
+    /// (relay-sourced presence, `source: internet`).
     pub fn presence_updated_with_last_seen(
         peer_id: String,
         status: PresenceStatus,
@@ -1438,6 +1464,7 @@ impl Event {
             status,
             timestamp,
             last_seen_ms,
+            source: PresenceSource::Internet,
         }
     }
 
@@ -2412,12 +2439,14 @@ impl fmt::Debug for Event {
                 status,
                 timestamp,
                 last_seen_ms,
+                source,
             } => f
                 .debug_struct("PresenceUpdated")
                 .field("peer_id", &"[REDACTED]")
                 .field("status", status)
                 .field("timestamp", timestamp)
                 .field("last_seen_ms", last_seen_ms)
+                .field("source", source)
                 .finish(),
             Self::TypingIndicatorReceived {
                 sender: _,

@@ -79,8 +79,8 @@ impl TelemetryRecord {
 mod tests {
     use super::*;
     use crate::events::{
-        DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, PresenceStatus,
-        SecurityWarningCode, WelcomeReasonCode,
+        DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, PresenceSource,
+        PresenceStatus, SecurityWarningCode, WelcomeReasonCode,
     };
     use crate::mls_observability::{DecryptionFailureKind, MlsOperationContext};
     use std::collections::{HashMap, HashSet};
@@ -638,6 +638,7 @@ mod tests {
                 status: PresenceStatus::Online,
                 timestamp: 0,
                 last_seen_ms: None,
+                source: PresenceSource::Internet,
             },
             Event::TypingIndicatorReceived {
                 sender: String::new(),
