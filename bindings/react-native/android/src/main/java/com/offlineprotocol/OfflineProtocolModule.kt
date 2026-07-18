@@ -3304,12 +3304,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * One-shot relay presence query for a peer (last-seen display, pre-send
      * checks). Fire-and-event: resolves true if the query was sent; the
      * answer arrives as the SDK's `presence_updated` event.
+     * `options.force` parks the query through the chat-open reconnect
+     * window instead of failing fast (see InternetManager.checkPresence).
      */
     @ReactMethod
-    fun checkInternetPresence(userId: String, promise: Promise) {
+    fun checkInternetPresence(userId: String, options: ReadableMap, promise: Promise) {
         try {
             val manager = internetManager ?: throw IllegalStateException("Internet transport not initialized")
-            promise.resolve(manager.checkPresence(userId))
+            val force = options.hasKey("force") && options.getBoolean("force")
+            manager.checkPresence(userId, force) { written -> promise.resolve(written) }
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_INTERNET", "Failed to query presence")
         }

@@ -510,6 +510,7 @@ RCT_EXTERN_METHOD(meshRenameGroup:(NSString *)groupId
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(checkInternetPresence:(NSString *)userId
+                  options:(NSDictionary *)options
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

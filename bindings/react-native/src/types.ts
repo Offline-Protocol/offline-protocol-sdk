@@ -1130,9 +1130,29 @@ export interface ServiceResponseReceivedEvent extends BaseEvent {
 export type PresenceStatus = 'online' | 'away' | 'offline';
 
 /**
- * Presence updated event — one unified stream for both sources: a peer-sent
- * `__PRESENCE__` update, or the internet relay's presence answer (driven by
- * the SDK's automatic watch loop or an explicit `checkInternetPresence`).
+ * Which channel produced a `presence_updated` event.
+ *
+ * - `internet`: the relay's authoritative answer (`CheckPresence` /
+ *   `PresenceStatusWithLastSeen`), observed by the relay itself.
+ * - `peer`: a peer-sent `__PRESENCE__` self-report. Transport-agnostic —
+ *   it may arrive over BLE, WiFi Direct, or even relay-forwarded frames,
+ *   hence "peer", not "mesh".
+ *
+ * Apps rendering relay-style presence UI (a direct-chat header's
+ * "Online" / "Last seen …") should filter on `internet` so a nearby
+ * peer's self-report can't flip a header defined as relay-observed.
+ */
+export type PresenceSource = 'internet' | 'peer';
+
+/**
+ * Presence updated event — one unified stream for both sources
+ * (discriminated by `source`): a peer-sent `__PRESENCE__` update, or the
+ * internet relay's presence answer (driven by the SDK's automatic watch
+ * loop or an explicit `checkInternetPresence`).
+ *
+ * Emission is 1:1 with the underlying signal — the SDK never dedupes
+ * unchanged statuses, so every relay answer re-emits this event even when
+ * nothing changed.
  */
 export interface PresenceUpdatedEvent extends BaseEvent {
   type: 'presence_updated';
@@ -1141,9 +1161,13 @@ export interface PresenceUpdatedEvent extends BaseEvent {
   timestamp: number;
   /**
    * When the peer was last seen (Unix ms), if the source knows it —
-   * relay-sourced presence only; absent for peer-sent updates.
+   * relay-sourced presence only; absent for peer-sent updates. May also be
+   * absent on relay answers when the relay itself doesn't know (e.g. the
+   * peer hasn't connected since the last relay restart).
    */
   last_seen_ms?: number;
+  /** Which channel produced this update. */
+  source: PresenceSource;
 }
 
 /**

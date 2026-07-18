@@ -175,6 +175,24 @@ public class InternetManager: NSObject, TransportManager {
     // a "successful" local write is invisible to the sender).
     private let rateLimiter = RelayRateLimiter()
 
+    // Forced presence checks (checkPresence(force:)): explicit app-driven
+    // queries that must survive the chat-open/focus window where the socket
+    // is still resuming or the token bucket is momentarily empty. Both
+    // messageQueue-confined (like pendingControlFrames); each entry retries
+    // until its deadline, then resolves false. Never bypasses the rate
+    // limiter — the client bucket mirrors the relay's server bucket, and an
+    // over-budget frame is dropped server-side *after* the local write
+    // "succeeds", which is strictly worse than deferring.
+    private struct PendingForcedPresenceCheck {
+        let userId: String
+        let deadlineMs: Int64
+        let completion: (Bool) -> Void
+    }
+    private var pendingForcedChecks: [PendingForcedPresenceCheck] = []
+    private var forcedCheckRetryScheduled = false
+    static let forcedCheckDeadlineMs: Int64 = 8_000
+    static let forcedCheckRetryInterval: TimeInterval = 0.5
+
     /// Cached mach timebase for monotonicNowMs (constant for the process).
     private static let machTimebase: mach_timebase_info_data_t = {
         var info = mach_timebase_info_data_t()
@@ -448,6 +466,17 @@ public class InternetManager: NSObject, TransportManager {
             // reset deliberately keeps it — the drain guarantee survives
             // background reconnects while paused).
             self?.drainOnSettle = false
+            // Parked forced presence checks resolve false immediately: an
+            // explicit stop() ends the session, and dangling their RN
+            // promises until the deadline helps nobody. (A mere disconnect
+            // keeps them — the deadline gives the reconnect its chance.)
+            if let self = self, !self.pendingForcedChecks.isEmpty {
+                let checks = self.pendingForcedChecks
+                self.pendingForcedChecks.removeAll()
+                for check in checks {
+                    check.completion(false)
+                }
+            }
         }
         // The watch set survives *reconnects* on purpose (pending traffic is
         // still pending), but an explicit stop() ends the session: without
@@ -771,6 +800,13 @@ public class InternetManager: NSObject, TransportManager {
             messageQueue.async { [weak self] in
                 self?.settleDrainIfRequested()
             }
+        }
+
+        // Forced presence checks parked during the reconnect window can go
+        // now — even while paused: they are explicit app actions with a
+        // bounded deadline, not a recurring timer the pause gate exists for.
+        messageQueue.async { [weak self] in
+            self?.serviceForcedChecks()
         }
 
         emitDiagnostic("info", "Authenticated with relay server", context: [
@@ -2020,9 +2056,46 @@ public class InternetManager: NSObject, TransportManager {
     /// connected+authenticated or deferred by the client-side rate limiter
     /// (the caller may retry).
     public func checkPresence(userId: String, completion: @escaping (Bool) -> Void) {
-        guard !userId.isEmpty, isConnected, isAuthenticated, let task = webSocketTask else {
+        checkPresence(userId: userId, force: false, completion: completion)
+    }
+
+    /// One-shot CheckPresence. Non-forced calls fail fast (`false`) when
+    /// the socket isn't authenticated+connected or the token bucket is
+    /// momentarily empty. `force` exists for the chat-open/focus window
+    /// (the socket is often still resuming exactly when the app wants a
+    /// fresh header): the query is parked and retried until authenticated
+    /// and rate-admitted, up to `forcedCheckDeadlineMs`, then resolves
+    /// false. Forced checks stay one-shot — they never join the watch set.
+    public func checkPresence(userId: String, force: Bool, completion: @escaping (Bool) -> Void) {
+        guard !userId.isEmpty else {
             completion(false)
             return
+        }
+        if !force {
+            if !sendPresenceCheckNow(userId: userId, completion: completion) {
+                completion(false)
+            }
+            return
+        }
+        let deadlineMs = monotonicNowMs() + Self.forcedCheckDeadlineMs
+        messageQueue.async { [weak self] in
+            guard let self = self else {
+                completion(false)
+                return
+            }
+            self.attemptForcedCheck(PendingForcedPresenceCheck(
+                userId: userId, deadlineMs: deadlineMs, completion: completion
+            ))
+        }
+    }
+
+    /// Admits and writes one CheckPresence frame. Returns false when the
+    /// frame could not be admitted right now (not authenticated / no
+    /// token) — `completion` is NOT called in that case. When it returns
+    /// true, the write outcome arrives via `completion`.
+    private func sendPresenceCheckNow(userId: String, completion: @escaping (Bool) -> Void) -> Bool {
+        guard isConnected, isAuthenticated, let task = webSocketTask else {
+            return false
         }
         let checkMessage: [String: Any] = [
             "type": "CheckPresence",
@@ -2030,16 +2103,71 @@ public class InternetManager: NSObject, TransportManager {
         ]
         guard let jsonData = try? JSONSerialization.data(withJSONObject: checkMessage),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
-            completion(false)
-            return
+            return false
         }
         guard rateLimiter.tryAcquire(nowMs: monotonicNowMs()) else {
-            completion(false)
-            return
+            return false
         }
         task.send(.string(jsonString)) { [weak self] error in
             if error != nil { self?.rateLimiter.refund() }
             completion(error == nil)
+        }
+        return true
+    }
+
+    /// messageQueue-confined. Sends the forced check if currently
+    /// admissible; otherwise parks it (or expires it past its deadline). A
+    /// write failure re-parks: the socket died mid-write and the reconnect
+    /// gets a chance until the deadline.
+    private func attemptForcedCheck(_ check: PendingForcedPresenceCheck) {
+        let sent = sendPresenceCheckNow(userId: check.userId) { [weak self] written in
+            if written {
+                check.completion(true)
+                return
+            }
+            guard let self = self else {
+                check.completion(false)
+                return
+            }
+            self.messageQueue.async {
+                self.parkOrExpireForcedCheck(check)
+            }
+        }
+        if !sent {
+            parkOrExpireForcedCheck(check)
+        }
+    }
+
+    /// messageQueue-confined.
+    private func parkOrExpireForcedCheck(_ check: PendingForcedPresenceCheck) {
+        guard monotonicNowMs() < check.deadlineMs else {
+            check.completion(false)
+            return
+        }
+        pendingForcedChecks.append(check)
+        scheduleForcedCheckRetry()
+    }
+
+    /// messageQueue-confined. One retry tick services the whole queue; the
+    /// scheduled flag keeps ticks from stacking.
+    private func scheduleForcedCheckRetry() {
+        guard !pendingForcedChecks.isEmpty, !forcedCheckRetryScheduled else { return }
+        forcedCheckRetryScheduled = true
+        messageQueue.asyncAfter(deadline: .now() + Self.forcedCheckRetryInterval) { [weak self] in
+            guard let self = self else { return }
+            self.forcedCheckRetryScheduled = false
+            self.serviceForcedChecks()
+        }
+    }
+
+    /// messageQueue-confined. Re-attempts every parked forced check;
+    /// attemptForcedCheck re-parks the still-unsendable ones.
+    private func serviceForcedChecks() {
+        guard !pendingForcedChecks.isEmpty else { return }
+        let checks = pendingForcedChecks
+        pendingForcedChecks.removeAll()
+        for check in checks {
+            attemptForcedCheck(check)
         }
     }
 
