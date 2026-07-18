@@ -867,6 +867,61 @@ interface ConnectionRequestCancelledEvent {
 }
 ```
 
+### Presence Events
+
+#### presence_updated
+
+One unified stream for both presence channels, discriminated by `source`:
+
+```typescript
+interface PresenceUpdatedEvent {
+  type: 'presence_updated';
+  peer_id: string;
+  status: 'online' | 'away' | 'offline';
+  timestamp: number;
+  last_seen_ms?: number; // relay-sourced only, when the relay knows it
+  source: 'internet' | 'peer';
+}
+```
+
+- `source: 'internet'` — the relay's authoritative answer, produced by the
+  SDK's automatic watch loop or an explicit `checkInternetPresence()`.
+  Carries `last_seen_ms` when the relay knows it (the relay can
+  legitimately not know — e.g. the peer hasn't connected since the relay
+  last restarted — so render "Last seen" defensively).
+- `source: 'peer'` — a peer-sent self-report (`sendPresenceUpdate`),
+  arriving over any transport.
+
+A direct-chat header that should behave like classic relay presence
+("Online" / "Last seen …") must filter on `source === 'internet'`;
+mixing in peer self-reports makes nearby mesh contact flip a header that
+users read as server-observed reachability.
+
+The SDK never dedupes unchanged statuses: every relay answer re-emits
+this event, so a manual check on chat open always produces a fresh event
+to render from. Exceptions: presence for blocked peers and your own user
+id is suppressed entirely.
+
+**Checking presence on demand:**
+
+```typescript
+// Chat open / app focus: force parks the query through the socket's
+// resume window (up to ~8s) instead of failing fast.
+const sent = await protocol.checkInternetPresence(peerId, { force: true });
+// The answer arrives as presence_updated with source: 'internet'.
+```
+
+Subscribe to `presence_updated` before calling — the answer is an event,
+not the promise value, and events are not replayed.
+
+**Migrating from an app-side presence layer:** if your app previously
+wrapped the SDK with its own throttle/dedupe/cache, note that the SDK
+itself never throttles or dedupes manual checks — every accepted call
+sends a fresh relay query (only a client-side mirror of the relay's rate
+budget can defer it, which `force` waits out). Delete the wrapper, filter
+on `source === 'internet'`, and use `last_seen_ms` from the event as the
+only "last seen" input.
+
 ### File Events
 
 #### file_progress
