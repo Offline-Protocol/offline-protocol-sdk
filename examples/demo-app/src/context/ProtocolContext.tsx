@@ -760,6 +760,9 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       case 'presence_updated': {
         const peerId = event.peer_id || event.peerId;
         const status: PresenceStatus = event.status || 'offline';
+        // 'internet' = relay-observed (authoritative for "Online" / "Last
+        // seen …" headers), 'peer' = a self-report over any transport.
+        const source = event.source || 'peer';
         if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
         setContacts(prev => {
           const next = new Map(prev);
@@ -768,8 +771,12 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
             next.set(peerId, {
               ...existing,
               presenceStatus: status,
-              lastSeen: Date.now(),
-              isNearby: status === 'online' || existing.isNearby,
+              // Prefer the relay's actual last-seen over our local clock.
+              lastSeen: event.last_seen_ms ?? Date.now(),
+              // Only a peer's own report proves nearby contact; a relay
+              // answer says nothing about mesh proximity.
+              isNearby:
+                (source === 'peer' && status === 'online') || existing.isNearby,
             });
           }
           return next;

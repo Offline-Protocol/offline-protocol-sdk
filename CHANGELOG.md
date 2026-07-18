@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`presence_updated` events now carry their source.** A new `source` field distinguishes the internet relay's authoritative answers (`internet`) from peer-sent `__PRESENCE__` self-reports (`peer`), so apps rendering relay-style headers ("Online" / "Last seen …") can filter on `internet` instead of guessing from `last_seen_ms` absence — which relay answers can legitimately share when the relay doesn't know a last-seen. The value is `peer` (not `mesh`) because self-reports are transport-agnostic and may arrive relay-forwarded. Additive: events without the field deserialize as `peer`; no UniFFI interface change (events cross the FFI as JSON).
+
+- **`checkInternetPresence` accepts `{ force: true }` for chat open/focus.** A non-forced manual check fails fast when the relay socket isn't authenticated or the client-side rate-limit mirror momentarily defers — which is exactly the state an app resuming from background is in when a chat header wants a fresh answer. A forced check parks in the bridge and retries until the transport is authenticated and rate-admitted (bounded at 8 seconds, then resolves `false`), is serviced immediately on the authenticated edge, survives reconnects until its deadline, and drains to `false` on an explicit transport stop. Force never bypasses rate limiting (the client bucket mirrors the relay's server-side budget, where an over-budget frame is dropped *after* a locally-successful write) and forced checks never join the SDK's automatic presence watch set.
+
+- **The manual presence-check contract is now documented and regression-pinned.** The SDK never throttles or dedupes manual presence checks, and every relay answer re-emits `presence_updated` even when the status is unchanged — a Rust regression test now locks the no-dedup behavior, and the React Native README documents the full contract (fire-and-event, subscribe-before-check, blocked/self suppression, `last_seen_ms` availability caveats) for apps replacing their own presence layers.
+
 ## [0.14.0] — 2026-07-16
 
 ### Added
