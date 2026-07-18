@@ -28,8 +28,12 @@ pub enum PresenceStatus {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresenceSource {
-    /// The internet relay's authoritative answer (`CheckPresence` /
-    /// `PresenceStatusWithLastSeen`), observed by the relay itself.
+    /// Relay-observed presence: the relay's authoritative answer to
+    /// `CheckPresence` (`PresenceStatus` / `PresenceStatusWithLastSeen`),
+    /// or relay-derived reachability — the platform bridges also report
+    /// `offline` here when a relay `DeliveryError` names the recipient
+    /// unreachable, so a failed send can produce an `Internet`-sourced
+    /// offline event without any explicit presence query.
     Internet,
     /// A peer-sent `__PRESENCE__` self-report. Transport-agnostic: it may
     /// arrive over BLE, WiFi Direct, or even relay-forwarded frames — hence
