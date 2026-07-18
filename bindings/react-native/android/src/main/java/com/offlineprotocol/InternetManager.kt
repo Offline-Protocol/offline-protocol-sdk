@@ -1764,21 +1764,16 @@ class InternetManager(
     }
 
     /**
-     * App-facing one-shot presence query (RN `checkInternetPresence`). The
-     * answer arrives as the SDK's `presence_updated` event — fire-and-event,
-     * matching relay semantics. Returns true if the query was written to the
-     * socket.
-     */
-    /**
      * One-shot CheckPresence. Non-forced calls fail fast (`false`) when the
      * socket isn't authenticated+connected or the token bucket is
      * momentarily empty. `force` exists for the chat-open/focus window (the
      * socket is often still resuming exactly when the app wants a fresh
      * header): the query is parked and retried until authenticated and
-     * rate-admitted, up to [FORCED_CHECK_DEADLINE_MS], then resolves false.
-     * Forced checks stay one-shot — they never join the watch set. Mirrors
-     * the iOS bridge's checkPresence(userId:force:completion:) — keep in
-     * sync.
+     * rate-admitted, up to [FORCED_CHECK_DEADLINE_MS], then resolves false —
+     * except on a stopping/stopped transport, where no reconnect is coming
+     * and even forced calls fail fast. Forced checks stay one-shot — they
+     * never join the watch set. Mirrors the iOS bridge's
+     * checkPresence(userId:force:completion:) — keep in sync.
      */
     fun checkPresence(userId: String, force: Boolean, callback: (Boolean) -> Unit) {
         if (userId.isEmpty()) {
@@ -1819,6 +1814,12 @@ class InternetManager(
     private fun attemptForcedCheck(check: PendingForcedPresenceCheck) {
         if (sendPresenceCheckNow(check.userId)) {
             check.callback(true)
+            return
+        }
+        // A stopping/stopped transport has no reconnect coming: fail fast
+        // instead of letting the check burn its full deadline parked.
+        if (state == TransportState.STOPPING || state == TransportState.STOPPED) {
+            check.callback(false)
             return
         }
         if (monotonicNowMs() >= check.deadlineMs) {
