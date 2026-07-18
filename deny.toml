@@ -8,6 +8,21 @@ ignore = [
     # artifacts, and RUSTSEC-2026-0173 itself states no safe upgrade
     # exists. Re-evaluate when libcrux/hax drop the dependency.
     { id = "RUSTSEC-2026-0173", reason = "unmaintained build-time proc-macro via libcrux hax-lib; no fixed release exists; compile-time only" },
+    # Three 2026-07 advisories against libcrux crates that reach us only
+    # through openmls_rust_crypto 0.4 -> hpke-rs 0.6 -> libcrux-sha3. The
+    # vulnerable code is hpke-rs's SHAKE/ML-KEM support (incremental SHAKE
+    # squeeze, AVX2 SHAKE-256, and the aarch64 constant-time swap/select
+    # under it); our only ciphersuite is
+    # MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519 (classical X25519 +
+    # AES-GCM + SHA-256, see DEFAULT_CIPHERSUITE in offline-protocol-mls),
+    # which never invokes SHAKE or any PQ KEM — the paths are compiled but
+    # unreachable. The patched libcrux (sha3 0.0.10, secrets 0.0.6) is only
+    # reachable via hpke-rs 0.7, which no released openmls_rust_crypto
+    # accepts yet (0.5.1 still requires ^0.6). Re-evaluate on the next
+    # openmls_rust_crypto release.
+    { id = "RUSTSEC-2026-0207", reason = "libcrux-sha3 incremental SHAKE squeeze bug; SHAKE unreachable with our classical MLS ciphersuite; no hpke-rs-0.6-compatible fix exists" },
+    { id = "RUSTSEC-2026-0208", reason = "libcrux-sha3 AVX2 SHAKE-256 panic; same unreachable SHAKE path, same missing upstream fix" },
+    { id = "RUSTSEC-2026-0212", reason = "libcrux-secrets aarch64 swap/select; only used beneath the unreachable SHAKE/ML-KEM path, same missing upstream fix" },
 ]
 
 [licenses]
