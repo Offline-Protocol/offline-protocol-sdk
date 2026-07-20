@@ -122,10 +122,10 @@ impl OfflineProtocol {
                 match result {
                     InternalMessageResult::Decrypted(content) => {
                         let mut decrypted_msg = msg.clone();
-                        decrypted_msg.content = content.clone();
-                        decrypted_msg
-                            .metadata
-                            .insert("encrypted".to_string(), "true".to_string());
+                        // Shared with the live receive path: swaps in the
+                        // plaintext and drops the relay-writable outer
+                        // `reply_context` (see `apply_decrypted_content`).
+                        Self::apply_decrypted_content(&mut decrypted_msg, content.clone());
                         decrypted_msg
                             .metadata
                             .insert("delayed_decrypt".to_string(), "true".to_string());

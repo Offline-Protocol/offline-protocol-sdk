@@ -480,6 +480,11 @@ pub(crate) enum InternalMessageResult {
 }
 
 /// Pending message waiting for session establishment.
+///
+/// NOTE for the rich send surface: this struct does not yet carry
+/// `reply_context`. When a send API that accepts one lands, it must be
+/// threaded through here (like `forwarded_from`) or replies queued behind
+/// session establishment will silently lose their quote preview.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct PendingMessage {
     /// Original plaintext content.

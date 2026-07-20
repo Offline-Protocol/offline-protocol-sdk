@@ -75,10 +75,33 @@ pub fn on_data_received_from(
     }
 }
 
+/// Strips confidential media-metadata fields before a message hits any
+/// cleartext wire encoding.
+///
+/// The `Message` fields outside `content` travel hop-visible: relays and
+/// every mesh hop can read them. `MediaMetadata::encryption_key`/`iv` grant
+/// access to cloud-stored media, so they must only ever travel inside the
+/// end-to-end-sealed payload (`__MLS_ENC__` content / the sealed media
+/// envelope) — this chokepoint guarantees that no send path, present or
+/// future (direct sends, forwards, pending-queue flushes, relaying), can
+/// leak them in cleartext. Borrows in the common case; clones only when a
+/// secret is actually present.
+fn sanitize_for_wire(message: &Message) -> std::borrow::Cow<'_, Message> {
+    match &message.media_metadata {
+        Some(meta) if meta.has_secrets() => {
+            let mut clean = message.clone();
+            clean.media_metadata = Some(meta.without_secrets());
+            std::borrow::Cow::Owned(clean)
+        }
+        _ => std::borrow::Cow::Borrowed(message),
+    }
+}
+
 /// Serialises a message to JSON bytes (the legacy, universally-understood wire
-/// encoding and the permanent interoperability floor).
+/// encoding and the permanent interoperability floor). Confidential media
+/// fields are stripped first (see [`sanitize_for_wire`]).
 pub fn serialize_message(message: &Message) -> Result<Vec<u8>> {
-    serde_json::to_vec(message)
+    serde_json::to_vec(sanitize_for_wire(message).as_ref())
         .map_err(|e| Error::SerializationError(format!("Failed to serialize message: {}", e)))
 }
 
@@ -86,10 +109,13 @@ pub fn serialize_message(message: &Message) -> Result<Vec<u8>> {
 /// ([`Message::wire_codec`]): binary wire v1 when the recipient is known to
 /// support it, JSON otherwise. Mesh transports call this; the internet transport
 /// keeps [`serialize_message`] (JSON) because its relay bridge treats the payload
-/// as UTF-8 text.
+/// as UTF-8 text. Both arms strip confidential media fields (see
+/// [`sanitize_for_wire`]).
 pub fn serialize_message_with(message: &Message) -> Result<Vec<u8>> {
     match message.wire_codec() {
-        WireCodec::BinaryV1 => message.to_wire_v1_bytes().map_err(Error::from),
+        WireCodec::BinaryV1 => sanitize_for_wire(message)
+            .to_wire_v1_bytes()
+            .map_err(Error::from),
         WireCodec::Json => serialize_message(message),
     }
 }
@@ -188,6 +214,65 @@ mod tests {
         let decoded = deserialize_message(&bytes).unwrap();
         assert_eq!(decoded.content, m.content);
         assert!(bytes.len() * 2 < serialize_message(&m).unwrap().len());
+    }
+
+    fn sample_with_media_secrets() -> Message {
+        let mut m = sample();
+        m.media_metadata = Some(offline_protocol_core::MediaMetadata {
+            mime_type: "image/jpeg".into(),
+            file_name: "x.jpg".into(),
+            file_size: 10,
+            duration_ms: None,
+            width: None,
+            height: None,
+            thumbnail_base64: None,
+            media_id: Some("m1".into()),
+            download_url: Some("https://cdn.example/m1".into()),
+            thumbnail_url: None,
+            encryption_key: Some("VEhFLVNFQ1JFVC1LRVk".into()),
+            iv: Some("VEhFLVNFQ1JFVC1JVg".into()),
+            ciphertext_hash: Some("aGFzaA==".into()),
+            sticker_provider: None,
+            sticker_remote_id: None,
+            sticker_kind: None,
+        });
+        m
+    }
+
+    #[test]
+    fn wire_encodings_never_carry_media_secrets() {
+        // The invariant on MediaMetadata::encryption_key: secret material
+        // must never appear in a cleartext wire frame, on either codec.
+        // Non-secret metadata (URLs, hashes) must survive untouched.
+        let mut m = sample_with_media_secrets();
+
+        for codec in [WireCodec::Json, WireCodec::BinaryV1] {
+            m.set_wire_codec(codec);
+            let bytes = serialize_message_with(&m).unwrap();
+
+            let haystack = String::from_utf8_lossy(&bytes).into_owned();
+            assert!(
+                !haystack.contains("VEhFLVNFQ1JFVC1LRVk")
+                    && !haystack.contains("VEhFLVNFQ1JFVC1JVg"),
+                "{codec:?} frame must not contain key material"
+            );
+
+            let meta = deserialize_message(&bytes).unwrap().media_metadata.unwrap();
+            assert!(meta.encryption_key.is_none(), "{codec:?}");
+            assert!(meta.iv.is_none(), "{codec:?}");
+            assert_eq!(meta.download_url.as_deref(), Some("https://cdn.example/m1"));
+            assert_eq!(meta.ciphertext_hash.as_deref(), Some("aGFzaA=="));
+            assert_eq!(meta.media_id.as_deref(), Some("m1"));
+        }
+
+        // The in-memory message is untouched — stripping happens on the
+        // serialized copy only.
+        assert!(m.media_metadata.as_ref().unwrap().has_secrets());
+
+        // serialize_message (the direct JSON entry the internet transport
+        // uses) applies the same strip.
+        let bytes = serialize_message(&m).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("VEhFLVNFQ1JFVC1LRVk"));
     }
 
     #[test]

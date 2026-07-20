@@ -166,10 +166,15 @@ pub struct MediaMetadata {
     ///
     /// Secret material: must only travel inside an end-to-end-encrypted
     /// payload, never in cleartext message fields visible to relays.
+    /// Enforced at the transport wire chokepoint, which strips it (via
+    /// [`MediaMetadata::without_secrets`]) from every outbound cleartext
+    /// frame, and by the telemetry scrubber, which redacts it
+    /// unconditionally before events reach a sink.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption_key: Option<String>,
 
     /// Initialization vector for the cloud-media content encryption (base64).
+    /// Secret material — same handling as [`Self::encryption_key`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iv: Option<String>,
 
@@ -188,6 +193,31 @@ pub struct MediaMetadata {
     /// Sticker rendering kind (e.g. "static", "animated", "lottie").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sticker_kind: Option<String>,
+}
+
+impl MediaMetadata {
+    /// True when any confidential field ([`Self::encryption_key`],
+    /// [`Self::iv`]) is set.
+    pub fn has_secrets(&self) -> bool {
+        self.encryption_key.is_some() || self.iv.is_some()
+    }
+
+    /// Returns a copy with the confidential fields cleared.
+    ///
+    /// The cloud-media content key (and its IV) grant access to the media
+    /// itself, so they must only ever travel inside an end-to-end-encrypted
+    /// payload. Every path that writes metadata into a cleartext surface —
+    /// the transport wire encoders, the telemetry event scrubber — routes
+    /// through this before emitting. The remaining fields (URLs, hashes,
+    /// sticker identity, dimensions) are display hints, not secrets, and are
+    /// preserved.
+    pub fn without_secrets(&self) -> Self {
+        Self {
+            encryption_key: None,
+            iv: None,
+            ..self.clone()
+        }
+    }
 }
 
 /// Information about a forwarded message.
@@ -239,6 +269,12 @@ impl ForwardInfo {
 /// hint copied by the sending client. A malicious client can forge any field.
 /// UI layers should treat this as a display-level hint and must not rely on
 /// it for access-control or security decisions.
+///
+/// On an MLS-encrypted message this outer field additionally sits outside
+/// the AEAD boundary (any relay hop can inject or rewrite it in transit),
+/// so the protocol layer drops it on decryption: it never surfaces on an
+/// `encrypted: true` event. The end-to-end-sealed envelope is the only
+/// trusted carrier for reply context on encrypted messages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplyContext {
     /// Sender of the message being replied to.
@@ -892,6 +928,43 @@ mod tests {
         assert!(!json.contains("reply_context"));
         let decoded = Message::from_bytes(json.as_bytes()).unwrap();
         assert!(decoded.reply_context.is_none());
+    }
+
+    #[test]
+    fn media_metadata_without_secrets_clears_only_key_material() {
+        let meta = MediaMetadata {
+            mime_type: "image/jpeg".into(),
+            file_name: "x.jpg".into(),
+            file_size: 10,
+            duration_ms: None,
+            width: Some(1),
+            height: Some(1),
+            thumbnail_base64: None,
+            media_id: Some("m1".into()),
+            download_url: Some("https://cdn.example/m1".into()),
+            thumbnail_url: Some("https://cdn.example/m1-t".into()),
+            encryption_key: Some("a2V5".into()),
+            iv: Some("aXY=".into()),
+            ciphertext_hash: Some("aGFzaA==".into()),
+            sticker_provider: Some("prov".into()),
+            sticker_remote_id: Some("rid".into()),
+            sticker_kind: Some("static".into()),
+        };
+        assert!(meta.has_secrets());
+
+        let clean = meta.without_secrets();
+        assert!(!clean.has_secrets());
+        assert!(clean.encryption_key.is_none());
+        assert!(clean.iv.is_none());
+        // Everything that isn't key material survives.
+        assert_eq!(clean.media_id, meta.media_id);
+        assert_eq!(clean.download_url, meta.download_url);
+        assert_eq!(clean.thumbnail_url, meta.thumbnail_url);
+        assert_eq!(clean.ciphertext_hash, meta.ciphertext_hash);
+        assert_eq!(clean.sticker_provider, meta.sticker_provider);
+        assert_eq!(clean.sticker_remote_id, meta.sticker_remote_id);
+        assert_eq!(clean.sticker_kind, meta.sticker_kind);
+        assert_eq!(clean.file_name, meta.file_name);
     }
 
     #[test]
