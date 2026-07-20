@@ -247,7 +247,8 @@ dictionary ForwardInfo {
 // __RICH_V1__ body, and only toward recipients whose key package advertised
 // rich_versions support; toward anyone else they are silently dropped —
 // never sent cleartext. All fields defaulted so callers can pass only what
-// they need.
+// they need. content_type must not be FileChunk (internal transport type),
+// and rich extras over 32 KiB serialized are rejected — both InvalidArgument.
 dictionary SendMessageOptions {
     MessagePriority? priority = null;
     string? reply_to_msg = null;

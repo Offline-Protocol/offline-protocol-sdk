@@ -7,8 +7,8 @@ use super::{
     PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras,
     SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
     MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS,
-    MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
-    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
+    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
 };
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
@@ -83,6 +83,12 @@ impl OfflineProtocol {
     /// `EncryptionConfig::rich_payload_enabled`). Toward anyone else they
     /// are silently dropped — never sent cleartext — so the message degrades
     /// to plain text with `reply_to_msg` threading intact.
+    ///
+    /// Returns `InvalidArgument` for `ContentType::FileChunk` (an internal
+    /// transport content type — the receiver would swallow the message into
+    /// its file-transfer manager) and for rich extras whose serialized size
+    /// exceeds 32 KiB (oversized bodies inflate the MLS plaintext into heavy
+    /// transport fragmentation).
     pub fn send_message_with(
         &mut self,
         recipient: impl Into<String>,
@@ -115,6 +121,16 @@ impl OfflineProtocol {
             ));
         }
 
+        // FileChunk is an internal transport content type: the receiver
+        // routes a message stamped with it into handle_incoming_file_chunk
+        // (after ACKing delivery) where a non-chunk fails to parse and is
+        // dropped without surfacing. Reject rather than silently lose it.
+        if options.content_type == Some(ContentType::FileChunk) {
+            return Err(Error::InvalidArgument(
+                "FileChunk is an internal content type and cannot be sent directly".to_string(),
+            ));
+        }
+
         // Parse reply_to_msg if provided
         let reply_to_msg_id = options
             .reply_to_msg
@@ -128,6 +144,24 @@ impl OfflineProtocol {
             media_metadata: options.media_metadata,
             forward_info: options.forward_info,
         };
+
+        // Bound the extras here at the boundary — not at seal time — so the
+        // pending queue only ever holds extras that are known to seal: the
+        // flush path re-seals against current capability, and a seal-time
+        // failure there would re-queue the message forever. The cap keeps an
+        // oversized quote or thumbnail from inflating the MLS plaintext into
+        // heavy transport fragmentation.
+        if rich.is_any() {
+            let extras_len = serde_json::to_vec(&rich)
+                .map_err(|e| Error::Serialization(e.to_string()))?
+                .len();
+            if extras_len > MAX_RICH_EXTRAS_BYTES {
+                return Err(Error::InvalidArgument(format!(
+                    "Rich extras too large: {} bytes serialized (max {})",
+                    extras_len, MAX_RICH_EXTRAS_BYTES
+                )));
+            }
+        }
 
         let final_content = match self.prepare_outbound_content(
             &recipient_str,

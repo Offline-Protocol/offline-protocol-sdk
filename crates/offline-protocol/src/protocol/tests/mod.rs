@@ -1935,6 +1935,64 @@ fn send_message_rejects_rich_prefix_content() {
 }
 
 #[test]
+fn send_message_with_rejects_file_chunk_content_type() {
+    // FileChunk is an internal transport content type: the receiver routes
+    // it into the file-transfer manager and drops it (after ACK) instead of
+    // surfacing — the boundary must reject it, not silently lose the message.
+    let config = create_test_config();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.start().unwrap();
+
+    let err = protocol
+        .send_message_with(
+            "bob",
+            "hello",
+            SendMessageOptions {
+                content_type: Some(ContentType::FileChunk),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::Error::InvalidArgument(_)),
+        "FileChunk content type must be rejected, got: {:?}",
+        err
+    );
+    assert!(err.to_string().contains("internal content type"));
+}
+
+#[test]
+fn send_message_with_rejects_oversized_rich_extras() {
+    // The extras cap is enforced at the boundary (before capability or
+    // session state matters), so an oversized quote can never enter the
+    // pending queue where a flush-time seal failure would re-queue forever.
+    let config = create_test_config();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.start().unwrap();
+
+    let mut extras = sample_rich_extras();
+    extras.reply_context.as_mut().unwrap().text = "q".repeat(MAX_RICH_EXTRAS_BYTES + 1);
+    let err = protocol
+        .send_message_with(
+            "bob",
+            "hello",
+            SendMessageOptions {
+                reply_context: extras.reply_context,
+                media_metadata: extras.media_metadata,
+                forward_info: extras.forward_info,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::Error::InvalidArgument(_)),
+        "oversized rich extras must be rejected, got: {:?}",
+        err
+    );
+    assert!(err.to_string().contains("Rich extras too large"));
+}
+
+#[test]
 fn test_process_internal_message_key_package() {
     let mut config = create_test_config();
     config.encryption.enabled = true;

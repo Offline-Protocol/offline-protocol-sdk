@@ -525,6 +525,8 @@ export interface SendMessageParams {
   /**
    * Content type hint stamped on the outer message (optional, defaults to
    * text). A coarse rendering hint — the content itself stays MLS-sealed.
+   * Must not be `file_chunk` (an internal transport content type); the SDK
+   * rejects it as InvalidArgument.
    */
   contentType?: ContentType;
   /**
