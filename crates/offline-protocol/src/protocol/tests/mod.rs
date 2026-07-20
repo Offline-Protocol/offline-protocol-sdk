@@ -426,6 +426,115 @@ fn test_receive_message_surfaces_reply_context_on_event() {
 }
 
 #[test]
+fn test_encrypted_receive_drops_relay_injected_reply_context() {
+    // The outer `reply_context` field is hop-visible cleartext outside the
+    // MLS AEAD boundary: a relay can inject or rewrite it in transit. On a
+    // decrypted (encrypted: true) message it must NOT surface — otherwise an
+    // attacker-controlled quote preview would render as if it were part of
+    // the authenticated conversation.
+    use crate::mls::InMemoryStorage;
+
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.encryption.enabled = true;
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    alice
+        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let alice_transport = MockTransport::new(TransportType::BLE);
+    alice_transport.start().unwrap();
+    let alice_transport_handle = alice_transport.clone();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(alice_transport));
+    alice.start().unwrap();
+
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_transport_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    let captured = Arc::new(Mutex::new(None));
+    let captured_clone = captured.clone();
+    bob.on_event(move |event| {
+        if let Event::MessageReceived {
+            reply_context,
+            encrypted,
+            ..
+        } = event
+        {
+            *captured_clone.lock().unwrap() = Some((reply_context.clone(), encrypted));
+        }
+    });
+
+    // Establish the MLS session directly (shortcut, same as the TOFU test).
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    {
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        let welcome = manager.create_session("bob").unwrap();
+        let bob_manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        bob_manager.join_session(&welcome).unwrap();
+    }
+    alice.confirm_session_state("bob", "test_setup").unwrap();
+    bob.confirm_session_state("alice", "test_setup").unwrap();
+
+    alice
+        .send_message(
+            "bob",
+            "sealed hello",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    let mut wire_msg = alice_transport_handle
+        .sent_messages()
+        .last()
+        .expect("an __MLS_ENC__ message must reach the wire")
+        .clone();
+    assert!(wire_msg.content.starts_with(internal_prefixes::ENCRYPTED));
+
+    // Hostile relay: splice a forged quote preview onto the sealed message.
+    wire_msg.reply_context = Some(offline_protocol_core::ReplyContext {
+        sender: UserId::new("mallory").unwrap(),
+        text: "forged quote".to_string(),
+        timestamp: None,
+        reply_media_label: None,
+        reply_content_type: None,
+    });
+
+    bob_transport_handle.queue_message(wire_msg);
+    let received = bob.receive_message().expect("message delivered");
+    assert_eq!(received.content, "sealed hello");
+    assert!(
+        received.reply_context.is_none(),
+        "outer reply_context on a sealed message must be dropped"
+    );
+
+    let (event_rc, event_encrypted) = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("MessageReceived emitted");
+    assert!(event_encrypted, "message must surface as encrypted");
+    assert!(
+        event_rc.is_none(),
+        "relay-injected reply_context must not surface on an encrypted event"
+    );
+}
+
+#[test]
 fn test_event_handler() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 

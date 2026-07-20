@@ -204,8 +204,8 @@ export interface MediaMetadata {
    * Stable media identifier assigned by the application.
    *
    * Note: this and the fields below are surfaced on received messages;
-   * sending them end-to-end requires the rich send surface (v0.16.0) —
-   * `sendMedia` ignores them until then.
+   * the end-to-end-sealed rich send surface (v0.16.0) is what populates
+   * them on the sending side.
    */
   mediaId?: string;
   /** URL to fetch the full media from (cloud-stored media). */
@@ -214,10 +214,14 @@ export interface MediaMetadata {
   thumbnailUrl?: string;
   /**
    * Content-encryption key for cloud-stored media (base64). Secret
-   * material: only ever carried inside end-to-end-encrypted payloads.
+   * material: only ever carried inside end-to-end-encrypted payloads —
+   * the SDK's wire chokepoint strips it from any cleartext frame.
    */
   encryptionKey?: string;
-  /** Initialization vector for the cloud-media content encryption (base64). */
+  /**
+   * Initialization vector for the cloud-media content encryption (base64).
+   * Secret material — same handling as `encryptionKey`.
+   */
   iv?: string;
   /** Integrity hash of the encrypted cloud-media blob (base64). */
   ciphertextHash?: string;
@@ -445,6 +449,34 @@ export interface ReplyContext {
 }
 
 /**
+ * Media metadata as carried on received events (snake_case, mirroring the
+ * event JSON — distinct from the camelCase `MediaMetadata` used as native
+ * module input).
+ *
+ * `encryption_key`/`iv` are secret material: the SDK strips them from every
+ * cleartext wire frame and redacts them from telemetry, so they only ever
+ * arrive here via the end-to-end-sealed media envelope.
+ */
+export interface MediaMetadataEvent {
+  mime_type?: string;
+  file_name?: string;
+  file_size?: number;
+  duration_ms?: number;
+  width?: number;
+  height?: number;
+  thumbnail_base64?: string;
+  media_id?: string;
+  download_url?: string;
+  thumbnail_url?: string;
+  encryption_key?: string;
+  iv?: string;
+  ciphertext_hash?: string;
+  sticker_provider?: string;
+  sticker_remote_id?: string;
+  sticker_kind?: string;
+}
+
+/**
  * Parameters for forwarding a message to a new recipient
  */
 export interface ForwardMessageParams {
@@ -615,24 +647,7 @@ export interface MessageReceivedEvent extends BaseEvent {
   /** The type of content (text, image, video, voice_note, etc.). */
   content_type?: string;
   /** Media metadata (present for non-text content). */
-  media_metadata?: {
-    mime_type?: string;
-    file_name?: string;
-    file_size?: number;
-    duration_ms?: number;
-    width?: number;
-    height?: number;
-    thumbnail_base64?: string;
-    media_id?: string;
-    download_url?: string;
-    thumbnail_url?: string;
-    encryption_key?: string;
-    iv?: string;
-    ciphertext_hash?: string;
-    sticker_provider?: string;
-    sticker_remote_id?: string;
-    sticker_kind?: string;
-  };
+  media_metadata?: MediaMetadataEvent;
   /** Forwarding attribution (present when this is a forwarded message). */
   forward_info?: ForwardInfo;
 }
@@ -744,24 +759,7 @@ export interface FileReceivedEvent extends BaseEvent {
   /** The content type of the media (image, video, file, etc.). */
   content_type: string;
   /** Media metadata from the sender. */
-  media_metadata?: {
-    mime_type?: string;
-    file_name?: string;
-    file_size?: number;
-    duration_ms?: number;
-    width?: number;
-    height?: number;
-    thumbnail_base64?: string;
-    media_id?: string;
-    download_url?: string;
-    thumbnail_url?: string;
-    encryption_key?: string;
-    iv?: string;
-    ciphertext_hash?: string;
-    sticker_provider?: string;
-    sticker_remote_id?: string;
-    sticker_kind?: string;
-  };
+  media_metadata?: MediaMetadataEvent;
   /** Base64-encoded reassembled file data. */
   file_data: string;
 }

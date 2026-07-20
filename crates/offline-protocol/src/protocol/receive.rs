@@ -17,6 +17,26 @@ use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {
+    /// Applies a successful MLS decryption to an inbound message: swaps the
+    /// ciphertext for the plaintext, marks the message encrypted, and drops
+    /// the outer `reply_context`.
+    ///
+    /// The outer `reply_context` field is hop-visible cleartext that any
+    /// relay can inject or rewrite in transit — it sits outside the MLS AEAD
+    /// boundary. On a sealed message the only trusted carrier for reply
+    /// context is the encrypted envelope itself; when the envelope-borne
+    /// variant lands it is restored from the decrypted payload *after* this
+    /// point. Without this strip, a `MessageReceived { encrypted: true }`
+    /// event could surface an attacker-controlled quote preview as if it
+    /// were part of the authenticated conversation.
+    pub(super) fn apply_decrypted_content(message: &mut Message, plaintext: String) {
+        message.content = plaintext;
+        message.reply_context = None;
+        message
+            .metadata
+            .insert("encrypted".to_string(), "true".to_string());
+    }
+
     /// Receives the next available message.
     pub fn receive_message(&mut self) -> Option<Message> {
         let Ok(mut state) = lock_shared_state(&self.shared_state) else {
@@ -154,12 +174,8 @@ impl OfflineProtocol {
                                 continue;
                             }
                             InternalMessageResult::Decrypted(plaintext) => {
-                                // Replace content with decrypted plaintext
                                 was_decrypted = true;
-                                message.content = plaintext;
-                                message
-                                    .metadata
-                                    .insert("encrypted".to_string(), "true".to_string());
+                                Self::apply_decrypted_content(&mut message, plaintext);
                             }
                         }
                     }

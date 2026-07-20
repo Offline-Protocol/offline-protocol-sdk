@@ -32,6 +32,13 @@
 //!   it belongs behind a separate `emit_content` knob so the two concerns
 //!   don't get conflated.
 //!
+//! - **Secret material is redacted unconditionally** (independent of the
+//!   `scrub_ids` setting): `media_metadata.encryption_key`/`iv` grant
+//!   access to cloud-stored media and are cleared from every event before
+//!   it reaches a sink. This is the one place the scrubber touches payload,
+//!   because a key is neither an identifier nor content — leaking it hands
+//!   the sink backend the media itself.
+//!
 //! - **Enum-ish string fields are left raw**: `transport`, `content_type`,
 //!   `role`/`new_role`, `priority`, `status` — finite value sets, not
 //!   identities. The `String` entries inside
@@ -99,12 +106,45 @@ use crate::telemetry::scrubber::Scrubber;
 /// [`Cow::into_owned`]. The `Cow` return still lets future callers that
 /// can tolerate a borrow (tests, in-process readers) avoid the clone.
 pub(crate) fn scrub_event<'a>(event: &'a Event, scrubber: &Scrubber) -> Cow<'a, Event> {
-    if !scrubber.is_enabled() {
+    // Secret redaction is NOT gated by `scrub_ids`: the cloud-media content
+    // key on `media_metadata` grants access to the media itself, and a sink
+    // that ships events off-device must never see it, regardless of how the
+    // identifier-hashing knob is set. (`scrub_ids` trades debuggability of
+    // *identifiers* against profiling risk; key material is not part of
+    // that trade.)
+    let carries_secrets = event_media_metadata(event).is_some_and(|m| m.has_secrets());
+    if !scrubber.is_enabled() && !carries_secrets {
         return Cow::Borrowed(event);
     }
     let mut scrubbed = event.clone();
-    scrub_in_place(&mut scrubbed, scrubber);
+    if carries_secrets {
+        redact_media_secrets(&mut scrubbed);
+    }
+    if scrubber.is_enabled() {
+        scrub_in_place(&mut scrubbed, scrubber);
+    }
     Cow::Owned(scrubbed)
+}
+
+/// The `media_metadata` carried by this event, if the variant has one.
+fn event_media_metadata(event: &Event) -> Option<&offline_protocol_core::MediaMetadata> {
+    match event {
+        Event::MessageReceived { media_metadata, .. }
+        | Event::FileReceived { media_metadata, .. } => media_metadata.as_ref(),
+        _ => None,
+    }
+}
+
+/// Clears `encryption_key`/`iv` from the event's `media_metadata`. See
+/// [`offline_protocol_core::MediaMetadata::without_secrets`].
+fn redact_media_secrets(event: &mut Event) {
+    if let Event::MessageReceived { media_metadata, .. }
+    | Event::FileReceived { media_metadata, .. } = event
+    {
+        if let Some(meta) = media_metadata {
+            *meta = meta.without_secrets();
+        }
+    }
 }
 
 fn hash_string(s: &mut String, scrubber: &Scrubber) {
@@ -677,6 +717,108 @@ mod tests {
         };
         let scrubbed = scrub_event(&event, &scrubber_disabled());
         assert!(matches!(scrubbed, Cow::Borrowed(_)));
+    }
+
+    fn secret_media_metadata() -> offline_protocol_core::MediaMetadata {
+        offline_protocol_core::MediaMetadata {
+            mime_type: "image/jpeg".into(),
+            file_name: "x.jpg".into(),
+            file_size: 10,
+            duration_ms: None,
+            width: None,
+            height: None,
+            thumbnail_base64: None,
+            media_id: Some("m1".into()),
+            download_url: Some("https://cdn.example/m1".into()),
+            thumbnail_url: None,
+            encryption_key: Some("a2V5".into()),
+            iv: Some("aXY=".into()),
+            ciphertext_hash: Some("aGFzaA==".into()),
+            sticker_provider: None,
+            sticker_remote_id: None,
+            sticker_kind: None,
+        }
+    }
+
+    fn file_received_with_secrets() -> Event {
+        Event::FileReceived {
+            file_id: "file-1".into(),
+            file_name: "x.jpg".into(),
+            file_size: 10,
+            sender: "alice".into(),
+            content_type: "image".into(),
+            media_metadata: Some(secret_media_metadata()),
+            file_data: String::new(),
+        }
+    }
+
+    #[test]
+    fn media_secrets_are_redacted_even_when_scrubbing_is_disabled() {
+        // `scrub_ids = false` must not exempt key material: identifiers stay
+        // raw (the knob's contract) but encryption_key/iv are still cleared.
+        let scrubbed =
+            scrub_event(&file_received_with_secrets(), &scrubber_disabled()).into_owned();
+        match scrubbed {
+            Event::FileReceived {
+                sender,
+                media_metadata,
+                ..
+            } => {
+                assert_eq!(sender, "alice", "identifiers stay raw when disabled");
+                let meta = media_metadata.expect("metadata preserved");
+                assert!(meta.encryption_key.is_none());
+                assert!(meta.iv.is_none());
+                assert_eq!(meta.download_url.as_deref(), Some("https://cdn.example/m1"));
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn media_secrets_are_redacted_alongside_id_hashing_when_enabled() {
+        let scrubbed = scrub_event(&file_received_with_secrets(), &scrubber_enabled()).into_owned();
+        match scrubbed {
+            Event::FileReceived {
+                sender,
+                media_metadata,
+                ..
+            } => {
+                assert_eq!(sender, hashed("alice"));
+                let meta = media_metadata.expect("metadata preserved");
+                assert!(meta.encryption_key.is_none());
+                assert!(meta.iv.is_none());
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn message_received_media_secrets_are_redacted_when_disabled() {
+        let event = Event::MessageReceived {
+            message_id: "msg-1".into(),
+            sender: "alice".into(),
+            recipient: "bob".into(),
+            content: "c".into(),
+            hop_count: 0,
+            transport: "ble".into(),
+            timestamp: 0,
+            lamport_clock: 0,
+            reply_to_msg: None,
+            reply_context: None,
+            content_type: "image".into(),
+            media_metadata: Some(secret_media_metadata()),
+            forward_info: None,
+            encrypted: true,
+        };
+        let scrubbed = scrub_event(&event, &scrubber_disabled()).into_owned();
+        match scrubbed {
+            Event::MessageReceived { media_metadata, .. } => {
+                let meta = media_metadata.expect("metadata preserved");
+                assert!(meta.encryption_key.is_none());
+                assert!(meta.iv.is_none());
+            }
+            _ => panic!("unexpected variant"),
+        }
     }
 
     #[test]
