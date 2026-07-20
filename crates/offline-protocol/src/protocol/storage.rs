@@ -1,8 +1,9 @@
 //! Storage persistence methods for protocol state.
 
 use super::{
-    storage_keys, OfflineProtocol, OutboxEntry, PendingMessage, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, MAX_PENDING_KEY_PACKAGES,
+    storage_keys, OfflineProtocol, OutboxEntry, PeerCapabilities, PendingMessage,
+    ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
     WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::MAX_OUTBOX_ENTRIES;
@@ -219,6 +220,114 @@ impl OfflineProtocol {
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // PEER CAPABILITIES PERSISTENCE
+    // ========================================================================
+
+    /// Persists the capability versions a peer advertised in its key package
+    /// so they survive restarts (see [`PeerCapabilities`] for why this is a
+    /// separate record from the key package itself). Best-effort like the
+    /// other persist paths: a lost record only degrades output (JSON
+    /// envelope, dropped rich extras) until the next live exchange.
+    pub(crate) fn persist_peer_capabilities(&self, peer_id: &str, caps: &PeerCapabilities) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        match serde_json::to_vec(caps) {
+            Ok(data) => {
+                if let Err(e) = storage.store(storage_keys::PEER_CAPABILITIES, peer_id, &data) {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to persist peer capabilities");
+                }
+            }
+            Err(e) => {
+                warn!(peer_id = %peer_id, error = %e, "Failed to serialize peer capabilities");
+            }
+        }
+    }
+
+    /// Removes the persisted capability record for a peer (downgrade,
+    /// eviction, or peer-state cleanup).
+    pub(crate) fn delete_peer_capabilities_from_storage(&self, peer_id: &str) {
+        if let Some(storage) = &self.message_storage {
+            let _ = storage.delete(storage_keys::PEER_CAPABILITIES, peer_id);
+        }
+    }
+
+    /// Repopulates the in-memory capability sets (`peer_compact_envelope`,
+    /// `peer_rich_payload`) from the durable per-peer records, so a send
+    /// right after relaunch — before any live key-package exchange — keeps
+    /// sealing rich extras and emitting the compact envelope.
+    ///
+    /// Config gating happens here, not at persist time: a record is only
+    /// applied to a set whose kill switch is on, but a record gated off is
+    /// left in storage (the switch may come back on next run). Records are
+    /// bounded to `MAX_KEY_PACKAGE_SENT_TO` — the same cap the live insert
+    /// path enforces on the sets — and overflow is pruned from durable
+    /// storage like `restore_peer_key_packages` does, so a pre-existing
+    /// over-cap store shrinks to the cap in a single boot. Best-effort:
+    /// failures degrade output, never blocking restore.
+    pub(crate) fn restore_peer_capabilities(&mut self) {
+        let Some(storage) = self.message_storage.clone() else {
+            return;
+        };
+        let peer_ids = match storage.list_keys(storage_keys::PEER_CAPABILITIES) {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(error = %e, "Failed to list peer capabilities, skipping restore");
+                return;
+            }
+        };
+
+        let mut kept = 0usize;
+        let mut pruned = 0usize;
+        for peer_id in peer_ids {
+            if kept >= MAX_KEY_PACKAGE_SENT_TO {
+                self.delete_peer_capabilities_from_storage(&peer_id);
+                pruned += 1;
+                continue;
+            }
+            let Ok(Some(data)) = storage.load(storage_keys::PEER_CAPABILITIES, &peer_id) else {
+                continue;
+            };
+            let Ok(caps) = serde_json::from_slice::<PeerCapabilities>(&data) else {
+                // Corrupt record: drop it rather than re-parsing it forever.
+                warn!(peer_id = %peer_id, "Corrupt peer capability record, deleting");
+                self.delete_peer_capabilities_from_storage(&peer_id);
+                continue;
+            };
+            if !caps.is_any() {
+                // Empty records are deleted at persist time; clean up any
+                // that predate that rule.
+                self.delete_peer_capabilities_from_storage(&peer_id);
+                continue;
+            }
+            if self.config.encryption.compact_envelope_enabled
+                && caps.env_versions.contains(&MLS_ENVELOPE_COMPACT_V1)
+            {
+                self.peer_compact_envelope.insert(peer_id.clone());
+            }
+            if self.config.encryption.rich_payload_enabled
+                && caps.rich_versions.contains(&RICH_PAYLOAD_V1)
+            {
+                self.peer_rich_payload.insert(peer_id.clone());
+            }
+            kept += 1;
+        }
+        if kept > 0 {
+            info!(
+                count = kept,
+                "Restored peer capability records from storage"
+            );
+        }
+        if pruned > 0 {
+            warn!(
+                cap = MAX_KEY_PACKAGE_SENT_TO,
+                pruned,
+                "Peer capability store exceeded the cap on restore; pruned overflow from durable storage"
+            );
+        }
     }
 
     // ========================================================================

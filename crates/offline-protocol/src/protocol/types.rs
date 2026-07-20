@@ -579,6 +579,40 @@ pub(crate) struct ReceivedKeyPackage {
     pub(crate) local_expires_at_ms: u64,
 }
 
+/// Durable record of the end-to-end capability versions a peer last
+/// advertised in its key package (`env_versions` / `rich_versions`).
+///
+/// Persisted separately from [`ReceivedKeyPackage`] because the cached key
+/// package is deleted once a session is established, while the capabilities
+/// must survive restarts for exactly those peers: mobile apps restart
+/// constantly and MLS sessions persist, so without this record a rich send
+/// right after relaunch silently degrades to bare text (and the compact
+/// envelope to JSON) until the next live key-package exchange.
+///
+/// Stores the raw advertised versions, not the config-gated subset: the kill
+/// switches (`compact_envelope_enabled` / `rich_payload_enabled`) gate use —
+/// live recording, restore, and send — not knowledge, so toggling one across
+/// restarts behaves the same as toggling it live.
+///
+/// `wire_versions` is deliberately absent: it is hop-local (which frames a
+/// directly-connected peer decodes), and connection setup re-exchanges key
+/// packages on discovery anyway, so persisting it would buy nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct PeerCapabilities {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) env_versions: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) rich_versions: Vec<u8>,
+}
+
+impl PeerCapabilities {
+    /// Whether any capability is advertised. Empty records are deleted
+    /// rather than stored — the durable side of the downgrade semantics.
+    pub(crate) fn is_any(&self) -> bool {
+        !self.env_versions.is_empty() || !self.rich_versions.is_empty()
+    }
+}
+
 /// Result of processing an internal protocol message.
 #[derive(Debug)]
 pub(crate) enum InternalMessageResult {
@@ -704,6 +738,11 @@ pub(crate) mod storage_keys {
     pub const SESSION_STATES: &str = "session_states";
     /// Key type for persisted per-peer received key packages (survives restart).
     pub const PEER_KEY_PACKAGES: &str = "peer_key_packages";
+    /// Key type for persisted per-peer advertised capability versions
+    /// (env/rich), which must outlive the key package entry above — that one
+    /// is deleted once a session is established (see
+    /// [`super::PeerCapabilities`]).
+    pub const PEER_CAPABILITIES: &str = "peer_capabilities";
     /// Key type for persisted per-peer outbound welcome lifecycle state.
     pub const WELCOME_LIFECYCLES: &str = "welcome_lifecycles";
     /// Key type for persisted store-and-forward outbox entries, keyed by

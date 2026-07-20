@@ -4,10 +4,10 @@ use super::{
     base64_decode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
     ConnectionRequestPayload, GroupCreatedPayload, GroupErrorPayload, GroupInfoPayload,
     GroupMemberAddedPayload, GroupMemberRemovedPayload, GroupMessageReceivedPayload,
-    InternalMessageResult, KeyPackagePayload, OfflineProtocol, PresencePayload, ReadReceiptPayload,
-    ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload, MAX_KEY_PACKAGE_LIFETIME_MS,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
-    MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
+    InternalMessageResult, KeyPackagePayload, OfflineProtocol, PeerCapabilities, PresencePayload,
+    ReadReceiptPayload, ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload,
+    MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
+    MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
 use crate::events::{DecryptionFailureCode, Event};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
@@ -78,6 +78,25 @@ impl OfflineProtocol {
                 self.peer_rich_payload.insert(sender.to_string());
             } else {
                 self.peer_rich_payload.remove(sender);
+            }
+
+            // Persist the raw advertised end-to-end capabilities so they
+            // survive restarts: the cached key package persisted below is
+            // deleted once a session is established, but the capability must
+            // outlive it — a rich send right after relaunch would otherwise
+            // silently drop its extras until the next live exchange. Raw
+            // versions rather than the config-gated subset (the kill
+            // switches gate the recording above, restore, and send — not
+            // knowledge). A package advertising nothing deletes the record:
+            // the durable side of the downgrade semantics above.
+            let caps = PeerCapabilities {
+                env_versions: payload.env_versions.clone(),
+                rich_versions: payload.rich_versions.clone(),
+            };
+            if caps.is_any() {
+                self.persist_peer_capabilities(sender, &caps);
+            } else {
+                self.delete_peer_capabilities_from_storage(sender);
             }
 
             // If the sender has reset their session (e.g. after unblocking us),
@@ -154,6 +173,12 @@ impl OfflineProtocol {
                     );
                     self.pending_key_packages.remove(&victim);
                     self.delete_peer_key_package_from_storage(&victim);
+                    // Evict the victim's capability record with its key
+                    // package: this ties the durable capability count to the
+                    // same flood bound. Peers with established sessions are
+                    // not in this map, so their records survive; an evicted
+                    // real peer re-advertises on the next exchange.
+                    self.delete_peer_capabilities_from_storage(&victim);
                 }
             }
             self.pending_key_packages
