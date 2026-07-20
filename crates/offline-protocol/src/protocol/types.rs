@@ -299,6 +299,14 @@ pub(crate) const MLS_ENVELOPE_COMPACT_V1: u8 = 1;
 /// of on the relay-visible outer message.
 pub(crate) const RICH_PAYLOAD_V1: u8 = 1;
 
+/// Upper bound on the serialized size of the rich extras accepted by the
+/// rich send surface. Enforced at the API boundary (`send_message_with`),
+/// deliberately NOT at seal time: a message queued behind session
+/// establishment re-makes the seal decision at flush, and a seal-time
+/// failure there would re-queue the message forever. Bounding at the
+/// boundary means every queued extras blob is already known to seal.
+pub(crate) const MAX_RICH_EXTRAS_BYTES: usize = 32 * 1024;
+
 /// Rich fields accepted by the `send_message_with` surface. Only ever
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
 /// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,
@@ -336,7 +344,10 @@ pub struct SendMessageOptions {
     /// ID of the message this is replying to.
     pub reply_to_msg: Option<String>,
     /// Content type stamped on the outer message (defaults to Text). A
-    /// coarse rendering hint — the actual content stays MLS-sealed.
+    /// coarse rendering hint — the actual content stays MLS-sealed. Must
+    /// not be [`ContentType::FileChunk`] (an internal transport content
+    /// type; the receiver would route the message into its file-transfer
+    /// manager and drop it) — rejected as `InvalidArgument`.
     pub content_type: Option<ContentType>,
     /// Quoted-reply context, delivered sealed-only.
     pub reply_context: Option<ReplyContext>,
