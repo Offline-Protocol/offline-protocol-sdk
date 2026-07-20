@@ -21,6 +21,7 @@ struct EncryptionConfigValues: Equatable {
     var storePending: Bool
     var requireEncryption: Bool
     var compactEnvelopeEnabled: Bool
+    var richPayloadEnabled: Bool
     var maxPendingPerPeer: UInt64
     var maxPendingGlobal: UInt64
     var pendingTtlMs: UInt64
@@ -50,6 +51,9 @@ enum EncryptionConfigReader {
         let compactEnvelopeEnabled = bool(nested, "compactEnvelopeEnabled", "compact_envelope_enabled")
             ?? bool(raw, "compactEnvelopeEnabled", "compact_envelope_enabled")
             ?? true
+        let richPayloadEnabled = bool(nested, "richPayloadEnabled", "rich_payload_enabled")
+            ?? bool(raw, "richPayloadEnabled", "rich_payload_enabled")
+            ?? true
 
         let pendingQueue = (nested["pendingQueue"] as? [String: Any])
             ?? (nested["pending_queue"] as? [String: Any])
@@ -73,6 +77,7 @@ enum EncryptionConfigReader {
             storePending: storePending,
             requireEncryption: requireEncryption,
             compactEnvelopeEnabled: compactEnvelopeEnabled,
+            richPayloadEnabled: richPayloadEnabled,
             maxPendingPerPeer: maxPendingPerPeer,
             maxPendingGlobal: maxPendingGlobal,
             pendingTtlMs: pendingTtlMs,

@@ -23,6 +23,7 @@ final class EncryptionConfigReaderTests: XCTestCase {
         XCTAssertTrue(values.storePending)
         XCTAssertTrue(values.requireEncryption)
         XCTAssertTrue(values.compactEnvelopeEnabled)
+        XCTAssertTrue(values.richPayloadEnabled)
         XCTAssertEqual(values.maxPendingPerPeer, 64)
         XCTAssertEqual(values.maxPendingGlobal, 4096)
         XCTAssertEqual(values.pendingTtlMs, 120_000)
@@ -88,6 +89,19 @@ final class EncryptionConfigReaderTests: XCTestCase {
 
         let flat = try read(#"{"compactEnvelopeEnabled":false,"encryption":{"enabled":true}}"#)
         XCTAssertFalse(flat.compactEnvelopeEnabled)
+    }
+
+    func testRichPayloadReadsItsNestedHomeThenTopLevel() throws {
+        let nested = try read(
+            #"{"richPayloadEnabled":true,"encryption":{"richPayloadEnabled":false}}"#
+        )
+        XCTAssertFalse(nested.richPayloadEnabled)
+
+        let flat = try read(#"{"richPayloadEnabled":false,"encryption":{"enabled":true}}"#)
+        XCTAssertFalse(flat.richPayloadEnabled)
+
+        let snake = try read(#"{"encryption":{"rich_payload_enabled":false}}"#)
+        XCTAssertFalse(snake.richPayloadEnabled)
     }
 
     func testPendingQueueNestedHomeWinsOverFlat() throws {

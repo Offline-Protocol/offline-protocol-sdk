@@ -22,6 +22,7 @@ class ProtocolConfigParserTest {
         val config = parse("""{"appId":"app","userId":"alice"}""")
         assertTrue(config.binaryWireEnabled)
         assertTrue(config.compactEnvelopeEnabled)
+        assertTrue(config.richPayloadEnabled)
     }
 
     @Test
@@ -70,6 +71,24 @@ class ProtocolConfigParserTest {
             """{"appId":"app","userId":"alice","compactEnvelopeEnabled":false,"encryption":{"enabled":true}}"""
         )
         assertFalse(config.compactEnvelopeEnabled)
+    }
+
+    @Test
+    fun richPayloadReadsItsNestedEncryptionHomeThenTopLevel() {
+        val nested = parse(
+            """{"appId":"app","userId":"alice","richPayloadEnabled":true,"encryption":{"richPayloadEnabled":false}}"""
+        )
+        assertFalse(nested.richPayloadEnabled)
+
+        val flat = parse(
+            """{"appId":"app","userId":"alice","richPayloadEnabled":false,"encryption":{"enabled":true}}"""
+        )
+        assertFalse(flat.richPayloadEnabled)
+
+        val snake = parse(
+            """{"appId":"app","userId":"alice","encryption":{"rich_payload_enabled":false}}"""
+        )
+        assertFalse(snake.richPayloadEnabled)
     }
 
     @Test

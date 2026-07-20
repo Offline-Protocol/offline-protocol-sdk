@@ -108,6 +108,7 @@ interface NativeConfig {
   storePending?: boolean;
   requireEncryption?: boolean;
   compactEnvelopeEnabled: boolean;
+  richPayloadEnabled: boolean;
   maxPendingPerPeer?: number;
   maxPendingGlobal?: number;
   pendingTtlMs?: number;
@@ -118,6 +119,7 @@ interface NativeConfig {
     storePending: boolean;
     requireEncryption: boolean;
     compactEnvelopeEnabled: boolean;
+    richPayloadEnabled: boolean;
     pendingQueue: {
       maxPendingPerPeer: number;
       maxPendingGlobal: number;
@@ -317,6 +319,7 @@ export class OfflineProtocol {
       // Fail-closed default (SEC-M3): plaintext operation is an explicit opt-out.
       requireEncryption: encryptionSource?.requireEncryption ?? encryptionOn,
       compactEnvelopeEnabled: encryptionSource?.compactEnvelopeEnabled ?? true,
+      richPayloadEnabled: encryptionSource?.richPayloadEnabled ?? true,
       pendingQueue: {
         maxPendingPerPeer: encryptionSource?.pendingQueue?.maxPendingPerPeer ?? 64,
         maxPendingGlobal: encryptionSource?.pendingQueue?.maxPendingGlobal ?? 4096,
@@ -346,6 +349,7 @@ export class OfflineProtocol {
       storePending: encryption.storePending,
       requireEncryption: encryption.requireEncryption,
       compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
+      richPayloadEnabled: encryption.richPayloadEnabled,
       maxPendingPerPeer: encryption.pendingQueue.maxPendingPerPeer,
       maxPendingGlobal: encryption.pendingQueue.maxPendingGlobal,
       pendingTtlMs: encryption.pendingQueue.pendingTtlMs,
@@ -822,6 +826,67 @@ export class OfflineProtocol {
    */
   async sendMessage(params: SendMessageParams): Promise<string> {
     const priority = params.priority ?? MessagePriority.Medium;
+
+    // Rich params route to the rich native method; the plain path is left
+    // untouched. Rich fields only ever travel inside the MLS-sealed rich
+    // payload (recipients that support it), or are dropped — never cleartext.
+    const hasRichOptions =
+      params.replyContext !== undefined ||
+      params.mediaMetadata !== undefined ||
+      params.forwardInfo !== undefined ||
+      params.contentType !== undefined;
+    if (hasRichOptions) {
+      const meta = params.mediaMetadata;
+      const options = {
+        content_type: params.contentType ?? null,
+        reply_context: params.replyContext
+          ? {
+              sender: params.replyContext.sender,
+              text: params.replyContext.text,
+              timestamp: params.replyContext.timestamp ?? null,
+              reply_media_label: params.replyContext.reply_media_label ?? null,
+              reply_content_type:
+                params.replyContext.reply_content_type ?? null,
+            }
+          : null,
+        media_metadata: meta
+          ? {
+              mime_type: meta.mimeType,
+              file_name: meta.fileName,
+              file_size: meta.fileSize,
+              duration_ms: meta.durationMs ?? null,
+              width: meta.width ?? null,
+              height: meta.height ?? null,
+              thumbnail_base64: meta.thumbnailBase64 ?? null,
+              media_id: meta.mediaId ?? null,
+              download_url: meta.downloadUrl ?? null,
+              thumbnail_url: meta.thumbnailUrl ?? null,
+              encryption_key: meta.encryptionKey ?? null,
+              iv: meta.iv ?? null,
+              ciphertext_hash: meta.ciphertextHash ?? null,
+              sticker_provider: meta.stickerProvider ?? null,
+              sticker_remote_id: meta.stickerRemoteId ?? null,
+              sticker_kind: meta.stickerKind ?? null,
+            }
+          : null,
+        forward_info: params.forwardInfo
+          ? {
+              original_sender: params.forwardInfo.original_sender,
+              original_message_id: params.forwardInfo.original_message_id,
+              original_timestamp: params.forwardInfo.original_timestamp,
+              forward_count: params.forwardInfo.forward_count,
+            }
+          : null,
+      };
+      return await OfflineProtocolNativeModule.sendMessageRich(
+        params.recipient,
+        params.content,
+        priority,
+        params.replyToMsg ?? null,
+        options
+      );
+    }
+
     const messageId = await OfflineProtocolNativeModule.sendMessage(
       params.recipient,
       params.content,

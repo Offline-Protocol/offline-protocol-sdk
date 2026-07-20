@@ -166,7 +166,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             pendingTtlMs: encryption.pendingTtlMs,
             overflowPolicy: overflowPolicy,
             binaryWireEnabled: binaryWireEnabled,
-            compactEnvelopeEnabled: encryption.compactEnvelopeEnabled
+            compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
+            richPayloadEnabled: encryption.richPayloadEnabled
         )
 
         return (config, raw)
@@ -840,6 +841,95 @@ class OfflineProtocolModule: RCTEventEmitter {
         } catch {
             rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND", fallbackMessage: "Failed to send message")
         }
+    }
+
+    /// Rich send surface: reply context, rich media metadata, and forward
+    /// attribution — sealed inside the MLS ciphertext for capable
+    /// recipients, silently dropped for everyone else (never cleartext).
+    @objc func sendMessageRich(_ recipient: String,
+                               content: String,
+                               priority: Int,
+                               replyToMsg: String?,
+                               options: NSDictionary?,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let msgPriority: MessagePriority = {
+                switch priority {
+                case 0: return .low
+                case 1: return .medium
+                case 2: return .high
+                case 3: return .critical
+                default: return .medium
+                }
+            }()
+
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+
+            let dict = options as? [String: Any] ?? [:]
+            let sendOptions = SendMessageOptions(
+                priority: msgPriority,
+                replyToMsg: replyToMsg,
+                contentType: (dict["content_type"] as? String).map(parseContentType),
+                replyContext: parseReplyContext(dict["reply_context"] as? [String: Any]),
+                mediaMetadata: parseRichMediaMetadata(dict["media_metadata"] as? [String: Any]),
+                forwardInfo: parseForwardInfo(dict["forward_info"] as? [String: Any])
+            )
+
+            let messageId = try proto.sendMessageRich(recipient: recipient, content: content, options: sendOptions)
+            resolver(messageId)
+        } catch {
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND", fallbackMessage: "Failed to send rich message")
+        }
+    }
+
+    private func parseReplyContext(_ dict: [String: Any]?) -> ReplyContext? {
+        guard let dict = dict else { return nil }
+        return ReplyContext(
+            sender: dict["sender"] as? String ?? "",
+            text: dict["text"] as? String ?? "",
+            timestamp: (dict["timestamp"] as? NSNumber)?.int64Value,
+            replyMediaLabel: dict["reply_media_label"] as? String,
+            replyContentType: dict["reply_content_type"] as? String
+        )
+    }
+
+    private func parseForwardInfo(_ dict: [String: Any]?) -> ForwardInfo? {
+        guard let dict = dict else { return nil }
+        return ForwardInfo(
+            originalSender: dict["original_sender"] as? String ?? "",
+            originalMessageId: dict["original_message_id"] as? String ?? "",
+            originalTimestamp: (dict["original_timestamp"] as? NSNumber)?.int64Value ?? 0,
+            forwardCount: (dict["forward_count"] as? NSNumber)?.uint32Value ?? 1
+        )
+    }
+
+    /// Full MediaMetadata parser for the rich send surface — unlike the
+    /// legacy sendMedia mapping, this includes the cloud/sticker fields
+    /// (they only ever travel MLS-sealed on this path).
+    private func parseRichMediaMetadata(_ dict: [String: Any]?) -> MediaMetadata? {
+        guard let dict = dict else { return nil }
+        return MediaMetadata(
+            mimeType: dict["mime_type"] as? String ?? "",
+            fileName: dict["file_name"] as? String ?? "",
+            fileSize: (dict["file_size"] as? NSNumber)?.uint64Value ?? 0,
+            durationMs: (dict["duration_ms"] as? NSNumber)?.uint64Value,
+            width: (dict["width"] as? NSNumber)?.uint32Value,
+            height: (dict["height"] as? NSNumber)?.uint32Value,
+            thumbnailBase64: dict["thumbnail_base64"] as? String,
+            mediaId: dict["media_id"] as? String,
+            downloadUrl: dict["download_url"] as? String,
+            thumbnailUrl: dict["thumbnail_url"] as? String,
+            encryptionKey: dict["encryption_key"] as? String,
+            iv: dict["iv"] as? String,
+            ciphertextHash: dict["ciphertext_hash"] as? String,
+            stickerProvider: dict["sticker_provider"] as? String,
+            stickerRemoteId: dict["sticker_remote_id"] as? String,
+            stickerKind: dict["sticker_kind"] as? String
+        )
     }
 
     /// Forwards a message to a new recipient with original sender attribution.
