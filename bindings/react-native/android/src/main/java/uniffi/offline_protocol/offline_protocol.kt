@@ -5925,6 +5925,52 @@ public object FfiConverterTypeFileProgress: FfiConverterRustBuffer<FileProgress>
 
 
 
+data class ForwardInfo (
+    var `originalSender`: kotlin.String
+    , 
+    var `originalMessageId`: kotlin.String
+    , 
+    var `originalTimestamp`: kotlin.Long
+    , 
+    var `forwardCount`: kotlin.UInt
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeForwardInfo: FfiConverterRustBuffer<ForwardInfo> {
+    override fun read(buf: ByteBuffer): ForwardInfo {
+        return ForwardInfo(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ForwardInfo) = (
+            FfiConverterString.allocationSize(value.`originalSender`) +
+            FfiConverterString.allocationSize(value.`originalMessageId`) +
+            FfiConverterLong.allocationSize(value.`originalTimestamp`) +
+            FfiConverterUInt.allocationSize(value.`forwardCount`)
+    )
+
+    override fun write(value: ForwardInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`originalSender`, buf)
+            FfiConverterString.write(value.`originalMessageId`, buf)
+            FfiConverterLong.write(value.`originalTimestamp`, buf)
+            FfiConverterUInt.write(value.`forwardCount`, buf)
+    }
+}
+
+
+
 data class GradientRoutingConfig (
     var `maxRoutesPerDestination`: kotlin.UInt
     , 
@@ -6036,6 +6082,24 @@ data class MediaMetadata (
     var `height`: kotlin.UInt?
     , 
     var `thumbnailBase64`: kotlin.String?
+    , 
+    var `mediaId`: kotlin.String? = null 
+    , 
+    var `downloadUrl`: kotlin.String? = null 
+    , 
+    var `thumbnailUrl`: kotlin.String? = null 
+    , 
+    var `encryptionKey`: kotlin.String? = null 
+    , 
+    var `iv`: kotlin.String? = null 
+    , 
+    var `ciphertextHash`: kotlin.String? = null 
+    , 
+    var `stickerProvider`: kotlin.String? = null 
+    , 
+    var `stickerRemoteId`: kotlin.String? = null 
+    , 
+    var `stickerKind`: kotlin.String? = null 
     
 ){
     
@@ -6057,6 +6121,15 @@ public object FfiConverterTypeMediaMetadata: FfiConverterRustBuffer<MediaMetadat
             FfiConverterOptionalUInt.read(buf),
             FfiConverterOptionalUInt.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -6067,7 +6140,16 @@ public object FfiConverterTypeMediaMetadata: FfiConverterRustBuffer<MediaMetadat
             FfiConverterOptionalULong.allocationSize(value.`durationMs`) +
             FfiConverterOptionalUInt.allocationSize(value.`width`) +
             FfiConverterOptionalUInt.allocationSize(value.`height`) +
-            FfiConverterOptionalString.allocationSize(value.`thumbnailBase64`)
+            FfiConverterOptionalString.allocationSize(value.`thumbnailBase64`) +
+            FfiConverterOptionalString.allocationSize(value.`mediaId`) +
+            FfiConverterOptionalString.allocationSize(value.`downloadUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`thumbnailUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`encryptionKey`) +
+            FfiConverterOptionalString.allocationSize(value.`iv`) +
+            FfiConverterOptionalString.allocationSize(value.`ciphertextHash`) +
+            FfiConverterOptionalString.allocationSize(value.`stickerProvider`) +
+            FfiConverterOptionalString.allocationSize(value.`stickerRemoteId`) +
+            FfiConverterOptionalString.allocationSize(value.`stickerKind`)
     )
 
     override fun write(value: MediaMetadata, buf: ByteBuffer) {
@@ -6078,6 +6160,15 @@ public object FfiConverterTypeMediaMetadata: FfiConverterRustBuffer<MediaMetadat
             FfiConverterOptionalUInt.write(value.`width`, buf)
             FfiConverterOptionalUInt.write(value.`height`, buf)
             FfiConverterOptionalString.write(value.`thumbnailBase64`, buf)
+            FfiConverterOptionalString.write(value.`mediaId`, buf)
+            FfiConverterOptionalString.write(value.`downloadUrl`, buf)
+            FfiConverterOptionalString.write(value.`thumbnailUrl`, buf)
+            FfiConverterOptionalString.write(value.`encryptionKey`, buf)
+            FfiConverterOptionalString.write(value.`iv`, buf)
+            FfiConverterOptionalString.write(value.`ciphertextHash`, buf)
+            FfiConverterOptionalString.write(value.`stickerProvider`, buf)
+            FfiConverterOptionalString.write(value.`stickerRemoteId`, buf)
+            FfiConverterOptionalString.write(value.`stickerKind`, buf)
     }
 }
 
@@ -7041,6 +7132,57 @@ public object FfiConverterTypeReliabilityConfig: FfiConverterRustBuffer<Reliabil
             FfiConverterTypeAckConfig.write(value.`ack`, buf)
             FfiConverterTypeRetryConfig.write(value.`retry`, buf)
             FfiConverterTypeDedupConfig.write(value.`dedup`, buf)
+    }
+}
+
+
+
+data class ReplyContext (
+    var `sender`: kotlin.String
+    , 
+    var `text`: kotlin.String
+    , 
+    var `timestamp`: kotlin.Long? = null 
+    , 
+    var `replyMediaLabel`: kotlin.String? = null 
+    , 
+    var `replyContentType`: kotlin.String? = null 
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeReplyContext: FfiConverterRustBuffer<ReplyContext> {
+    override fun read(buf: ByteBuffer): ReplyContext {
+        return ReplyContext(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalLong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ReplyContext) = (
+            FfiConverterString.allocationSize(value.`sender`) +
+            FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterOptionalLong.allocationSize(value.`timestamp`) +
+            FfiConverterOptionalString.allocationSize(value.`replyMediaLabel`) +
+            FfiConverterOptionalString.allocationSize(value.`replyContentType`)
+    )
+
+    override fun write(value: ReplyContext, buf: ByteBuffer) {
+            FfiConverterString.write(value.`sender`, buf)
+            FfiConverterString.write(value.`text`, buf)
+            FfiConverterOptionalLong.write(value.`timestamp`, buf)
+            FfiConverterOptionalString.write(value.`replyMediaLabel`, buf)
+            FfiConverterOptionalString.write(value.`replyContentType`, buf)
     }
 }
 

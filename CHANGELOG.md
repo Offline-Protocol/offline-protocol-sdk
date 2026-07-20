@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Rich message model: quoted-reply context and rich media metadata (foundation).** `Message` gains an optional `reply_context` (`ReplyContext { sender, text, timestamp?, reply_media_label?, reply_content_type? }` — an unverified display-level hint, like `ForwardInfo`), surfaced on `message_received` events, and `MediaMetadata` gains nine optional cloud-media/sticker fields (`media_id`, `download_url`, `thumbnail_url`, `encryption_key`, `iv`, `ciphertext_hash`, `sticker_provider`, `sticker_remote_id`, `sticker_kind`), surfaced on `message_received` and `file_received`. On the binary mesh wire, `reply_context` rides the frame's extension section as tag 2 (only the first entry is honored; a malformed payload rejects the frame, matching the JSON path); the frozen `WireMessageV1` layout is unchanged, and a legacy decoder skipping the tag loses only the reply preview — the same degradation a legacy JSON receiver applies by ignoring the unknown field. Purely additive: nothing populates the new fields yet — the end-to-end-sealed rich send surface ships alongside this in the same release, and until it lands `sendMedia` ignores the new metadata fields rather than sending them in cleartext.
+
+### Fixed
+
+- **React Native `MessageReceivedEvent` type was missing `reply_to_msg`.** The Rust event has always carried the replied-to message id; the TypeScript mirror now declares it (alongside the new `reply_context`).
+
 ## [0.15.0] — 2026-07-20
 
 ### Added

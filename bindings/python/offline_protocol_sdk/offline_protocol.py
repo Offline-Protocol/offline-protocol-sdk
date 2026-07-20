@@ -3535,6 +3535,54 @@ class _UniffiFfiConverterTypeFileProgress(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt8.write(value.percentage, buf)
 
 @dataclass
+class ForwardInfo:
+    def __init__(self, *, original_sender:str, original_message_id:str, original_timestamp:int, forward_count:int):
+        self.original_sender = original_sender
+        self.original_message_id = original_message_id
+        self.original_timestamp = original_timestamp
+        self.forward_count = forward_count
+        
+        
+
+    
+    def __str__(self):
+        return "ForwardInfo(original_sender={}, original_message_id={}, original_timestamp={}, forward_count={})".format(self.original_sender, self.original_message_id, self.original_timestamp, self.forward_count)
+    def __eq__(self, other):
+        if self.original_sender != other.original_sender:
+            return False
+        if self.original_message_id != other.original_message_id:
+            return False
+        if self.original_timestamp != other.original_timestamp:
+            return False
+        if self.forward_count != other.forward_count:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeForwardInfo(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return ForwardInfo(
+            original_sender=_UniffiFfiConverterString.read(buf),
+            original_message_id=_UniffiFfiConverterString.read(buf),
+            original_timestamp=_UniffiFfiConverterInt64.read(buf),
+            forward_count=_UniffiFfiConverterUInt32.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.original_sender)
+        _UniffiFfiConverterString.check_lower(value.original_message_id)
+        _UniffiFfiConverterInt64.check_lower(value.original_timestamp)
+        _UniffiFfiConverterUInt32.check_lower(value.forward_count)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.original_sender, buf)
+        _UniffiFfiConverterString.write(value.original_message_id, buf)
+        _UniffiFfiConverterInt64.write(value.original_timestamp, buf)
+        _UniffiFfiConverterUInt32.write(value.forward_count, buf)
+
+@dataclass
 class GradientRoutingConfig:
     def __init__(self, *, max_routes_per_destination:int, route_ttl_secs:int, max_routing_table_size:int):
         self.max_routes_per_destination = max_routes_per_destination
@@ -3713,7 +3761,7 @@ class _UniffiFfiConverterOptionalUInt32(_UniffiConverterRustBuffer):
 
 @dataclass
 class MediaMetadata:
-    def __init__(self, *, mime_type:str, file_name:str, file_size:int, duration_ms:typing.Optional[int], width:typing.Optional[int], height:typing.Optional[int], thumbnail_base64:typing.Optional[str]):
+    def __init__(self, *, mime_type:str, file_name:str, file_size:int, duration_ms:typing.Optional[int], width:typing.Optional[int], height:typing.Optional[int], thumbnail_base64:typing.Optional[str], media_id:typing.Optional[str] = _DEFAULT, download_url:typing.Optional[str] = _DEFAULT, thumbnail_url:typing.Optional[str] = _DEFAULT, encryption_key:typing.Optional[str] = _DEFAULT, iv:typing.Optional[str] = _DEFAULT, ciphertext_hash:typing.Optional[str] = _DEFAULT, sticker_provider:typing.Optional[str] = _DEFAULT, sticker_remote_id:typing.Optional[str] = _DEFAULT, sticker_kind:typing.Optional[str] = _DEFAULT):
         self.mime_type = mime_type
         self.file_name = file_name
         self.file_size = file_size
@@ -3721,12 +3769,48 @@ class MediaMetadata:
         self.width = width
         self.height = height
         self.thumbnail_base64 = thumbnail_base64
+        if media_id is _DEFAULT:
+            self.media_id = None
+        else:
+            self.media_id = media_id
+        if download_url is _DEFAULT:
+            self.download_url = None
+        else:
+            self.download_url = download_url
+        if thumbnail_url is _DEFAULT:
+            self.thumbnail_url = None
+        else:
+            self.thumbnail_url = thumbnail_url
+        if encryption_key is _DEFAULT:
+            self.encryption_key = None
+        else:
+            self.encryption_key = encryption_key
+        if iv is _DEFAULT:
+            self.iv = None
+        else:
+            self.iv = iv
+        if ciphertext_hash is _DEFAULT:
+            self.ciphertext_hash = None
+        else:
+            self.ciphertext_hash = ciphertext_hash
+        if sticker_provider is _DEFAULT:
+            self.sticker_provider = None
+        else:
+            self.sticker_provider = sticker_provider
+        if sticker_remote_id is _DEFAULT:
+            self.sticker_remote_id = None
+        else:
+            self.sticker_remote_id = sticker_remote_id
+        if sticker_kind is _DEFAULT:
+            self.sticker_kind = None
+        else:
+            self.sticker_kind = sticker_kind
         
         
 
     
     def __str__(self):
-        return "MediaMetadata(mime_type={}, file_name={}, file_size={}, duration_ms={}, width={}, height={}, thumbnail_base64={})".format(self.mime_type, self.file_name, self.file_size, self.duration_ms, self.width, self.height, self.thumbnail_base64)
+        return "MediaMetadata(mime_type={}, file_name={}, file_size={}, duration_ms={}, width={}, height={}, thumbnail_base64={}, media_id={}, download_url={}, thumbnail_url={}, encryption_key={}, iv={}, ciphertext_hash={}, sticker_provider={}, sticker_remote_id={}, sticker_kind={})".format(self.mime_type, self.file_name, self.file_size, self.duration_ms, self.width, self.height, self.thumbnail_base64, self.media_id, self.download_url, self.thumbnail_url, self.encryption_key, self.iv, self.ciphertext_hash, self.sticker_provider, self.sticker_remote_id, self.sticker_kind)
     def __eq__(self, other):
         if self.mime_type != other.mime_type:
             return False
@@ -3742,6 +3826,24 @@ class MediaMetadata:
             return False
         if self.thumbnail_base64 != other.thumbnail_base64:
             return False
+        if self.media_id != other.media_id:
+            return False
+        if self.download_url != other.download_url:
+            return False
+        if self.thumbnail_url != other.thumbnail_url:
+            return False
+        if self.encryption_key != other.encryption_key:
+            return False
+        if self.iv != other.iv:
+            return False
+        if self.ciphertext_hash != other.ciphertext_hash:
+            return False
+        if self.sticker_provider != other.sticker_provider:
+            return False
+        if self.sticker_remote_id != other.sticker_remote_id:
+            return False
+        if self.sticker_kind != other.sticker_kind:
+            return False
         return True
 
 class _UniffiFfiConverterTypeMediaMetadata(_UniffiConverterRustBuffer):
@@ -3755,6 +3857,15 @@ class _UniffiFfiConverterTypeMediaMetadata(_UniffiConverterRustBuffer):
             width=_UniffiFfiConverterOptionalUInt32.read(buf),
             height=_UniffiFfiConverterOptionalUInt32.read(buf),
             thumbnail_base64=_UniffiFfiConverterOptionalString.read(buf),
+            media_id=_UniffiFfiConverterOptionalString.read(buf),
+            download_url=_UniffiFfiConverterOptionalString.read(buf),
+            thumbnail_url=_UniffiFfiConverterOptionalString.read(buf),
+            encryption_key=_UniffiFfiConverterOptionalString.read(buf),
+            iv=_UniffiFfiConverterOptionalString.read(buf),
+            ciphertext_hash=_UniffiFfiConverterOptionalString.read(buf),
+            sticker_provider=_UniffiFfiConverterOptionalString.read(buf),
+            sticker_remote_id=_UniffiFfiConverterOptionalString.read(buf),
+            sticker_kind=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -3766,6 +3877,15 @@ class _UniffiFfiConverterTypeMediaMetadata(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalUInt32.check_lower(value.width)
         _UniffiFfiConverterOptionalUInt32.check_lower(value.height)
         _UniffiFfiConverterOptionalString.check_lower(value.thumbnail_base64)
+        _UniffiFfiConverterOptionalString.check_lower(value.media_id)
+        _UniffiFfiConverterOptionalString.check_lower(value.download_url)
+        _UniffiFfiConverterOptionalString.check_lower(value.thumbnail_url)
+        _UniffiFfiConverterOptionalString.check_lower(value.encryption_key)
+        _UniffiFfiConverterOptionalString.check_lower(value.iv)
+        _UniffiFfiConverterOptionalString.check_lower(value.ciphertext_hash)
+        _UniffiFfiConverterOptionalString.check_lower(value.sticker_provider)
+        _UniffiFfiConverterOptionalString.check_lower(value.sticker_remote_id)
+        _UniffiFfiConverterOptionalString.check_lower(value.sticker_kind)
 
     @staticmethod
     def write(value, buf):
@@ -3776,6 +3896,15 @@ class _UniffiFfiConverterTypeMediaMetadata(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalUInt32.write(value.width, buf)
         _UniffiFfiConverterOptionalUInt32.write(value.height, buf)
         _UniffiFfiConverterOptionalString.write(value.thumbnail_base64, buf)
+        _UniffiFfiConverterOptionalString.write(value.media_id, buf)
+        _UniffiFfiConverterOptionalString.write(value.download_url, buf)
+        _UniffiFfiConverterOptionalString.write(value.thumbnail_url, buf)
+        _UniffiFfiConverterOptionalString.write(value.encryption_key, buf)
+        _UniffiFfiConverterOptionalString.write(value.iv, buf)
+        _UniffiFfiConverterOptionalString.write(value.ciphertext_hash, buf)
+        _UniffiFfiConverterOptionalString.write(value.sticker_provider, buf)
+        _UniffiFfiConverterOptionalString.write(value.sticker_remote_id, buf)
+        _UniffiFfiConverterOptionalString.write(value.sticker_kind, buf)
 
 @dataclass
 class MessageStats:
@@ -5417,6 +5546,94 @@ class _UniffiFfiConverterTypeProtocolConfigExtended(_UniffiConverterRustBuffer):
         _UniffiFfiConverterTypePathConfig.write(value.path, buf)
         _UniffiFfiConverterTypeReliabilityConfig.write(value.reliability, buf)
         _UniffiFfiConverterUInt8.write(value.initial_ttl, buf)
+
+class _UniffiFfiConverterOptionalInt64(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterInt64.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterInt64.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterInt64.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+@dataclass
+class ReplyContext:
+    def __init__(self, *, sender:str, text:str, timestamp:typing.Optional[int] = _DEFAULT, reply_media_label:typing.Optional[str] = _DEFAULT, reply_content_type:typing.Optional[str] = _DEFAULT):
+        self.sender = sender
+        self.text = text
+        if timestamp is _DEFAULT:
+            self.timestamp = None
+        else:
+            self.timestamp = timestamp
+        if reply_media_label is _DEFAULT:
+            self.reply_media_label = None
+        else:
+            self.reply_media_label = reply_media_label
+        if reply_content_type is _DEFAULT:
+            self.reply_content_type = None
+        else:
+            self.reply_content_type = reply_content_type
+        
+        
+
+    
+    def __str__(self):
+        return "ReplyContext(sender={}, text={}, timestamp={}, reply_media_label={}, reply_content_type={})".format(self.sender, self.text, self.timestamp, self.reply_media_label, self.reply_content_type)
+    def __eq__(self, other):
+        if self.sender != other.sender:
+            return False
+        if self.text != other.text:
+            return False
+        if self.timestamp != other.timestamp:
+            return False
+        if self.reply_media_label != other.reply_media_label:
+            return False
+        if self.reply_content_type != other.reply_content_type:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeReplyContext(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return ReplyContext(
+            sender=_UniffiFfiConverterString.read(buf),
+            text=_UniffiFfiConverterString.read(buf),
+            timestamp=_UniffiFfiConverterOptionalInt64.read(buf),
+            reply_media_label=_UniffiFfiConverterOptionalString.read(buf),
+            reply_content_type=_UniffiFfiConverterOptionalString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.sender)
+        _UniffiFfiConverterString.check_lower(value.text)
+        _UniffiFfiConverterOptionalInt64.check_lower(value.timestamp)
+        _UniffiFfiConverterOptionalString.check_lower(value.reply_media_label)
+        _UniffiFfiConverterOptionalString.check_lower(value.reply_content_type)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.sender, buf)
+        _UniffiFfiConverterString.write(value.text, buf)
+        _UniffiFfiConverterOptionalInt64.write(value.timestamp, buf)
+        _UniffiFfiConverterOptionalString.write(value.reply_media_label, buf)
+        _UniffiFfiConverterOptionalString.write(value.reply_content_type, buf)
 
 @dataclass
 class ReticulumMessage:
@@ -7639,31 +7856,6 @@ class _UniffiFfiConverterOptionalTypeInternetMessage(_UniffiConverterRustBuffer)
             return None
         elif flag == 1:
             return _UniffiFfiConverterTypeInternetMessage.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-class _UniffiFfiConverterOptionalInt64(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterInt64.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterInt64.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterInt64.read(buf)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
@@ -10743,6 +10935,7 @@ __all__ = [
     "PendingQueueConfig",
     "EncryptionConfig",
     "FileProgress",
+    "ForwardInfo",
     "GradientRoutingConfig",
     "InternetMessage",
     "MediaMetadata",
@@ -10768,6 +10961,7 @@ __all__ = [
     "RetryConfig",
     "ReliabilityConfig",
     "ProtocolConfigExtended",
+    "ReplyContext",
     "ReticulumMessage",
     "RouteEntry",
     "RoutingScoreEntry",

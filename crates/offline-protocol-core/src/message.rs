@@ -149,6 +149,45 @@ pub struct MediaMetadata {
     /// Small base64-encoded thumbnail (< 2 KB) for preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_base64: Option<String>,
+
+    /// Stable media identifier assigned by the application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_id: Option<String>,
+
+    /// URL to fetch the full media from (cloud-stored media).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+
+    /// URL to fetch a thumbnail from (cloud-stored media).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
+
+    /// Content-encryption key for cloud-stored media (base64).
+    ///
+    /// Secret material: must only travel inside an end-to-end-encrypted
+    /// payload, never in cleartext message fields visible to relays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_key: Option<String>,
+
+    /// Initialization vector for the cloud-media content encryption (base64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iv: Option<String>,
+
+    /// Integrity hash of the encrypted cloud-media blob (base64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ciphertext_hash: Option<String>,
+
+    /// Sticker pack provider (sticker messages).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker_provider: Option<String>,
+
+    /// Provider-scoped sticker identifier (sticker messages).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker_remote_id: Option<String>,
+
+    /// Sticker rendering kind (e.g. "static", "animated", "lottie").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker_kind: Option<String>,
 }
 
 /// Information about a forwarded message.
@@ -191,6 +230,30 @@ impl ForwardInfo {
             },
         }
     }
+}
+
+/// Quoted-reply context for rendering a reply preview without a local copy
+/// of the original message.
+///
+/// **Trust model:** like [`ForwardInfo`], this is an unverified display-level
+/// hint copied by the sending client. A malicious client can forge any field.
+/// UI layers should treat this as a display-level hint and must not rely on
+/// it for access-control or security decisions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplyContext {
+    /// Sender of the message being replied to.
+    pub sender: UserId,
+    /// Text (or excerpt) of the message being replied to.
+    pub text: String,
+    /// Timestamp of the quoted message (wall-clock, for display).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<Timestamp>,
+    /// Short human-readable label for quoted media (e.g. a file name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_media_label: Option<String>,
+    /// Content type of the quoted message, as a display string (e.g. "image").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_content_type: Option<String>,
 }
 
 /// Message priority levels.
@@ -312,6 +375,10 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarded_from: Option<ForwardInfo>,
 
+    /// Quoted-reply context (present when this message quotes another).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_context: Option<ReplyContext>,
+
     /// Transport-verified peer identity.
     ///
     /// Set by the transport layer when a message is received, binding the message
@@ -375,6 +442,7 @@ impl Message {
             requires_ack: true,
             reply_to_msg: None,
             forwarded_from: None,
+            reply_context: None,
             transport_peer_id: None,
             wire_codec: WireCodec::Json,
         }
@@ -518,10 +586,22 @@ impl Message {
         // rides raw in the ext TLV instead of paying the 4/3 base64 inflation;
         // the split is verified byte-exact at encode time, so decoding
         // reconstructs the identical string. See [`crate::wire::EXT_TAG_B64_TAIL`].
-        let (content, ext) = match crate::wire::split_b64_tail(&self.content) {
+        let (content, mut ext) = match crate::wire::split_b64_tail(&self.content) {
             Some((head, raw)) => (head.to_string(), vec![(crate::wire::EXT_TAG_B64_TAIL, raw)]),
             None => (self.content.clone(), Vec::new()),
         };
+
+        // The quoted-reply context rides the ext TLV as a JSON blob (like
+        // `media_metadata_json`) because the v1 DTO is frozen. Old decoders
+        // skip the tag, losing only the reply preview — the same degradation
+        // a legacy JSON receiver applies by ignoring the unknown field.
+        if let Some(rc) = &self.reply_context {
+            ext.push((
+                crate::wire::EXT_TAG_REPLY_CONTEXT,
+                serde_json::to_vec(rc)
+                    .map_err(|e| crate::Error::SerializationError(format!("reply_context: {e}")))?,
+            ));
+        }
 
         let wire = crate::wire::WireMessageV1 {
             id: self.id.as_bytes(),
@@ -580,6 +660,20 @@ impl Message {
                 })?),
                 None => None,
             };
+        // Like tag 1, only the first tag-2 entry is honored; a malformed
+        // payload rejects the frame, matching the JSON path where a malformed
+        // `reply_context` field rejects the whole message.
+        let reply_context =
+            match wire
+                .ext
+                .iter()
+                .find(|(tag, _)| *tag == crate::wire::EXT_TAG_REPLY_CONTEXT)
+            {
+                Some((_, bytes)) => Some(serde_json::from_slice(bytes).map_err(|e| {
+                    crate::Error::DeserializationError(format!("reply_context: {e}"))
+                })?),
+                None => None,
+            };
         Ok(Self {
             id: MessageId::from_bytes(wire.id),
             sender: UserId::new(wire.sender)?,
@@ -598,6 +692,7 @@ impl Message {
             requires_ack: wire.requires_ack,
             reply_to_msg: wire.reply_to_msg.map(MessageId::from_bytes),
             forwarded_from,
+            reply_context,
             transport_peer_id: None,
             wire_codec: WireCodec::Json,
         })
@@ -619,6 +714,7 @@ pub struct MessageBuilder {
     requires_ack: bool,
     reply_to_msg: Option<MessageId>,
     forwarded_from: Option<ForwardInfo>,
+    reply_context: Option<ReplyContext>,
 }
 
 impl MessageBuilder {
@@ -638,6 +734,7 @@ impl MessageBuilder {
             requires_ack: true,
             reply_to_msg: None,
             forwarded_from: None,
+            reply_context: None,
         }
     }
 
@@ -695,6 +792,12 @@ impl MessageBuilder {
         self
     }
 
+    /// Sets the quoted-reply context on the message.
+    pub fn reply_context(mut self, ctx: ReplyContext) -> Self {
+        self.reply_context = Some(ctx);
+        self
+    }
+
     /// Sets the Lamport clock value for this message.
     pub fn lamport_clock(mut self, clock: LamportClock) -> Self {
         self.lamport_clock = clock;
@@ -721,6 +824,7 @@ impl MessageBuilder {
             requires_ack: self.requires_ack,
             reply_to_msg: self.reply_to_msg,
             forwarded_from: self.forwarded_from,
+            reply_context: self.reply_context,
             transport_peer_id: None,
             wire_codec: WireCodec::Json,
         }
@@ -767,6 +871,38 @@ mod tests {
         assert_eq!(msg.priority, MessagePriority::High);
         assert_eq!(msg.metadata.get("key1").unwrap(), "value1");
         assert!(!msg.requires_ack);
+    }
+
+    #[test]
+    fn reply_context_json_round_trip_and_default() {
+        let mut msg = create_test_message();
+        msg.reply_context = Some(ReplyContext {
+            sender: UserId::new("carol").unwrap(),
+            text: "quoted".into(),
+            timestamp: Some(Timestamp::from_millis(1_700_000_000_000)),
+            reply_media_label: None,
+            reply_content_type: Some("text".into()),
+        });
+        let decoded = Message::from_bytes(&msg.to_bytes().unwrap()).unwrap();
+        assert_eq!(decoded.reply_context, msg.reply_context);
+
+        // Absent on the wire → defaults to None (old sender, new receiver).
+        let plain = create_test_message();
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("reply_context"));
+        let decoded = Message::from_bytes(json.as_bytes()).unwrap();
+        assert!(decoded.reply_context.is_none());
+    }
+
+    #[test]
+    fn message_json_ignores_unknown_fields() {
+        // A legacy receiver's tolerance for fields it doesn't know is the
+        // compat story for `reply_context` (new sender, old receiver); prove
+        // Message keeps that tolerance.
+        let mut json = serde_json::to_value(create_test_message()).unwrap();
+        json["some_future_field"] = serde_json::Value::String("x".into());
+        let bytes = serde_json::to_vec(&json).unwrap();
+        assert!(Message::from_bytes(&bytes).is_ok());
     }
 
     #[test]

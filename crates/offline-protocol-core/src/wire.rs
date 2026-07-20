@@ -63,17 +63,34 @@ pub const WIRE_VERSION_V1: u8 = 1;
 ///
 /// # Tag registry (wire v1)
 ///
-/// | tag | meaning                            |
-/// |-----|------------------------------------|
-/// | 1   | base64 tail of `content`, decoded  |
+/// | tag | meaning                                      |
+/// |-----|----------------------------------------------|
+/// | 1   | base64 tail of `content`, decoded            |
+/// | 2   | `reply_context` as JSON ([`EXT_TAG_REPLY_CONTEXT`]) |
 ///
 /// Tag 1 ships in wire v1's *first* release, so advertising [`WIRE_VERSION_V1`]
 /// implies understanding it. Note the constraint that imposes on future tags:
 /// a decoder that ignores tag 1 would reconstruct a truncated `content`, which
 /// is only safe because no v1 decoder without tag-1 support ever shipped. A
 /// future tag whose absence changes meaning (rather than merely costing
-/// efficiency) cannot piggyback on v1 — it needs a new wire version.
+/// efficiency or optional context) cannot piggyback on v1 — it needs a new
+/// wire version.
 pub(crate) const EXT_TAG_B64_TAIL: u16 = 1;
+
+/// `ext` TLV tag: [`ReplyContext`](crate::ReplyContext) serialized as JSON.
+///
+/// Rides opaquely (like `media_metadata_json`) so the struct keeps evolving
+/// through its own serde attributes. Unlike tag 1, this tag may piggyback on
+/// v1 even though not every v1 decoder understands it: a decoder that skips
+/// it delivers the message without its reply preview — exactly the
+/// degradation a legacy JSON receiver applies by ignoring the unknown
+/// `reply_context` field. Meaning is preserved; only optional display
+/// context is lost.
+///
+/// Decoders honor only the first tag-2 entry and reject a frame whose
+/// payload is not valid `ReplyContext` JSON, matching the JSON path where a
+/// malformed `reply_context` rejects the whole message.
+pub(crate) const EXT_TAG_REPLY_CONTEXT: u16 = 2;
 
 /// Minimum length (in base64 characters, including padding) of a trailing
 /// base64 run before [`split_b64_tail`] moves it to the ext TLV. Short tails
@@ -250,8 +267,8 @@ mod tests {
     use super::*;
     use crate::types::LAMPORT_CLOCK_MAX;
     use crate::{
-        AppId, ForwardInfo, LamportClock, MediaMetadata, Message, MessageId, Timestamp, UserId,
-        MAX_ID_LEN, TTL,
+        AppId, ForwardInfo, LamportClock, MediaMetadata, Message, MessageId, ReplyContext,
+        Timestamp, UserId, MAX_ID_LEN, TTL,
     };
 
     fn sample_message() -> Message {
@@ -278,6 +295,15 @@ mod tests {
             width: Some(640),
             height: Some(480),
             thumbnail_base64: None,
+            media_id: Some("media-1".into()),
+            download_url: Some("https://cdn.example/media-1".into()),
+            thumbnail_url: None,
+            encryption_key: Some("a2V5".into()),
+            iv: None,
+            ciphertext_hash: None,
+            sticker_provider: None,
+            sticker_remote_id: None,
+            sticker_kind: None,
         });
         m.forwarded_from = Some(ForwardInfo {
             original_sender: UserId::new("carol").unwrap(),
@@ -527,6 +553,128 @@ mod tests {
         let bytes = encode(&wire).unwrap();
         let decoded = Message::from_wire_v1_bytes(&bytes).unwrap();
         assert_eq!(decoded.content, format!("head:{}", BASE64.encode(b"AB")));
+    }
+
+    fn sample_reply_context() -> ReplyContext {
+        ReplyContext {
+            sender: UserId::new("carol").unwrap(),
+            text: "original text".into(),
+            timestamp: Some(Timestamp::from_millis(1_700_000_000_000)),
+            reply_media_label: Some("x.png".into()),
+            reply_content_type: Some("image".into()),
+        }
+    }
+
+    #[test]
+    fn wire_v1_round_trips_reply_context() {
+        // Fully-populated context on an otherwise rich message.
+        let mut m = sample_message();
+        m.reply_context = Some(sample_reply_context());
+        let decoded = Message::from_wire_v1_bytes(&m.to_wire_v1_bytes().unwrap()).unwrap();
+        assert_eq!(decoded.reply_context, m.reply_context);
+
+        // Minimal context (all optional fields absent).
+        let mut m = Message::new(
+            UserId::new("a").unwrap(),
+            UserId::new("b").unwrap(),
+            AppId::new("c").unwrap(),
+            "hi",
+        );
+        m.reply_context = Some(ReplyContext {
+            sender: UserId::new("carol").unwrap(),
+            text: "quoted".into(),
+            timestamp: None,
+            reply_media_label: None,
+            reply_content_type: None,
+        });
+        let decoded = Message::from_wire_v1_bytes(&m.to_wire_v1_bytes().unwrap()).unwrap();
+        assert_eq!(decoded.reply_context, m.reply_context);
+    }
+
+    #[test]
+    fn wire_v1_reply_context_coexists_with_b64_tail() {
+        let mut m = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("app").unwrap(),
+            format!("__MLS_ENC__{}", BASE64.encode(vec![7u8; 90])),
+        );
+        m.reply_context = Some(sample_reply_context());
+        let bytes = m.to_wire_v1_bytes().unwrap();
+
+        let wire = decode(&bytes).unwrap();
+        assert_eq!(wire.ext.len(), 2);
+        assert_eq!(wire.ext[0].0, EXT_TAG_B64_TAIL);
+        assert_eq!(wire.ext[1].0, EXT_TAG_REPLY_CONTEXT);
+
+        let decoded = Message::from_wire_v1_bytes(&bytes).unwrap();
+        assert_eq!(decoded.content, m.content);
+        assert_eq!(decoded.reply_context, m.reply_context);
+    }
+
+    #[test]
+    fn wire_v1_honors_only_first_reply_context_entry() {
+        // A hostile frame cannot override an earlier reply context with a
+        // spliced later entry.
+        let mut wire = base_dto();
+        wire.ext = vec![
+            (
+                EXT_TAG_REPLY_CONTEXT,
+                br#"{"sender":"carol","text":"first"}"#.to_vec(),
+            ),
+            (
+                EXT_TAG_REPLY_CONTEXT,
+                br#"{"sender":"mallory","text":"second"}"#.to_vec(),
+            ),
+        ];
+        let decoded = Message::from_wire_v1_bytes(&encode(&wire).unwrap()).unwrap();
+        let rc = decoded.reply_context.expect("first entry honored");
+        assert_eq!(rc.sender.as_str(), "carol");
+        assert_eq!(rc.text, "first");
+    }
+
+    #[test]
+    fn wire_v1_rejects_malformed_reply_context_ext() {
+        // Parity with the JSON path: a malformed `reply_context` rejects the
+        // whole message rather than being silently dropped.
+        let mut wire = base_dto();
+        wire.ext = vec![(EXT_TAG_REPLY_CONTEXT, b"not json".to_vec())];
+        assert!(Message::from_wire_v1_bytes(&encode(&wire).unwrap()).is_err());
+
+        // Valid JSON, but a sender that fails UserId validation.
+        let mut wire = base_dto();
+        wire.ext = vec![(
+            EXT_TAG_REPLY_CONTEXT,
+            br#"{"sender":"evil/path","text":"t"}"#.to_vec(),
+        )];
+        assert!(Message::from_wire_v1_bytes(&encode(&wire).unwrap()).is_err());
+    }
+
+    #[test]
+    fn wire_v1_golden_layout_with_reply_context_ext_is_frozen() {
+        // Freezes the ext-TLV encoding for tag 2 (reply context JSON). Same
+        // contract as `wire_v1_golden_layout_is_frozen`: a mismatch means the
+        // wire format changed — bump the magic byte, do not edit the bytes.
+        let rc_json: &[u8] = br#"{"sender":"c","text":"t"}"#;
+        let mut wire = base_dto();
+        wire.content = String::new();
+        wire.ext = vec![(EXT_TAG_REPLY_CONTEXT, rc_json.to_vec())];
+        let mut expected_tail = vec![
+            0x01, // ext: len 1
+            0x02, // tag 2 (varint u16)
+            0x19, // value: len 25
+        ];
+        expected_tail.extend_from_slice(rc_json); // raw JSON bytes
+        let encoded = encode(&wire).unwrap();
+        assert_eq!(
+            &encoded[encoded.len() - expected_tail.len()..],
+            expected_tail
+        );
+        // And the decoder surfaces it as a validated ReplyContext.
+        let decoded = Message::from_wire_v1_bytes(&encoded).unwrap();
+        let rc = decoded.reply_context.expect("reply context decoded");
+        assert_eq!(rc.sender.as_str(), "c");
+        assert_eq!(rc.text, "t");
     }
 
     #[test]
