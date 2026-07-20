@@ -761,6 +761,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 31925:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() != 3565:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() != 19098:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt() != 62179:
@@ -2033,6 +2035,14 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_presence_update.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2612,6 +2622,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_m
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update.restype = ctypes.c_uint16
@@ -5075,7 +5088,7 @@ class _UniffiFfiConverterTypePeerDevice(_UniffiConverterRustBuffer):
 
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, user_id:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, require_transport_identity:bool = False, binary_wire_enabled:bool = True, compact_envelope_enabled:bool = True):
+    def __init__(self, *, app_id:str, user_id:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, require_transport_identity:bool = False, binary_wire_enabled:bool = True, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True):
         self.app_id = app_id
         self.user_id = user_id
         self.ble_enabled = ble_enabled
@@ -5098,12 +5111,13 @@ class ProtocolConfig:
         self.require_transport_identity = require_transport_identity
         self.binary_wire_enabled = binary_wire_enabled
         self.compact_envelope_enabled = compact_envelope_enabled
+        self.rich_payload_enabled = rich_payload_enabled
         
         
 
     
     def __str__(self):
-        return "ProtocolConfig(app_id={}, user_id={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, require_transport_identity={}, binary_wire_enabled={}, compact_envelope_enabled={})".format(self.app_id, self.user_id, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.require_transport_identity, self.binary_wire_enabled, self.compact_envelope_enabled)
+        return "ProtocolConfig(app_id={}, user_id={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, require_transport_identity={}, binary_wire_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={})".format(self.app_id, self.user_id, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.require_transport_identity, self.binary_wire_enabled, self.compact_envelope_enabled, self.rich_payload_enabled)
     def __eq__(self, other):
         if self.app_id != other.app_id:
             return False
@@ -5149,6 +5163,8 @@ class ProtocolConfig:
             return False
         if self.compact_envelope_enabled != other.compact_envelope_enabled:
             return False
+        if self.rich_payload_enabled != other.rich_payload_enabled:
+            return False
         return True
 
 class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
@@ -5177,6 +5193,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
             require_transport_identity=_UniffiFfiConverterBoolean.read(buf),
             binary_wire_enabled=_UniffiFfiConverterBoolean.read(buf),
             compact_envelope_enabled=_UniffiFfiConverterBoolean.read(buf),
+            rich_payload_enabled=_UniffiFfiConverterBoolean.read(buf),
         )
 
     @staticmethod
@@ -5203,6 +5220,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.check_lower(value.require_transport_identity)
         _UniffiFfiConverterBoolean.check_lower(value.binary_wire_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.compact_envelope_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.rich_payload_enabled)
 
     @staticmethod
     def write(value, buf):
@@ -5228,6 +5246,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.require_transport_identity, buf)
         _UniffiFfiConverterBoolean.write(value.binary_wire_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.compact_envelope_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.rich_payload_enabled, buf)
 
 @dataclass
 class TransportConfig:
@@ -6148,6 +6167,353 @@ class _UniffiFfiConverterTypeRoutingStats(_UniffiConverterRustBuffer):
 
 
 
+class MessagePriority(enum.Enum):
+    
+    LOW = 0
+    
+    MEDIUM = 1
+    
+    HIGH = 2
+    
+    CRITICAL = 3
+    
+
+
+class _UniffiFfiConverterTypeMessagePriority(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return MessagePriority.LOW
+        if variant == 2:
+            return MessagePriority.MEDIUM
+        if variant == 3:
+            return MessagePriority.HIGH
+        if variant == 4:
+            return MessagePriority.CRITICAL
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == MessagePriority.LOW:
+            return
+        if value == MessagePriority.MEDIUM:
+            return
+        if value == MessagePriority.HIGH:
+            return
+        if value == MessagePriority.CRITICAL:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == MessagePriority.LOW:
+            buf.write_i32(1)
+        if value == MessagePriority.MEDIUM:
+            buf.write_i32(2)
+        if value == MessagePriority.HIGH:
+            buf.write_i32(3)
+        if value == MessagePriority.CRITICAL:
+            buf.write_i32(4)
+
+
+
+class _UniffiFfiConverterOptionalTypeMessagePriority(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeMessagePriority.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeMessagePriority.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeMessagePriority.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+
+
+
+
+
+class ContentType(enum.Enum):
+    
+    TEXT = 0
+    
+    IMAGE = 1
+    
+    VIDEO = 2
+    
+    AUDIO = 3
+    
+    VOICE_NOTE = 4
+    
+    VIDEO_NOTE = 5
+    
+    FILE = 6
+    
+    FILE_CHUNK = 7
+    
+
+
+class _UniffiFfiConverterTypeContentType(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return ContentType.TEXT
+        if variant == 2:
+            return ContentType.IMAGE
+        if variant == 3:
+            return ContentType.VIDEO
+        if variant == 4:
+            return ContentType.AUDIO
+        if variant == 5:
+            return ContentType.VOICE_NOTE
+        if variant == 6:
+            return ContentType.VIDEO_NOTE
+        if variant == 7:
+            return ContentType.FILE
+        if variant == 8:
+            return ContentType.FILE_CHUNK
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == ContentType.TEXT:
+            return
+        if value == ContentType.IMAGE:
+            return
+        if value == ContentType.VIDEO:
+            return
+        if value == ContentType.AUDIO:
+            return
+        if value == ContentType.VOICE_NOTE:
+            return
+        if value == ContentType.VIDEO_NOTE:
+            return
+        if value == ContentType.FILE:
+            return
+        if value == ContentType.FILE_CHUNK:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == ContentType.TEXT:
+            buf.write_i32(1)
+        if value == ContentType.IMAGE:
+            buf.write_i32(2)
+        if value == ContentType.VIDEO:
+            buf.write_i32(3)
+        if value == ContentType.AUDIO:
+            buf.write_i32(4)
+        if value == ContentType.VOICE_NOTE:
+            buf.write_i32(5)
+        if value == ContentType.VIDEO_NOTE:
+            buf.write_i32(6)
+        if value == ContentType.FILE:
+            buf.write_i32(7)
+        if value == ContentType.FILE_CHUNK:
+            buf.write_i32(8)
+
+
+
+class _UniffiFfiConverterOptionalTypeContentType(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeContentType.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeContentType.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeContentType.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class _UniffiFfiConverterOptionalTypeReplyContext(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeReplyContext.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeReplyContext.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeReplyContext.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class _UniffiFfiConverterOptionalTypeMediaMetadata(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeMediaMetadata.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeMediaMetadata.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeMediaMetadata.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class _UniffiFfiConverterOptionalTypeForwardInfo(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeForwardInfo.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeForwardInfo.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeForwardInfo.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+@dataclass
+class SendMessageOptions:
+    def __init__(self, *, priority:typing.Optional[MessagePriority] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, content_type:typing.Optional[ContentType] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT):
+        if priority is _DEFAULT:
+            self.priority = None
+        else:
+            self.priority = priority
+        if reply_to_msg is _DEFAULT:
+            self.reply_to_msg = None
+        else:
+            self.reply_to_msg = reply_to_msg
+        if content_type is _DEFAULT:
+            self.content_type = None
+        else:
+            self.content_type = content_type
+        if reply_context is _DEFAULT:
+            self.reply_context = None
+        else:
+            self.reply_context = reply_context
+        if media_metadata is _DEFAULT:
+            self.media_metadata = None
+        else:
+            self.media_metadata = media_metadata
+        if forward_info is _DEFAULT:
+            self.forward_info = None
+        else:
+            self.forward_info = forward_info
+        
+        
+
+    
+    def __str__(self):
+        return "SendMessageOptions(priority={}, reply_to_msg={}, content_type={}, reply_context={}, media_metadata={}, forward_info={})".format(self.priority, self.reply_to_msg, self.content_type, self.reply_context, self.media_metadata, self.forward_info)
+    def __eq__(self, other):
+        if self.priority != other.priority:
+            return False
+        if self.reply_to_msg != other.reply_to_msg:
+            return False
+        if self.content_type != other.content_type:
+            return False
+        if self.reply_context != other.reply_context:
+            return False
+        if self.media_metadata != other.media_metadata:
+            return False
+        if self.forward_info != other.forward_info:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return SendMessageOptions(
+            priority=_UniffiFfiConverterOptionalTypeMessagePriority.read(buf),
+            reply_to_msg=_UniffiFfiConverterOptionalString.read(buf),
+            content_type=_UniffiFfiConverterOptionalTypeContentType.read(buf),
+            reply_context=_UniffiFfiConverterOptionalTypeReplyContext.read(buf),
+            media_metadata=_UniffiFfiConverterOptionalTypeMediaMetadata.read(buf),
+            forward_info=_UniffiFfiConverterOptionalTypeForwardInfo.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterOptionalTypeMessagePriority.check_lower(value.priority)
+        _UniffiFfiConverterOptionalString.check_lower(value.reply_to_msg)
+        _UniffiFfiConverterOptionalTypeContentType.check_lower(value.content_type)
+        _UniffiFfiConverterOptionalTypeReplyContext.check_lower(value.reply_context)
+        _UniffiFfiConverterOptionalTypeMediaMetadata.check_lower(value.media_metadata)
+        _UniffiFfiConverterOptionalTypeForwardInfo.check_lower(value.forward_info)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterOptionalTypeMessagePriority.write(value.priority, buf)
+        _UniffiFfiConverterOptionalString.write(value.reply_to_msg, buf)
+        _UniffiFfiConverterOptionalTypeContentType.write(value.content_type, buf)
+        _UniffiFfiConverterOptionalTypeReplyContext.write(value.reply_context, buf)
+        _UniffiFfiConverterOptionalTypeMediaMetadata.write(value.media_metadata, buf)
+        _UniffiFfiConverterOptionalTypeForwardInfo.write(value.forward_info, buf)
+
+
+
+
+
+
 class MlsVerbosity(enum.Enum):
     
     OFF = 0
@@ -6429,94 +6795,6 @@ class _UniffiFfiConverterTypeWifiDirectMessage(_UniffiConverterRustBuffer):
 
 
 
-class ContentType(enum.Enum):
-    
-    TEXT = 0
-    
-    IMAGE = 1
-    
-    VIDEO = 2
-    
-    AUDIO = 3
-    
-    VOICE_NOTE = 4
-    
-    VIDEO_NOTE = 5
-    
-    FILE = 6
-    
-    FILE_CHUNK = 7
-    
-
-
-class _UniffiFfiConverterTypeContentType(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return ContentType.TEXT
-        if variant == 2:
-            return ContentType.IMAGE
-        if variant == 3:
-            return ContentType.VIDEO
-        if variant == 4:
-            return ContentType.AUDIO
-        if variant == 5:
-            return ContentType.VOICE_NOTE
-        if variant == 6:
-            return ContentType.VIDEO_NOTE
-        if variant == 7:
-            return ContentType.FILE
-        if variant == 8:
-            return ContentType.FILE_CHUNK
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == ContentType.TEXT:
-            return
-        if value == ContentType.IMAGE:
-            return
-        if value == ContentType.VIDEO:
-            return
-        if value == ContentType.AUDIO:
-            return
-        if value == ContentType.VOICE_NOTE:
-            return
-        if value == ContentType.VIDEO_NOTE:
-            return
-        if value == ContentType.FILE:
-            return
-        if value == ContentType.FILE_CHUNK:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == ContentType.TEXT:
-            buf.write_i32(1)
-        if value == ContentType.IMAGE:
-            buf.write_i32(2)
-        if value == ContentType.VIDEO:
-            buf.write_i32(3)
-        if value == ContentType.AUDIO:
-            buf.write_i32(4)
-        if value == ContentType.VOICE_NOTE:
-            buf.write_i32(5)
-        if value == ContentType.VIDEO_NOTE:
-            buf.write_i32(6)
-        if value == ContentType.FILE:
-            buf.write_i32(7)
-        if value == ContentType.FILE_CHUNK:
-            buf.write_i32(8)
-
-
-
-
-
-
-
-
 class EstablishmentState(enum.Enum):
     
     NO_KEY_PACKAGE = 0
@@ -6564,62 +6842,6 @@ class _UniffiFfiConverterTypeEstablishmentState(_UniffiConverterRustBuffer):
         if value == EstablishmentState.SESSION_PENDING:
             buf.write_i32(3)
         if value == EstablishmentState.SESSION_CONFIRMED:
-            buf.write_i32(4)
-
-
-
-
-
-
-
-
-class MessagePriority(enum.Enum):
-    
-    LOW = 0
-    
-    MEDIUM = 1
-    
-    HIGH = 2
-    
-    CRITICAL = 3
-    
-
-
-class _UniffiFfiConverterTypeMessagePriority(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return MessagePriority.LOW
-        if variant == 2:
-            return MessagePriority.MEDIUM
-        if variant == 3:
-            return MessagePriority.HIGH
-        if variant == 4:
-            return MessagePriority.CRITICAL
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == MessagePriority.LOW:
-            return
-        if value == MessagePriority.MEDIUM:
-            return
-        if value == MessagePriority.HIGH:
-            return
-        if value == MessagePriority.CRITICAL:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == MessagePriority.LOW:
-            buf.write_i32(1)
-        if value == MessagePriority.MEDIUM:
-            buf.write_i32(2)
-        if value == MessagePriority.HIGH:
-            buf.write_i32(3)
-        if value == MessagePriority.CRITICAL:
             buf.write_i32(4)
 
 
@@ -7371,31 +7593,6 @@ class _UniffiFfiConverterOptionalTypeMlsWelcomeMessage(_UniffiConverterRustBuffe
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
-class _UniffiFfiConverterOptionalTypeMessagePriority(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeMessagePriority.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeMessagePriority.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeMessagePriority.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
 class _UniffiFfiConverterSequenceTypeRouteEntry(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -7932,31 +8129,6 @@ class _UniffiFfiConverterOptionalTypeReticulumMessage(_UniffiConverterRustBuffer
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
-class _UniffiFfiConverterOptionalTypeMediaMetadata(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeMediaMetadata.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeMediaMetadata.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeMediaMetadata.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
 
 
 
@@ -8473,6 +8645,8 @@ class OfflineProtocolProtocol(typing.Protocol):
     def send_media(self, recipient: str,file_data: typing.List[int],file_name: str,content_type: ContentType,media_metadata: typing.Optional[MediaMetadata]) -> str:
         raise NotImplementedError
     def send_message(self, recipient: str,content: str,priority: MessagePriority,reply_to_msg: typing.Optional[str]) -> str:
+        raise NotImplementedError
+    def send_message_rich(self, recipient: str,content: str,options: SendMessageOptions) -> str:
         raise NotImplementedError
     def send_presence_update(self, recipient: str,status: PresenceStatus) -> str:
         raise NotImplementedError
@@ -10380,6 +10554,27 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def send_message_rich(self, recipient: str,content: str,options: SendMessageOptions) -> str:
+        
+        _UniffiFfiConverterString.check_lower(recipient)
+        
+        _UniffiFfiConverterString.check_lower(content)
+        
+        _UniffiFfiConverterTypeSendMessageOptions.check_lower(options)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(recipient),
+            _UniffiFfiConverterString.lower(content),
+            _UniffiFfiConverterTypeSendMessageOptions.lower(options),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def send_presence_update(self, recipient: str,status: PresenceStatus) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
@@ -10916,11 +11111,11 @@ __all__ = [
     "RelayPriority",
     "RoutingPhase",
     "RoutingReasonCode",
+    "MessagePriority",
+    "ContentType",
     "MlsVerbosity",
     "TransportStatus",
-    "ContentType",
     "EstablishmentState",
-    "MessagePriority",
     "MlsStorageError",
     "PresenceStatus",
     "ProtocolError",
@@ -10967,6 +11162,7 @@ __all__ = [
     "RoutingScoreEntry",
     "RoutingDecision",
     "RoutingStats",
+    "SendMessageOptions",
     "TelemetryConfig",
     "TransportStateEvent",
     "WifiDirectMessage",
