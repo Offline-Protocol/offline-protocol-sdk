@@ -17,8 +17,8 @@ mod types;
 pub(crate) use decryption_queue::PendingDecryptionQueue;
 pub use decryption_queue::PendingQueueMetrics;
 pub(crate) use prefixes::*;
-pub use types::ProtocolState;
 pub(crate) use types::*;
+pub use types::{ProtocolState, SendMessageOptions};
 
 use crate::file_transfer::{FileTransferManager, OutboundTransferState};
 use crate::mls_observability::{MlsEventEmitter, MlsEventRateLimiter, NoopMlsEventEmitter};
@@ -112,6 +112,16 @@ pub struct OfflineProtocol {
     /// degrading to the JSON envelope in the meantime. Bounded like
     /// `key_package_sent_to` (it is keyed by the wire-claimed sender).
     peer_compact_envelope: std::collections::HashSet<String>,
+
+    /// Peers whose key package advertised the sealed rich payload
+    /// ([`RICH_PAYLOAD_V1`] in `rich_versions`), so the send path may seal
+    /// rich extras (reply context, rich media metadata, forward attribution)
+    /// inside the `__RICH_V1__` body. Same lifecycle as
+    /// `peer_compact_envelope` above: in-memory only, re-learned from the
+    /// next key-package exchange, bounded like `key_package_sent_to`.
+    /// Forgetting a peer only costs silently dropped rich extras — never a
+    /// cleartext fallback.
+    peer_rich_payload: std::collections::HashSet<String>,
 
     /// Peers already flagged with a `PlaintextSend` security warning, so the
     /// explicit-opt-out plaintext path warns once per peer instead of once
@@ -354,6 +364,7 @@ impl OfflineProtocol {
             known_peers: HashMap::new(),
             confirmed_sessions: std::collections::HashSet::new(),
             peer_compact_envelope: std::collections::HashSet::new(),
+            peer_rich_payload: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
             pending_queue: PendingDecryptionQueue::default(),

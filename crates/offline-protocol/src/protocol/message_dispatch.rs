@@ -7,7 +7,7 @@ use super::{
     InternalMessageResult, KeyPackagePayload, OfflineProtocol, PresencePayload, ReadReceiptPayload,
     ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload, MAX_KEY_PACKAGE_LIFETIME_MS,
     MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS,
-    MLS_ENVELOPE_COMPACT_V1,
+    MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
 use crate::events::{DecryptionFailureCode, Event};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
@@ -57,6 +57,27 @@ impl OfflineProtocol {
                 self.peer_compact_envelope.insert(sender.to_string());
             } else {
                 self.peer_compact_envelope.remove(sender);
+            }
+
+            // Record whether this peer parses the sealed rich payload, so the
+            // send path may seal rich extras for messages encrypted to them.
+            // Same shape as the compact-envelope capability above: gated by
+            // our own config so the kill switch stops both directions,
+            // removed when a fresh key package no longer advertises it (peer
+            // downgrade), and bounded like `key_package_sent_to`. Forgetting
+            // a peer only costs silently dropped rich extras — never a
+            // cleartext fallback.
+            if self.config.encryption.rich_payload_enabled
+                && payload.rich_versions.contains(&RICH_PAYLOAD_V1)
+            {
+                if !self.peer_rich_payload.contains(sender)
+                    && self.peer_rich_payload.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_rich_payload.clear();
+                }
+                self.peer_rich_payload.insert(sender.to_string());
+            } else {
+                self.peer_rich_payload.remove(sender);
             }
 
             // If the sender has reset their session (e.g. after unblocking us),

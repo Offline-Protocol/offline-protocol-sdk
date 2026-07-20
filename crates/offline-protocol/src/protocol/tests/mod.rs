@@ -1400,6 +1400,7 @@ fn test_internal_prefixes_are_correct() {
         internal_prefixes::SESSION_CONFIRM_ACK,
         "__MLS_CONFIRM_ACK__"
     );
+    assert_eq!(internal_prefixes::RICH_V1, "__RICH_V1__");
     assert_eq!(internal_prefixes::CONN_REQUEST, "__CONN_REQ__");
     assert_eq!(internal_prefixes::CONN_ACCEPT, "__CONN_ACC__");
     assert_eq!(internal_prefixes::CONN_REJECT, "__CONN_REJ__");
@@ -1430,6 +1431,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         session_reset: false,
         wire_versions,
         env_versions: Vec::new(),
+        rich_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -1511,6 +1513,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         session_reset: false,
         wire_versions: Vec::new(),
         env_versions,
+        rich_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -1667,6 +1670,270 @@ fn parse_encrypted_payload_reads_legacy_compact_and_wrapped_json_forms() {
     assert!(OfflineProtocol::parse_encrypted_payload(&base64_encode(&truncated)).is_none());
 }
 
+/// Helper: like [`feed_key_package`] but advertising `rich_versions`
+/// (sealed rich payload capability).
+#[cfg(test)]
+fn feed_key_package_with_rich(
+    protocol: &mut OfflineProtocol,
+    sender: &str,
+    rich_versions: Vec<u8>,
+) {
+    let payload = KeyPackagePayload {
+        user_id: sender.to_string(),
+        key_package_data: vec![1, 2, 3, 4],
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: false,
+        wire_versions: Vec::new(),
+        env_versions: Vec::new(),
+        rich_versions,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    );
+    let message = Message::new(
+        UserId::new(sender).unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+    protocol.process_internal_message(&message);
+}
+
+/// Fixture rich extras with every field populated, including media secrets.
+#[cfg(test)]
+fn sample_rich_extras() -> RichSendExtras {
+    let mut media = sample_media_metadata(42);
+    media.download_url = Some("https://cdn.example/blob/1".to_string());
+    media.encryption_key = Some("a2V5LWJ5dGVz".to_string());
+    media.iv = Some("aXYtYnl0ZXM=".to_string());
+    RichSendExtras {
+        reply_context: Some(offline_protocol_core::ReplyContext {
+            sender: UserId::new("carol").unwrap(),
+            text: "the quoted message".to_string(),
+            timestamp: None,
+            reply_media_label: None,
+            reply_content_type: Some("text".to_string()),
+        }),
+        media_metadata: Some(media),
+        forward_info: Some(offline_protocol_core::ForwardInfo {
+            original_sender: UserId::new("dave").unwrap(),
+            original_message_id: MessageId::new(),
+            original_timestamp: offline_protocol_core::Timestamp::now(),
+            forward_count: 1,
+        }),
+    }
+}
+
+#[test]
+fn rich_payload_negotiation_marks_capable_peer() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    // rich_payload_enabled defaults to true.
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    feed_key_package_with_rich(&mut protocol, "peer-rich", vec![RICH_PAYLOAD_V1]);
+
+    assert!(protocol.peer_rich_payload.contains("peer-rich"));
+    assert!(protocol.rich_seal_active("peer-rich"));
+}
+
+#[test]
+fn rich_payload_negotiation_ignores_legacy_peer() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Legacy peer omits rich_versions (empty) -> plain text only.
+    feed_key_package_with_rich(&mut protocol, "peer-legacy", Vec::new());
+
+    assert!(!protocol.peer_rich_payload.contains("peer-legacy"));
+    assert!(!protocol.rich_seal_active("peer-legacy"));
+}
+
+#[test]
+fn rich_payload_kill_switch_prevents_recording_and_sealing() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    config.encryption.rich_payload_enabled = false; // kill switch off
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Peer advertises the capability, but with the flag off we do not record it.
+    feed_key_package_with_rich(&mut protocol, "peer-rich", vec![RICH_PAYLOAD_V1]);
+    assert!(!protocol.peer_rich_payload.contains("peer-rich"));
+
+    // Defense in depth: even a (stale) recorded capability must not seal
+    // while the flag is off.
+    protocol.peer_rich_payload.insert("peer-rich".to_string());
+    assert!(!protocol.rich_seal_active("peer-rich"));
+}
+
+#[test]
+fn rich_payload_downgrade_removes_capability() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.auto_key_exchange = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    feed_key_package_with_rich(&mut protocol, "peer", vec![RICH_PAYLOAD_V1]);
+    assert!(protocol.peer_rich_payload.contains("peer"));
+
+    // A fresh key package without the capability (peer downgraded or flipped
+    // its own kill switch) must remove it.
+    feed_key_package_with_rich(&mut protocol, "peer", Vec::new());
+    assert!(!protocol.peer_rich_payload.contains("peer"));
+}
+
+#[test]
+fn seal_rich_payload_round_trips_through_apply_decrypted_content() {
+    let extras = sample_rich_extras();
+    let sealed = OfflineProtocol::seal_rich_payload("hello rich", &extras).unwrap();
+    assert!(sealed.starts_with(internal_prefixes::RICH_V1));
+
+    let mut message = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "cipher-placeholder",
+    );
+    // Relay-injected outer quote: must never survive into the restored fields.
+    message.reply_context = Some(offline_protocol_core::ReplyContext {
+        sender: UserId::new("mallory").unwrap(),
+        text: "injected quote".to_string(),
+        timestamp: None,
+        reply_media_label: None,
+        reply_content_type: None,
+    });
+    OfflineProtocol::apply_decrypted_content(&mut message, sealed);
+
+    assert_eq!(message.content, "hello rich");
+    let restored = message
+        .reply_context
+        .expect("sealed reply context restored");
+    assert_eq!(restored.sender.as_str(), "carol");
+    assert_eq!(restored.text, "the quoted message");
+    let media = message
+        .media_metadata
+        .expect("sealed media metadata restored");
+    assert_eq!(media.encryption_key.as_deref(), Some("a2V5LWJ5dGVz"));
+    assert_eq!(media.iv.as_deref(), Some("aXYtYnl0ZXM="));
+    assert_eq!(
+        media.download_url.as_deref(),
+        Some("https://cdn.example/blob/1")
+    );
+    let forward = message
+        .forwarded_from
+        .expect("sealed forward info restored");
+    assert_eq!(forward.original_sender.as_str(), "dave");
+    assert_eq!(
+        message.metadata.get("encrypted").map(String::as_str),
+        Some("true")
+    );
+}
+
+#[test]
+fn apply_decrypted_content_rich_body_is_authoritative_over_outer_fields() {
+    // Sealed body carrying ONLY a reply context: the relay-writable outer
+    // media/forward copies must be wiped, not trusted.
+    let extras = RichSendExtras {
+        reply_context: sample_rich_extras().reply_context,
+        media_metadata: None,
+        forward_info: None,
+    };
+    let sealed = OfflineProtocol::seal_rich_payload("bare rich", &extras).unwrap();
+
+    let mut message = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "cipher-placeholder",
+    );
+    message.media_metadata = Some(sample_media_metadata(7));
+    message.forwarded_from = Some(offline_protocol_core::ForwardInfo {
+        original_sender: UserId::new("mallory").unwrap(),
+        original_message_id: MessageId::new(),
+        original_timestamp: offline_protocol_core::Timestamp::now(),
+        forward_count: 3,
+    });
+    OfflineProtocol::apply_decrypted_content(&mut message, sealed);
+
+    assert_eq!(message.content, "bare rich");
+    assert!(message.reply_context.is_some());
+    assert!(
+        message.media_metadata.is_none(),
+        "outer media metadata must not survive a sealed rich message"
+    );
+    assert!(
+        message.forwarded_from.is_none(),
+        "outer forward info must not survive a sealed rich message"
+    );
+}
+
+#[test]
+fn apply_decrypted_content_rich_parse_failure_surfaces_raw_text() {
+    // Malformed JSON after the prefix -> raw text fallback, nothing restored.
+    let raw = format!("{}not-json", internal_prefixes::RICH_V1);
+    let mut message = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "cipher-placeholder",
+    );
+    OfflineProtocol::apply_decrypted_content(&mut message, raw.clone());
+    assert_eq!(message.content, raw);
+    assert!(message.reply_context.is_none());
+    assert_eq!(
+        message.metadata.get("encrypted").map(String::as_str),
+        Some("true")
+    );
+
+    // A hostile reply sender inside the sealed body fails UserId validation
+    // -> same fallback: the whole body surfaces as text, never a partial
+    // parse with an attacker-shaped identifier.
+    let hostile = format!(
+        "{}{}",
+        internal_prefixes::RICH_V1,
+        r#"{"text":"x","reply_context":{"sender":"evil/path","text":"q"}}"#
+    );
+    let mut message = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "cipher-placeholder",
+    );
+    OfflineProtocol::apply_decrypted_content(&mut message, hostile.clone());
+    assert_eq!(message.content, hostile);
+    assert!(message.reply_context.is_none());
+}
+
+#[test]
+fn send_message_rejects_rich_prefix_content() {
+    // `__RICH_V1__` joined INTERNAL_PREFIXES: user content can never
+    // impersonate a sealed rich body through the public send APIs.
+    let config = create_test_config();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.start().unwrap();
+
+    let result = protocol.send_message(
+        "bob",
+        format!("{}fake-body", internal_prefixes::RICH_V1),
+        None,
+        None::<String>,
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, crate::Error::InvalidArgument(_)),
+        "rich prefix injection must be rejected, got: {:?}",
+        err
+    );
+    assert!(err.to_string().contains("reserved internal prefix"));
+}
+
 #[test]
 fn test_process_internal_message_key_package() {
     let mut config = create_test_config();
@@ -1684,6 +1951,7 @@ fn test_process_internal_message_key_package() {
         session_reset: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
+        rich_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -3238,6 +3506,7 @@ fn test_pending_message_queue() {
         None,
         ContentType::default(),
         None,
+        None,
     );
     protocol.queue_pending_message(
         "bob",
@@ -3248,6 +3517,7 @@ fn test_pending_message_queue() {
         None,
         ContentType::default(),
         None,
+        None,
     );
     protocol.queue_pending_message(
         "alice",
@@ -3257,6 +3527,7 @@ fn test_pending_message_queue() {
         None,
         None,
         ContentType::default(),
+        None,
         None,
     );
 
@@ -6405,6 +6676,7 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
         None,
         ContentType::default(),
         None,
+        None,
     );
     assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
 
@@ -6457,6 +6729,7 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
         None,
         None,
         ContentType::default(),
+        None,
         None,
     );
 
@@ -7128,6 +7401,7 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
         None,
         ContentType::default(),
         None,
+        None,
     );
     bob.queue_pending_message(
         "alice",
@@ -7137,6 +7411,7 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
         None,
         None,
         ContentType::default(),
+        None,
         None,
     );
 
@@ -8368,6 +8643,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         session_reset: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
+        rich_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -8595,6 +8871,7 @@ fn test_key_package_remaining_lifetime_ms() {
         session_reset: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
+        rich_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -8676,6 +8953,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             session_reset: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
+            rich_versions: Vec::new(),
         };
         let content = format!(
             "{}{}",
@@ -8765,6 +9043,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         session_reset: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
+        rich_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -8817,6 +9096,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         session_reset: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
+        rich_versions: Vec::new(),
     };
     let content = format!(
         "{}{}",
@@ -8972,6 +9252,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             session_reset: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
+            rich_versions: Vec::new(),
         };
         let content = format!(
             "{}{}",
@@ -12068,6 +12349,7 @@ fn test_pending_forwarded_message_preserves_forward_count() {
         Some(forward_info),
         ContentType::default(),
         None,
+        None,
     );
 
     // Verify the stored forward_count is 1
@@ -15013,6 +15295,158 @@ fn compact_envelope_interop_legacy_recipient_and_ungated_parsing() {
     assert!(
         matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "compact anyway"),
         "flag-off receiver must still parse the compact envelope, got {result:?}"
+    );
+}
+
+#[test]
+fn rich_payload_end_to_end_with_negotiated_peer() {
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    // Alice learned bob's rich-payload capability from his key package.
+    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+
+    let extras = sample_rich_extras();
+    alice
+        .send_message_with(
+            "bob",
+            "hello rich",
+            SendMessageOptions {
+                reply_context: extras.reply_context.clone(),
+                media_metadata: extras.media_metadata.clone(),
+                forward_info: extras.forward_info.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("an __MLS_ENC__ message must reach the wire");
+
+    // The outer message must carry no rich cleartext anywhere.
+    assert!(enc.reply_context.is_none());
+    assert!(enc.media_metadata.is_none());
+    assert!(enc.forwarded_from.is_none());
+    let outer_json = serde_json::to_string(enc).unwrap();
+    assert!(!outer_json.contains("the quoted message"));
+    assert!(!outer_json.contains("a2V5LWJ5dGVz"));
+
+    // Bob decrypts to the sealed body; the shared restore seam repopulates
+    // the rich fields for both the live and delayed emission paths.
+    let result = bob.process_internal_message(enc);
+    let Some(InternalMessageResult::Decrypted(text)) = result else {
+        panic!("rich message must decrypt, got {result:?}");
+    };
+    assert!(text.starts_with(internal_prefixes::RICH_V1));
+    let mut delivered = enc.clone();
+    OfflineProtocol::apply_decrypted_content(&mut delivered, text);
+    assert_eq!(delivered.content, "hello rich");
+    assert_eq!(
+        delivered.reply_context.as_ref().map(|rc| rc.text.as_str()),
+        Some("the quoted message")
+    );
+    assert_eq!(
+        delivered
+            .media_metadata
+            .as_ref()
+            .and_then(|m| m.encryption_key.as_deref()),
+        Some("a2V5LWJ5dGVz")
+    );
+    assert_eq!(
+        delivered
+            .forwarded_from
+            .as_ref()
+            .map(|f| f.original_sender.as_str()),
+        Some("dave")
+    );
+}
+
+#[test]
+fn rich_payload_degrades_to_plain_text_for_legacy_recipient() {
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    // Bob never advertised rich_versions.
+
+    let extras = sample_rich_extras();
+    alice
+        .send_message_with(
+            "bob",
+            "hello plain",
+            SendMessageOptions {
+                reply_context: extras.reply_context.clone(),
+                media_metadata: extras.media_metadata.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("an __MLS_ENC__ message must reach the wire");
+
+    // Degrade rule: rich extras are dropped, never cleartext — nowhere on
+    // the outer frame.
+    assert!(enc.reply_context.is_none());
+    assert!(enc.media_metadata.is_none());
+    let outer_json = serde_json::to_string(enc).unwrap();
+    assert!(!outer_json.contains("the quoted message"));
+    assert!(!outer_json.contains("a2V5LWJ5dGVz"));
+
+    let result = bob.process_internal_message(enc);
+    assert!(
+        matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "hello plain"),
+        "legacy recipient must get plain text with rich extras dropped, got {result:?}"
+    );
+}
+
+#[test]
+fn rich_payload_flush_pending_seals_with_current_capability() {
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+
+    // Queue a rich message as if the session had not been ready at send
+    // time; the extras ride the pending queue in `PendingMessage::rich`.
+    alice.queue_pending_message(
+        "bob",
+        "queued rich",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::default(),
+        None,
+        Some(sample_rich_extras()),
+    );
+    alice.flush_pending_messages("bob").unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("flushed rich message must reach the wire");
+    let result = bob.process_internal_message(enc);
+    let Some(InternalMessageResult::Decrypted(text)) = result else {
+        panic!("flushed rich message must decrypt, got {result:?}");
+    };
+    assert!(
+        text.starts_with(internal_prefixes::RICH_V1),
+        "flush must re-make the seal decision against current capability"
+    );
+    let mut delivered = enc.clone();
+    OfflineProtocol::apply_decrypted_content(&mut delivered, text);
+    assert_eq!(delivered.content, "queued rich");
+    assert_eq!(
+        delivered.reply_context.as_ref().map(|rc| rc.text.as_str()),
+        Some("the quoted message")
     );
 }
 

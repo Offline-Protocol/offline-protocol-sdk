@@ -5,7 +5,7 @@ use crate::telemetry::{dispatch_record, scrub_event, TelemetryContext, Telemetry
 use crate::Error;
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{
-    ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority,
+    ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, ReplyContext,
 };
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
@@ -265,6 +265,23 @@ pub(crate) struct KeyPackagePayload {
     /// has). A performance optimization, never a security control.
     #[serde(default)]
     pub(crate) env_versions: Vec<u8>,
+
+    /// Sealed rich-payload versions the sender can parse (e.g. `[1]` for
+    /// [`RICH_PAYLOAD_V1`]). Absent on legacy nodes (`#[serde(default)]` →
+    /// empty → plain text only), so an old peer is never sent a
+    /// `__RICH_V1__` body it would surface as raw JSON text.
+    ///
+    /// End-to-end like `env_versions` (what the *recipient* parses inside
+    /// the decrypted MLS plaintext), not hop-local like `wire_versions`.
+    ///
+    /// Trust boundary: identical to the two fields above — a plaintext
+    /// envelope field, not signature-bound. Stripping it downgrades to plain
+    /// text with the rich extras dropped (harmless); forging it onto a
+    /// legacy peer makes us seal bodies that peer renders as JSON text (a
+    /// nuisance an attacker in that position could match by corrupting
+    /// delivery outright). A feature negotiation, never a security control.
+    #[serde(default)]
+    pub(crate) rich_versions: Vec<u8>,
 }
 
 /// Compact MLS envelope version advertised in
@@ -274,6 +291,80 @@ pub(crate) struct KeyPackagePayload {
 /// Receivers distinguish the two by the byte after the prefix — `{` opens the
 /// JSON envelope and never occurs in base64.
 pub(crate) const MLS_ENVELOPE_COMPACT_V1: u8 = 1;
+
+/// Sealed rich-payload version advertised in
+/// [`KeyPackagePayload::rich_versions`]: the decrypted MLS plaintext may be
+/// `__RICH_V1__` + JSON of [`RichPayloadV1`], carrying reply context, rich
+/// media metadata, and forward attribution inside the AEAD boundary instead
+/// of on the relay-visible outer message.
+pub(crate) const RICH_PAYLOAD_V1: u8 = 1;
+
+/// Rich fields accepted by the `send_message_with` surface. Only ever
+/// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
+/// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,
+/// never sent cleartext.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct RichSendExtras {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reply_context: Option<ReplyContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) media_metadata: Option<MediaMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forward_info: Option<ForwardInfo>,
+}
+
+impl RichSendExtras {
+    /// Whether any rich field is present (empty extras never seal).
+    pub(crate) fn is_any(&self) -> bool {
+        self.reply_context.is_some() || self.media_metadata.is_some() || self.forward_info.is_some()
+    }
+}
+
+/// Options for `OfflineProtocol::send_message_with`: priority and reply
+/// threading (as on `send_message`), plus the rich fields introduced with
+/// the sealed rich payload.
+///
+/// The rich fields (`reply_context`, `media_metadata`, `forward_info`) only
+/// ever travel inside the MLS-sealed `__RICH_V1__` body, and only toward
+/// recipients whose key package advertised `rich_versions` support. Toward
+/// anyone else they are silently dropped — never sent cleartext — so the
+/// message degrades to plain text with `reply_to_msg` threading intact.
+#[derive(Debug, Clone, Default)]
+pub struct SendMessageOptions {
+    /// Message priority (defaults to Medium).
+    pub priority: Option<MessagePriority>,
+    /// ID of the message this is replying to.
+    pub reply_to_msg: Option<String>,
+    /// Content type stamped on the outer message (defaults to Text). A
+    /// coarse rendering hint — the actual content stays MLS-sealed.
+    pub content_type: Option<ContentType>,
+    /// Quoted-reply context, delivered sealed-only.
+    pub reply_context: Option<ReplyContext>,
+    /// Rich media metadata (cloud attachments, stickers — including any
+    /// `encryption_key`/`iv` secrets), delivered sealed-only.
+    pub media_metadata: Option<MediaMetadata>,
+    /// Forward attribution, delivered sealed-only.
+    pub forward_info: Option<ForwardInfo>,
+    /// Send via this specific transport (bypassing DORS selection), like
+    /// `send_message_via_transport`.
+    pub via_transport: Option<TransportType>,
+}
+
+/// The sealed rich body: what `__RICH_V1__` + JSON carries inside the MLS
+/// plaintext. `text` is the user-visible content; the optional fields are
+/// restored onto the inbound message by `apply_decrypted_content` *after*
+/// its outer-field strip, making the sealed body the sole trusted carrier
+/// for rich data on encrypted messages.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct RichPayloadV1 {
+    pub(crate) text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reply_context: Option<ReplyContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) media_metadata: Option<MediaMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forward_info: Option<ForwardInfo>,
+}
 
 /// An outbound connection request awaiting a transport outcome (see
 /// `OfflineProtocol::pending_connection_requests`).
@@ -480,11 +571,6 @@ pub(crate) enum InternalMessageResult {
 }
 
 /// Pending message waiting for session establishment.
-///
-/// NOTE for the rich send surface: this struct does not yet carry
-/// `reply_context`. When a send API that accepts one lands, it must be
-/// threaded through here (like `forwarded_from`) or replies queued behind
-/// session establishment will silently lose their quote preview.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct PendingMessage {
     /// Original plaintext content.
@@ -504,6 +590,12 @@ pub(crate) struct PendingMessage {
     /// Media metadata (preserved for forwarded media messages).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) media_metadata: Option<MediaMetadata>,
+    /// Option-borne rich extras from the rich send surface. Kept separate
+    /// from the legacy `forwarded_from`/`media_metadata` fields above: those
+    /// flush as outer cleartext (shipped forward behavior), while these must
+    /// flush inside the sealed rich body or be dropped — never cleartext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rich: Option<RichSendExtras>,
     /// When the message was queued (for future TTL/expiry support).
     pub(crate) queued_at: DateTime<Utc>,
 }
