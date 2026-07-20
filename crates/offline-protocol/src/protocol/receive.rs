@@ -229,6 +229,10 @@ impl OfflineProtocol {
                             .reply_to_msg
                             .as_ref()
                             .map(|id| id.as_str().to_string()),
+                        reply_context: message
+                            .reply_context
+                            .as_ref()
+                            .map(|rc| Box::new(crate::events::ReplyContextEvent::from(rc))),
                         content_type: message.content_type.to_string(),
                         media_metadata: message.media_metadata.clone(),
                         forward_info,

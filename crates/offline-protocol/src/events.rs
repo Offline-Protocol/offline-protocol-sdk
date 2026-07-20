@@ -276,6 +276,36 @@ impl From<&offline_protocol_core::ForwardInfo> for ForwardInfoEvent {
     }
 }
 
+/// Quoted-reply context in events (mirrors `ReplyContext` from core).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplyContextEvent {
+    /// Sender of the message being replied to.
+    pub sender: String,
+    /// Text (or excerpt) of the message being replied to.
+    pub text: String,
+    /// Timestamp of the quoted message (wall-clock ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<i64>,
+    /// Short human-readable label for quoted media (e.g. a file name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_media_label: Option<String>,
+    /// Content type of the quoted message, as a display string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_content_type: Option<String>,
+}
+
+impl From<&offline_protocol_core::ReplyContext> for ReplyContextEvent {
+    fn from(rc: &offline_protocol_core::ReplyContext) -> Self {
+        Self {
+            sender: rc.sender.as_str().to_string(),
+            text: rc.text.clone(),
+            timestamp: rc.timestamp.map(|t| t.as_millis()),
+            reply_media_label: rc.reply_media_label.clone(),
+            reply_content_type: rc.reply_content_type.clone(),
+        }
+    }
+}
+
 /// Events that can occur in the protocol.
 ///
 /// Note: This type implements a custom Debug that redacts sensitive fields
@@ -329,6 +359,10 @@ pub enum Event {
         /// ID of the message this is replying to (optional).
         #[serde(skip_serializing_if = "Option::is_none")]
         reply_to_msg: Option<String>,
+        /// Quoted-reply context (present when this message quotes another).
+        /// Boxed to keep the `Event` enum's by-value size in check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_context: Option<Box<ReplyContextEvent>>,
         /// The type of content (text, image, video, etc.).
         #[serde(default)]
         content_type: String,
@@ -1969,6 +2003,7 @@ impl fmt::Debug for Event {
                 timestamp,
                 lamport_clock,
                 reply_to_msg: _,
+                reply_context,
                 content_type,
                 media_metadata: _,
                 forward_info,
@@ -1984,6 +2019,7 @@ impl fmt::Debug for Event {
                 .field("timestamp", timestamp)
                 .field("lamport_clock", lamport_clock)
                 .field("reply_to_msg", &"[REDACTED]")
+                .field("reply_context", &reply_context.is_some())
                 .field("content_type", content_type)
                 .field("forward_info", &forward_info.is_some())
                 .field("encrypted", encrypted)

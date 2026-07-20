@@ -232,6 +232,15 @@ mod tests {
             width: Some(800),
             height: Some(600),
             thumbnail_base64: Some("dGh1bWI=".to_string()),
+            media_id: None,
+            download_url: None,
+            thumbnail_url: None,
+            encryption_key: None,
+            iv: None,
+            ciphertext_hash: None,
+            sticker_provider: None,
+            sticker_remote_id: None,
+            sticker_kind: None,
         }
     }
 

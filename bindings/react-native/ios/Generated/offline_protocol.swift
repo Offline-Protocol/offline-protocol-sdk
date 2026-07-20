@@ -3058,6 +3058,66 @@ public func FfiConverterTypeFileProgress_lower(_ value: FileProgress) -> RustBuf
 }
 
 
+public struct ForwardInfo: Equatable, Hashable {
+    public var originalSender: String
+    public var originalMessageId: String
+    public var originalTimestamp: Int64
+    public var forwardCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(originalSender: String, originalMessageId: String, originalTimestamp: Int64, forwardCount: UInt32) {
+        self.originalSender = originalSender
+        self.originalMessageId = originalMessageId
+        self.originalTimestamp = originalTimestamp
+        self.forwardCount = forwardCount
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension ForwardInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeForwardInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ForwardInfo {
+        return
+            try ForwardInfo(
+                originalSender: FfiConverterString.read(from: &buf), 
+                originalMessageId: FfiConverterString.read(from: &buf), 
+                originalTimestamp: FfiConverterInt64.read(from: &buf), 
+                forwardCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ForwardInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.originalSender, into: &buf)
+        FfiConverterString.write(value.originalMessageId, into: &buf)
+        FfiConverterInt64.write(value.originalTimestamp, into: &buf)
+        FfiConverterUInt32.write(value.forwardCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeForwardInfo_lift(_ buf: RustBuffer) throws -> ForwardInfo {
+    return try FfiConverterTypeForwardInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeForwardInfo_lower(_ value: ForwardInfo) -> RustBuffer {
+    return FfiConverterTypeForwardInfo.lower(value)
+}
+
+
 public struct GradientRoutingConfig: Equatable, Hashable {
     public var maxRoutesPerDestination: UInt32
     public var routeTtlSecs: UInt64
@@ -3190,10 +3250,19 @@ public struct MediaMetadata: Equatable, Hashable {
     public var width: UInt32?
     public var height: UInt32?
     public var thumbnailBase64: String?
+    public var mediaId: String?
+    public var downloadUrl: String?
+    public var thumbnailUrl: String?
+    public var encryptionKey: String?
+    public var iv: String?
+    public var ciphertextHash: String?
+    public var stickerProvider: String?
+    public var stickerRemoteId: String?
+    public var stickerKind: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mimeType: String, fileName: String, fileSize: UInt64, durationMs: UInt64?, width: UInt32?, height: UInt32?, thumbnailBase64: String?) {
+    public init(mimeType: String, fileName: String, fileSize: UInt64, durationMs: UInt64?, width: UInt32?, height: UInt32?, thumbnailBase64: String?, mediaId: String? = nil, downloadUrl: String? = nil, thumbnailUrl: String? = nil, encryptionKey: String? = nil, iv: String? = nil, ciphertextHash: String? = nil, stickerProvider: String? = nil, stickerRemoteId: String? = nil, stickerKind: String? = nil) {
         self.mimeType = mimeType
         self.fileName = fileName
         self.fileSize = fileSize
@@ -3201,6 +3270,15 @@ public struct MediaMetadata: Equatable, Hashable {
         self.width = width
         self.height = height
         self.thumbnailBase64 = thumbnailBase64
+        self.mediaId = mediaId
+        self.downloadUrl = downloadUrl
+        self.thumbnailUrl = thumbnailUrl
+        self.encryptionKey = encryptionKey
+        self.iv = iv
+        self.ciphertextHash = ciphertextHash
+        self.stickerProvider = stickerProvider
+        self.stickerRemoteId = stickerRemoteId
+        self.stickerKind = stickerKind
     }
 
     
@@ -3223,7 +3301,16 @@ public struct FfiConverterTypeMediaMetadata: FfiConverterRustBuffer {
                 durationMs: FfiConverterOptionUInt64.read(from: &buf), 
                 width: FfiConverterOptionUInt32.read(from: &buf), 
                 height: FfiConverterOptionUInt32.read(from: &buf), 
-                thumbnailBase64: FfiConverterOptionString.read(from: &buf)
+                thumbnailBase64: FfiConverterOptionString.read(from: &buf), 
+                mediaId: FfiConverterOptionString.read(from: &buf), 
+                downloadUrl: FfiConverterOptionString.read(from: &buf), 
+                thumbnailUrl: FfiConverterOptionString.read(from: &buf), 
+                encryptionKey: FfiConverterOptionString.read(from: &buf), 
+                iv: FfiConverterOptionString.read(from: &buf), 
+                ciphertextHash: FfiConverterOptionString.read(from: &buf), 
+                stickerProvider: FfiConverterOptionString.read(from: &buf), 
+                stickerRemoteId: FfiConverterOptionString.read(from: &buf), 
+                stickerKind: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -3235,6 +3322,15 @@ public struct FfiConverterTypeMediaMetadata: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.width, into: &buf)
         FfiConverterOptionUInt32.write(value.height, into: &buf)
         FfiConverterOptionString.write(value.thumbnailBase64, into: &buf)
+        FfiConverterOptionString.write(value.mediaId, into: &buf)
+        FfiConverterOptionString.write(value.downloadUrl, into: &buf)
+        FfiConverterOptionString.write(value.thumbnailUrl, into: &buf)
+        FfiConverterOptionString.write(value.encryptionKey, into: &buf)
+        FfiConverterOptionString.write(value.iv, into: &buf)
+        FfiConverterOptionString.write(value.ciphertextHash, into: &buf)
+        FfiConverterOptionString.write(value.stickerProvider, into: &buf)
+        FfiConverterOptionString.write(value.stickerRemoteId, into: &buf)
+        FfiConverterOptionString.write(value.stickerKind, into: &buf)
     }
 }
 
@@ -4439,6 +4535,70 @@ public func FfiConverterTypeReliabilityConfig_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeReliabilityConfig_lower(_ value: ReliabilityConfig) -> RustBuffer {
     return FfiConverterTypeReliabilityConfig.lower(value)
+}
+
+
+public struct ReplyContext: Equatable, Hashable {
+    public var sender: String
+    public var text: String
+    public var timestamp: Int64?
+    public var replyMediaLabel: String?
+    public var replyContentType: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sender: String, text: String, timestamp: Int64? = nil, replyMediaLabel: String? = nil, replyContentType: String? = nil) {
+        self.sender = sender
+        self.text = text
+        self.timestamp = timestamp
+        self.replyMediaLabel = replyMediaLabel
+        self.replyContentType = replyContentType
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension ReplyContext: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReplyContext: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReplyContext {
+        return
+            try ReplyContext(
+                sender: FfiConverterString.read(from: &buf), 
+                text: FfiConverterString.read(from: &buf), 
+                timestamp: FfiConverterOptionInt64.read(from: &buf), 
+                replyMediaLabel: FfiConverterOptionString.read(from: &buf), 
+                replyContentType: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReplyContext, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sender, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterOptionInt64.write(value.timestamp, into: &buf)
+        FfiConverterOptionString.write(value.replyMediaLabel, into: &buf)
+        FfiConverterOptionString.write(value.replyContentType, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReplyContext_lift(_ buf: RustBuffer) throws -> ReplyContext {
+    return try FfiConverterTypeReplyContext.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReplyContext_lower(_ value: ReplyContext) -> RustBuffer {
+    return FfiConverterTypeReplyContext.lower(value)
 }
 
 

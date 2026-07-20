@@ -378,6 +378,54 @@ fn test_receive_message() {
 }
 
 #[test]
+fn test_receive_message_surfaces_reply_context_on_event() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let captured = Arc::new(Mutex::new(None));
+    let captured_clone = captured.clone();
+    protocol.on_event(move |event| {
+        if let Event::MessageReceived { reply_context, .. } = event {
+            *captured_clone.lock().unwrap() = Some(reply_context.clone());
+        }
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+
+    let message = Message::builder(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content("see quoted")
+    .reply_context(offline_protocol_core::ReplyContext {
+        sender: UserId::new("carol").unwrap(),
+        text: "the original".to_string(),
+        timestamp: None,
+        reply_media_label: None,
+        reply_content_type: Some("text".to_string()),
+    })
+    .build();
+    mock_transport.queue_message(message);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    assert!(protocol.receive_message().is_some());
+    let rc = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .flatten()
+        .expect("reply_context surfaced on MessageReceived");
+    assert_eq!(rc.sender, "carol");
+    assert_eq!(rc.text, "the original");
+    assert_eq!(rc.reply_content_type.as_deref(), Some("text"));
+}
+
+#[test]
 fn test_event_handler() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
@@ -14689,6 +14737,15 @@ fn sample_media_metadata(file_size: u64) -> offline_protocol_core::MediaMetadata
         width: Some(10),
         height: Some(10),
         thumbnail_base64: Some("c2VjcmV0LXRodW1i".to_string()),
+        media_id: None,
+        download_url: None,
+        thumbnail_url: None,
+        encryption_key: None,
+        iv: None,
+        ciphertext_hash: None,
+        sticker_provider: None,
+        sticker_remote_id: None,
+        sticker_kind: None,
     }
 }
 

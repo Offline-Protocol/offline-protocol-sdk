@@ -142,6 +142,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             sender,
             recipient,
             forward_info,
+            reply_context,
             message_id: _,
             content: _,
             hop_count: _,
@@ -157,6 +158,11 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             hash_string(recipient, scrubber);
             if let Some(fi) = forward_info {
                 hash_string(&mut fi.original_sender, scrubber);
+            }
+            // The quoted sender is an identifier and gets hashed; the quoted
+            // text is content and stays raw, like `content` itself.
+            if let Some(rc) = reply_context {
+                hash_string(&mut rc.sender, scrubber);
             }
         }
         Event::MessageDelivered {
@@ -641,7 +647,8 @@ mod tests {
     use super::*;
     use crate::events::{
         DecryptionFailureCode, DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode,
-        ForwardInfoEvent, GroupInfoMember, PresenceStatus, UserGroupSummary, WelcomeReasonCode,
+        ForwardInfoEvent, GroupInfoMember, PresenceStatus, ReplyContextEvent, UserGroupSummary,
+        WelcomeReasonCode,
     };
     use std::collections::HashMap;
 
@@ -696,6 +703,13 @@ mod tests {
             timestamp: 0,
             lamport_clock: 0,
             reply_to_msg: None,
+            reply_context: Some(Box::new(ReplyContextEvent {
+                sender: "dave".into(),
+                text: "quoted text".into(),
+                timestamp: None,
+                reply_media_label: None,
+                reply_content_type: None,
+            })),
             content_type: "text".into(),
             media_metadata: None,
             forward_info: Some(ForwardInfoEvent {
@@ -714,6 +728,7 @@ mod tests {
                 recipient,
                 content,
                 forward_info,
+                reply_context,
                 ..
             } => {
                 assert_eq!(message_id, "msg-123", "message_id must stay raw");
@@ -726,6 +741,9 @@ mod tests {
                     fi.original_message_id, "orig-456",
                     "original_message_id must stay raw",
                 );
+                let rc = reply_context.expect("reply_context preserved");
+                assert_eq!(rc.sender, hashed("dave"));
+                assert_eq!(rc.text, "quoted text", "quoted text must stay raw");
             }
             _ => panic!("unexpected variant"),
         }

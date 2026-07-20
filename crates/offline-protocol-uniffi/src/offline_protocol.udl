@@ -201,7 +201,9 @@ enum ContentType {
     "FileChunk",
 };
 
-// Media metadata for attachments
+// Media metadata for attachments.
+// The defaulted fields keep hand-written constructors source-compatible:
+// uniffi renders them as defaulted constructor parameters.
 dictionary MediaMetadata {
     string mime_type;
     string file_name;
@@ -210,6 +212,34 @@ dictionary MediaMetadata {
     u32? width;
     u32? height;
     string? thumbnail_base64;
+    string? media_id = null;
+    string? download_url = null;
+    string? thumbnail_url = null;
+    string? encryption_key = null;
+    string? iv = null;
+    string? ciphertext_hash = null;
+    string? sticker_provider = null;
+    string? sticker_remote_id = null;
+    string? sticker_kind = null;
+};
+
+// Quoted-reply context: an unverified display-level hint copied by the
+// sending client (see core ReplyContext). Consumed by the rich send surface.
+dictionary ReplyContext {
+    string sender;
+    string text;
+    i64? timestamp = null;
+    string? reply_media_label = null;
+    string? reply_content_type = null;
+};
+
+// Forwarding attribution: an unverified display-level hint (see core
+// ForwardInfo). Consumed by the rich send surface.
+dictionary ForwardInfo {
+    string original_sender;
+    string original_message_id;
+    i64 original_timestamp;
+    u32 forward_count;
 };
 
 // File transfer progress information

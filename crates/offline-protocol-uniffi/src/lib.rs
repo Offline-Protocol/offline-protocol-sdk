@@ -1312,6 +1312,15 @@ pub struct MediaMetadata {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub thumbnail_base64: Option<String>,
+    pub media_id: Option<String>,
+    pub download_url: Option<String>,
+    pub thumbnail_url: Option<String>,
+    pub encryption_key: Option<String>,
+    pub iv: Option<String>,
+    pub ciphertext_hash: Option<String>,
+    pub sticker_provider: Option<String>,
+    pub sticker_remote_id: Option<String>,
+    pub sticker_kind: Option<String>,
 }
 
 impl From<MediaMetadata> for CoreMediaMetadata {
@@ -1324,8 +1333,39 @@ impl From<MediaMetadata> for CoreMediaMetadata {
             width: m.width,
             height: m.height,
             thumbnail_base64: m.thumbnail_base64,
+            media_id: m.media_id,
+            download_url: m.download_url,
+            thumbnail_url: m.thumbnail_url,
+            encryption_key: m.encryption_key,
+            iv: m.iv,
+            ciphertext_hash: m.ciphertext_hash,
+            sticker_provider: m.sticker_provider,
+            sticker_remote_id: m.sticker_remote_id,
+            sticker_kind: m.sticker_kind,
         }
     }
+}
+
+/// Quoted-reply context: an unverified display-level hint mirroring the core
+/// `ReplyContext`. Conversions to the validated core type land with the rich
+/// send surface that consumes them.
+#[derive(Debug, Clone)]
+pub struct ReplyContext {
+    pub sender: String,
+    pub text: String,
+    pub timestamp: Option<i64>,
+    pub reply_media_label: Option<String>,
+    pub reply_content_type: Option<String>,
+}
+
+/// Forwarding attribution: an unverified display-level hint mirroring the
+/// core `ForwardInfo`.
+#[derive(Debug, Clone)]
+pub struct ForwardInfo {
+    pub original_sender: String,
+    pub original_message_id: String,
+    pub original_timestamp: i64,
+    pub forward_count: u32,
 }
 
 /// File transfer progress

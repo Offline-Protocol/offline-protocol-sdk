@@ -200,6 +200,33 @@ export interface MediaMetadata {
   height?: number;
   /** Small base64-encoded thumbnail for preview (< 2 KB) */
   thumbnailBase64?: string;
+  /**
+   * Stable media identifier assigned by the application.
+   *
+   * Note: this and the fields below are surfaced on received messages;
+   * sending them end-to-end requires the rich send surface (v0.16.0) —
+   * `sendMedia` ignores them until then.
+   */
+  mediaId?: string;
+  /** URL to fetch the full media from (cloud-stored media). */
+  downloadUrl?: string;
+  /** URL to fetch a thumbnail from (cloud-stored media). */
+  thumbnailUrl?: string;
+  /**
+   * Content-encryption key for cloud-stored media (base64). Secret
+   * material: only ever carried inside end-to-end-encrypted payloads.
+   */
+  encryptionKey?: string;
+  /** Initialization vector for the cloud-media content encryption (base64). */
+  iv?: string;
+  /** Integrity hash of the encrypted cloud-media blob (base64). */
+  ciphertextHash?: string;
+  /** Sticker pack provider (sticker messages). */
+  stickerProvider?: string;
+  /** Provider-scoped sticker identifier (sticker messages). */
+  stickerRemoteId?: string;
+  /** Sticker rendering kind (e.g. "static", "animated", "lottie"). */
+  stickerKind?: string;
 }
 
 /**
@@ -397,6 +424,27 @@ export interface ForwardInfo {
 }
 
 /**
+ * Quoted-reply context for rendering a reply preview without a local copy
+ * of the original message.
+ *
+ * **Trust model:** This is a display-level hint copied by the sending
+ * client, not a cryptographic proof. UI layers should not rely on it for
+ * access-control or security decisions.
+ */
+export interface ReplyContext {
+  /** Sender of the message being replied to. */
+  sender: string;
+  /** Text (or excerpt) of the message being replied to. */
+  text: string;
+  /** Timestamp of the quoted message (wall-clock ms). */
+  timestamp?: number;
+  /** Short human-readable label for quoted media (e.g. a file name). */
+  reply_media_label?: string;
+  /** Content type of the quoted message (e.g. "image"). */
+  reply_content_type?: string;
+}
+
+/**
  * Parameters for forwarding a message to a new recipient
  */
 export interface ForwardMessageParams {
@@ -560,6 +608,10 @@ export interface MessageReceivedEvent extends BaseEvent {
    * landed; optional here for compatibility with older SDK cores.
    */
   encrypted?: boolean;
+  /** ID of the message this is replying to (optional). */
+  reply_to_msg?: string;
+  /** Quoted-reply context (present when this message quotes another). */
+  reply_context?: ReplyContext;
   /** The type of content (text, image, video, voice_note, etc.). */
   content_type?: string;
   /** Media metadata (present for non-text content). */
@@ -571,6 +623,15 @@ export interface MessageReceivedEvent extends BaseEvent {
     width?: number;
     height?: number;
     thumbnail_base64?: string;
+    media_id?: string;
+    download_url?: string;
+    thumbnail_url?: string;
+    encryption_key?: string;
+    iv?: string;
+    ciphertext_hash?: string;
+    sticker_provider?: string;
+    sticker_remote_id?: string;
+    sticker_kind?: string;
   };
   /** Forwarding attribution (present when this is a forwarded message). */
   forward_info?: ForwardInfo;
@@ -691,6 +752,15 @@ export interface FileReceivedEvent extends BaseEvent {
     width?: number;
     height?: number;
     thumbnail_base64?: string;
+    media_id?: string;
+    download_url?: string;
+    thumbnail_url?: string;
+    encryption_key?: string;
+    iv?: string;
+    ciphertext_hash?: string;
+    sticker_provider?: string;
+    sticker_remote_id?: string;
+    sticker_kind?: string;
   };
   /** Base64-encoded reassembled file data. */
   file_data: string;
