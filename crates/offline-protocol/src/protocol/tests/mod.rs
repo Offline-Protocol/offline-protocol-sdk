@@ -15509,6 +15509,53 @@ fn rich_payload_flush_pending_seals_with_current_capability() {
 }
 
 #[test]
+fn rich_payload_flush_pending_drops_extras_for_legacy_recipient() {
+    // The negative half of the flush-time re-decision: extras queued toward
+    // a recipient who never advertised rich_versions must be DROPPED at
+    // flush — bare text inside the ciphertext, nothing rich on the outer
+    // frame. This is the "sealed or dropped, never cleartext" invariant at
+    // its most fragile seam.
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    // Bob never fed alice a rich-capable key package.
+
+    alice.queue_pending_message(
+        "bob",
+        "queued rich",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::default(),
+        None,
+        Some(sample_rich_extras()),
+    );
+    alice.flush_pending_messages("bob").unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("flushed message must reach the wire");
+
+    // Nothing rich anywhere on the outer frame.
+    assert!(enc.reply_context.is_none());
+    assert!(enc.media_metadata.is_none());
+    assert!(enc.forwarded_from.is_none());
+    let outer_json = serde_json::to_string(enc).unwrap();
+    assert!(!outer_json.contains("the quoted message"));
+    assert!(!outer_json.contains("a2V5LWJ5dGVz"));
+
+    // And the plaintext is bare text, not a sealed rich body.
+    let result = bob.process_internal_message(enc);
+    assert!(
+        matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "queued rich"),
+        "flush toward a legacy recipient must drop extras to bare text, got {result:?}"
+    );
+}
+
+#[test]
 fn flush_pending_preserves_content_type_without_rich_extras() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
     let (mut bob, _bob_handle) = media_test_protocol("bob");
