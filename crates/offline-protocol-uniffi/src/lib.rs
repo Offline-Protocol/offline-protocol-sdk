@@ -14,13 +14,15 @@ use offline_protocol::{
     OverflowPolicy as CoreOverflowPolicy, PendingQueueConfig as CorePendingQueueConfig,
     PresenceStatus as CorePresenceStatus, ProtocolConfig as CoreConfig,
     RoutingDecision as CoreRoutingDecision, RoutingPhase as CoreRoutingPhase,
-    RoutingReasonCode as CoreRoutingReasonCode, TelemetryConfig as CoreTelemetryConfig,
-    TelemetryRecord as CoreTelemetryRecord, TelemetrySink as CoreTelemetrySink,
-    TransportStateEvent as CoreTransportStateEvent,
+    RoutingReasonCode as CoreRoutingReasonCode, SendMessageOptions as CoreSendMessageOptions,
+    TelemetryConfig as CoreTelemetryConfig, TelemetryRecord as CoreTelemetryRecord,
+    TelemetrySink as CoreTelemetrySink, TransportStateEvent as CoreTransportStateEvent,
 };
 use offline_protocol_core::{
-    ContentType as CoreContentType, MediaMetadata as CoreMediaMetadata,
-    MessagePriority as CorePriority,
+    ContentType as CoreContentType, ForwardInfo as CoreForwardInfo,
+    MediaMetadata as CoreMediaMetadata, MessageId as CoreMessageId,
+    MessagePriority as CorePriority, ReplyContext as CoreReplyContext, Timestamp as CoreTimestamp,
+    UserId as CoreUserId,
 };
 use offline_protocol_mls::{
     EncryptedMessage as CoreEncryptedMessage, GroupId as CoreGroupId, GroupInfo as CoreGroupInfo,
@@ -1347,8 +1349,8 @@ impl From<MediaMetadata> for CoreMediaMetadata {
 }
 
 /// Quoted-reply context: an unverified display-level hint mirroring the core
-/// `ReplyContext`. Conversions to the validated core type land with the rich
-/// send surface that consumes them.
+/// `ReplyContext`. Converted to the validated core type by
+/// `send_message_rich` (an invalid `sender` fails the whole call).
 #[derive(Debug, Clone)]
 pub struct ReplyContext {
     pub sender: String,
@@ -1356,6 +1358,22 @@ pub struct ReplyContext {
     pub timestamp: Option<i64>,
     pub reply_media_label: Option<String>,
     pub reply_content_type: Option<String>,
+}
+
+impl TryFrom<ReplyContext> for CoreReplyContext {
+    type Error = ProtocolError;
+
+    fn try_from(rc: ReplyContext) -> Result<Self, Self::Error> {
+        Ok(CoreReplyContext {
+            sender: CoreUserId::new(&rc.sender).map_err(|e| {
+                ProtocolError::InvalidConfiguration(format!("Invalid reply_context.sender: {}", e))
+            })?,
+            text: rc.text,
+            timestamp: rc.timestamp.map(CoreTimestamp::from_millis),
+            reply_media_label: rc.reply_media_label,
+            reply_content_type: rc.reply_content_type,
+        })
+    }
 }
 
 /// Forwarding attribution: an unverified display-level hint mirroring the
@@ -1366,6 +1384,42 @@ pub struct ForwardInfo {
     pub original_message_id: String,
     pub original_timestamp: i64,
     pub forward_count: u32,
+}
+
+impl TryFrom<ForwardInfo> for CoreForwardInfo {
+    type Error = ProtocolError;
+
+    fn try_from(fi: ForwardInfo) -> Result<Self, Self::Error> {
+        Ok(CoreForwardInfo {
+            original_sender: CoreUserId::new(&fi.original_sender).map_err(|e| {
+                ProtocolError::InvalidConfiguration(format!(
+                    "Invalid forward_info.original_sender: {}",
+                    e
+                ))
+            })?,
+            original_message_id: CoreMessageId::from_str(&fi.original_message_id).map_err(|e| {
+                ProtocolError::InvalidConfiguration(format!(
+                    "Invalid forward_info.original_message_id: {}",
+                    e
+                ))
+            })?,
+            original_timestamp: CoreTimestamp::from_millis(fi.original_timestamp),
+            forward_count: fi.forward_count,
+        })
+    }
+}
+
+/// Options for `send_message_rich`, mirroring the core `SendMessageOptions`
+/// (minus `via_transport`, which the wrapper derives from the session's
+/// forced-transport setting).
+#[derive(Debug, Clone)]
+pub struct SendMessageOptions {
+    pub priority: Option<MessagePriority>,
+    pub reply_to_msg: Option<String>,
+    pub content_type: Option<ContentType>,
+    pub reply_context: Option<ReplyContext>,
+    pub media_metadata: Option<MediaMetadata>,
+    pub forward_info: Option<ForwardInfo>,
 }
 
 /// File transfer progress
@@ -1752,6 +1806,10 @@ pub struct ProtocolConfig {
     /// dictionary and `EncryptionConfig::compact_envelope_enabled` for
     /// semantics.
     pub compact_envelope_enabled: bool,
+    /// Kill switch for the sealed rich payload (default on). See the UDL
+    /// dictionary and `EncryptionConfig::rich_payload_enabled` for
+    /// semantics.
+    pub rich_payload_enabled: bool,
 }
 
 /// Extended protocol configuration with all options
@@ -1777,6 +1835,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.transport.nostr_enabled = config.nostr_enabled;
         core_config.transport.binary_wire_enabled = config.binary_wire_enabled;
         core_config.encryption.compact_envelope_enabled = config.compact_envelope_enabled;
+        core_config.encryption.rich_payload_enabled = config.rich_payload_enabled;
         core_config.dors.prefer_online = config.prefer_online;
         core_config.initial_ttl = config.initial_ttl;
         core_config.encryption.enabled = config.encryption_enabled;
@@ -2619,6 +2678,55 @@ impl OfflineProtocol {
                 .map_err(map_send_error)?
         };
 
+        Ok(message_id.as_str())
+    }
+
+    /// Rich send surface: like `send_message`, but accepting
+    /// `SendMessageOptions`. Rich fields are sealed inside the MLS
+    /// ciphertext for capable recipients and silently dropped otherwise —
+    /// never sent cleartext. Honors a forced transport like `send_message`.
+    pub fn send_message_rich(
+        &self,
+        recipient: String,
+        content: String,
+        options: SendMessageOptions,
+    ) -> Result<String, ProtocolError> {
+        // Validate the display-hint dictionaries into core types before
+        // taking the protocol lock; a hostile identifier fails the call.
+        let reply_context = options
+            .reply_context
+            .map(CoreReplyContext::try_from)
+            .transpose()?;
+        let forward_info = options
+            .forward_info
+            .map(CoreForwardInfo::try_from)
+            .transpose()?;
+
+        let mut protocol = self.lock_inner()?;
+
+        // Check if a transport is forced (bypasses DORS), same as send_message.
+        let forced = *self.read_forced_transport()?;
+        let via_transport = forced.map(|forced_type| match forced_type {
+            TransportType::Internet => CoreTransportType::Internet,
+            TransportType::Ble => CoreTransportType::BLE,
+            TransportType::WiFiDirect => CoreTransportType::WiFiDirect,
+            TransportType::Reticulum => CoreTransportType::Reticulum,
+            TransportType::Nostr => CoreTransportType::Nostr,
+        });
+
+        let core_options = CoreSendMessageOptions {
+            priority: options.priority.map(|p| p.into()),
+            reply_to_msg: options.reply_to_msg,
+            content_type: options.content_type.map(|ct| ct.into()),
+            reply_context,
+            media_metadata: options.media_metadata.map(CoreMediaMetadata::from),
+            forward_info,
+            via_transport,
+        };
+
+        let message_id = protocol
+            .send_message_with(&recipient, &content, core_options)
+            .map_err(map_send_error)?;
         Ok(message_id.as_str())
     }
 
@@ -5395,6 +5503,7 @@ mod tests {
         ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: true,
@@ -5422,6 +5531,7 @@ mod tests {
         ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: true,
@@ -5757,6 +5867,7 @@ mod tests {
         ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: false,
@@ -6077,6 +6188,7 @@ mod tests {
         let sender_config = ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "sender-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6103,6 +6215,7 @@ mod tests {
         let receiver_config = ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6130,6 +6243,7 @@ mod tests {
         let sender_config = ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "sender-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6156,6 +6270,7 @@ mod tests {
         let receiver_config = ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6190,6 +6305,7 @@ mod tests {
         let config = ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             reticulum_enabled: false,
             ble_enabled: true,
             ..create_reticulum_config()
@@ -6240,6 +6356,7 @@ mod tests {
         let sender = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: sender_id.to_string(),
             ..create_test_config()
         })
@@ -6325,6 +6442,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6352,6 +6470,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6378,6 +6497,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6408,6 +6528,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6453,6 +6574,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6483,6 +6605,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6561,6 +6684,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_reticulum_config()
         })
@@ -6585,6 +6709,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             nostr_enabled: true,
             ..create_test_config()
@@ -6640,6 +6765,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6671,6 +6797,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6720,6 +6847,7 @@ mod tests {
         let owner = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "owner-user".to_string(),
             ..create_test_config()
         })
@@ -6734,6 +6862,7 @@ mod tests {
         let peer = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
             user_id: "peer-user".to_string(),
             ..create_test_config()
         })

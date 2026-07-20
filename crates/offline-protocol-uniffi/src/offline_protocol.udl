@@ -242,6 +242,21 @@ dictionary ForwardInfo {
     u32 forward_count;
 };
 
+// Options for send_message_rich. The rich fields (reply_context,
+// media_metadata, forward_info) only ever travel inside the MLS-sealed
+// __RICH_V1__ body, and only toward recipients whose key package advertised
+// rich_versions support; toward anyone else they are silently dropped —
+// never sent cleartext. All fields defaulted so callers can pass only what
+// they need.
+dictionary SendMessageOptions {
+    MessagePriority? priority = null;
+    string? reply_to_msg = null;
+    ContentType? content_type = null;
+    ReplyContext? reply_context = null;
+    MediaMetadata? media_metadata = null;
+    ForwardInfo? forward_info = null;
+};
+
 // File transfer progress information
 dictionary FileProgress {
     string file_id;
@@ -439,6 +454,14 @@ dictionary ProtocolConfig {
     // both directions fall back to the JSON envelope. Defaulted so existing
     // callers keep compiling.
     boolean compact_envelope_enabled = true;
+    // Kill switch for the sealed rich payload (default on): quoted-reply
+    // context, rich media metadata, and forward attribution sealed inside
+    // the MLS ciphertext. Negotiated per-recipient via the key package
+    // (rich_versions); parsing of inbound sealed bodies is always on, and
+    // disabling stops advertising and sealing so rich extras degrade to
+    // being dropped — never sent cleartext. Defaulted so existing callers
+    // keep compiling.
+    boolean rich_payload_enabled = true;
 };
 
 // Extended protocol configuration with all options
@@ -771,6 +794,12 @@ interface OfflineProtocol {
     // Messaging
     [Throws=ProtocolError]
     string send_message(string recipient, string content, MessagePriority priority, string? reply_to_msg);
+
+    // Rich send surface: like send_message, but accepting SendMessageOptions
+    // (reply context, rich media metadata, forward attribution — sealed
+    // inside the MLS ciphertext for capable recipients, dropped otherwise).
+    [Throws=ProtocolError]
+    string send_message_rich(string recipient, string content, SendMessageOptions options);
 
     // Forward a message to a new recipient (preserves original sender attribution)
     [Throws=ProtocolError]

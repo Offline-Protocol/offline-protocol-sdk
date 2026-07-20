@@ -1014,6 +1014,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?) throws  -> String
     
+    func sendMessageRich(recipient: String, content: String, options: SendMessageOptions) throws  -> String
+    
     func sendPresenceUpdate(recipient: String, status: PresenceStatus) throws  -> String
     
     func sendReadReceipt(recipient: String, messageIds: [String]) throws  -> String
@@ -2162,6 +2164,17 @@ open func sendMessage(recipient: String, content: String, priority: MessagePrior
         FfiConverterString.lower(content),
         FfiConverterTypeMessagePriority_lower(priority),
         FfiConverterOptionString.lower(replyToMsg),$0
+    )
+})
+}
+    
+open func sendMessageRich(recipient: String, content: String, options: SendMessageOptions)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),
+        FfiConverterString.lower(content),
+        FfiConverterTypeSendMessageOptions_lower(options),$0
     )
 })
 }
@@ -4237,10 +4250,11 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var requireTransportIdentity: Bool
     public var binaryWireEnabled: Bool
     public var compactEnvelopeEnabled: Bool
+    public var richPayloadEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, compactEnvelopeEnabled: Bool = true) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -4263,6 +4277,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.requireTransportIdentity = requireTransportIdentity
         self.binaryWireEnabled = binaryWireEnabled
         self.compactEnvelopeEnabled = compactEnvelopeEnabled
+        self.richPayloadEnabled = richPayloadEnabled
     }
 
     
@@ -4300,7 +4315,8 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 groupRelayEnabled: FfiConverterBool.read(from: &buf), 
                 requireTransportIdentity: FfiConverterBool.read(from: &buf), 
                 binaryWireEnabled: FfiConverterBool.read(from: &buf), 
-                compactEnvelopeEnabled: FfiConverterBool.read(from: &buf)
+                compactEnvelopeEnabled: FfiConverterBool.read(from: &buf), 
+                richPayloadEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -4327,6 +4343,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.requireTransportIdentity, into: &buf)
         FfiConverterBool.write(value.binaryWireEnabled, into: &buf)
         FfiConverterBool.write(value.compactEnvelopeEnabled, into: &buf)
+        FfiConverterBool.write(value.richPayloadEnabled, into: &buf)
     }
 }
 
@@ -5055,6 +5072,74 @@ public func FfiConverterTypeRoutingStats_lift(_ buf: RustBuffer) throws -> Routi
 #endif
 public func FfiConverterTypeRoutingStats_lower(_ value: RoutingStats) -> RustBuffer {
     return FfiConverterTypeRoutingStats.lower(value)
+}
+
+
+public struct SendMessageOptions: Equatable, Hashable {
+    public var priority: MessagePriority?
+    public var replyToMsg: String?
+    public var contentType: ContentType?
+    public var replyContext: ReplyContext?
+    public var mediaMetadata: MediaMetadata?
+    public var forwardInfo: ForwardInfo?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(priority: MessagePriority? = nil, replyToMsg: String? = nil, contentType: ContentType? = nil, replyContext: ReplyContext? = nil, mediaMetadata: MediaMetadata? = nil, forwardInfo: ForwardInfo? = nil) {
+        self.priority = priority
+        self.replyToMsg = replyToMsg
+        self.contentType = contentType
+        self.replyContext = replyContext
+        self.mediaMetadata = mediaMetadata
+        self.forwardInfo = forwardInfo
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension SendMessageOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SendMessageOptions {
+        return
+            try SendMessageOptions(
+                priority: FfiConverterOptionTypeMessagePriority.read(from: &buf), 
+                replyToMsg: FfiConverterOptionString.read(from: &buf), 
+                contentType: FfiConverterOptionTypeContentType.read(from: &buf), 
+                replyContext: FfiConverterOptionTypeReplyContext.read(from: &buf), 
+                mediaMetadata: FfiConverterOptionTypeMediaMetadata.read(from: &buf), 
+                forwardInfo: FfiConverterOptionTypeForwardInfo.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SendMessageOptions, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeMessagePriority.write(value.priority, into: &buf)
+        FfiConverterOptionString.write(value.replyToMsg, into: &buf)
+        FfiConverterOptionTypeContentType.write(value.contentType, into: &buf)
+        FfiConverterOptionTypeReplyContext.write(value.replyContext, into: &buf)
+        FfiConverterOptionTypeMediaMetadata.write(value.mediaMetadata, into: &buf)
+        FfiConverterOptionTypeForwardInfo.write(value.forwardInfo, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSendMessageOptions_lift(_ buf: RustBuffer) throws -> SendMessageOptions {
+    return try FfiConverterTypeSendMessageOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSendMessageOptions_lower(_ value: SendMessageOptions) -> RustBuffer {
+    return FfiConverterTypeSendMessageOptions.lower(value)
 }
 
 
@@ -8248,6 +8333,30 @@ fileprivate struct FfiConverterOptionTypeFileProgress: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeForwardInfo: FfiConverterRustBuffer {
+    typealias SwiftType = ForwardInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeForwardInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeForwardInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeInternetMessage: FfiConverterRustBuffer {
     typealias SwiftType = InternetMessage?
 
@@ -8368,6 +8477,30 @@ fileprivate struct FfiConverterOptionTypeNostrMessage: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeReplyContext: FfiConverterRustBuffer {
+    typealias SwiftType = ReplyContext?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeReplyContext.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeReplyContext.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeReticulumMessage: FfiConverterRustBuffer {
     typealias SwiftType = ReticulumMessage?
 
@@ -8456,6 +8589,30 @@ fileprivate struct FfiConverterOptionTypeWifiDirectMessage: FfiConverterRustBuff
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWifiDirectMessage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeContentType: FfiConverterRustBuffer {
+    typealias SwiftType = ContentType?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeContentType.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeContentType.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -9217,6 +9374,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() != 55139) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() != 20289) {

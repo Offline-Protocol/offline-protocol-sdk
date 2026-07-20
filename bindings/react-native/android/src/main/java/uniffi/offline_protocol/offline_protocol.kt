@@ -1090,6 +1090,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt(
@@ -1474,6 +1476,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,`mediaMetadata`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_presence_update(`ptr`: Long,`recipient`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -2042,6 +2046,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() != 55139.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() != 20289.toShort()) {
@@ -3282,6 +3289,8 @@ public interface OfflineProtocolInterface {
     fun `sendMedia`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String, `contentType`: ContentType, `mediaMetadata`: MediaMetadata?): kotlin.String
     
     fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority, `replyToMsg`: kotlin.String?): kotlin.String
+    
+    fun `sendMessageRich`(`recipient`: kotlin.String, `content`: kotlin.String, `options`: SendMessageOptions): kotlin.String
     
     fun `sendPresenceUpdate`(`recipient`: kotlin.String, `status`: PresenceStatus): kotlin.String
     
@@ -5012,6 +5021,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(
         it,
         FfiConverterString.lower(`recipient`),FfiConverterString.lower(`content`),FfiConverterTypeMessagePriority.lower(`priority`),FfiConverterOptionalString.lower(`replyToMsg`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `sendMessageRich`(`recipient`: kotlin.String, `content`: kotlin.String, `options`: SendMessageOptions): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich(
+        it,
+        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`content`),FfiConverterTypeSendMessageOptions.lower(`options`),_status)
 }
     }
     )
@@ -6892,6 +6915,8 @@ data class ProtocolConfig (
     var `binaryWireEnabled`: kotlin.Boolean = true 
     , 
     var `compactEnvelopeEnabled`: kotlin.Boolean = true 
+    , 
+    var `richPayloadEnabled`: kotlin.Boolean = true 
     
 ){
     
@@ -6928,6 +6953,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -6953,7 +6979,8 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`groupRelayEnabled`) +
             FfiConverterBoolean.allocationSize(value.`requireTransportIdentity`) +
             FfiConverterBoolean.allocationSize(value.`binaryWireEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`compactEnvelopeEnabled`)
+            FfiConverterBoolean.allocationSize(value.`compactEnvelopeEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`richPayloadEnabled`)
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
@@ -6979,6 +7006,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`requireTransportIdentity`, buf)
             FfiConverterBoolean.write(value.`binaryWireEnabled`, buf)
             FfiConverterBoolean.write(value.`compactEnvelopeEnabled`, buf)
+            FfiConverterBoolean.write(value.`richPayloadEnabled`, buf)
     }
 }
 
@@ -7550,6 +7578,62 @@ public object FfiConverterTypeRoutingStats: FfiConverterRustBuffer<RoutingStats>
     override fun write(value: RoutingStats, buf: ByteBuffer) {
             FfiConverterUInt.write(value.`destinationCount`, buf)
             FfiConverterUInt.write(value.`routeCount`, buf)
+    }
+}
+
+
+
+data class SendMessageOptions (
+    var `priority`: MessagePriority? = null 
+    , 
+    var `replyToMsg`: kotlin.String? = null 
+    , 
+    var `contentType`: ContentType? = null 
+    , 
+    var `replyContext`: ReplyContext? = null 
+    , 
+    var `mediaMetadata`: MediaMetadata? = null 
+    , 
+    var `forwardInfo`: ForwardInfo? = null 
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer<SendMessageOptions> {
+    override fun read(buf: ByteBuffer): SendMessageOptions {
+        return SendMessageOptions(
+            FfiConverterOptionalTypeMessagePriority.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeContentType.read(buf),
+            FfiConverterOptionalTypeReplyContext.read(buf),
+            FfiConverterOptionalTypeMediaMetadata.read(buf),
+            FfiConverterOptionalTypeForwardInfo.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SendMessageOptions) = (
+            FfiConverterOptionalTypeMessagePriority.allocationSize(value.`priority`) +
+            FfiConverterOptionalString.allocationSize(value.`replyToMsg`) +
+            FfiConverterOptionalTypeContentType.allocationSize(value.`contentType`) +
+            FfiConverterOptionalTypeReplyContext.allocationSize(value.`replyContext`) +
+            FfiConverterOptionalTypeMediaMetadata.allocationSize(value.`mediaMetadata`) +
+            FfiConverterOptionalTypeForwardInfo.allocationSize(value.`forwardInfo`)
+    )
+
+    override fun write(value: SendMessageOptions, buf: ByteBuffer) {
+            FfiConverterOptionalTypeMessagePriority.write(value.`priority`, buf)
+            FfiConverterOptionalString.write(value.`replyToMsg`, buf)
+            FfiConverterOptionalTypeContentType.write(value.`contentType`, buf)
+            FfiConverterOptionalTypeReplyContext.write(value.`replyContext`, buf)
+            FfiConverterOptionalTypeMediaMetadata.write(value.`mediaMetadata`, buf)
+            FfiConverterOptionalTypeForwardInfo.write(value.`forwardInfo`, buf)
     }
 }
 
@@ -9496,6 +9580,38 @@ public object FfiConverterOptionalTypeFileProgress: FfiConverterRustBuffer<FileP
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeForwardInfo: FfiConverterRustBuffer<ForwardInfo?> {
+    override fun read(buf: ByteBuffer): ForwardInfo? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeForwardInfo.read(buf)
+    }
+
+    override fun allocationSize(value: ForwardInfo?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeForwardInfo.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ForwardInfo?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeForwardInfo.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeInternetMessage: FfiConverterRustBuffer<InternetMessage?> {
     override fun read(buf: ByteBuffer): InternetMessage? {
         if (buf.get().toInt() == 0) {
@@ -9656,6 +9772,38 @@ public object FfiConverterOptionalTypeNostrMessage: FfiConverterRustBuffer<Nostr
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeReplyContext: FfiConverterRustBuffer<ReplyContext?> {
+    override fun read(buf: ByteBuffer): ReplyContext? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeReplyContext.read(buf)
+    }
+
+    override fun allocationSize(value: ReplyContext?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeReplyContext.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ReplyContext?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeReplyContext.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeReticulumMessage: FfiConverterRustBuffer<ReticulumMessage?> {
     override fun read(buf: ByteBuffer): ReticulumMessage? {
         if (buf.get().toInt() == 0) {
@@ -9774,6 +9922,38 @@ public object FfiConverterOptionalTypeWifiDirectMessage: FfiConverterRustBuffer<
         } else {
             buf.put(1)
             FfiConverterTypeWifiDirectMessage.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeContentType: FfiConverterRustBuffer<ContentType?> {
+    override fun read(buf: ByteBuffer): ContentType? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeContentType.read(buf)
+    }
+
+    override fun allocationSize(value: ContentType?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeContentType.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ContentType?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeContentType.write(value, buf)
         }
     }
 }
