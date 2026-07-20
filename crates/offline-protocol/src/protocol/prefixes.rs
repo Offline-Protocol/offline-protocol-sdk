@@ -69,6 +69,12 @@ define_internal_prefixes! {
     /// group-aware decrypt so the both-create "owner" (which confirms only on
     /// `decrypt_success`) converges. Consumed on receipt — never surfaced to the app.
     SESSION_CONFIRM_ENCRYPTED = "__MLS_ENC_CONFIRM__",
+    /// Prefix for the sealed rich payload (`RichPayloadV1` JSON) inside a
+    /// decrypted MLS plaintext. Only ever travels INSIDE an `ENCRYPTED`
+    /// envelope, negotiated via `rich_versions` in the key package; listed
+    /// here so user content can never impersonate a sealed rich body through
+    /// the public send APIs.
+    RICH_V1 = "__RICH_V1__",
     /// Prefix for connection request messages.
     CONN_REQUEST = "__CONN_REQ__",
     /// Prefix for connection accepted messages.

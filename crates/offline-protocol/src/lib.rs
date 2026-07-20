@@ -32,7 +32,7 @@ pub use events::{
     EventCallback, GroupInfoMember, PresenceSource, PresenceStatus, UserGroupSummary,
 };
 pub use offline_protocol_services::MeshServices;
-pub use protocol::OfflineProtocol;
+pub use protocol::{OfflineProtocol, SendMessageOptions};
 pub use transport_manager::TransportManager;
 pub use visualization::{
     MessageStats, NetworkLink, NetworkNode, NetworkTopology, NetworkVisualizer, NodeRole,

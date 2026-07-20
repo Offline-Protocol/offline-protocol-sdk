@@ -123,9 +123,13 @@ impl OfflineProtocol {
                     InternalMessageResult::Decrypted(content) => {
                         let mut decrypted_msg = msg.clone();
                         // Shared with the live receive path: swaps in the
-                        // plaintext and drops the relay-writable outer
-                        // `reply_context` (see `apply_decrypted_content`).
-                        Self::apply_decrypted_content(&mut decrypted_msg, content.clone());
+                        // plaintext, drops the relay-writable outer
+                        // `reply_context`, and restores rich fields from a
+                        // sealed `__RICH_V1__` body (see
+                        // `apply_decrypted_content`) — so the event below
+                        // must read content/rich fields from the message,
+                        // not the raw decrypted string.
+                        Self::apply_decrypted_content(&mut decrypted_msg, content);
                         decrypted_msg
                             .metadata
                             .insert("delayed_decrypt".to_string(), "true".to_string());
@@ -139,7 +143,7 @@ impl OfflineProtocol {
                                 message_id: decrypted_msg.id.as_str().to_string(),
                                 sender: decrypted_msg.sender.as_str().to_string(),
                                 recipient: decrypted_msg.recipient.as_str().to_string(),
-                                content,
+                                content: decrypted_msg.content.clone(),
                                 hop_count: decrypted_msg.hop_count.value(),
                                 transport: "delayed".to_string(),
                                 timestamp: Utc::now().timestamp_millis(),

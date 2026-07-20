@@ -4,10 +4,11 @@ use super::{
     base64_encode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
     ConnectionRequestPayload, KeyPackagePayload, OfflineProtocol, OutboundMediaTransfer,
     OutboundSendPreparation, OutboxEntry, PendingConnectionRequest, PendingMessage,
-    PresencePayload, ProtocolState, ReadReceiptPayload, TypingIndicatorPayload,
-    WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO,
-    MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1,
-    PENDING_CONNECTION_REQUEST_TTL, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras,
+    SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS,
+    MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
 };
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
@@ -61,6 +62,33 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<impl Into<String>>,
     ) -> Result<MessageId> {
+        self.send_message_with(
+            recipient,
+            content,
+            SendMessageOptions {
+                priority,
+                reply_to_msg: reply_to_msg.map(Into::into),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Sends a message with rich options: priority and reply threading (as
+    /// on [`Self::send_message`]), plus quoted-reply context, rich media
+    /// metadata, and forward attribution.
+    ///
+    /// The rich fields only ever travel inside the MLS-sealed `__RICH_V1__`
+    /// body, and only toward recipients whose key package advertised
+    /// `rich_versions` support (gated by
+    /// `EncryptionConfig::rich_payload_enabled`). Toward anyone else they
+    /// are silently dropped — never sent cleartext — so the message degrades
+    /// to plain text with `reply_to_msg` threading intact.
+    pub fn send_message_with(
+        &mut self,
+        recipient: impl Into<String>,
+        content: impl Into<String>,
+        options: SendMessageOptions,
+    ) -> Result<MessageId> {
         // Check if protocol is running
         {
             let state = lock_shared_state(&self.shared_state)?;
@@ -71,7 +99,7 @@ impl OfflineProtocol {
 
         let recipient_str: String = recipient.into();
         let content_str: String = content.into();
-        let priority = priority.unwrap_or(MessagePriority::Medium);
+        let priority = options.priority.unwrap_or(MessagePriority::Medium);
 
         // Prevent sending messages to blocked users. Blocking is bidirectional:
         // we neither receive from nor send to a blocked peer.
@@ -88,10 +116,18 @@ impl OfflineProtocol {
         }
 
         // Parse reply_to_msg if provided
-        let reply_to_msg_id = reply_to_msg
-            .map(|r| MessageId::from_str(&r.into()))
+        let reply_to_msg_id = options
+            .reply_to_msg
+            .as_deref()
+            .map(MessageId::from_str)
             .transpose()
             .map_err(|e| Error::InvalidArgument(format!("Invalid reply_to_msg: {}", e)))?;
+
+        let rich = RichSendExtras {
+            reply_context: options.reply_context,
+            media_metadata: options.media_metadata,
+            forward_info: options.forward_info,
+        };
 
         let final_content = match self.prepare_outbound_content(
             &recipient_str,
@@ -99,61 +135,32 @@ impl OfflineProtocol {
             priority,
             reply_to_msg_id.clone(),
             None,
-            ContentType::default(),
+            options.content_type.unwrap_or_default(),
             None,
+            Some(&rich),
             "send_message_session_pending",
         )? {
             OutboundSendPreparation::Ready(content) => content,
             OutboundSendPreparation::Queued(message_id) => return Ok(message_id),
         };
 
-        // Create message with potentially encrypted content
-        let message = self.create_message(
+        // Create message with potentially encrypted content. Rich extras are
+        // deliberately NOT copied onto the outer message — they are either
+        // inside the sealed body by now or dropped; only the coarse
+        // content_type rendering hint rides outer.
+        let mut message = self.create_message(
             &recipient_str,
             final_content,
             Some(priority),
             reply_to_msg_id,
         )?;
-        let message_id = message.id.clone();
-
-        // Check for duplicates
-        if self.deduplicator.is_duplicate(&message_id) {
-            return Err(crate::Error::Other("Duplicate message".to_string()));
+        if let Some(content_type) = options.content_type {
+            message.content_type = content_type;
         }
 
-        // Mark as seen
-        self.deduplicator.mark_seen(message_id.clone());
-
-        // Track previous transport before sending
-        let previous_transport = self.transport_manager.current_transport();
-
-        // Attempt to send via transport manager (DORS will select best transport)
-        let send_result = self.transport_manager.send(&message);
-        let current_transport = self.transport_manager.current_transport();
-
-        // Handle send result
-        match send_result {
-            Ok(()) => {
-                self.handle_send_success(&message, current_transport)?;
-                self.emit_transport_switch_event(previous_transport, current_transport)?;
-                self.emit_message_sent_event(&message)?;
-                Ok(message_id)
-            }
-            Err(err) => {
-                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
-                warn!(
-                    message_id = %message.id,
-                    error = %err,
-                    "Send failed, message deferred"
-                );
-                self.emit_event(Event::message_deferred(
-                    message.id.clone(),
-                    format!("Transport send failed: {}", err),
-                    0,
-                    None,
-                ));
-                Ok(message_id)
-            }
+        match options.via_transport {
+            Some(transport) => self.dispatch_prepared_message_via(message, transport),
+            None => self.dispatch_prepared_message(message),
         }
     }
 
@@ -221,6 +228,7 @@ impl OfflineProtocol {
             Some(forward_info.clone()),
             original_message.content_type,
             original_message.media_metadata.clone(),
+            None,
             "forward_message_session_pending",
         )? {
             OutboundSendPreparation::Ready(content) => content,
@@ -271,6 +279,58 @@ impl OfflineProtocol {
                 self.emit_event(Event::message_deferred(
                     message.id.clone(),
                     format!("Transport send failed: {}", err),
+                    0,
+                    None,
+                ));
+                Ok(message_id)
+            }
+        }
+    }
+
+    /// [`Self::dispatch_prepared_message`] variant that sends via a specific
+    /// transport (bypassing DORS), mirroring `send_message_via_transport`'s
+    /// tail — including the explicit retry-failure recording that
+    /// `send_via_transport` does not do internally.
+    fn dispatch_prepared_message_via(
+        &mut self,
+        message: Message,
+        transport: TransportType,
+    ) -> Result<MessageId> {
+        let message_id = message.id.clone();
+
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        self.deduplicator.mark_seen(message_id.clone());
+
+        let previous_transport = self.transport_manager.current_transport();
+        let send_result = self
+            .transport_manager
+            .send_via_transport(&message, transport);
+        let current_transport = Some(transport);
+
+        match send_result {
+            Ok(()) => {
+                self.handle_send_success(&message, current_transport)?;
+                self.emit_transport_switch_event(previous_transport, current_transport)?;
+                self.emit_message_sent_event(&message)?;
+                Ok(message_id)
+            }
+            Err(err) => {
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                // send_via_transport does not record retry failures internally
+                // (unlike TransportManager::send), so record explicitly here.
+                self.transport_manager.record_retry_failure(transport);
+                warn!(
+                    message_id = %message.id,
+                    transport = ?transport,
+                    error = %err,
+                    "Send via forced transport failed, message deferred"
+                );
+                self.emit_event(Event::message_deferred(
+                    message.id.clone(),
+                    format!("Send via {:?} failed: {}", transport, err),
                     0,
                     None,
                 ));
@@ -442,6 +502,7 @@ impl OfflineProtocol {
             reply_to_msg_id.clone(),
             None,
             ContentType::default(),
+            None,
             None,
             "send_message_via_transport_session_pending",
         )? {
@@ -730,6 +791,29 @@ impl OfflineProtocol {
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
+    /// Whether rich extras seal for `recipient`: our own kill switch is on
+    /// and the peer advertised [`RICH_PAYLOAD_V1`] in their key package.
+    pub(super) fn rich_seal_active(&self, recipient: &str) -> bool {
+        self.config.encryption.rich_payload_enabled && self.peer_rich_payload.contains(recipient)
+    }
+
+    /// Wraps plaintext content and rich extras into the sealed
+    /// `__RICH_V1__`-prefixed JSON body ([`RichPayloadV1`]). Callers must
+    /// only invoke this on a path that MLS-encrypts the result — the sealed
+    /// body is the sole carrier for reply context and media secrets and must
+    /// never leave as cleartext.
+    pub(super) fn seal_rich_payload(content: &str, extras: &RichSendExtras) -> Result<String> {
+        let payload = RichPayloadV1 {
+            text: content.to_string(),
+            reply_context: extras.reply_context.clone(),
+            media_metadata: extras.media_metadata.clone(),
+            forward_info: extras.forward_info.clone(),
+        };
+        let serialized =
+            serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
+        Ok(format!("{}{}", internal_prefixes::RICH_V1, serialized))
+    }
+
     /// Encrypts a plaintext for a recipient whose session is known to be
     /// confirmed (in-memory cache hit). Uses `encrypt_for_existing_session` to
     /// skip both the external `has_session()` and the internal one inside
@@ -874,11 +958,34 @@ impl OfflineProtocol {
         forwarded_from: Option<ForwardInfo>,
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
+        rich: Option<&RichSendExtras>,
         reconciliation_reason: &'static str,
     ) -> Result<OutboundSendPreparation> {
         if self.should_auto_encrypt() {
+            // Rich extras travel only inside the sealed body: seal for a
+            // capable recipient, drop for everyone else — never cleartext.
+            // The decision is made here, at actual-send time; a message
+            // queued behind session establishment stores the raw extras and
+            // re-evaluates capability at flush (the key package that
+            // confirms the session may be the one that advertised it).
+            let rich_extras = rich.filter(|extras| extras.is_any());
+            let sealed_body;
+            let outbound: &str = match rich_extras {
+                Some(extras) if self.rich_seal_active(recipient) => {
+                    sealed_body = Self::seal_rich_payload(content, extras)?;
+                    &sealed_body
+                }
+                Some(_) => {
+                    debug!(
+                        recipient = %recipient,
+                        "Recipient lacks sealed rich payload capability, dropping rich extras"
+                    );
+                    content
+                }
+                None => content,
+            };
             if self.config.encryption.require_encryption {
-                match self.encrypt_content_for_recipient_strict(recipient, content) {
+                match self.encrypt_content_for_recipient_strict(recipient, outbound) {
                     Ok(encrypted) => return Ok(OutboundSendPreparation::Ready(encrypted)),
                     Err(Error::SessionNotReady(_)) if self.config.encryption.store_pending => {
                         // Session not ready but store_pending is enabled — queue
@@ -913,6 +1020,7 @@ impl OfflineProtocol {
                             forwarded_from,
                             content_type,
                             media_metadata,
+                            rich_extras.cloned(),
                             reconciliation_reason,
                         )?;
                         return Ok(OutboundSendPreparation::Queued(queued_id));
@@ -921,7 +1029,7 @@ impl OfflineProtocol {
                 }
             }
 
-            match self.encrypt_content_for_recipient(recipient, content, priority) {
+            match self.encrypt_content_for_recipient(recipient, outbound, priority) {
                 Ok(encrypted) => Ok(OutboundSendPreparation::Ready(encrypted)),
                 Err(Error::SessionNotReady(state)) => {
                     if !self.config.encryption.store_pending {
@@ -936,6 +1044,7 @@ impl OfflineProtocol {
                         forwarded_from,
                         content_type,
                         media_metadata,
+                        rich_extras.cloned(),
                         reconciliation_reason,
                     )?;
                     Ok(OutboundSendPreparation::Queued(queued_id))
@@ -953,6 +1062,14 @@ impl OfflineProtocol {
             // Explicit opt-out: require_encryption=false with encryption
             // disabled or MLS uninitialized. The message leaves as plaintext;
             // surface that loudly (once per peer) instead of a debug log.
+            // Rich extras are dropped here unconditionally — they only ever
+            // travel inside the sealed body, never as cleartext.
+            if rich.is_some_and(|extras| extras.is_any()) {
+                debug!(
+                    recipient = %recipient,
+                    "Plaintext send path, dropping rich extras (sealed-only)"
+                );
+            }
             self.warn_plaintext_send(recipient);
             Ok(OutboundSendPreparation::Ready(content.to_string()))
         }
@@ -972,6 +1089,7 @@ impl OfflineProtocol {
         forwarded_from: Option<ForwardInfo>,
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
+        rich: Option<RichSendExtras>,
         reconciliation_reason: &'static str,
     ) -> Result<MessageId> {
         // Generate an ID without ticking the Lamport clock.
@@ -993,6 +1111,7 @@ impl OfflineProtocol {
             forwarded_from,
             content_type,
             media_metadata,
+            rich,
         );
         self.kick_pending_session_reconciliation(reconciliation_reason);
         if self.has_terminal_welcome_failure(recipient) {
@@ -1021,6 +1140,7 @@ impl OfflineProtocol {
         forwarded_from: Option<ForwardInfo>,
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
+        rich: Option<RichSendExtras>,
     ) {
         let message_id_str = message_id.as_str().to_string();
         let pending = PendingMessage {
@@ -1031,6 +1151,7 @@ impl OfflineProtocol {
             forwarded_from,
             content_type,
             media_metadata,
+            rich,
             queued_at: Utc::now(),
         };
 
@@ -1053,7 +1174,28 @@ impl OfflineProtocol {
             let mut remaining = Vec::new();
 
             for msg in pending {
-                let result = if msg.forwarded_from.is_some() {
+                let result = if let Some(rich) = msg.rich.clone() {
+                    // Option-borne rich extras: re-send through the rich
+                    // surface so the seal-or-drop decision is re-made against
+                    // the recipient's *current* capability (the key package
+                    // that confirmed this session may have advertised it).
+                    self.send_message_with(
+                        recipient,
+                        msg.content.clone(),
+                        SendMessageOptions {
+                            priority: Some(msg.priority),
+                            reply_to_msg: msg
+                                .reply_to_msg
+                                .as_ref()
+                                .map(|id| id.as_str().to_string()),
+                            content_type: Some(msg.content_type),
+                            reply_context: rich.reply_context,
+                            media_metadata: rich.media_metadata,
+                            forward_info: rich.forward_info,
+                            via_transport: None,
+                        },
+                    )
+                } else if msg.forwarded_from.is_some() {
                     // Re-send with the stored ForwardInfo directly (don't
                     // re-derive via forward_message to avoid double-incrementing
                     // forward_count). Also restore content_type and media_metadata.
@@ -1065,6 +1207,7 @@ impl OfflineProtocol {
                         msg.forwarded_from.clone(),
                         msg.content_type,
                         msg.media_metadata.clone(),
+                        None,
                         "forward_message_flush_pending",
                     )? {
                         OutboundSendPreparation::Ready(c) => c,
@@ -2557,6 +2700,11 @@ impl OfflineProtocol {
             },
             env_versions: if self.config.encryption.compact_envelope_enabled {
                 vec![MLS_ENVELOPE_COMPACT_V1]
+            } else {
+                Vec::new()
+            },
+            rich_versions: if self.config.encryption.rich_payload_enabled {
+                vec![RICH_PAYLOAD_V1]
             } else {
                 Vec::new()
             },

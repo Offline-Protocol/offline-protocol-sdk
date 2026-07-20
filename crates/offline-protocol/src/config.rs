@@ -121,6 +121,21 @@ pub struct EncryptionConfig {
     /// [`TransportConfig::binary_wire_enabled`], with an independent kill
     /// switch because the two degrade separately.
     pub compact_envelope_enabled: bool,
+
+    /// Whether to negotiate and seal the rich `__RICH_V1__` payload for
+    /// encrypted messages: quoted-reply context, rich media metadata, and
+    /// forward attribution carried *inside* the MLS ciphertext instead of on
+    /// the relay-visible outer message.
+    ///
+    /// Defaults to `true`. It only takes effect toward recipients that
+    /// advertise support in their key package (`rich_versions`); toward
+    /// everyone else the rich extras are silently dropped — never sent
+    /// cleartext. Parsing of inbound sealed payloads is always on,
+    /// independent of this flag; this gates only advertising and sealing.
+    /// Independent kill switch from
+    /// [`EncryptionConfig::compact_envelope_enabled`] — the two degrade
+    /// separately.
+    pub rich_payload_enabled: bool,
 }
 
 impl Default for EncryptionConfig {
@@ -134,6 +149,7 @@ impl Default for EncryptionConfig {
             require_encryption: true,
             pending_queue: PendingQueueConfig::default(),
             compact_envelope_enabled: true,
+            rich_payload_enabled: true,
         }
     }
 }
@@ -148,6 +164,7 @@ impl EncryptionConfig {
             require_encryption: false,
             pending_queue: PendingQueueConfig::default(),
             compact_envelope_enabled: false,
+            rich_payload_enabled: false,
         }
     }
 }

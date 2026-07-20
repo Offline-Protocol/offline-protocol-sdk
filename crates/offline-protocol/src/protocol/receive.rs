@@ -1,8 +1,8 @@
 //! Message receive loop and file chunk handling.
 
 use super::{
-    lock_shared_state, InternalMessageResult, OfflineProtocol, PendingMediaMetadataEntry,
-    ProtocolState,
+    internal_prefixes, lock_shared_state, InternalMessageResult, OfflineProtocol,
+    PendingMediaMetadataEntry, ProtocolState, RichPayloadV1,
 };
 use crate::constants::{ACK_FOR_KEY, RELAY_LEARNED_ROUTE_QUALITY};
 use crate::events::{Event, SecurityWarningCode};
@@ -18,20 +18,49 @@ use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {
     /// Applies a successful MLS decryption to an inbound message: swaps the
-    /// ciphertext for the plaintext, marks the message encrypted, and drops
-    /// the outer `reply_context`.
+    /// ciphertext for the plaintext, marks the message encrypted, drops the
+    /// outer `reply_context`, and restores rich fields from a sealed
+    /// `__RICH_V1__` body when present.
     ///
     /// The outer `reply_context` field is hop-visible cleartext that any
     /// relay can inject or rewrite in transit — it sits outside the MLS AEAD
-    /// boundary. On a sealed message the only trusted carrier for reply
-    /// context is the encrypted envelope itself; when the envelope-borne
-    /// variant lands it is restored from the decrypted payload *after* this
-    /// point. Without this strip, a `MessageReceived { encrypted: true }`
-    /// event could surface an attacker-controlled quote preview as if it
-    /// were part of the authenticated conversation.
+    /// boundary. The strip happens unconditionally *before* the sealed-body
+    /// restore below, so the encrypted envelope is the only trusted carrier
+    /// for reply context on encrypted messages. Without this strip, a
+    /// `MessageReceived { encrypted: true }` event could surface an
+    /// attacker-controlled quote preview as if it were part of the
+    /// authenticated conversation.
+    ///
+    /// Sealed-body parsing is never capability-gated (mirroring envelope
+    /// parsing): whatever a peer chose to seal, we try to read. On a rich
+    /// message the sealed body is authoritative for `reply_context`,
+    /// `media_metadata`, and `forwarded_from` — the relay-writable outer
+    /// copies are overwritten wholesale, `None`s included. A body that fails
+    /// to parse (including a hostile `reply_context.sender` rejected by
+    /// `UserId` validation) surfaces as raw text with a warning rather than
+    /// dropping an authenticated message.
     pub(super) fn apply_decrypted_content(message: &mut Message, plaintext: String) {
-        message.content = plaintext;
         message.reply_context = None;
+        if let Some(sealed) = plaintext.strip_prefix(internal_prefixes::RICH_V1) {
+            match serde_json::from_str::<RichPayloadV1>(sealed) {
+                Ok(rich) => {
+                    message.content = rich.text;
+                    message.reply_context = rich.reply_context;
+                    message.media_metadata = rich.media_metadata;
+                    message.forwarded_from = rich.forward_info;
+                }
+                Err(e) => {
+                    warn!(
+                        sender = %message.sender,
+                        error = %e,
+                        "Failed to parse sealed rich payload, surfacing raw text"
+                    );
+                    message.content = plaintext;
+                }
+            }
+        } else {
+            message.content = plaintext;
+        }
         message
             .metadata
             .insert("encrypted".to_string(), "true".to_string());
