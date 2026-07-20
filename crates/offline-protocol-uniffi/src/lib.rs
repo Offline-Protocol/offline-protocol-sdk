@@ -1366,7 +1366,7 @@ impl TryFrom<ReplyContext> for CoreReplyContext {
     fn try_from(rc: ReplyContext) -> Result<Self, Self::Error> {
         Ok(CoreReplyContext {
             sender: CoreUserId::new(&rc.sender).map_err(|e| {
-                ProtocolError::InvalidConfiguration(format!("Invalid reply_context.sender: {}", e))
+                ProtocolError::InvalidArgument(format!("Invalid reply_context.sender: {}", e))
             })?,
             text: rc.text,
             timestamp: rc.timestamp.map(CoreTimestamp::from_millis),
@@ -1392,13 +1392,13 @@ impl TryFrom<ForwardInfo> for CoreForwardInfo {
     fn try_from(fi: ForwardInfo) -> Result<Self, Self::Error> {
         Ok(CoreForwardInfo {
             original_sender: CoreUserId::new(&fi.original_sender).map_err(|e| {
-                ProtocolError::InvalidConfiguration(format!(
+                ProtocolError::InvalidArgument(format!(
                     "Invalid forward_info.original_sender: {}",
                     e
                 ))
             })?,
             original_message_id: CoreMessageId::from_str(&fi.original_message_id).map_err(|e| {
-                ProtocolError::InvalidConfiguration(format!(
+                ProtocolError::InvalidArgument(format!(
                     "Invalid forward_info.original_message_id: {}",
                     e
                 ))
