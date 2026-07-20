@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-07-20
+
 ### Added
 
 - **`presence_updated` events now carry their source.** A new `source` field distinguishes the internet relay's authoritative answers (`internet`) from peer-sent `__PRESENCE__` self-reports (`peer`), so apps rendering relay-style headers ("Online" / "Last seen …") can filter on `internet` instead of guessing from `last_seen_ms` absence — which relay answers can legitimately share when the relay doesn't know a last-seen. The value is `peer` (not `mesh`) because self-reports are transport-agnostic and may arrive relay-forwarded. Additive: events without the field deserialize as `peer`; no UniFFI interface change (events cross the FFI as JSON).
