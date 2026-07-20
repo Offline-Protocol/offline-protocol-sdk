@@ -1084,28 +1084,7 @@ impl OfflineProtocol {
             let mut remaining = Vec::new();
 
             for msg in pending {
-                let result = if let Some(rich) = msg.rich.clone() {
-                    // Option-borne rich extras: re-send through the rich
-                    // surface so the seal-or-drop decision is re-made against
-                    // the recipient's *current* capability (the key package
-                    // that confirmed this session may have advertised it).
-                    self.send_message_with(
-                        recipient,
-                        msg.content.clone(),
-                        SendMessageOptions {
-                            priority: Some(msg.priority),
-                            reply_to_msg: msg
-                                .reply_to_msg
-                                .as_ref()
-                                .map(|id| id.as_str().to_string()),
-                            content_type: Some(msg.content_type),
-                            reply_context: rich.reply_context,
-                            media_metadata: rich.media_metadata,
-                            forward_info: rich.forward_info,
-                            via_transport: None,
-                        },
-                    )
-                } else if msg.forwarded_from.is_some() {
+                let result = if msg.forwarded_from.is_some() {
                     // Re-send with the stored ForwardInfo directly (don't
                     // re-derive via forward_message to avoid double-incrementing
                     // forward_count). Also restore content_type and media_metadata.
@@ -1135,12 +1114,29 @@ impl OfflineProtocol {
                     message.media_metadata = msg.media_metadata.clone();
                     self.dispatch_prepared_message(message)
                 } else {
-                    let reply_to_str = msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string());
-                    self.send_message(
+                    // Non-forward flushes all re-send through the rich
+                    // surface: the seal-or-drop decision for option-borne
+                    // rich extras is re-made against the recipient's
+                    // *current* capability (the key package that confirmed
+                    // this session may have advertised it), and the stored
+                    // content_type survives — plain `send_message` would
+                    // reset it to Text.
+                    let rich = msg.rich.clone().unwrap_or_default();
+                    self.send_message_with(
                         recipient,
                         msg.content.clone(),
-                        Some(msg.priority),
-                        reply_to_str,
+                        SendMessageOptions {
+                            priority: Some(msg.priority),
+                            reply_to_msg: msg
+                                .reply_to_msg
+                                .as_ref()
+                                .map(|id| id.as_str().to_string()),
+                            content_type: Some(msg.content_type),
+                            reply_context: rich.reply_context,
+                            media_metadata: rich.media_metadata,
+                            forward_info: rich.forward_info,
+                            via_transport: None,
+                        },
                     )
                 };
                 match result {

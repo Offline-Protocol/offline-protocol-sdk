@@ -15450,6 +15450,49 @@ fn rich_payload_flush_pending_seals_with_current_capability() {
     );
 }
 
+#[test]
+fn flush_pending_preserves_content_type_without_rich_extras() {
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    // A content_type-only send queued behind session establishment: no rich
+    // extras (`rich: None`), so the flush takes the non-forward branch —
+    // which must restore the stored content_type instead of resetting to
+    // Text.
+    alice.queue_pending_message(
+        "bob",
+        "queued image caption",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::Image,
+        None,
+        None,
+    );
+    alice.flush_pending_messages("bob").unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("flushed message must reach the wire");
+    assert_eq!(
+        enc.content_type,
+        ContentType::Image,
+        "stored content_type must survive a pending-queue flush"
+    );
+
+    // No rich extras and no negotiated capability: the plaintext must be
+    // the bare text, not a sealed rich body.
+    let result = bob.process_internal_message(enc);
+    assert!(
+        matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "queued image caption"),
+        "content_type-only flush must decrypt to bare text, got {result:?}"
+    );
+}
+
 /// Durable size/fragment report for encrypted text DMs across the four
 /// envelope x wire-codec combinations, using a real OpenMLS ciphertext and
 /// realistic identifier lengths (27-char base58 user ids). Prints the table
