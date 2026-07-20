@@ -288,9 +288,10 @@ impl OfflineProtocol {
     }
 
     /// [`Self::dispatch_prepared_message`] variant that sends via a specific
-    /// transport (bypassing DORS), mirroring `send_message_via_transport`'s
-    /// tail — including the explicit retry-failure recording that
-    /// `send_via_transport` does not do internally.
+    /// transport (bypassing DORS) — the shared tail for
+    /// `send_message_via_transport` and rich sends carrying `via_transport`.
+    /// Unlike `TransportManager::send`, `send_via_transport` does not record
+    /// retry failures internally, so the failure arm records one explicitly.
     fn dispatch_prepared_message_via(
         &mut self,
         message: Message,
@@ -454,7 +455,7 @@ impl OfflineProtocol {
         }
     }
 
-    /// Sends a message via a specific transport type.
+    /// Sends a message via a specific transport type (bypassing DORS).
     pub fn send_message_via_transport(
         &mut self,
         recipient: impl Into<String>,
@@ -463,107 +464,16 @@ impl OfflineProtocol {
         transport: TransportType,
         reply_to_msg: Option<impl Into<String>>,
     ) -> Result<MessageId> {
-        // Check if protocol is running
-        {
-            let state = lock_shared_state(&self.shared_state)?;
-            if state.state != ProtocolState::Running {
-                return Err(Error::NotStarted);
-            }
-        }
-
-        let recipient_str: String = recipient.into();
-        let content_str: String = content.into();
-        let priority = priority.unwrap_or(MessagePriority::Medium);
-
-        // Prevent sending messages to blocked users. Blocking is bidirectional:
-        // we neither receive from nor send to a blocked peer.
-        if self.is_user_blocked(&recipient_str) {
-            return Err(Error::UserBlocked(recipient_str));
-        }
-
-        // Reject content that starts with an internal control prefix to prevent
-        // injection of protocol-level messages through the public API.
-        if Self::is_internal_prefix(&content_str) {
-            return Err(Error::InvalidArgument(
-                "Message content must not start with a reserved internal prefix".to_string(),
-            ));
-        }
-
-        // Parse reply_to_msg if provided
-        let reply_to_msg_id = reply_to_msg
-            .map(|r| MessageId::from_str(&r.into()))
-            .transpose()
-            .map_err(|e| Error::InvalidArgument(format!("Invalid reply_to_msg: {}", e)))?;
-
-        let final_content = match self.prepare_outbound_content(
-            &recipient_str,
-            &content_str,
-            priority,
-            reply_to_msg_id.clone(),
-            None,
-            ContentType::default(),
-            None,
-            None,
-            "send_message_via_transport_session_pending",
-        )? {
-            OutboundSendPreparation::Ready(content) => content,
-            OutboundSendPreparation::Queued(message_id) => return Ok(message_id),
-        };
-
-        // Create message
-        let message = self.create_message(
-            &recipient_str,
-            final_content,
-            Some(priority),
-            reply_to_msg_id,
-        )?;
-        let message_id = message.id.clone();
-
-        // Check for duplicates
-        if self.deduplicator.is_duplicate(&message_id) {
-            return Err(crate::Error::Other("Duplicate message".to_string()));
-        }
-
-        // Mark as seen
-        self.deduplicator.mark_seen(message_id.clone());
-
-        // Track previous transport before sending
-        let previous_transport = self.transport_manager.current_transport();
-
-        // Attempt to send via the specified transport (bypassing DORS)
-        let send_result = self
-            .transport_manager
-            .send_via_transport(&message, transport);
-        let current_transport = Some(transport);
-
-        // Handle send result
-        match send_result {
-            Ok(()) => {
-                self.handle_send_success(&message, current_transport)?;
-                self.emit_transport_switch_event(previous_transport, current_transport)?;
-                self.emit_message_sent_event(&message)?;
-                Ok(message_id)
-            }
-            Err(err) => {
-                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
-                // send_via_transport does not record retry failures internally
-                // (unlike TransportManager::send), so record explicitly here.
-                self.transport_manager.record_retry_failure(transport);
-                warn!(
-                    message_id = %message.id,
-                    transport = ?transport,
-                    error = %err,
-                    "Send via forced transport failed, message deferred"
-                );
-                self.emit_event(Event::message_deferred(
-                    message.id.clone(),
-                    format!("Send via {:?} failed: {}", transport, err),
-                    0,
-                    None,
-                ));
-                Ok(message_id)
-            }
-        }
+        self.send_message_with(
+            recipient,
+            content,
+            SendMessageOptions {
+                priority,
+                reply_to_msg: reply_to_msg.map(Into::into),
+                via_transport: Some(transport),
+                ..Default::default()
+            },
+        )
     }
 
     /// Creates a new message from the given parameters.
