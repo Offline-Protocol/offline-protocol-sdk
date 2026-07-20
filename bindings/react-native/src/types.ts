@@ -312,6 +312,16 @@ export interface EncryptionConfig {
    */
   compactEnvelopeEnabled?: boolean;
   /**
+   * Kill switch for the sealed rich payload on encrypted messages
+   * (default: true): quoted-reply context, rich media metadata, and forward
+   * attribution sealed inside the MLS ciphertext. Negotiated per recipient
+   * via the key package; parsing of inbound sealed bodies is always on.
+   * Disabling stops advertising and sealing, so rich extras degrade to
+   * being dropped — never sent cleartext. Independent of
+   * `compactEnvelopeEnabled`.
+   */
+  richPayloadEnabled?: boolean;
+  /**
    * Bounds and policy for encrypted messages received before session readiness.
    */
   pendingQueue?: PendingQueueConfig;
@@ -512,6 +522,25 @@ export interface SendMessageParams {
   priority?: MessagePriority;
   /** ID of the message this is replying to (optional) */
   replyToMsg?: string;
+  /**
+   * Content type hint stamped on the outer message (optional, defaults to
+   * text). A coarse rendering hint — the content itself stays MLS-sealed.
+   */
+  contentType?: ContentType;
+  /**
+   * Quoted-reply context (optional). Only ever delivered inside the
+   * MLS-sealed rich payload, and only to recipients whose SDK advertised
+   * support; toward anyone else it is silently dropped — never sent
+   * cleartext.
+   */
+  replyContext?: ReplyContext;
+  /**
+   * Rich media metadata (optional) — cloud attachments, stickers, including
+   * any `encryptionKey`/`iv` secrets. Sealed-only, like `replyContext`.
+   */
+  mediaMetadata?: MediaMetadata;
+  /** Forward attribution (optional). Sealed-only, like `replyContext`. */
+  forwardInfo?: ForwardInfo;
 }
 
 /**

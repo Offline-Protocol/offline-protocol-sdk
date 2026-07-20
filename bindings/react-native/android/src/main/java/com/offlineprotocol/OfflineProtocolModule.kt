@@ -991,6 +991,86 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * Rich send surface: reply context, rich media metadata, and forward
+     * attribution — sealed inside the MLS ciphertext for capable recipients,
+     * silently dropped for everyone else (never cleartext).
+     */
+    @ReactMethod
+    fun sendMessageRich(recipient: String, content: String, priority: Int, replyToMsg: String?, options: ReadableMap?, promise: Promise) {
+        try {
+            val msgPriority = when (priority) {
+                0 -> MessagePriority.LOW
+                1 -> MessagePriority.MEDIUM
+                2 -> MessagePriority.HIGH
+                3 -> MessagePriority.CRITICAL
+                else -> MessagePriority.MEDIUM
+            }
+
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val sendOptions = SendMessageOptions(
+                priority = msgPriority,
+                replyToMsg = replyToMsg,
+                contentType = options?.getString("content_type")?.let { parseContentType(it) },
+                replyContext = parseReplyContext(options?.getMap("reply_context")),
+                mediaMetadata = parseRichMediaMetadata(options?.getMap("media_metadata")),
+                forwardInfo = parseForwardInfo(options?.getMap("forward_info"))
+            )
+            val messageId = proto.sendMessageRich(recipient, content, sendOptions)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_SEND", "Failed to send rich message")
+        }
+    }
+
+    private fun parseReplyContext(map: ReadableMap?): ReplyContext? {
+        if (map == null) return null
+        return ReplyContext(
+            sender = map.getString("sender") ?: "",
+            text = map.getString("text") ?: "",
+            timestamp = if (map.hasKey("timestamp") && !map.isNull("timestamp")) map.getDouble("timestamp").toLong() else null,
+            replyMediaLabel = map.getString("reply_media_label"),
+            replyContentType = map.getString("reply_content_type")
+        )
+    }
+
+    private fun parseForwardInfo(map: ReadableMap?): ForwardInfo? {
+        if (map == null) return null
+        return ForwardInfo(
+            originalSender = map.getString("original_sender") ?: "",
+            originalMessageId = map.getString("original_message_id") ?: "",
+            originalTimestamp = if (map.hasKey("original_timestamp") && !map.isNull("original_timestamp")) map.getDouble("original_timestamp").toLong() else 0L,
+            forwardCount = if (map.hasKey("forward_count") && !map.isNull("forward_count")) map.getInt("forward_count").toUInt() else 1u
+        )
+    }
+
+    /**
+     * Full MediaMetadata parser for the rich send surface — unlike the
+     * legacy sendMedia mapping, this includes the cloud/sticker fields
+     * (they only ever travel MLS-sealed on this path).
+     */
+    private fun parseRichMediaMetadata(map: ReadableMap?): MediaMetadata? {
+        if (map == null) return null
+        return MediaMetadata(
+            mimeType = map.getString("mime_type") ?: "",
+            fileName = map.getString("file_name") ?: "",
+            fileSize = if (map.hasKey("file_size") && !map.isNull("file_size")) map.getDouble("file_size").toULong() else 0u,
+            durationMs = if (map.hasKey("duration_ms") && !map.isNull("duration_ms")) map.getDouble("duration_ms").toULong() else null,
+            width = if (map.hasKey("width") && !map.isNull("width")) map.getInt("width").toUInt() else null,
+            height = if (map.hasKey("height") && !map.isNull("height")) map.getInt("height").toUInt() else null,
+            thumbnailBase64 = map.getString("thumbnail_base64"),
+            mediaId = map.getString("media_id"),
+            downloadUrl = map.getString("download_url"),
+            thumbnailUrl = map.getString("thumbnail_url"),
+            encryptionKey = map.getString("encryption_key"),
+            iv = map.getString("iv"),
+            ciphertextHash = map.getString("ciphertext_hash"),
+            stickerProvider = map.getString("sticker_provider"),
+            stickerRemoteId = map.getString("sticker_remote_id"),
+            stickerKind = map.getString("sticker_kind")
+        )
+    }
+
     @ReactMethod
     fun forwardMessage(originalMessageJson: String, newRecipient: String, priority: Int?, promise: Promise) {
         try {
