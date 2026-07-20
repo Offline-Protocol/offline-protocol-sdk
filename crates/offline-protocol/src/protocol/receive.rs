@@ -35,9 +35,17 @@ impl OfflineProtocol {
     /// parsing): whatever a peer chose to seal, we try to read. On a rich
     /// message the sealed body is authoritative for `reply_context`,
     /// `media_metadata`, and `forwarded_from` — the relay-writable outer
-    /// copies are overwritten wholesale, `None`s included. A body that fails
-    /// to parse (including a hostile `reply_context.sender` rejected by
-    /// `UserId` validation) surfaces as raw text with a warning rather than
+    /// copies are overwritten wholesale, `None`s included — and for
+    /// `content_type` when the body carries one (absent from bodies sealed
+    /// by senders predating the field, where the outer hint stands). The
+    /// sealed `content_type` restore runs before the receive loop's
+    /// `FileChunk` routing, so a relay restamping an encrypted rich
+    /// message's outer hint can no longer misroute it; `FileChunk` itself
+    /// is refused from the sealed body (mirroring the send boundary), or a
+    /// hostile sender could steer an ordinary message into the
+    /// file-transfer manager, which drops it. A body that fails to parse
+    /// (including a hostile `reply_context.sender` rejected by `UserId`
+    /// validation) surfaces as raw text with a warning rather than
     /// dropping an authenticated message.
     pub(super) fn apply_decrypted_content(message: &mut Message, plaintext: String) {
         message.reply_context = None;
@@ -48,6 +56,16 @@ impl OfflineProtocol {
                     message.reply_context = rich.reply_context;
                     message.media_metadata = rich.media_metadata;
                     message.forwarded_from = rich.forward_info;
+                    match rich.content_type {
+                        Some(ContentType::FileChunk) => {
+                            warn!(
+                                sender = %message.sender,
+                                "Sealed rich payload claims the internal FileChunk content type, keeping outer value"
+                            );
+                        }
+                        Some(content_type) => message.content_type = content_type,
+                        None => {}
+                    }
                 }
                 Err(e) => {
                     warn!(

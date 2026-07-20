@@ -746,12 +746,22 @@ impl OfflineProtocol {
     /// only invoke this on a path that MLS-encrypts the result — the sealed
     /// body is the sole carrier for reply context and media secrets and must
     /// never leave as cleartext.
-    pub(super) fn seal_rich_payload(content: &str, extras: &RichSendExtras) -> Result<String> {
+    ///
+    /// The outer `content_type` hint is always copied into the body (not
+    /// just when non-Text) so the receiver can treat the sealed copy as
+    /// authoritative and a relay cannot rewrite the hint in either
+    /// direction on a rich message.
+    pub(super) fn seal_rich_payload(
+        content: &str,
+        extras: &RichSendExtras,
+        content_type: ContentType,
+    ) -> Result<String> {
         let payload = RichPayloadV1 {
             text: content.to_string(),
             reply_context: extras.reply_context.clone(),
             media_metadata: extras.media_metadata.clone(),
             forward_info: extras.forward_info.clone(),
+            content_type: Some(content_type),
         };
         let serialized =
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -916,7 +926,7 @@ impl OfflineProtocol {
             let sealed_body;
             let outbound: &str = match rich_extras {
                 Some(extras) if self.rich_seal_active(recipient) => {
-                    sealed_body = Self::seal_rich_payload(content, extras)?;
+                    sealed_body = Self::seal_rich_payload(content, extras, content_type)?;
                     &sealed_body
                 }
                 Some(_) => {

@@ -1792,7 +1792,8 @@ fn rich_payload_downgrade_removes_capability() {
 #[test]
 fn seal_rich_payload_round_trips_through_apply_decrypted_content() {
     let extras = sample_rich_extras();
-    let sealed = OfflineProtocol::seal_rich_payload("hello rich", &extras).unwrap();
+    let sealed =
+        OfflineProtocol::seal_rich_payload("hello rich", &extras, ContentType::Image).unwrap();
     assert!(sealed.starts_with(internal_prefixes::RICH_V1));
 
     let mut message = Message::new(
@@ -1831,6 +1832,11 @@ fn seal_rich_payload_round_trips_through_apply_decrypted_content() {
         .expect("sealed forward info restored");
     assert_eq!(forward.original_sender.as_str(), "dave");
     assert_eq!(
+        message.content_type,
+        ContentType::Image,
+        "sealed content_type must overwrite the relay-writable outer hint"
+    );
+    assert_eq!(
         message.metadata.get("encrypted").map(String::as_str),
         Some("true")
     );
@@ -1845,7 +1851,8 @@ fn apply_decrypted_content_rich_body_is_authoritative_over_outer_fields() {
         media_metadata: None,
         forward_info: None,
     };
-    let sealed = OfflineProtocol::seal_rich_payload("bare rich", &extras).unwrap();
+    let sealed =
+        OfflineProtocol::seal_rich_payload("bare rich", &extras, ContentType::default()).unwrap();
 
     let mut message = Message::new(
         UserId::new("alice").unwrap(),
@@ -1909,6 +1916,55 @@ fn apply_decrypted_content_rich_parse_failure_surfaces_raw_text() {
     OfflineProtocol::apply_decrypted_content(&mut message, hostile.clone());
     assert_eq!(message.content, hostile);
     assert!(message.reply_context.is_none());
+}
+
+#[test]
+fn apply_decrypted_content_legacy_rich_body_keeps_outer_content_type() {
+    // A body sealed by a sender predating the sealed content_type copy has
+    // no such field — the outer hint must stand (backward compatibility),
+    // not be reset to Text.
+    let legacy = format!(
+        "{}{}",
+        internal_prefixes::RICH_V1,
+        r#"{"text":"old sender"}"#
+    );
+    let mut message = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "cipher-placeholder",
+    );
+    message.content_type = ContentType::VoiceNote;
+    OfflineProtocol::apply_decrypted_content(&mut message, legacy);
+    assert_eq!(message.content, "old sender");
+    assert_eq!(message.content_type, ContentType::VoiceNote);
+}
+
+#[test]
+fn apply_decrypted_content_refuses_sealed_file_chunk_content_type() {
+    // FileChunk is an internal transport type: the receive loop routes on
+    // content_type AFTER decryption, so honoring a sealed FileChunk claim
+    // would hand an ordinary message to the file-transfer manager, which
+    // drops it. Refuse it (like the send boundary does) and keep the outer
+    // value.
+    let hostile = format!(
+        "{}{}",
+        internal_prefixes::RICH_V1,
+        r#"{"text":"smuggled","content_type":"file_chunk"}"#
+    );
+    let mut message = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "cipher-placeholder",
+    );
+    OfflineProtocol::apply_decrypted_content(&mut message, hostile);
+    assert_eq!(message.content, "smuggled");
+    assert_eq!(
+        message.content_type,
+        ContentType::Text,
+        "sealed FileChunk claim must not survive into routing"
+    );
 }
 
 #[test]
@@ -15552,6 +15608,52 @@ fn rich_payload_flush_pending_drops_extras_for_legacy_recipient() {
     assert!(
         matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "queued rich"),
         "flush toward a legacy recipient must drop extras to bare text, got {result:?}"
+    );
+}
+
+#[test]
+fn rich_send_seals_content_type_against_relay_rewrite() {
+    // The sealed content_type copy end-to-end: a relay rewriting the outer
+    // rendering hint on a rich message (Image -> FileChunk would even
+    // misroute it into the file-transfer manager) must lose to the sealed
+    // copy once the recipient decrypts.
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+
+    alice
+        .send_message_with(
+            "bob",
+            "look at this",
+            SendMessageOptions {
+                content_type: Some(ContentType::Image),
+                media_metadata: Some(sample_media_metadata(9)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("rich message must reach the wire");
+
+    // Simulate a hostile relay restamping the outer hint in transit.
+    let mut tampered = enc.clone();
+    tampered.content_type = ContentType::FileChunk;
+
+    let result = bob.process_internal_message(&tampered);
+    let Some(InternalMessageResult::Decrypted(text)) = result else {
+        panic!("tampered outer hint must not break decryption, got {result:?}");
+    };
+    OfflineProtocol::apply_decrypted_content(&mut tampered, text);
+    assert_eq!(tampered.content, "look at this");
+    assert_eq!(
+        tampered.content_type,
+        ContentType::Image,
+        "sealed content_type must overwrite the relay-rewritten outer hint"
     );
 }
 
