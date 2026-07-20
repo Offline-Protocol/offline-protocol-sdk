@@ -111,11 +111,16 @@ impl OfflineProtocol {
             }
         }
 
-        // 2. Discard any received key package we were holding for them.
+        // 2. Discard any received key package we were holding for them, and
+        //    the advertised capability record (memory + durable): the clean
+        //    slate re-learns capabilities from the fresh exchange in step 6.
         if self.pending_key_packages.remove(user_id).is_some() {
             debug!(user_id = %user_id, "Cleared pending key package for unblocked user");
         }
         self.delete_peer_key_package_from_storage(user_id);
+        self.peer_compact_envelope.remove(user_id);
+        self.peer_rich_payload.remove(user_id);
+        self.delete_peer_capabilities_from_storage(user_id);
 
         // 3. Drop queued outbound messages that were waiting for session
         //    establishment with this peer.

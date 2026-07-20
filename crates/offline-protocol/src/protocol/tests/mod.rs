@@ -1789,6 +1789,168 @@ fn rich_payload_downgrade_removes_capability() {
     assert!(!protocol.peer_rich_payload.contains("peer"));
 }
 
+/// Feeds a key package advertising both end-to-end capabilities (compact
+/// envelope + sealed rich payload) — the persistence tests below exercise
+/// both sets at once.
+#[cfg(test)]
+fn feed_key_package_with_caps(
+    protocol: &mut OfflineProtocol,
+    sender: &str,
+    env_versions: Vec<u8>,
+    rich_versions: Vec<u8>,
+) {
+    let payload = KeyPackagePayload {
+        user_id: sender.to_string(),
+        key_package_data: vec![1, 2, 3, 4],
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: false,
+        wire_versions: Vec::new(),
+        env_versions,
+        rich_versions,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    );
+    let message = Message::new(
+        UserId::new(sender).unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+    protocol.process_internal_message(&message);
+}
+
+/// Builds a protocol instance with MLS initialized on the given storage —
+/// the restart half of the capability persistence tests.
+#[cfg(test)]
+fn protocol_with_mls_storage(storage: Arc<InMemoryStorage>) -> OfflineProtocol {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+    protocol
+}
+
+#[test]
+fn peer_capabilities_persist_across_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    feed_key_package_with_caps(
+        &mut protocol,
+        "peer",
+        vec![MLS_ENVELOPE_COMPACT_V1],
+        vec![RICH_PAYLOAD_V1],
+    );
+    assert!(protocol.peer_compact_envelope.contains("peer"));
+    assert!(protocol.peer_rich_payload.contains("peer"));
+
+    // Restart: a fresh instance on the same storage must re-learn both
+    // capabilities from the durable record, without any live exchange.
+    let restarted = protocol_with_mls_storage(storage);
+    assert!(
+        restarted.peer_compact_envelope.contains("peer"),
+        "compact envelope capability must survive a restart"
+    );
+    assert!(
+        restarted.peer_rich_payload.contains("peer"),
+        "rich payload capability must survive a restart"
+    );
+    assert!(restarted.peer_supports_rich_payload("peer"));
+}
+
+#[test]
+fn peer_capability_downgrade_survives_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), vec![RICH_PAYLOAD_V1]);
+    // A fresh key package without the capability removes it — the durable
+    // record must follow, or a restart would resurrect the stale grant.
+    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), Vec::new());
+    assert!(!protocol.peer_rich_payload.contains("peer"));
+
+    let restarted = protocol_with_mls_storage(storage);
+    assert!(
+        !restarted.peer_rich_payload.contains("peer"),
+        "a downgraded capability must not come back after restart"
+    );
+}
+
+#[test]
+fn peer_capability_restore_respects_kill_switch_but_keeps_record() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), vec![RICH_PAYLOAD_V1]);
+
+    // Restart with the kill switch off: the capability must not be applied…
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.rich_payload_enabled = false;
+    let mut gated = OfflineProtocol::new(config).unwrap();
+    gated.initialize_mls(storage.clone()).unwrap();
+    assert!(!gated.peer_rich_payload.contains("peer"));
+    assert!(!gated.peer_supports_rich_payload("peer"));
+
+    // …but the record survives, so flipping the switch back on restores it
+    // on the next run — same semantics as toggling the switch live.
+    let restored = protocol_with_mls_storage(storage);
+    assert!(restored.peer_rich_payload.contains("peer"));
+}
+
+#[test]
+fn peer_capability_unblock_clears_record() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), vec![RICH_PAYLOAD_V1]);
+
+    // Unblock runs the clean-slate cleanup: capability forgotten in memory
+    // and on disk, to be re-learned from the fresh exchange.
+    protocol.block_user("peer").unwrap();
+    protocol.unblock_user("peer").unwrap();
+    assert!(!protocol.peer_rich_payload.contains("peer"));
+
+    let restarted = protocol_with_mls_storage(storage);
+    assert!(
+        !restarted.peer_rich_payload.contains("peer"),
+        "unblock's clean slate must extend to the durable capability record"
+    );
+}
+
+#[test]
+fn peer_capability_restore_prunes_overflow() {
+    // A durable store inflated past the cap (e.g. by a forged-sender flood
+    // on an older build) must shrink to the cap in a single boot, exactly
+    // like restore_peer_key_packages.
+    let storage = Arc::new(InMemoryStorage::new());
+    let caps = PeerCapabilities {
+        env_versions: Vec::new(),
+        rich_versions: vec![RICH_PAYLOAD_V1],
+    };
+    let encoded = serde_json::to_vec(&caps).unwrap();
+    for i in 0..MAX_KEY_PACKAGE_SENT_TO + 7 {
+        storage
+            .store(
+                storage_keys::PEER_CAPABILITIES,
+                &format!("peer-{i}"),
+                &encoded,
+            )
+            .unwrap();
+    }
+
+    let protocol = protocol_with_mls_storage(storage.clone());
+    assert_eq!(protocol.peer_rich_payload.len(), MAX_KEY_PACKAGE_SENT_TO);
+    assert_eq!(
+        storage
+            .list_keys(storage_keys::PEER_CAPABILITIES)
+            .unwrap()
+            .len(),
+        MAX_KEY_PACKAGE_SENT_TO,
+        "overflow records must be pruned from durable storage"
+    );
+}
+
 #[test]
 fn seal_rich_payload_round_trips_through_apply_decrypted_content() {
     let extras = sample_rich_extras();
@@ -15654,6 +15816,76 @@ fn rich_send_seals_content_type_against_relay_rewrite() {
         tampered.content_type,
         ContentType::Image,
         "sealed content_type must overwrite the relay-rewritten outer hint"
+    );
+}
+
+#[test]
+fn rich_payload_flush_after_restart_seals_with_restored_capability() {
+    // Issue #200's user-visible half: a rich message queued before an app
+    // restart must still seal its extras when the post-restart flush runs.
+    // Before capability persistence, the restarted instance had an empty
+    // peer_rich_payload set and the flush silently degraded the message to
+    // bare text.
+    let alice_storage = Arc::new(InMemoryStorage::new());
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.encryption.enabled = true;
+    alice_config.encryption.store_pending = true;
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    alice.initialize_mls(alice_storage.clone()).unwrap();
+
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+
+    alice.queue_pending_message(
+        "bob",
+        "queued rich",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::default(),
+        None,
+        Some(sample_rich_extras()),
+    );
+
+    // Restart alice on the same storage; start() flushes the restored queue.
+    let mut alice2_config = create_test_config_for_user("alice");
+    alice2_config.encryption.enabled = true;
+    alice2_config.encryption.store_pending = true;
+    let mut alice2 = OfflineProtocol::new(alice2_config).unwrap();
+    alice2.initialize_mls(alice_storage).unwrap();
+    assert!(
+        alice2.peer_supports_rich_payload("bob"),
+        "restored capability must be visible before the flush runs"
+    );
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    let transport_handle = transport.clone();
+    alice2
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    alice2.start().unwrap();
+
+    let sent = transport_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("restored rich message must flush to the wire");
+    let result = bob.process_internal_message(enc);
+    let Some(InternalMessageResult::Decrypted(text)) = result else {
+        panic!("flushed message must decrypt, got {result:?}");
+    };
+    assert!(
+        text.starts_with(internal_prefixes::RICH_V1),
+        "post-restart flush must seal rich extras against the restored capability"
+    );
+    let mut delivered = enc.clone();
+    OfflineProtocol::apply_decrypted_content(&mut delivered, text);
+    assert_eq!(delivered.content, "queued rich");
+    assert_eq!(
+        delivered.reply_context.as_ref().map(|rc| rc.text.as_str()),
+        Some("the quoted message")
     );
 }
 

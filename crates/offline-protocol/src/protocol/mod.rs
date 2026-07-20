@@ -107,20 +107,22 @@ pub struct OfflineProtocol {
     /// Peers whose key package advertised the compact MLS envelope
     /// ([`MLS_ENVELOPE_COMPACT_V1`] in `env_versions`), so
     /// `seal_encrypted_content` may emit it instead of the legacy JSON form.
-    /// In-memory only, like the transport manager's binary-wire registry:
-    /// forgotten on restart and re-learned from the next key-package exchange,
-    /// degrading to the JSON envelope in the meantime. Bounded like
-    /// `key_package_sent_to` (it is keyed by the wire-claimed sender).
+    /// Learned from key-package exchange, persisted per peer as
+    /// [`PeerCapabilities`], and repopulated by `restore_peer_capabilities`
+    /// on `initialize_mls` — unlike the transport manager's binary-wire
+    /// registry, which stays in-memory because direct connections re-exchange
+    /// key packages anyway. Bounded like `key_package_sent_to` (it is keyed
+    /// by the wire-claimed sender).
     peer_compact_envelope: std::collections::HashSet<String>,
 
     /// Peers whose key package advertised the sealed rich payload
     /// ([`RICH_PAYLOAD_V1`] in `rich_versions`), so the send path may seal
     /// rich extras (reply context, rich media metadata, forward attribution)
     /// inside the `__RICH_V1__` body. Same lifecycle as
-    /// `peer_compact_envelope` above: in-memory only, re-learned from the
-    /// next key-package exchange, bounded like `key_package_sent_to`.
-    /// Forgetting a peer only costs silently dropped rich extras — never a
-    /// cleartext fallback.
+    /// `peer_compact_envelope` above: learned from key-package exchange,
+    /// persisted, restored on `initialize_mls`, bounded like
+    /// `key_package_sent_to`. Forgetting a peer only costs silently dropped
+    /// rich extras — never a cleartext fallback.
     peer_rich_payload: std::collections::HashSet<String>,
 
     /// Peers already flagged with a `PlaintextSend` security warning, so the
@@ -450,6 +452,8 @@ impl OfflineProtocol {
         let previous_tofu_keys = self.known_peer_public_keys.clone();
         let previous_blocked_users = self.blocked_users.clone();
         let previous_outbox = self.outbox.clone();
+        let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
+        let previous_peer_rich_payload = self.peer_rich_payload.clone();
 
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
@@ -472,6 +476,10 @@ impl OfflineProtocol {
             self.restore_blocked_users();
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
+            // Must precede start(): flush_restored_confirmed_pending_messages
+            // re-makes the rich seal decision against these sets, and an
+            // empty set there silently drops queued rich extras.
+            self.restore_peer_capabilities();
             self.restore_welcome_lifecycles()?;
             self.restore_outbox()?;
             self.restore_both_create_awaiting_decrypt();
@@ -487,6 +495,8 @@ impl OfflineProtocol {
             self.known_peer_public_keys = previous_tofu_keys;
             self.blocked_users = previous_blocked_users;
             self.outbox = previous_outbox;
+            self.peer_compact_envelope = previous_peer_compact_envelope;
+            self.peer_rich_payload = previous_peer_rich_payload;
             return Err(err);
         }
 
@@ -1150,6 +1160,18 @@ impl OfflineProtocol {
     /// Use this to show "Establishing…" or drive retries without calling send/establish.
     pub fn get_establishment_state(&self, peer_id: &str) -> Result<EstablishmentState> {
         self.establishment_state(peer_id)
+    }
+
+    /// Whether rich extras (reply context, rich media metadata, forward
+    /// attribution) on a send toward `peer_id` would travel in the sealed
+    /// rich body — i.e. the peer's last key package advertised the
+    /// capability (surviving restarts) and our own `rich_payload_enabled`
+    /// kill switch is on. When `false` the extras are silently dropped and
+    /// the message degrades to plain text, so apps can use this to render
+    /// honest degraded-reply UX instead of discovering the drop after the
+    /// fact.
+    pub fn peer_supports_rich_payload(&self, peer_id: &str) -> bool {
+        self.rich_seal_active(peer_id)
     }
 
     /// Creates a session using manually imported key material.
