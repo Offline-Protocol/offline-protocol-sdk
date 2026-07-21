@@ -3211,26 +3211,19 @@ impl OfflineProtocol {
         }
     }
 
-    /// Attempts to send a group message via relay broadcast.
-    ///
-    /// Sends a single `__GRP_RELAY_BCAST__` message to the user's own ID.
-    /// The bridge translator (not the relay — see
-    /// [`RelayGroupBroadcastPayload`]) turns it into a relay-native
-    /// `SendGroupMessage`; the relay fans out to registered members, whose
-    /// bridges inject the delivery as `__GROUP_MSG__` frames. Callers must
-    /// only take this path for a `relay_synced` group.
-    ///
-    /// Returns the broadcast `MessageId` on success, or an error if the
-    /// relay is unreachable.
     /// Applies the sealed `__RICH_V1__` restore to a decrypted group
     /// message plaintext, returning the event-ready fields: content, media
     /// metadata, content-type hint, and forward attribution.
     ///
     /// Parsing is never capability-gated (whatever a peer chose to seal, we
-    /// try to read). The sealed attribution is authoritative over the
-    /// hop-visible payload copy — a relay can rewrite the latter but not
-    /// the former. A body that fails to parse surfaces as raw text with
-    /// nothing restored, mirroring the DM path: never drop an
+    /// try to read). When the body parses, the sealed attribution is
+    /// authoritative wholesale — absence included: a sealing sender always
+    /// seals its `forward_info` when one exists, so the hop-visible payload
+    /// copy is consulted only for unsealed messages. Falling back to it on
+    /// a sealed body would let a relay attach fabricated attribution to a
+    /// rich message that carried none (mirrors the DM restore, which
+    /// overwrites the outer fields wholesale). A body that fails to parse
+    /// surfaces as raw text with nothing restored: never drop an
     /// authenticated message.
     fn restore_group_rich(
         text: String,
@@ -3244,12 +3237,11 @@ impl OfflineProtocol {
     ) {
         if text.starts_with(internal_prefixes::RICH_V1) {
             if let Some(rich) = RichPayloadV1::parse_sealed(&text, sender) {
-                let forward_info = rich.forward_info.or(payload_forward_info);
                 return (
                     rich.text,
                     rich.media_metadata,
                     rich.content_type.map(|ct| ct.to_string()),
-                    forward_info
+                    rich.forward_info
                         .as_ref()
                         .map(crate::events::ForwardInfoEvent::from),
                 );
@@ -3265,6 +3257,17 @@ impl OfflineProtocol {
         )
     }
 
+    /// Attempts to send a group message via relay broadcast.
+    ///
+    /// Sends a single `__GRP_RELAY_BCAST__` message to the user's own ID.
+    /// The bridge translator (not the relay — see
+    /// [`RelayGroupBroadcastPayload`]) turns it into a relay-native
+    /// `SendGroupMessage`; the relay fans out to registered members, whose
+    /// bridges inject the delivery as `__GROUP_MSG__` frames. Callers must
+    /// only take this path for a `relay_synced` group.
+    ///
+    /// Returns the broadcast `MessageId` on success, or an error if the
+    /// relay is unreachable.
     fn try_relay_broadcast(
         &mut self,
         group_id: &str,
