@@ -2743,6 +2743,14 @@ impl OfflineProtocol {
     }
 
     /// Forwards a message to a new recipient with original sender attribution.
+    ///
+    /// `original_message_json` must be the core-serde message shape (as
+    /// produced by `receive_message` or the `message_received` event).
+    /// Include `media_metadata` — with its `encryption_key`/`iv` — when
+    /// forwarding cloud media: toward a rich-capable recipient those travel
+    /// inside the MLS-sealed body (the only carrier that can deliver media
+    /// secrets); toward legacy recipients the secrets are stripped at the
+    /// wire and only URL/attribution survive.
     pub fn forward_message(
         &self,
         original_message_json: String,
@@ -2786,6 +2794,21 @@ impl OfflineProtocol {
                     "original_timestamp": fwd.original_timestamp.as_millis(),
                     "forward_count": fwd.forward_count,
                 });
+            }
+            // Serialized with the core serde shape so the JSON round-trips
+            // straight back into `forward_message` — a media message without
+            // these fields would forward with its download URL and content
+            // key silently dropped.
+            json_value["content_type"] = serde_json::json!(msg.content_type);
+            if let Some(ref media) = msg.media_metadata {
+                match serde_json::to_value(media) {
+                    Ok(value) => json_value["media_metadata"] = value,
+                    Err(e) => tracing::warn!(
+                        message_id = %msg_id,
+                        error = %e,
+                        "Failed to serialize media metadata, omitting from message JSON"
+                    ),
+                }
             }
             match serde_json::to_string(&json_value) {
                 Ok(json) => Some(json),
