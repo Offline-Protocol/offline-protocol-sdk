@@ -89,10 +89,8 @@ impl OfflineProtocol {
             // switches gate the recording above, restore, and send — not
             // knowledge). A package advertising nothing deletes the record:
             // the durable side of the downgrade semantics above.
-            let caps = PeerCapabilities {
-                env_versions: payload.env_versions.clone(),
-                rich_versions: payload.rich_versions.clone(),
-            };
+            let caps =
+                PeerCapabilities::from_advertised(&payload.env_versions, &payload.rich_versions);
             if caps.is_any() {
                 self.persist_peer_capabilities(sender, &caps);
             } else {
@@ -174,11 +172,28 @@ impl OfflineProtocol {
                     self.pending_key_packages.remove(&victim);
                     self.delete_peer_key_package_from_storage(&victim);
                     // Evict the victim's capability record with its key
-                    // package: this ties the durable capability count to the
-                    // same flood bound. Peers with established sessions are
-                    // not in this map, so their records survive; an evicted
-                    // real peer re-advertises on the next exchange.
-                    self.delete_peer_capabilities_from_storage(&victim);
+                    // package, tying the durable capability count to the same
+                    // flood bound — but only for victims without an
+                    // established session. Session peers DO land in this map:
+                    // a package re-advertised by a peer that restarted (its
+                    // in-memory key_package_sent_to cleared) is inserted
+                    // above but never consumed, because auto-establish sees
+                    // the existing session and leaves it. They are exactly
+                    // the population whose capabilities must survive
+                    // restarts, so letting a forged-sender flood delete their
+                    // records would reopen the silent rich-degrade window
+                    // (#200) after the next relaunch. A non-session victim's
+                    // record is as recoverable as its key package: the peer
+                    // re-advertises on the next exchange.
+                    let victim_has_session = self
+                        .mls_manager
+                        .as_ref()
+                        .and_then(|mls| mls.read().ok())
+                        .map(|manager| manager.has_session(&victim).unwrap_or(false))
+                        .unwrap_or(false);
+                    if !victim_has_session {
+                        self.delete_peer_capabilities_from_storage(&victim);
+                    }
                 }
             }
             self.pending_key_packages

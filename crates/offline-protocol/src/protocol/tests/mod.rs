@@ -1951,6 +1951,171 @@ fn peer_capability_restore_prunes_overflow() {
     );
 }
 
+/// Establishes a local MLS session from `protocol` toward `peer` at the
+/// manager level (import + create), without needing the peer to process the
+/// Welcome — `has_session`/`list_sessions` are local.
+#[cfg(test)]
+fn create_local_session_with(protocol: &OfflineProtocol, peer: &str) {
+    let peer_mgr =
+        crate::mls::MlsManager::new(peer, Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let peer_kp = peer_mgr.generate_key_package().unwrap();
+    let mls = protocol.mls_manager.as_ref().unwrap().clone();
+    let manager = mls.read().unwrap();
+    manager
+        .import_key_package(peer, &peer_kp.key_package_data)
+        .unwrap();
+    manager.create_session(peer).unwrap();
+}
+
+#[test]
+fn peer_capability_eviction_spares_session_peers() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut alice = protocol_with_mls_storage(storage.clone());
+    create_local_session_with(&alice, "bob");
+
+    // Bob re-advertises after his own restart: the package is inserted into
+    // pending_key_packages but never consumed (the session already exists),
+    // so bob IS in the eviction candidate pool despite the session.
+    feed_key_package_with_caps(&mut alice, "bob", Vec::new(), vec![RICH_PAYLOAD_V1]);
+    assert!(alice.pending_key_packages.contains_key("bob"));
+    // Make bob the deterministic soonest-to-expire victim.
+    alice
+        .pending_key_packages
+        .get_mut("bob")
+        .unwrap()
+        .local_expires_at_ms = 1;
+
+    // A forged-sender flood fills the map to capacity…
+    while alice.pending_key_packages.len() < MAX_PENDING_KEY_PACKAGES {
+        let i = alice.pending_key_packages.len();
+        alice.pending_key_packages.insert(
+            format!("forged-{i}"),
+            ReceivedKeyPackage {
+                key_package_data: vec![0],
+                local_expires_at_ms: u64::MAX,
+            },
+        );
+    }
+    // …and the next forged package evicts bob's key package. His durable
+    // capability record must survive, or the flood would silently degrade
+    // rich sends to him after the next relaunch (the #200 window).
+    feed_key_package_with_caps(&mut alice, "trigger-1", Vec::new(), vec![RICH_PAYLOAD_V1]);
+    assert!(!alice.pending_key_packages.contains_key("bob"));
+    assert!(
+        storage
+            .load(storage_keys::PEER_CAPABILITIES, "bob")
+            .unwrap()
+            .is_some(),
+        "a session peer's durable capability record must survive eviction"
+    );
+    assert!(alice.peer_rich_payload.contains("bob"));
+
+    // A non-session victim's record goes with its key package — both are
+    // recoverable via re-exchange, and this ties the durable capability
+    // count to the flood bound.
+    feed_key_package_with_caps(&mut alice, "carol", Vec::new(), vec![RICH_PAYLOAD_V1]);
+    alice
+        .pending_key_packages
+        .get_mut("carol")
+        .unwrap()
+        .local_expires_at_ms = 1;
+    feed_key_package_with_caps(&mut alice, "trigger-2", Vec::new(), vec![RICH_PAYLOAD_V1]);
+    assert!(!alice.pending_key_packages.contains_key("carol"));
+    assert!(
+        storage
+            .load(storage_keys::PEER_CAPABILITIES, "carol")
+            .unwrap()
+            .is_none(),
+        "a non-session victim's capability record is evicted with its key package"
+    );
+}
+
+#[test]
+fn peer_capability_restore_prefers_session_peers() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut alice = protocol_with_mls_storage(storage.clone());
+    create_local_session_with(&alice, "bob");
+    feed_key_package_with_caps(
+        &mut alice,
+        "bob",
+        vec![MLS_ENVELOPE_COMPACT_V1],
+        vec![RICH_PAYLOAD_V1],
+    );
+
+    // Inflate the store past the cap with forged non-session records.
+    // `list_keys` order is backend-defined, so without session-first
+    // admission the over-cap prune could evict bob's record while keeping
+    // forged leftovers.
+    let caps = PeerCapabilities {
+        env_versions: Vec::new(),
+        rich_versions: vec![RICH_PAYLOAD_V1],
+    };
+    let encoded = serde_json::to_vec(&caps).unwrap();
+    for i in 0..MAX_KEY_PACKAGE_SENT_TO + 40 {
+        storage
+            .store(
+                storage_keys::PEER_CAPABILITIES,
+                &format!("forged-{i}"),
+                &encoded,
+            )
+            .unwrap();
+    }
+
+    let restarted = protocol_with_mls_storage(storage.clone());
+    assert!(
+        restarted.peer_rich_payload.contains("bob"),
+        "the session peer's record must always survive an over-cap prune"
+    );
+    assert!(storage
+        .load(storage_keys::PEER_CAPABILITIES, "bob")
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        storage
+            .list_keys(storage_keys::PEER_CAPABILITIES)
+            .unwrap()
+            .len(),
+        MAX_KEY_PACKAGE_SENT_TO
+    );
+}
+
+#[test]
+fn peer_capability_restore_deletes_corrupt_record() {
+    let storage = Arc::new(InMemoryStorage::new());
+    storage
+        .store(storage_keys::PEER_CAPABILITIES, "mangled", b"not-json")
+        .unwrap();
+    let protocol = protocol_with_mls_storage(storage.clone());
+    assert!(!protocol.peer_rich_payload.contains("mangled"));
+    assert!(!protocol.peer_compact_envelope.contains("mangled"));
+    assert!(
+        storage
+            .load(storage_keys::PEER_CAPABILITIES, "mangled")
+            .unwrap()
+            .is_none(),
+        "a corrupt record must be deleted, not re-parsed on every boot"
+    );
+}
+
+#[test]
+fn peer_capability_persist_truncates_version_lists() {
+    // The advertised lists are unauthenticated wire input persisted raw; a
+    // hostile advertiser padding them must not bloat the durable record.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    let mut rich_versions = vec![RICH_PAYLOAD_V1];
+    rich_versions.extend(2..=200u8);
+    feed_key_package_with_caps(&mut protocol, "peer", Vec::new(), rich_versions);
+
+    let data = storage
+        .load(storage_keys::PEER_CAPABILITIES, "peer")
+        .unwrap()
+        .expect("record must persist");
+    let caps: PeerCapabilities = serde_json::from_slice(&data).unwrap();
+    assert_eq!(caps.rich_versions.len(), MAX_PERSISTED_CAPABILITY_VERSIONS);
+    assert!(caps.rich_versions.contains(&RICH_PAYLOAD_V1));
+}
+
 #[test]
 fn seal_rich_payload_round_trips_through_apply_decrypted_content() {
     let extras = sample_rich_extras();
