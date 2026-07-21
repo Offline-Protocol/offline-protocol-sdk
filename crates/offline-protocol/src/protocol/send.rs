@@ -936,6 +936,28 @@ impl OfflineProtocol {
                     );
                     content
                 }
+                // No rich extras, but a non-Text content_type toward a
+                // capable recipient still seals a hint-only body: the outer
+                // hint is relay-writable, and restamping it FileChunk gets
+                // the decrypted message ACKed and then dropped by the
+                // file-transfer manager — worse than a plain relay drop,
+                // which at least fails the ACK and retries. Only when
+                // nothing rides outer (`forwarded_from`/`media_metadata`
+                // both absent): the forward path deliberately carries those
+                // as cleartext outer fields with no sealed copy, and the
+                // receiver's sealed-body restore overwrites outer copies
+                // wholesale — sealing here would wipe them. Bare Text seals
+                // nothing: no hint to protect, and the unsealed form keeps
+                // the plaintext floor maximal.
+                None if content_type != ContentType::Text
+                    && forwarded_from.is_none()
+                    && media_metadata.is_none()
+                    && self.rich_seal_active(recipient) =>
+                {
+                    sealed_body =
+                        Self::seal_rich_payload(content, &RichSendExtras::default(), content_type)?;
+                    &sealed_body
+                }
                 None => content,
             };
             if self.config.encryption.require_encryption {
