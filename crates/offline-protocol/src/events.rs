@@ -918,6 +918,17 @@ pub enum Event {
         succeeded_members: Vec<String>,
     },
 
+    /// Rich media metadata was dropped from an outbound group message
+    /// because the group is not fully rich-capable (not every member
+    /// advertised sealed rich payload support, or the local kill switch
+    /// disabled it). The text was still sent; members receive it without
+    /// the media attachment. Apps can use this to warn the sender that an
+    /// attachment did not go through.
+    GroupRichExtrasDropped {
+        /// MLS group identifier.
+        group_id: String,
+    },
+
     /// An epoch fork was detected in a group — concurrent commits caused
     /// members to diverge onto different MLS branches. The deterministic
     /// leader will attempt automatic resolution via a key-update commit.
@@ -1811,6 +1822,11 @@ impl Event {
         }
     }
 
+    /// Creates a GroupRichExtrasDropped event.
+    pub fn group_rich_extras_dropped(group_id: String) -> Self {
+        Self::GroupRichExtrasDropped { group_id }
+    }
+
     /// Creates a GroupEpochForkDetected event.
     pub fn group_epoch_fork_detected(group_id: String, local_epoch: Option<u64>) -> Self {
         Self::GroupEpochForkDetected {
@@ -2046,6 +2062,7 @@ impl Event {
             Self::GroupError { .. } => "protocol.group.error",
             Self::GroupMessageSent { .. } => "protocol.group.message_sent",
             Self::GroupMessagePartialFailure { .. } => "protocol.group.message_partial_failure",
+            Self::GroupRichExtrasDropped { .. } => "protocol.group.rich_extras_dropped",
             Self::GroupEpochForkDetected { .. } => "protocol.group.epoch_fork_detected",
             Self::GroupEpochForkResolved { .. } => "protocol.group.epoch_fork_resolved",
             Self::GroupRoleChanged { .. } => "protocol.group.role_changed",
@@ -2652,6 +2669,10 @@ impl fmt::Debug for Event {
                 .field("group_id", group_id)
                 .field("failed_count", &failed_members.len())
                 .field("succeeded_count", &succeeded_members.len())
+                .finish(),
+            Self::GroupRichExtrasDropped { group_id } => f
+                .debug_struct("GroupRichExtrasDropped")
+                .field("group_id", group_id)
                 .finish(),
             Self::GroupEpochForkDetected {
                 group_id,

@@ -512,6 +512,9 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             hash_each(failed_members, scrubber);
             hash_each(succeeded_members, scrubber);
         }
+        Event::GroupRichExtrasDropped { group_id } => {
+            hash_string(group_id, scrubber);
+        }
         Event::GroupEpochForkDetected {
             group_id,
             local_epoch: _,
@@ -706,6 +709,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::GroupError { .. }
         | Event::GroupMessageSent { .. }
         | Event::GroupMessagePartialFailure { .. }
+        | Event::GroupRichExtrasDropped { .. }
         | Event::GroupEpochForkDetected { .. }
         | Event::GroupEpochForkResolved { .. }
         | Event::GroupRoleChanged { .. }
