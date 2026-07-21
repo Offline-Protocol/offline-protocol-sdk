@@ -2294,6 +2294,15 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<&str>,
     ) -> Result<Vec<MessageId>> {
+        // Reject reserved internal prefixes: receivers parse decrypted group
+        // plaintext for the sealed `__RICH_V1__` body, so user content must
+        // never be able to impersonate one (same rule as `send_message` and
+        // the forward paths).
+        if Self::is_internal_prefix(content) {
+            return Err(Error::InvalidArgument(
+                "Message content must not start with a reserved internal prefix".to_string(),
+            ));
+        }
         self.send_group_message_inner(
             group_id,
             content,
@@ -2317,6 +2326,12 @@ impl OfflineProtocol {
         content: &str,
         options: GroupSendOptions,
     ) -> Result<Vec<MessageId>> {
+        // Same internal-prefix rejection as `send_group_message`.
+        if Self::is_internal_prefix(content) {
+            return Err(Error::InvalidArgument(
+                "Message content must not start with a reserved internal prefix".to_string(),
+            ));
+        }
         // FileChunk is an internal transport content type — same boundary
         // rule as `send_message_with`.
         if options.content_type == Some(ContentType::FileChunk) {
