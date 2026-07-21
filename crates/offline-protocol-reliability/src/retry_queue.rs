@@ -152,14 +152,32 @@ impl RetryQueue {
     /// The absolute time the retry is scheduled for, or `None` if the
     /// message was already queued (nothing was scheduled).
     pub fn enqueue(&mut self, message: Message, retry_count: u32) -> Option<DateTime<Utc>> {
+        let delay_ms = self.config.delay_for_retry(retry_count);
+        self.enqueue_with_delay(message, retry_count, delay_ms)
+    }
+
+    /// Adds a message to the retry queue with an explicit delay, bypassing
+    /// the backoff formula.
+    ///
+    /// Used for reachability probes toward peers an authoritative relay
+    /// verdict reported unreachable, where the interval is driven by
+    /// per-peer escalation rather than this message's retry count.
+    ///
+    /// Duplicate messages (same ID already in queue) are silently ignored;
+    /// `None` means nothing was scheduled.
+    pub fn enqueue_with_delay(
+        &mut self,
+        message: Message,
+        retry_count: u32,
+        delay_ms: u64,
+    ) -> Option<DateTime<Utc>> {
         // Prevent duplicate entries for the same message
         if self.index.contains_key(&message.id.as_str()) {
             return None;
         }
 
-        let delay_ms = self.config.delay_for_retry(retry_count);
-
-        let retry_at = Utc::now() + chrono::Duration::milliseconds(delay_ms as i64);
+        let retry_at =
+            Utc::now() + chrono::Duration::milliseconds(delay_ms.min(i64::MAX as u64) as i64);
 
         let entry = RetryEntry {
             message: message.clone(),
@@ -586,6 +604,32 @@ mod tests {
             MessagePriority::Medium
         );
         assert_eq!(heap.pop().unwrap().message.priority, MessagePriority::Low);
+    }
+
+    #[test]
+    fn test_enqueue_with_delay_uses_explicit_delay() {
+        // The backoff formula would schedule retry 0 at initial_delay_ms
+        // (1s default); the explicit delay must win.
+        let mut queue = RetryQueue::new();
+        let msg = create_test_message(MessagePriority::Medium);
+
+        let before = Utc::now();
+        let retry_at = queue.enqueue_with_delay(msg, 0, 60_000).unwrap();
+
+        let delay = retry_at - before;
+        assert!(delay >= chrono::Duration::milliseconds(59_000));
+        assert!(delay <= chrono::Duration::milliseconds(61_000));
+    }
+
+    #[test]
+    fn test_enqueue_with_delay_ignores_duplicates() {
+        let mut queue = RetryQueue::new();
+        let msg = create_test_message(MessagePriority::Medium);
+
+        assert!(queue.enqueue_with_delay(msg.clone(), 0, 1000).is_some());
+        assert!(queue.enqueue_with_delay(msg.clone(), 0, 2000).is_none());
+        assert!(queue.enqueue(msg, 0).is_none());
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]
