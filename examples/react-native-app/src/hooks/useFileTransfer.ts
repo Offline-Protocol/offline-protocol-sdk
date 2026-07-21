@@ -11,13 +11,19 @@ import {
 } from '@offline-protocol/mesh-sdk';
 import { FileTransferState } from '../types/runtime';
 
+/** Rich extras threaded into chunk 0 (sealed; dropped for non-rich peers). */
+export type MediaSendExtras = Pick<
+  SendMediaParams,
+  'caption' | 'replyToMsg' | 'replyContext'
+>;
+
 interface UseFileTransferReturn {
   fileTransfers: FileTransferState[];
   sendFile: (params: SendFileParams) => Promise<string | null>;
   sendMedia: (params: SendMediaParams) => Promise<string | null>;
-  sendImage: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
-  sendVoiceNote: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
-  sendVideo: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
+  sendImage: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata, extras?: MediaSendExtras) => Promise<string | null>;
+  sendVoiceNote: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata, extras?: MediaSendExtras) => Promise<string | null>;
+  sendVideo: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata, extras?: MediaSendExtras) => Promise<string | null>;
   cancelFileTransfer: (fileId: string) => Promise<boolean>;
   handleFileProgress: (event: FileProgressEvent) => void;
   handleFileReceived: (event: FileReceivedEvent) => void;
@@ -124,22 +130,22 @@ export function useFileTransfer(
   );
 
   const sendImage = useCallback(
-    async (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata): Promise<string | null> => {
-      return sendMedia({ recipient, fileData, fileName, contentType: ContentType.Image, mediaMetadata: metadata });
+    async (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata, extras?: MediaSendExtras): Promise<string | null> => {
+      return sendMedia({ recipient, fileData, fileName, contentType: ContentType.Image, mediaMetadata: metadata, ...extras });
     },
     [sendMedia],
   );
 
   const sendVoiceNote = useCallback(
-    async (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata): Promise<string | null> => {
-      return sendMedia({ recipient, fileData, fileName, contentType: ContentType.VoiceNote, mediaMetadata: metadata });
+    async (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata, extras?: MediaSendExtras): Promise<string | null> => {
+      return sendMedia({ recipient, fileData, fileName, contentType: ContentType.VoiceNote, mediaMetadata: metadata, ...extras });
     },
     [sendMedia],
   );
 
   const sendVideo = useCallback(
-    async (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata): Promise<string | null> => {
-      return sendMedia({ recipient, fileData, fileName, contentType: ContentType.Video, mediaMetadata: metadata });
+    async (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata, extras?: MediaSendExtras): Promise<string | null> => {
+      return sendMedia({ recipient, fileData, fileName, contentType: ContentType.Video, mediaMetadata: metadata, ...extras });
     },
     [sendMedia],
   );

@@ -28,7 +28,7 @@ import { Icon } from '../components/Icon';
 import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
 import { Message } from '../providers/ProtocolProvider';
-import { MessagePriority, ContentType } from '@offline-protocol/mesh-sdk';
+import { MessagePriority, type ReplyContext } from '@offline-protocol/mesh-sdk';
 import { getUserInitials, generateAvatarColor } from '../utils/user';
 
 const MEDIA_CONTENT_TYPES = new Set(['image', 'video', 'audio', 'voice_note', 'video_note', 'file']);
@@ -63,6 +63,44 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+const REPLY_EXCERPT_MAX_CHARS = 120;
+
+/**
+ * Build the sealed ReplyContext for a message being replied to, so the
+ * recipient can render a quote preview without a local copy of the
+ * original. `sender` must be the real user id (the SDK validates it and
+ * rejects the whole send otherwise), so bail out when it's missing.
+ * Media originals quote their label/file name, never `content` — received
+ * file messages carry raw base64 there.
+ */
+function buildReplyContext(original: Message): ReplyContext | undefined {
+  if (!original.senderId) return undefined;
+  const isMedia =
+    original.contentType && MEDIA_CONTENT_TYPES.has(original.contentType);
+  return {
+    sender: original.senderId,
+    text: isMedia
+      ? getMediaLabel(original.contentType!)
+      : original.content.slice(0, REPLY_EXCERPT_MAX_CHARS),
+    timestamp: original.timestamp,
+    reply_media_label: isMedia
+      ? original.mediaMetadata?.fileName || getMediaLabel(original.contentType!)
+      : undefined,
+    reply_content_type: original.contentType,
+  };
+}
+
+/** Sender label for a quote rendered from received reply context. */
+function getReplyContextSenderLabel(
+  message: Message,
+  peerName?: string,
+): string {
+  const ctx = message.replyContext;
+  if (!ctx) return 'Original message';
+  const localUserId = message.isFromMe ? message.senderId : message.recipientId;
+  return ctx.sender === localUserId ? 'You' : peerName || 'They';
+}
+
 function renderMessageContent(message: Message, isFromMe: boolean, theme: any) {
   const ct = message.contentType;
   const isMedia = ct && MEDIA_CONTENT_TYPES.has(ct);
@@ -92,34 +130,46 @@ function renderMessageContent(message: Message, isFromMe: boolean, theme: any) {
             {formatFileSize(meta.fileSize)}
           </Text>
         )}
+        {message.caption ? (
+          <Text style={[styles.messageText, { color: textColor }]}>
+            {message.caption}
+          </Text>
+        ) : null}
       </View>
     );
   }
 
   return (
-    <View style={styles.mediaIndicator}>
-      <View style={[styles.mediaIconCircle, { backgroundColor: isFromMe ? 'rgba(255,255,255,0.2)' : theme.colors.primary + '15' }]}>
-        <Icon name={getMediaIcon(ct!)} size={20} color={isFromMe ? theme.colors.textInverse : theme.colors.primary} />
+    <View>
+      <View style={styles.mediaIndicator}>
+        <View style={[styles.mediaIconCircle, { backgroundColor: isFromMe ? 'rgba(255,255,255,0.2)' : theme.colors.primary + '15' }]}>
+          <Icon name={getMediaIcon(ct!)} size={20} color={isFromMe ? theme.colors.textInverse : theme.colors.primary} />
+        </View>
+        <View style={styles.mediaInfo}>
+          <Text style={[styles.mediaLabel, { color: textColor }]}>
+            {getMediaLabel(ct!)}
+          </Text>
+          {meta?.fileName ? (
+            <Text style={[styles.mediaFileName, { color: secondaryColor }]} numberOfLines={1}>
+              {meta.fileName}{meta.fileSize > 0 ? ` · ${formatFileSize(meta.fileSize)}` : ''}
+            </Text>
+          ) : message.content && message.content !== ct ? (
+            <Text style={[styles.mediaFileName, { color: secondaryColor }]} numberOfLines={1}>
+              {message.content}
+            </Text>
+          ) : null}
+          {meta?.durationMs != null && (
+            <Text style={[styles.mediaDuration, { color: secondaryColor }]}>
+              {Math.floor(meta.durationMs / 60000)}:{String(Math.floor((meta.durationMs % 60000) / 1000)).padStart(2, '0')}
+            </Text>
+          )}
+        </View>
       </View>
-      <View style={styles.mediaInfo}>
-        <Text style={[styles.mediaLabel, { color: textColor }]}>
-          {getMediaLabel(ct!)}
+      {message.caption ? (
+        <Text style={[styles.messageText, { color: textColor }]}>
+          {message.caption}
         </Text>
-        {meta?.fileName ? (
-          <Text style={[styles.mediaFileName, { color: secondaryColor }]} numberOfLines={1}>
-            {meta.fileName}{meta.fileSize > 0 ? ` · ${formatFileSize(meta.fileSize)}` : ''}
-          </Text>
-        ) : message.content && message.content !== ct ? (
-          <Text style={[styles.mediaFileName, { color: secondaryColor }]} numberOfLines={1}>
-            {message.content}
-          </Text>
-        ) : null}
-        {meta?.durationMs != null && (
-          <Text style={[styles.mediaDuration, { color: secondaryColor }]}>
-            {Math.floor(meta.durationMs / 60000)}:{String(Math.floor((meta.durationMs % 60000) / 1000)).padStart(2, '0')}
-          </Text>
-        )}
-      </View>
+      ) : null}
     </View>
   );
 }
@@ -247,8 +297,9 @@ function MessageBubble({
           isLastInGroup && styles.lastInGroup,
         ]}
       >
-        {/* Reply preview - show if message has replyToMsg attribute */}
-        {message.replyToMsg && (
+        {/* Reply preview - show when the message threads a reply id or
+            carries sealed reply context from the sender */}
+        {(message.replyToMsg || message.replyContext) && (
           <View
             style={[
               styles.replyPreview,
@@ -288,6 +339,38 @@ function MessageBubble({
                   numberOfLines={2}
                 >
                   {repliedToMessage.content || 'Message content unavailable'}
+                </Text>
+              </>
+            ) : message.replyContext ? (
+              // No local copy of the original — render the sender's sealed
+              // reply context instead (the whole point of the field).
+              <>
+                <Text
+                  style={[
+                    styles.replyPreviewSender,
+                    {
+                      color: isFromMe
+                        ? theme.colors.textInverse
+                        : theme.colors.primary,
+                    },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {getReplyContextSenderLabel(message, peerName)}
+                </Text>
+                <Text
+                  style={[
+                    styles.replyPreviewText,
+                    {
+                      color: isFromMe
+                        ? theme.colors.textInverse
+                        : theme.colors.textSecondary,
+                    },
+                  ]}
+                  numberOfLines={2}
+                >
+                  {message.replyContext.reply_media_label ||
+                    message.replyContext.text}
                 </Text>
               </>
             ) : (
@@ -542,7 +625,13 @@ export function ChatDetailScreen({
     if (!text) return;
 
     try {
-      await sendMessage(peerId, text, priority, replyingToMessage?.id);
+      await sendMessage(
+        peerId,
+        text,
+        priority,
+        replyingToMessage?.id,
+        replyingToMessage ? buildReplyContext(replyingToMessage) : undefined,
+      );
       setInputText('');
       setReplyingToMessage(null); // Clear reply selection after sending
       // Keep keyboard open for quick follow-up messages
@@ -571,6 +660,16 @@ export function ChatDetailScreen({
     setShowPriorityPicker(prev => !prev);
   }, []);
 
+  // Declared before the pick/send callbacks below — their dependency
+  // arrays reference it at render time, so a later declaration is a TDZ
+  // use-before-init that only Babel's lenient output papered over.
+  const addOptimisticMediaMessage = useCallback((msg: Message) => {
+    addOptimisticMessage(msg.recipientId, msg);
+    setTimeout(() => {
+      flatListRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+  }, [addOptimisticMessage]);
+
   const handlePickImage = useCallback(async () => {
     try {
       const result = await launchImageLibrary({
@@ -587,24 +686,49 @@ export function ChatDetailScreen({
       setSendingMedia(true);
       const fileName = asset.fileName || `media_${Date.now()}`;
       const isVideo = asset.type?.startsWith('video');
+      // Composer text becomes the caption; the selected reply threads
+      // through chunk 0. Both travel sealed (rich-capable peers only).
+      const caption = inputText.trim() || undefined;
+      const replyContext = replyingToMessage
+        ? buildReplyContext(replyingToMessage)
+        : undefined;
+      const extras = {
+        caption,
+        replyToMsg: replyingToMessage?.id,
+        replyContext,
+      };
       if (isVideo) {
-        await sendVideo(peerId, asset.base64, fileName, {
-          mimeType: asset.type || 'video/mp4',
+        await sendVideo(
+          peerId,
+          asset.base64,
           fileName,
-          fileSize: asset.fileSize || 0,
-          width: asset.width,
-          height: asset.height,
-          durationMs: asset.duration ? asset.duration * 1000 : undefined,
-        });
+          {
+            mimeType: asset.type || 'video/mp4',
+            fileName,
+            fileSize: asset.fileSize || 0,
+            width: asset.width,
+            height: asset.height,
+            durationMs: asset.duration ? asset.duration * 1000 : undefined,
+          },
+          extras,
+        );
       } else {
-        await sendImage(peerId, asset.base64, fileName, {
-          mimeType: asset.type || 'image/jpeg',
+        await sendImage(
+          peerId,
+          asset.base64,
           fileName,
-          fileSize: asset.fileSize || 0,
-          width: asset.width,
-          height: asset.height,
-        });
+          {
+            mimeType: asset.type || 'image/jpeg',
+            fileName,
+            fileSize: asset.fileSize || 0,
+            width: asset.width,
+            height: asset.height,
+          },
+          extras,
+        );
       }
+      if (caption) setInputText('');
+      setReplyingToMessage(null);
       const mediaMsg: Message = {
         id: `media_${Date.now()}`,
         senderId: currentUserId,
@@ -615,6 +739,9 @@ export function ChatDetailScreen({
         status: 'sending',
         isFromMe: true,
         contentType: isVideo ? 'video' : 'image',
+        caption,
+        replyToMsg: replyingToMessage?.id,
+        replyContext,
         mediaMetadata: {
           mimeType: asset.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
           fileName,
@@ -630,7 +757,7 @@ export function ChatDetailScreen({
     } finally {
       setSendingMedia(false);
     }
-  }, [peerId, sendImage, sendVideo, currentUserId, addOptimisticMediaMessage]);
+  }, [peerId, sendImage, sendVideo, currentUserId, addOptimisticMediaMessage, inputText, replyingToMessage]);
 
   const handleTakePhoto = useCallback(async () => {
     try {
@@ -646,13 +773,25 @@ export function ChatDetailScreen({
       if (!asset.base64) return;
       setSendingMedia(true);
       const fileName = asset.fileName || `photo_${Date.now()}.jpg`;
-      await sendImage(peerId, asset.base64, fileName, {
-        mimeType: asset.type || 'image/jpeg',
+      const caption = inputText.trim() || undefined;
+      const replyContext = replyingToMessage
+        ? buildReplyContext(replyingToMessage)
+        : undefined;
+      await sendImage(
+        peerId,
+        asset.base64,
         fileName,
-        fileSize: asset.fileSize || 0,
-        width: asset.width,
-        height: asset.height,
-      });
+        {
+          mimeType: asset.type || 'image/jpeg',
+          fileName,
+          fileSize: asset.fileSize || 0,
+          width: asset.width,
+          height: asset.height,
+        },
+        { caption, replyToMsg: replyingToMessage?.id, replyContext },
+      );
+      if (caption) setInputText('');
+      setReplyingToMessage(null);
       addOptimisticMediaMessage({
         id: `media_${Date.now()}`,
         senderId: currentUserId,
@@ -663,6 +802,9 @@ export function ChatDetailScreen({
         status: 'sending',
         isFromMe: true,
         contentType: 'image',
+        caption,
+        replyToMsg: replyingToMessage?.id,
+        replyContext,
         mediaMetadata: {
           mimeType: asset.type || 'image/jpeg',
           fileName,
@@ -676,7 +818,7 @@ export function ChatDetailScreen({
     } finally {
       setSendingMedia(false);
     }
-  }, [peerId, sendImage, currentUserId, addOptimisticMediaMessage]);
+  }, [peerId, sendImage, currentUserId, addOptimisticMediaMessage, inputText, replyingToMessage]);
 
   const handlePickFile = useCallback(async () => {
     try {
@@ -710,13 +852,6 @@ export function ChatDetailScreen({
       setSendingMedia(false);
     }
   }, [peerId, sendFile, currentUserId, addOptimisticMediaMessage]);
-
-  const addOptimisticMediaMessage = useCallback((msg: Message) => {
-    addOptimisticMessage(msg.recipientId, msg);
-    setTimeout(() => {
-      flatListRef.current?.scrollToEnd({ animated: true });
-    }, 100);
-  }, [addOptimisticMessage]);
 
   const showAttachmentOptions = useCallback(() => {
     if (Platform.OS === 'ios') {

@@ -5,6 +5,7 @@ import {
   ProtocolConfig,
   ProtocolEvent,
   MessagePriority,
+  ReplyContext,
   DiagnosticEvent,
   FileProgressEvent,
   FileReceivedEvent,
@@ -37,6 +38,7 @@ interface UseOfflineProtocolReturn {
     content: string,
     priority: MessagePriority,
     replyToMsg?: string,
+    replyContext?: ReplyContext,
   ) => Promise<string | null>;
   clearEvents: () => void;
   requestPermissions: () => Promise<boolean>;
@@ -350,6 +352,7 @@ export function useOfflineProtocol(
       content: string,
       priority: MessagePriority,
       replyToMsg?: string,
+      replyContext?: ReplyContext,
     ): Promise<string | null> => {
       if (!protocolRef.current) {
         setError('Protocol not initialized');
@@ -367,6 +370,7 @@ export function useOfflineProtocol(
           content,
           priority,
           replyToMsg,
+          replyContext,
         });
         setError(null);
         return messageId;
