@@ -14518,6 +14518,117 @@ fn test_cleanup_outbox_removes_retry_queue_entry() {
     );
 }
 
+/// Outbox expiry is terminal and must not be silent: the app is otherwise
+/// left showing the message as pending forever.
+#[test]
+fn test_cleanup_outbox_expiry_emits_message_failed() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    config.reliability.retry.outbox_max_lifetime_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let msg_id = protocol
+        .send_message(
+            "bob",
+            "will expire",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    assert!(protocol.outbox_entry_count() > 0);
+
+    std::thread::sleep(Duration::from_millis(5));
+    protocol.cleanup_expired_entries();
+
+    assert_eq!(protocol.outbox_entry_count(), 0);
+    let captured = events.lock().unwrap();
+    let failed = captured
+        .iter()
+        .find_map(|e| match e {
+            Event::MessageFailed {
+                message_id, reason, ..
+            } => Some((message_id.clone(), reason.clone())),
+            _ => None,
+        })
+        .expect("outbox expiry must emit a terminal message_failed");
+    assert_eq!(failed.0, msg_id.as_str());
+    assert_eq!(failed.1, "Outbox lifetime exceeded");
+    assert!(
+        !captured
+            .iter()
+            .any(|e| matches!(e, Event::ConnectionRequestUndeliverable { .. })),
+        "an ordinary message must not emit the connection-request event"
+    );
+}
+
+/// A connection request expiring out of the outbox settles its pending
+/// entry and emits the typed undeliverable event, mirroring the
+/// max-retries exhaustion path.
+#[test]
+fn test_cleanup_outbox_expiry_settles_pending_connection_request() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    config.reliability.retry.outbox_max_lifetime_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(5));
+    protocol.cleanup_expired_entries();
+
+    let captured = events.lock().unwrap();
+    let undeliverable = captured
+        .iter()
+        .find_map(|e| match e {
+            Event::ConnectionRequestUndeliverable {
+                recipient,
+                message_id,
+                reason,
+            } => Some((recipient.clone(), message_id.clone(), reason.clone())),
+            _ => None,
+        })
+        .expect("connection request expiry must emit undeliverable");
+    assert_eq!(undeliverable.0, "bob");
+    assert_eq!(undeliverable.1, sent_id.as_str());
+    assert_eq!(undeliverable.2, "outbox_lifetime_exceeded");
+    drop(captured);
+
+    assert!(
+        protocol.pending_connection_requests.is_empty(),
+        "outbox expiry must settle the pending connection request entry"
+    );
+}
+
 #[test]
 fn test_flush_outbox_for_peer_includes_media_outbox() {
     let mut config = create_test_config();
@@ -17653,7 +17764,7 @@ fn test_media_descriptor_restore_prunes_expired() {
     let (mut alice, _handle, _events) =
         plaintext_media_protocol_with_storage("alice", Arc::clone(&storage));
 
-    // Plant a descriptor older than the outbox lifetime (default 1h).
+    // Plant a descriptor older than the outbox lifetime (default 7 days).
     let stale = MediaTransferDescriptor {
         file_id: "file_stale".to_string(),
         recipient: "bob".to_string(),
@@ -17661,7 +17772,7 @@ fn test_media_descriptor_restore_prunes_expired() {
         file_size: 10,
         file_checksum: "00".repeat(32),
         content_type: ContentType::File,
-        queued_at: chrono::Utc::now() - ChronoDuration::hours(2),
+        queued_at: chrono::Utc::now() - ChronoDuration::days(8),
     };
     alice.persist_media_descriptor(&stale);
 

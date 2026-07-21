@@ -68,7 +68,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
     },
     retry: {
       maxRetries: 5,  // More retries
-      outboxMaxLifetimeMs: 86400000,  // 24 hours
+      outboxMaxLifetimeMs: 2592000000,  // 30 days
     }
   }
 }
@@ -406,9 +406,9 @@ enabled one automatically.
 |-----------|------|---------|-------------|
 | `maxRetries` | number | 10 | Max ACK retry attempts (transport retries are unlimited) |
 | `initialDelayMs` | number | 1000 | Initial retry delay |
-| `maxDelayMs` | number | 30000 | Max retry delay |
+| `maxDelayMs` | number | 300000 | Max retry delay (5 min) |
 | `backoffMultiplier` | number | 2.0 | Backoff multiplier |
-| `outboxMaxLifetimeMs` | number | 3600000 | Max message lifetime (1 hour) |
+| `outboxMaxLifetimeMs` | number | 604800000 | Max message lifetime (7 days) |
 
 **Dedup Config**:
 | Parameter | Type | Default | Description |
@@ -532,7 +532,7 @@ Build and package details are in
   reliability: {
     retry: {
       maxRetries: 5,
-      outboxMaxLifetimeMs: 86400000,  // 24 hours
+      outboxMaxLifetimeMs: 2592000000,  // 30 days
     }
   },
   path: {

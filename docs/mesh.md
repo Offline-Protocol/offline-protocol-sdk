@@ -253,8 +253,8 @@ Within the same priority, older messages go first.
 Messages awaiting acknowledgment are stored in an in-memory outbox:
 - Survives temporary transport failures within the process lifetime
 - Automatically cleaned up after successful delivery or max ACK retries
-- Configurable maximum lifetime (default: 1 hour)
-- Does not survive process restarts — see [Client-Side Persistence](message-delivery.md#client-side-persistence)
+- Configurable maximum lifetime (default: 7 days); expiry emits a terminal `message_failed` event
+- Regular-message entries are persisted when a message storage backend is configured and restored on the next `start()` — see [Client-Side Persistence](message-delivery.md#client-side-persistence)
 
 ## Deduplication
 
@@ -705,7 +705,7 @@ const config = {
     retry: {
       maxRetries: 10,            // Max ACK retry attempts
       initialDelayMs: 1000,      // First retry after 1s
-      maxDelayMs: 30000,         // Cap delay at 30s
+      maxDelayMs: 300000,        // Cap delay at 5 min (default)
       backoffFactor: 2.0,        // Double delay each retry
     },
     dedup: {

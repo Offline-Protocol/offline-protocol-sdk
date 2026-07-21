@@ -768,6 +768,12 @@ mod tests {
         let reliability = ReliabilityConfig::default();
         assert_eq!(reliability.ack.default_timeout_ms, 10000);
         assert_eq!(reliability.retry.max_retries, 10);
+        // 7 days — must match the app-layer presence-flush window and the
+        // fallback values hardcoded in the RN native bridges
+        // (OfflineProtocolModule.kt / OfflineProtocolModule.swift).
+        assert_eq!(reliability.retry.outbox_max_lifetime_ms, 604_800_000);
+        // 5 min ceiling — also mirrored by the RN bridge fallbacks.
+        assert_eq!(reliability.retry.max_delay_ms, 300_000);
         assert_eq!(reliability.dedup.max_tracked_messages, 1000);
     }
 

@@ -119,11 +119,11 @@ The outbox persists messages that require acknowledgment. It serves as the sourc
 |-----------|---------|-------------|
 | Max entries | 500 | Regular messages |
 | Max media entries | 100 | File chunk messages |
-| Max lifetime | 1 hour | `outbox_max_lifetime_ms` |
+| Max lifetime | 7 days | `outbox_max_lifetime_ms` |
 
-When the outbox is full, the oldest entry is evicted. When a message exceeds its lifetime and has no pending ACK, it is cleaned up.
+When the outbox is full, the oldest entry is evicted. When a message exceeds its lifetime and has no pending ACK, it is dropped and a terminal `message_failed` event (reason `"Outbox lifetime exceeded"`) is emitted so the app can settle its UI state.
 
-**Important**: The outbox is in-memory only. It does not survive process restarts. See [Client-Side Persistence](#client-side-persistence) for how to handle this.
+**Important**: When a message storage backend is configured, regular-message outbox entries are persisted and restored on the next `start()` with a refreshed delivery window. Media chunks are never persisted — an interrupted transfer surfaces as `media_resend_required` instead. See [Client-Side Persistence](#client-side-persistence) for the app-side layer.
 
 ## ACK Cleanup
 
@@ -155,9 +155,9 @@ const config = {
     retry: {
       maxRetries: 10,              // ACK retry limit (default)
       initialDelayMs: 1000,        // First backoff delay
-      maxDelayMs: 30000,           // Backoff ceiling (30s)
+      maxDelayMs: 300000,          // Backoff ceiling (5 min)
       backoffMultiplier: 2.0,      // Exponential factor
-      outboxMaxLifetimeMs: 3600000, // 1 hour outbox lifetime
+      outboxMaxLifetimeMs: 604800000, // 7 day outbox lifetime
     },
   },
 };
@@ -171,7 +171,7 @@ reliability: {
   ack: { defaultTimeoutMs: 15000 },
   retry: {
     maxRetries: 20,
-    outboxMaxLifetimeMs: 86400000,  // 24 hours
+    outboxMaxLifetimeMs: 2592000000,  // 30 days
   },
 }
 ```
@@ -260,7 +260,7 @@ reliability: {
 
 ## Client-Side Persistence
 
-The SDK's retry system operates in-memory. If the app process is killed (common on mobile), pending messages are lost. Client applications should implement their own persistence layer to survive restarts.
+When a message storage backend is configured, the SDK persists regular-message outbox entries and restores them on the next `start()` with a refreshed delivery window (media chunks are never persisted — see `media_resend_required`). Client applications should still maintain their own persistence layer for message history and UI state.
 
 ### Recommended Pattern
 
