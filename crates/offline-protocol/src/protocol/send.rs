@@ -1190,6 +1190,8 @@ impl OfflineProtocol {
             }
 
             info!(recipient = %recipient, count = pending.len(), "Flushing pending messages");
+            let original_order: Vec<String> =
+                pending.iter().map(|m| m.message_id.as_str()).collect();
             let mut remaining = Vec::new();
 
             for msg in pending {
@@ -1199,8 +1201,11 @@ impl OfflineProtocol {
                 // was dispatched before — drop it, don't retry forever.
                 if self.deduplicator.is_duplicate(&msg.message_id) {
                     if self.deduplicator.is_exact() {
-                        // Exact mode: the hit is authoritative — this id
-                        // already went out and was settled then.
+                        // Exact mode: the hit is authoritative — this id was
+                        // already dispatched and (barring an internal error
+                        // after the transport accepted it) settled then via
+                        // MessageSent or MessageDeferred; re-dispatching
+                        // would duplicate on the wire.
                         debug!(
                             message_id = %msg.message_id,
                             "Pending message already dispatched (dedup hit), dropping"
@@ -1286,18 +1291,39 @@ impl OfflineProtocol {
             }
 
             // Messages that re-queued above re-inserted themselves into the
-            // map (and persisted) — merge failures in behind them rather
-            // than clobbering the entry, and only clear storage when
-            // neither survives.
+            // map (and persisted) — merge failures in without clobbering the
+            // entry, and only clear storage when neither survives.
             if remaining.is_empty() {
                 if !self.pending_encrypted_messages.contains_key(recipient) {
                     self.clear_pending_messages_from_storage(recipient);
                 }
+            } else if self.has_terminal_welcome_failure(recipient) {
+                // A prepare failure above came from a terminal Welcome
+                // failure: abort_pending_session_for_peer already cleared
+                // the queue and its storage and settled the peer with
+                // secure_session_failed — re-inserting `remaining` would
+                // resurrect messages the abort just settled, on every
+                // future flush, forever.
+                debug!(
+                    recipient = %recipient,
+                    count = remaining.len(),
+                    "Dropping flush failures for aborted pending session"
+                );
             } else {
-                self.pending_encrypted_messages
+                let queue = self
+                    .pending_encrypted_messages
                     .entry(recipient.to_string())
-                    .or_default()
-                    .extend(remaining);
+                    .or_default();
+                queue.extend(remaining);
+                // A failure that preceded a mid-flush re-queue would land
+                // behind it — restore the original queue order (stable
+                // sort; every id here came from this flush's queue).
+                queue.sort_by_key(|m| {
+                    original_order
+                        .iter()
+                        .position(|id| *id == m.message_id.as_str())
+                        .unwrap_or(usize::MAX)
+                });
                 self.persist_pending_messages_for_recipient(recipient);
             }
         }
