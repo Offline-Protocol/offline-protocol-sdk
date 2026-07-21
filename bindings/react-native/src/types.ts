@@ -1090,6 +1090,15 @@ export interface GroupMessageReceivedEvent extends BaseEvent {
   reply_to_msg?: string;
   /** Forwarding attribution (present when this is a forwarded message). */
   forward_info?: ForwardInfo;
+  /**
+   * Media metadata restored from the sealed body of a rich group message
+   * (cloud attachments — including the `encryption_key`/`iv` needed to
+   * decrypt cloud media, which only ever travel MLS-sealed). Absent on
+   * plain group messages.
+   */
+  media_metadata?: MediaMetadataEvent;
+  /** Content-type rendering hint from the sealed body (text, image, ...). */
+  content_type?: string;
 }
 
 /**
