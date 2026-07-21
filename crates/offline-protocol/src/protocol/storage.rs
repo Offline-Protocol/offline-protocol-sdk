@@ -266,9 +266,14 @@ impl OfflineProtocol {
     /// bounded to `MAX_KEY_PACKAGE_SENT_TO` — the same cap the live insert
     /// path enforces on the sets — and overflow is pruned from durable
     /// storage like `restore_peer_key_packages` does, so a pre-existing
-    /// over-cap store shrinks to the cap in a single boot. Best-effort:
-    /// failures degrade output, never blocking restore.
-    pub(crate) fn restore_peer_capabilities(&mut self) {
+    /// over-cap store shrinks to the cap in a single boot. Session peers are
+    /// admitted first: they are exactly the records this feature exists for
+    /// (their key-package cache entry is gone), and `list_keys` order is
+    /// backend-defined, so an unprioritized over-cap prune — reachable only
+    /// after a forged-sender flood — could evict them while keeping forged
+    /// leftovers. Best-effort: failures degrade output, never blocking
+    /// restore.
+    pub(crate) fn restore_peer_capabilities(&mut self, mls: &Arc<RwLock<MlsManager>>) {
         let Some(storage) = self.message_storage.clone() else {
             return;
         };
@@ -279,6 +284,19 @@ impl OfflineProtocol {
                 return;
             }
         };
+
+        // Best-effort session lookup: if it fails, restore proceeds in
+        // backend order rather than not at all.
+        let session_set: std::collections::HashSet<String> = mls
+            .read()
+            .ok()
+            .and_then(|manager| manager.list_sessions().ok())
+            .map(|sessions| sessions.into_iter().collect())
+            .unwrap_or_default();
+        let (mut peer_ids, non_session_ids): (Vec<_>, Vec<_>) = peer_ids
+            .into_iter()
+            .partition(|peer_id| session_set.contains(peer_id));
+        peer_ids.extend(non_session_ids);
 
         let mut kept = 0usize;
         let mut pruned = 0usize;

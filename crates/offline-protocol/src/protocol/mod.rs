@@ -479,7 +479,7 @@ impl OfflineProtocol {
             // Must precede start(): flush_restored_confirmed_pending_messages
             // re-makes the rich seal decision against these sets, and an
             // empty set there silently drops queued rich extras.
-            self.restore_peer_capabilities();
+            self.restore_peer_capabilities(&manager);
             self.restore_welcome_lifecycles()?;
             self.restore_outbox()?;
             self.restore_both_create_awaiting_decrypt();

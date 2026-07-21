@@ -605,7 +605,32 @@ pub(crate) struct PeerCapabilities {
     pub(crate) rich_versions: Vec<u8>,
 }
 
+/// Cap on how many advertised version entries persist per capability list
+/// in a [`PeerCapabilities`] record. The lists are unauthenticated wire
+/// input stored raw (raw so unknown future versions survive a local
+/// upgrade), and a hostile advertiser could otherwise bloat each durable
+/// record up to the transport message size. Truncation only hurts the
+/// advertiser — real senders list a handful of versions.
+pub(crate) const MAX_PERSISTED_CAPABILITY_VERSIONS: usize = 8;
+
 impl PeerCapabilities {
+    /// Builds a record from the wire-advertised version lists, truncating
+    /// each to [`MAX_PERSISTED_CAPABILITY_VERSIONS`].
+    pub(crate) fn from_advertised(env_versions: &[u8], rich_versions: &[u8]) -> Self {
+        Self {
+            env_versions: env_versions
+                .iter()
+                .copied()
+                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
+                .collect(),
+            rich_versions: rich_versions
+                .iter()
+                .copied()
+                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
+                .collect(),
+        }
+    }
+
     /// Whether any capability is advertised. Empty records are deleted
     /// rather than stored — the durable side of the downgrade semantics.
     pub(crate) fn is_any(&self) -> bool {
