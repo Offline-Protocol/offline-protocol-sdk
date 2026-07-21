@@ -846,8 +846,9 @@ impl OfflineProtocol {
     ///   by `queued_at` (overflow deleted from storage).
     ///
     /// The survivors are parked in `restored_media_descriptors`; `start()`
-    /// drains them into `MediaResendRequired` events once the event pipeline
-    /// is live.
+    /// emits one `MediaResendRequired` each once the event pipeline is live,
+    /// leaving entries parked until a same-`file_id` resend consumes them or
+    /// the restore TTL prunes them.
     pub(crate) fn restore_media_descriptors(&mut self) -> Result<()> {
         let Some(storage) = &self.message_storage else {
             return Ok(());
