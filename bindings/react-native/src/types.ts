@@ -38,13 +38,15 @@ export interface RetryConfig {
   /** Exponential backoff multiplier */
   backoffMultiplier?: number;
   /**
-   * Maximum lifetime for outbox messages in milliseconds (default 3600000
-   * = 1h). Applied end-to-end from `ProtocolConfig.reliability.retry`: the
+   * Maximum lifetime for outbox messages in milliseconds (default
+   * 604800000 = 7 days, matching the app-layer presence-flush window).
+   * Applied end-to-end from `ProtocolConfig.reliability.retry`: the
    * JS bridge forwards it verbatim on init (applyInitialRuntimeConfig →
    * native updateRetryConfig → Rust update_retry_config), where it bounds
    * store-and-forward outbox entries and, after a restart, prunes both
    * restored outbox entries and persisted media transfer descriptors
-   * (see MediaResendRequiredEvent).
+   * (see MediaResendRequiredEvent). Expiry is terminal and emits
+   * `message_failed` with reason `"Outbox lifetime exceeded"`.
    */
   outboxMaxLifetimeMs?: number;
 }

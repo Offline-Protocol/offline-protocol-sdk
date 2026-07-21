@@ -2267,12 +2267,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     fun updateRetryConfig(configJson: String, promise: Promise) {
         try {
             val json = JSONObject(configJson)
+            // Fallbacks must mirror the Rust defaults in
+            // offline-protocol-reliability/src/constants.rs: a partial config
+            // rebuilds the whole RetryConfig, so a stale fallback silently
+            // overrides the SDK default for every field the app didn't set.
             val retryConfig = RetryConfig(
-                maxRetries = json.optInt("maxRetries", 3).toUInt(),
+                maxRetries = json.optInt("maxRetries", 10).toUInt(),
                 initialDelayMs = json.optLong("initialDelayMs", 1000).toULong(),
-                maxDelayMs = json.optLong("maxDelayMs", 30000).toULong(),
+                maxDelayMs = json.optLong("maxDelayMs", 300000).toULong(),
                 backoffMultiplier = json.optDouble("backoffMultiplier", 2.0).toFloat(),
-                outboxMaxLifetimeMs = json.optLong("outboxMaxLifetimeMs", 3600000).toULong()
+                outboxMaxLifetimeMs = json.optLong("outboxMaxLifetimeMs", 604800000).toULong()
             )
             
             protocol?.updateRetryConfig(retryConfig)

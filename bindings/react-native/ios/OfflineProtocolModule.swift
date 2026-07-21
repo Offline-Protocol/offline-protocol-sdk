@@ -2206,12 +2206,16 @@ class OfflineProtocolModule: RCTEventEmitter {
                              userInfo: [NSLocalizedDescriptionKey: "Invalid retry config JSON"])
             }
             
+            // Fallbacks must mirror the Rust defaults in
+            // offline-protocol-reliability/src/constants.rs: a partial config
+            // rebuilds the whole RetryConfig, so a stale fallback silently
+            // overrides the SDK default for every field the app didn't set.
             let retryConfig = RetryConfig(
-                maxRetries: (config["maxRetries"] as? NSNumber)?.uint32Value ?? 3,
+                maxRetries: (config["maxRetries"] as? NSNumber)?.uint32Value ?? 10,
                 initialDelayMs: (config["initialDelayMs"] as? NSNumber)?.uint64Value ?? 1000,
-                maxDelayMs: (config["maxDelayMs"] as? NSNumber)?.uint64Value ?? 30000,
+                maxDelayMs: (config["maxDelayMs"] as? NSNumber)?.uint64Value ?? 300000,
                 backoffMultiplier: (config["backoffMultiplier"] as? NSNumber)?.floatValue ?? 2.0,
-                outboxMaxLifetimeMs: (config["outboxMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 3600000
+                outboxMaxLifetimeMs: (config["outboxMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000
             )
             
             try proto.updateRetryConfig(config: retryConfig)
