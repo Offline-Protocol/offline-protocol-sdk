@@ -4520,7 +4520,8 @@ fn test_flush_requeue_keeps_queued_id_and_storage() {
 #[test]
 fn test_flush_drops_pending_for_blocked_recipient() {
     // A recipient blocked after messages were queued: flush drops the queue
-    // (memory + storage) instead of retrying into UserBlocked forever.
+    // (memory + storage) instead of retrying into UserBlocked forever, and
+    // settles each held id with a terminal MessageFailed.
     let mut config = create_test_config();
     config.encryption.enabled = true;
     config.encryption.require_encryption = true;
@@ -4530,6 +4531,12 @@ fn test_flush_drops_pending_for_blocked_recipient() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls(storage).unwrap();
 
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
@@ -4538,7 +4545,7 @@ fn test_flush_drops_pending_for_blocked_recipient() {
         .add_transport(TransportType::BLE, Box::new(mock_transport));
     protocol.start().unwrap();
 
-    protocol
+    let queued_id = protocol
         .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
     assert_eq!(
@@ -4558,6 +4565,15 @@ fn test_flush_drops_pending_for_blocked_recipient() {
         protocol.load_pending_messages_from_storage("bob").is_none(),
         "Persisted pending messages must be cleared for a blocked recipient"
     );
+    let captured = events.lock().unwrap();
+    assert!(
+        captured.iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id, reason, .. }
+                if *message_id == queued_id.as_str() && reason == "Recipient blocked"
+        )),
+        "Dropped pending message must settle with a terminal MessageFailed"
+    );
 }
 
 #[test]
@@ -4573,6 +4589,12 @@ fn test_flush_dedup_hit_drops_already_dispatched_message() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls(storage).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -4606,6 +4628,69 @@ fn test_flush_dedup_hit_drops_already_dispatched_message() {
     assert!(
         !protocol.pending_encrypted_messages.contains_key("bob"),
         "Dedup-hit message must be dropped, not re-queued"
+    );
+    // Exact-mode hit is authoritative: the id was already settled when it
+    // first dispatched, so no contradictory terminal event is emitted.
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, Event::MessageFailed { .. })),
+        "Exact-mode dedup drop must not re-settle an already-settled id"
+    );
+}
+
+#[test]
+fn test_flush_bloom_dedup_hit_settles_with_message_failed() {
+    // In bloom mode a dedup hit may be a ~1% false positive for a message
+    // that never went out. The flush still drops it (dispatching would
+    // error-loop on the same filter) but must settle the id with a terminal
+    // MessageFailed so the app can resend instead of losing it silently.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+    config.reliability.dedup.use_bloom_filter = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let queued_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.deduplicator.mark_seen(queued_id.clone());
+    assert!(!protocol.deduplicator.is_exact());
+
+    protocol.flush_pending_messages("bob").unwrap();
+
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert!(
+        !protocol.pending_encrypted_messages.contains_key("bob"),
+        "Bloom dedup-hit message must be dropped, not re-queued"
+    );
+    let captured = events.lock().unwrap();
+    assert!(
+        captured.iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id, .. } if *message_id == queued_id.as_str()
+        )),
+        "Bloom-mode dedup drop must settle the id with a terminal MessageFailed"
     );
 }
 

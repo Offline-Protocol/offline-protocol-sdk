@@ -272,6 +272,14 @@ impl Deduplicator {
         }
     }
 
+    /// Returns `true` when deduplication is exact (HashMap mode): a positive
+    /// [`Self::is_duplicate`] answer is then authoritative. In bloom mode
+    /// (`false`) a positive answer may be a false positive (~1% with default
+    /// settings), so callers must not treat a hit as proof of a prior send.
+    pub fn is_exact(&self) -> bool {
+        self.bloom_filter.is_none()
+    }
+
     /// Checks if a message has been seen before.
     ///
     /// # Arguments
