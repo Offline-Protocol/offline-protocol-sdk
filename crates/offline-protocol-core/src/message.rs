@@ -293,19 +293,28 @@ pub struct ReplyContext {
 }
 
 /// Message priority levels.
+///
+/// Serializes lowercase; the capitalized aliases keep Debug-cased values
+/// parseable — the UniFFI `receive_message` JSON has always emitted
+/// `"Medium"` etc., and that JSON must round-trip back through
+/// `forward_message`.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum MessagePriority {
     /// Low priority - can be delayed or dropped under congestion.
+    #[serde(alias = "Low")]
     Low,
     /// Medium priority - default for most messages.
     #[default]
+    #[serde(alias = "Medium")]
     Medium,
     /// High priority - important messages that should be delivered quickly.
+    #[serde(alias = "High")]
     High,
     /// Critical priority - emergency messages, highest delivery guarantee.
+    #[serde(alias = "Critical")]
     Critical,
 }
 
