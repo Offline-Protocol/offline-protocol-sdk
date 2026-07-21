@@ -4496,24 +4496,116 @@ fn test_flush_requeue_keeps_queued_id_and_storage() {
     let queued_id = protocol
         .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
+    let second_id = protocol
+        .send_message("bob", "world", None::<MessagePriority>, None::<String>)
+        .unwrap();
 
     // Session never established: flush re-queues rather than sending.
     protocol.flush_pending_messages("bob").unwrap();
 
     assert_eq!(transport_handle.sent_messages().len(), 0);
     let pending = protocol.pending_encrypted_messages.get("bob").unwrap();
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 2);
     assert_eq!(
         pending[0].message_id, queued_id,
         "Re-queued pending message must keep its original id"
     );
+    assert_eq!(
+        pending[1].message_id, second_id,
+        "Re-queue must preserve the original send order"
+    );
     let persisted = protocol
         .load_pending_messages_from_storage("bob")
         .expect("pending messages must remain persisted after a re-queue");
-    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted.len(), 2);
     assert_eq!(
         persisted[0].message_id, queued_id,
         "Persisted snapshot must keep the original id across a re-queue"
+    );
+    assert_eq!(
+        persisted[1].message_id, second_id,
+        "Persisted snapshot must preserve the original send order"
+    );
+}
+
+#[test]
+fn test_flush_terminal_welcome_failure_drops_pending_without_resurrection() {
+    // A terminal Welcome failure surfacing mid-flush runs
+    // abort_pending_session_for_peer (via the prepare path), which clears
+    // the queue and its storage and settles the peer with
+    // secure_session_failed. The flush's failure merge must not re-insert
+    // (resurrect) what the abort just settled.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    protocol
+        .send_message("bob", "first", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .send_message("bob", "second", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // The Welcome for bob goes terminal before the flush runs.
+    protocol.welcome_lifecycles.insert(
+        "bob".to_string(),
+        WelcomeLifecycleRecord {
+            peer_id: "bob".to_string(),
+            group_id: "session:user123:bob".to_string(),
+            state: WelcomeDeliveryState::Expired,
+            attempt: 1,
+            unreachable_parks: 0,
+            welcome_message: Message::new(
+                UserId::new("user123").unwrap(),
+                UserId::new("bob").unwrap(),
+                AppId::new("test-app").unwrap(),
+                "__MLS_WELCOME__{}",
+            ),
+            next_retry_at: None,
+            last_reason_code: None,
+            last_transport_error: None,
+            created_at: Utc::now(),
+            expires_at: Utc::now() - ChronoDuration::seconds(1),
+        },
+    );
+
+    protocol.flush_pending_messages("bob").unwrap();
+
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert!(
+        !protocol.pending_encrypted_messages.contains_key("bob"),
+        "Flush must not resurrect messages the session abort settled"
+    );
+    assert!(
+        protocol.load_pending_messages_from_storage("bob").is_none(),
+        "The aborted queue must stay cleared in storage"
+    );
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::SecureSessionFailed { .. })),
+        "The abort settles the peer with secure_session_failed"
     );
 }
 
