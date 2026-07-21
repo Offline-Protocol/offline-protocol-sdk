@@ -9013,3 +9013,149 @@ fn group_send_with_rejects_file_chunk_and_oversized_extras() {
         .unwrap_err();
     assert!(err.to_string().contains("Rich extras too large"));
 }
+
+#[test]
+fn group_sealed_body_ignores_injected_payload_attribution() {
+    // A sealing sender always seals its forward_info when one exists, so
+    // when a sealed body parses, the hop-visible payload copy must be
+    // ignored wholesale — a relay attaching fabricated attribution to a
+    // rich media message (sealed without forward_info) must not get it
+    // surfaced to the app.
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Injected Attribution Group");
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    let original = group_cloud_media_original("dave", "alice");
+    let sealed = OfflineProtocol::seal_rich_payload(
+        &original.content,
+        &crate::protocol::RichSendExtras {
+            reply_context: None,
+            media_metadata: original.media_metadata.clone(),
+            forward_info: None,
+        },
+        original.content_type,
+    )
+    .unwrap();
+    let encrypted = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        alice_mls
+            .encrypt_for_group(&gid, sealed.as_bytes())
+            .unwrap()
+    };
+
+    // The relay rewrites the hop-visible payload to add fake attribution.
+    let injected = offline_protocol_core::ForwardInfo::from_message(&make_message(
+        "mallory",
+        "bob",
+        "never sent",
+    ));
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &base64_encode(&encrypted.ciphertext),
+        "2026-07-22T00:00:00Z",
+        "relay-injected-1",
+        None,
+        Some(injected),
+    );
+
+    let events = bob_events.lock().unwrap();
+    let Some(Event::GroupMessageReceived {
+        content,
+        media_metadata,
+        forward_info,
+        ..
+    }) = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMessageReceived { .. }))
+    else {
+        panic!("sealed rich message must surface");
+    };
+    assert_eq!(content, "check out this photo");
+    assert!(
+        media_metadata.is_some(),
+        "sealed media metadata must restore"
+    );
+    assert!(
+        forward_info.is_none(),
+        "injected payload attribution must be ignored when the sealed body parsed"
+    );
+}
+
+#[test]
+fn group_buffered_drain_restores_sealed_media() {
+    // The deferred-retry inbound path shares the sealed restore: a rich
+    // ciphertext buffered while group state lagged must surface its media
+    // metadata and sealed attribution once the drain delivers it.
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Buffered Rich Group");
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    let original = group_cloud_media_original("dave", "alice");
+    let sealed = OfflineProtocol::seal_rich_payload(
+        &original.content,
+        &crate::protocol::RichSendExtras {
+            reply_context: None,
+            media_metadata: original.media_metadata.clone(),
+            forward_info: Some(offline_protocol_core::ForwardInfo::from_message(&original)),
+        },
+        original.content_type,
+    )
+    .unwrap();
+    let encrypted = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        alice_mls
+            .encrypt_for_group(&gid, sealed.as_bytes())
+            .unwrap()
+    };
+
+    bob.buffer_pending_group_message(
+        &group_id,
+        PendingGroupMessage {
+            sender: "alice".to_string(),
+            message_id: "buffered-rich-1".to_string(),
+            ciphertext_b64: base64_encode(&encrypted.ciphertext),
+            timestamp: None,
+            reply_to: None,
+            forward_info: None,
+            buffered_at: Instant::now(),
+        },
+    );
+    bob.drain_pending_group_messages(&group_id);
+
+    let events = bob_events.lock().unwrap();
+    let Some(Event::GroupMessageReceived {
+        content,
+        media_metadata,
+        content_type,
+        forward_info,
+        ..
+    }) = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMessageReceived { .. }))
+    else {
+        panic!("drained rich message must surface");
+    };
+    assert_eq!(content, "check out this photo");
+    assert_eq!(
+        media_metadata
+            .as_ref()
+            .and_then(|m| m.encryption_key.as_deref()),
+        Some("a2V5LWJ5dGVz")
+    );
+    assert_eq!(content_type.as_deref(), Some("image"));
+    assert_eq!(
+        forward_info.as_ref().map(|f| f.original_sender.as_str()),
+        Some("dave")
+    );
+}
