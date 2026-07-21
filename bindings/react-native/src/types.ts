@@ -1200,6 +1200,18 @@ export interface GroupMessagePartialFailureEvent extends BaseEvent {
 }
 
 /**
+ * Rich media metadata was dropped from an outbound group message because
+ * the group is not fully rich-capable (not every member advertised sealed
+ * rich payload support, or the local kill switch disabled it). The text
+ * was still sent; members receive it without the media attachment. Use
+ * this to warn the sender that an attachment did not go through.
+ */
+export interface GroupRichExtrasDroppedEvent extends BaseEvent {
+  type: 'group_rich_extras_dropped';
+  group_id: string;
+}
+
+/**
  * Epoch fork detected — concurrent MLS commits caused members to diverge
  * onto different branches. The deterministic leader will attempt automatic
  * resolution.
@@ -1593,6 +1605,7 @@ export type ProtocolEvent =
   | GroupErrorEvent
   | GroupMessageSentEvent
   | GroupMessagePartialFailureEvent
+  | GroupRichExtrasDroppedEvent
   | GroupEpochForkDetectedEvent
   | GroupEpochForkResolvedEvent
   | GroupRoleChangedEvent

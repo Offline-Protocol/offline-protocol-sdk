@@ -151,6 +151,7 @@ mod tests {
         "protocol.group.error",
         "protocol.group.message_sent",
         "protocol.group.message_partial_failure",
+        "protocol.group.rich_extras_dropped",
         "protocol.group.epoch_fork_detected",
         "protocol.group.epoch_fork_resolved",
         "protocol.group.role_changed",
@@ -325,6 +326,7 @@ mod tests {
             | Event::GroupError { .. }
             | Event::GroupMessageSent { .. }
             | Event::GroupMessagePartialFailure { .. }
+            | Event::GroupRichExtrasDropped { .. }
             | Event::GroupEpochForkDetected { .. }
             | Event::GroupEpochForkResolved { .. }
             | Event::GroupRoleChanged { .. }
@@ -622,6 +624,9 @@ mod tests {
                 group_id: String::new(),
                 failed_members: Vec::new(),
                 succeeded_members: Vec::new(),
+            },
+            Event::GroupRichExtrasDropped {
+                group_id: String::new(),
             },
             Event::GroupEpochForkDetected {
                 group_id: String::new(),

@@ -8766,10 +8766,27 @@ fn group_forward_drops_media_when_member_capability_unknown() {
     bob.on_event(move |event| {
         bob_events_clone.lock().unwrap().push(event);
     });
+    let alice_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let alice_events_clone = alice_events.clone();
+    alice.on_event(move |event| {
+        alice_events_clone.lock().unwrap().push(event);
+    });
+
     let original = group_cloud_media_original("dave", "alice");
     alice
         .forward_message_to_group(&original, &group_id, None)
         .unwrap();
+
+    // The drop is surfaced to the sending app — the send succeeded, but the
+    // attachment did not go through.
+    assert!(
+        alice_events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::GroupRichExtrasDropped { group_id: g } if g == &group_id)),
+        "dropping rich media must emit GroupRichExtrasDropped to the sender"
+    );
 
     let sent = alice_handle.sent_messages();
     let wire = sent
@@ -9267,6 +9284,86 @@ fn group_rich_seal_gate_requires_every_member_capable() {
     assert!(
         alice.group_rich_seal_active(&members),
         "gate passes once every non-self member advertised the capability"
+    );
+}
+
+#[test]
+fn group_rich_kill_switch_drops_extras_even_when_all_members_capable() {
+    // The gate's first conjunct: `rich_payload_enabled = false` must drop
+    // rich extras even when every member advertised the capability — no
+    // sealed body on the wire, members receive bare text, and the sender
+    // gets the GroupRichExtrasDropped signal.
+    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Kill Switch Group");
+    let alice_handle = wire_mock_transport(&mut alice);
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "bob",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+    alice.config.encryption.rich_payload_enabled = false;
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+    let alice_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let alice_events_clone = alice_events.clone();
+    alice.on_event(move |event| {
+        alice_events_clone.lock().unwrap().push(event);
+    });
+
+    let media = group_cloud_media_original("alice", "bob")
+        .media_metadata
+        .unwrap();
+    alice
+        .send_group_message_with(
+            &group_id,
+            "cloud photo",
+            GroupSendOptions {
+                content_type: Some(offline_protocol_core::ContentType::Image),
+                media_metadata: Some(media),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let wire = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::GROUP_MLS_MSG))
+        .expect("group send must reach the wire");
+    assert!(!wire.content.contains(internal_prefixes::RICH_V1));
+    assert!(!wire.content.contains("a2V5LWJ5dGVz"));
+
+    bob.process_internal_message(&make_message("alice", "bob", &wire.content));
+
+    let events = bob_events.lock().unwrap();
+    let Some(Event::GroupMessageReceived {
+        content,
+        media_metadata,
+        content_type,
+        ..
+    }) = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMessageReceived { .. }))
+    else {
+        panic!("bob must receive the plain group message");
+    };
+    assert_eq!(content, "cloud photo");
+    assert!(
+        media_metadata.is_none(),
+        "kill switch must drop rich media metadata"
+    );
+    assert!(content_type.is_none(), "kill switch must drop the hint");
+
+    assert!(
+        alice_events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::GroupRichExtrasDropped { group_id: g } if g == &group_id)),
+        "kill-switch drop must emit GroupRichExtrasDropped to the sender"
     );
 }
 

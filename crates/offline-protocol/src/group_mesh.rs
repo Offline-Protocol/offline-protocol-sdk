@@ -2471,10 +2471,12 @@ impl OfflineProtocol {
         // capability — a legacy member would render the sealed body as
         // literal JSON text. For unsealed sends the attribution rides the
         // hop-visible payload below as the fallback; media metadata has no
-        // such fallback and simply drops. A non-Text hint seals a
-        // hint-only body even without extras (mirroring the DM path): the
-        // group payload has no outer content_type carrier, so an unsealed
-        // hint would not merely go unprotected — it would be lost.
+        // such fallback and simply drops (surfaced to the app via
+        // `GroupRichExtrasDropped` — the send itself still succeeds). A
+        // non-Text hint seals a hint-only body even without extras
+        // (mirroring the DM path): the group payload has no outer
+        // content_type carrier, so an unsealed hint would not merely go
+        // unprotected — it would be lost.
         let extras = RichSendExtras {
             reply_context: None,
             media_metadata,
@@ -2493,6 +2495,7 @@ impl OfflineProtocol {
                     "Group not fully rich-capable, dropping rich media metadata (members \
                      will receive the text without the media attachment)"
                 );
+                self.emit_event(Event::group_rich_extras_dropped(group_id.to_string()));
             }
             content
         };
