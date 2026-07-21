@@ -759,6 +759,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 7230:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich() != 48847:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 31925:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() != 3565:
@@ -2026,6 +2028,16 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media.a
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2619,6 +2631,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_g
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message.restype = ctypes.c_uint16
@@ -3918,6 +3933,247 @@ class _UniffiFfiConverterTypeMediaMetadata(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.write(value.sticker_provider, buf)
         _UniffiFfiConverterOptionalString.write(value.sticker_remote_id, buf)
         _UniffiFfiConverterOptionalString.write(value.sticker_kind, buf)
+
+class _UniffiFfiConverterOptionalTypeMediaMetadata(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeMediaMetadata.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeMediaMetadata.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeMediaMetadata.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class _UniffiFfiConverterOptionalInt64(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterInt64.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterInt64.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterInt64.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+@dataclass
+class ReplyContext:
+    def __init__(self, *, sender:str, text:str, timestamp:typing.Optional[int] = _DEFAULT, reply_media_label:typing.Optional[str] = _DEFAULT, reply_content_type:typing.Optional[str] = _DEFAULT):
+        self.sender = sender
+        self.text = text
+        if timestamp is _DEFAULT:
+            self.timestamp = None
+        else:
+            self.timestamp = timestamp
+        if reply_media_label is _DEFAULT:
+            self.reply_media_label = None
+        else:
+            self.reply_media_label = reply_media_label
+        if reply_content_type is _DEFAULT:
+            self.reply_content_type = None
+        else:
+            self.reply_content_type = reply_content_type
+        
+        
+
+    
+    def __str__(self):
+        return "ReplyContext(sender={}, text={}, timestamp={}, reply_media_label={}, reply_content_type={})".format(self.sender, self.text, self.timestamp, self.reply_media_label, self.reply_content_type)
+    def __eq__(self, other):
+        if self.sender != other.sender:
+            return False
+        if self.text != other.text:
+            return False
+        if self.timestamp != other.timestamp:
+            return False
+        if self.reply_media_label != other.reply_media_label:
+            return False
+        if self.reply_content_type != other.reply_content_type:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeReplyContext(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return ReplyContext(
+            sender=_UniffiFfiConverterString.read(buf),
+            text=_UniffiFfiConverterString.read(buf),
+            timestamp=_UniffiFfiConverterOptionalInt64.read(buf),
+            reply_media_label=_UniffiFfiConverterOptionalString.read(buf),
+            reply_content_type=_UniffiFfiConverterOptionalString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.sender)
+        _UniffiFfiConverterString.check_lower(value.text)
+        _UniffiFfiConverterOptionalInt64.check_lower(value.timestamp)
+        _UniffiFfiConverterOptionalString.check_lower(value.reply_media_label)
+        _UniffiFfiConverterOptionalString.check_lower(value.reply_content_type)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.sender, buf)
+        _UniffiFfiConverterString.write(value.text, buf)
+        _UniffiFfiConverterOptionalInt64.write(value.timestamp, buf)
+        _UniffiFfiConverterOptionalString.write(value.reply_media_label, buf)
+        _UniffiFfiConverterOptionalString.write(value.reply_content_type, buf)
+
+class _UniffiFfiConverterOptionalTypeReplyContext(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeReplyContext.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeReplyContext.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeReplyContext.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class _UniffiFfiConverterOptionalTypeForwardInfo(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeForwardInfo.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeForwardInfo.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeForwardInfo.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+@dataclass
+class MediaSendOptions:
+    def __init__(self, *, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, caption:typing.Optional[str] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT, file_id:typing.Optional[str] = _DEFAULT):
+        if media_metadata is _DEFAULT:
+            self.media_metadata = None
+        else:
+            self.media_metadata = media_metadata
+        if caption is _DEFAULT:
+            self.caption = None
+        else:
+            self.caption = caption
+        if reply_to_msg is _DEFAULT:
+            self.reply_to_msg = None
+        else:
+            self.reply_to_msg = reply_to_msg
+        if reply_context is _DEFAULT:
+            self.reply_context = None
+        else:
+            self.reply_context = reply_context
+        if forward_info is _DEFAULT:
+            self.forward_info = None
+        else:
+            self.forward_info = forward_info
+        if file_id is _DEFAULT:
+            self.file_id = None
+        else:
+            self.file_id = file_id
+        
+        
+
+    
+    def __str__(self):
+        return "MediaSendOptions(media_metadata={}, caption={}, reply_to_msg={}, reply_context={}, forward_info={}, file_id={})".format(self.media_metadata, self.caption, self.reply_to_msg, self.reply_context, self.forward_info, self.file_id)
+    def __eq__(self, other):
+        if self.media_metadata != other.media_metadata:
+            return False
+        if self.caption != other.caption:
+            return False
+        if self.reply_to_msg != other.reply_to_msg:
+            return False
+        if self.reply_context != other.reply_context:
+            return False
+        if self.forward_info != other.forward_info:
+            return False
+        if self.file_id != other.file_id:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return MediaSendOptions(
+            media_metadata=_UniffiFfiConverterOptionalTypeMediaMetadata.read(buf),
+            caption=_UniffiFfiConverterOptionalString.read(buf),
+            reply_to_msg=_UniffiFfiConverterOptionalString.read(buf),
+            reply_context=_UniffiFfiConverterOptionalTypeReplyContext.read(buf),
+            forward_info=_UniffiFfiConverterOptionalTypeForwardInfo.read(buf),
+            file_id=_UniffiFfiConverterOptionalString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterOptionalTypeMediaMetadata.check_lower(value.media_metadata)
+        _UniffiFfiConverterOptionalString.check_lower(value.caption)
+        _UniffiFfiConverterOptionalString.check_lower(value.reply_to_msg)
+        _UniffiFfiConverterOptionalTypeReplyContext.check_lower(value.reply_context)
+        _UniffiFfiConverterOptionalTypeForwardInfo.check_lower(value.forward_info)
+        _UniffiFfiConverterOptionalString.check_lower(value.file_id)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterOptionalTypeMediaMetadata.write(value.media_metadata, buf)
+        _UniffiFfiConverterOptionalString.write(value.caption, buf)
+        _UniffiFfiConverterOptionalString.write(value.reply_to_msg, buf)
+        _UniffiFfiConverterOptionalTypeReplyContext.write(value.reply_context, buf)
+        _UniffiFfiConverterOptionalTypeForwardInfo.write(value.forward_info, buf)
+        _UniffiFfiConverterOptionalString.write(value.file_id, buf)
 
 @dataclass
 class MessageStats:
@@ -5566,94 +5822,6 @@ class _UniffiFfiConverterTypeProtocolConfigExtended(_UniffiConverterRustBuffer):
         _UniffiFfiConverterTypeReliabilityConfig.write(value.reliability, buf)
         _UniffiFfiConverterUInt8.write(value.initial_ttl, buf)
 
-class _UniffiFfiConverterOptionalInt64(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterInt64.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterInt64.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterInt64.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-@dataclass
-class ReplyContext:
-    def __init__(self, *, sender:str, text:str, timestamp:typing.Optional[int] = _DEFAULT, reply_media_label:typing.Optional[str] = _DEFAULT, reply_content_type:typing.Optional[str] = _DEFAULT):
-        self.sender = sender
-        self.text = text
-        if timestamp is _DEFAULT:
-            self.timestamp = None
-        else:
-            self.timestamp = timestamp
-        if reply_media_label is _DEFAULT:
-            self.reply_media_label = None
-        else:
-            self.reply_media_label = reply_media_label
-        if reply_content_type is _DEFAULT:
-            self.reply_content_type = None
-        else:
-            self.reply_content_type = reply_content_type
-        
-        
-
-    
-    def __str__(self):
-        return "ReplyContext(sender={}, text={}, timestamp={}, reply_media_label={}, reply_content_type={})".format(self.sender, self.text, self.timestamp, self.reply_media_label, self.reply_content_type)
-    def __eq__(self, other):
-        if self.sender != other.sender:
-            return False
-        if self.text != other.text:
-            return False
-        if self.timestamp != other.timestamp:
-            return False
-        if self.reply_media_label != other.reply_media_label:
-            return False
-        if self.reply_content_type != other.reply_content_type:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeReplyContext(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return ReplyContext(
-            sender=_UniffiFfiConverterString.read(buf),
-            text=_UniffiFfiConverterString.read(buf),
-            timestamp=_UniffiFfiConverterOptionalInt64.read(buf),
-            reply_media_label=_UniffiFfiConverterOptionalString.read(buf),
-            reply_content_type=_UniffiFfiConverterOptionalString.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterString.check_lower(value.sender)
-        _UniffiFfiConverterString.check_lower(value.text)
-        _UniffiFfiConverterOptionalInt64.check_lower(value.timestamp)
-        _UniffiFfiConverterOptionalString.check_lower(value.reply_media_label)
-        _UniffiFfiConverterOptionalString.check_lower(value.reply_content_type)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterString.write(value.sender, buf)
-        _UniffiFfiConverterString.write(value.text, buf)
-        _UniffiFfiConverterOptionalInt64.write(value.timestamp, buf)
-        _UniffiFfiConverterOptionalString.write(value.reply_media_label, buf)
-        _UniffiFfiConverterOptionalString.write(value.reply_content_type, buf)
-
 @dataclass
 class ReticulumMessage:
     def __init__(self, *, message_id:str, recipient_id:str, data:typing.List[int], reply_to_msg:typing.Optional[str]):
@@ -6353,81 +6521,6 @@ class _UniffiFfiConverterOptionalTypeContentType(_UniffiConverterRustBuffer):
             return None
         elif flag == 1:
             return _UniffiFfiConverterTypeContentType.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-class _UniffiFfiConverterOptionalTypeReplyContext(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeReplyContext.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeReplyContext.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeReplyContext.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-class _UniffiFfiConverterOptionalTypeMediaMetadata(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeMediaMetadata.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeMediaMetadata.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeMediaMetadata.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
-class _UniffiFfiConverterOptionalTypeForwardInfo(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeForwardInfo.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeForwardInfo.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeForwardInfo.read(buf)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
@@ -8644,6 +8737,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def send_media(self, recipient: str,file_data: typing.List[int],file_name: str,content_type: ContentType,media_metadata: typing.Optional[MediaMetadata]) -> str:
         raise NotImplementedError
+    def send_media_rich(self, recipient: str,file_data: typing.List[int],file_name: str,content_type: ContentType,options: MediaSendOptions) -> str:
+        raise NotImplementedError
     def send_message(self, recipient: str,content: str,priority: MessagePriority,reply_to_msg: typing.Optional[str]) -> str:
         raise NotImplementedError
     def send_message_rich(self, recipient: str,content: str,options: SendMessageOptions) -> str:
@@ -10530,6 +10625,33 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def send_media_rich(self, recipient: str,file_data: typing.List[int],file_name: str,content_type: ContentType,options: MediaSendOptions) -> str:
+        
+        _UniffiFfiConverterString.check_lower(recipient)
+        
+        _UniffiFfiConverterSequenceUInt8.check_lower(file_data)
+        
+        _UniffiFfiConverterString.check_lower(file_name)
+        
+        _UniffiFfiConverterTypeContentType.check_lower(content_type)
+        
+        _UniffiFfiConverterTypeMediaSendOptions.check_lower(options)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(recipient),
+            _UniffiFfiConverterSequenceUInt8.lower(file_data),
+            _UniffiFfiConverterString.lower(file_name),
+            _UniffiFfiConverterTypeContentType.lower(content_type),
+            _UniffiFfiConverterTypeMediaSendOptions.lower(options),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def send_message(self, recipient: str,content: str,priority: MessagePriority,reply_to_msg: typing.Optional[str]) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
@@ -11134,6 +11256,8 @@ __all__ = [
     "GradientRoutingConfig",
     "InternetMessage",
     "MediaMetadata",
+    "ReplyContext",
+    "MediaSendOptions",
     "MessageStats",
     "TransportMetrics",
     "TransportMetricsEntry",
@@ -11156,7 +11280,6 @@ __all__ = [
     "RetryConfig",
     "ReliabilityConfig",
     "ProtocolConfigExtended",
-    "ReplyContext",
     "ReticulumMessage",
     "RouteEntry",
     "RoutingScoreEntry",

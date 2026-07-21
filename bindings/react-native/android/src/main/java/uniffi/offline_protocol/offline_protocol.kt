@@ -1088,6 +1088,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich(
@@ -1474,6 +1476,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group_message(`ptr`: Long,`groupId`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,`mediaMetadata`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -2043,6 +2047,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 42952.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich() != 59880.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559.toShort()) {
@@ -3287,6 +3294,8 @@ public interface OfflineProtocolInterface {
     fun `sendGroupMessage`(`groupId`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority?, `replyToMsg`: kotlin.String?): List<kotlin.String>
     
     fun `sendMedia`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String, `contentType`: ContentType, `mediaMetadata`: MediaMetadata?): kotlin.String
+    
+    fun `sendMediaRich`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String, `contentType`: ContentType, `options`: MediaSendOptions): kotlin.String
     
     fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority, `replyToMsg`: kotlin.String?): kotlin.String
     
@@ -5014,6 +5023,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `sendMediaRich`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String, `contentType`: ContentType, `options`: MediaSendOptions): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich(
+        it,
+        FfiConverterString.lower(`recipient`),FfiConverterSequenceUByte.lower(`fileData`),FfiConverterString.lower(`fileName`),FfiConverterTypeContentType.lower(`contentType`),FfiConverterTypeMediaSendOptions.lower(`options`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority, `replyToMsg`: kotlin.String?): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -6192,6 +6215,62 @@ public object FfiConverterTypeMediaMetadata: FfiConverterRustBuffer<MediaMetadat
             FfiConverterOptionalString.write(value.`stickerProvider`, buf)
             FfiConverterOptionalString.write(value.`stickerRemoteId`, buf)
             FfiConverterOptionalString.write(value.`stickerKind`, buf)
+    }
+}
+
+
+
+data class MediaSendOptions (
+    var `mediaMetadata`: MediaMetadata? = null 
+    , 
+    var `caption`: kotlin.String? = null 
+    , 
+    var `replyToMsg`: kotlin.String? = null 
+    , 
+    var `replyContext`: ReplyContext? = null 
+    , 
+    var `forwardInfo`: ForwardInfo? = null 
+    , 
+    var `fileId`: kotlin.String? = null 
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer<MediaSendOptions> {
+    override fun read(buf: ByteBuffer): MediaSendOptions {
+        return MediaSendOptions(
+            FfiConverterOptionalTypeMediaMetadata.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeReplyContext.read(buf),
+            FfiConverterOptionalTypeForwardInfo.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MediaSendOptions) = (
+            FfiConverterOptionalTypeMediaMetadata.allocationSize(value.`mediaMetadata`) +
+            FfiConverterOptionalString.allocationSize(value.`caption`) +
+            FfiConverterOptionalString.allocationSize(value.`replyToMsg`) +
+            FfiConverterOptionalTypeReplyContext.allocationSize(value.`replyContext`) +
+            FfiConverterOptionalTypeForwardInfo.allocationSize(value.`forwardInfo`) +
+            FfiConverterOptionalString.allocationSize(value.`fileId`)
+    )
+
+    override fun write(value: MediaSendOptions, buf: ByteBuffer) {
+            FfiConverterOptionalTypeMediaMetadata.write(value.`mediaMetadata`, buf)
+            FfiConverterOptionalString.write(value.`caption`, buf)
+            FfiConverterOptionalString.write(value.`replyToMsg`, buf)
+            FfiConverterOptionalTypeReplyContext.write(value.`replyContext`, buf)
+            FfiConverterOptionalTypeForwardInfo.write(value.`forwardInfo`, buf)
+            FfiConverterOptionalString.write(value.`fileId`, buf)
     }
 }
 

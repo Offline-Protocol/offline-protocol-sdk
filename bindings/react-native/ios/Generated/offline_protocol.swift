@@ -1012,6 +1012,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func sendMedia(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, mediaMetadata: MediaMetadata?) throws  -> String
     
+    func sendMediaRich(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, options: MediaSendOptions) throws  -> String
+    
     func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?) throws  -> String
     
     func sendMessageRich(recipient: String, content: String, options: SendMessageOptions) throws  -> String
@@ -2152,6 +2154,19 @@ open func sendMedia(recipient: String, fileData: [UInt8], fileName: String, cont
         FfiConverterString.lower(fileName),
         FfiConverterTypeContentType_lower(contentType),
         FfiConverterOptionTypeMediaMetadata.lower(mediaMetadata),$0
+    )
+})
+}
+    
+open func sendMediaRich(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, options: MediaSendOptions)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),
+        FfiConverterSequenceUInt8.lower(fileData),
+        FfiConverterString.lower(fileName),
+        FfiConverterTypeContentType_lower(contentType),
+        FfiConverterTypeMediaSendOptions_lower(options),$0
     )
 })
 }
@@ -3360,6 +3375,74 @@ public func FfiConverterTypeMediaMetadata_lift(_ buf: RustBuffer) throws -> Medi
 #endif
 public func FfiConverterTypeMediaMetadata_lower(_ value: MediaMetadata) -> RustBuffer {
     return FfiConverterTypeMediaMetadata.lower(value)
+}
+
+
+public struct MediaSendOptions: Equatable, Hashable {
+    public var mediaMetadata: MediaMetadata?
+    public var caption: String?
+    public var replyToMsg: String?
+    public var replyContext: ReplyContext?
+    public var forwardInfo: ForwardInfo?
+    public var fileId: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(mediaMetadata: MediaMetadata? = nil, caption: String? = nil, replyToMsg: String? = nil, replyContext: ReplyContext? = nil, forwardInfo: ForwardInfo? = nil, fileId: String? = nil) {
+        self.mediaMetadata = mediaMetadata
+        self.caption = caption
+        self.replyToMsg = replyToMsg
+        self.replyContext = replyContext
+        self.forwardInfo = forwardInfo
+        self.fileId = fileId
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MediaSendOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MediaSendOptions {
+        return
+            try MediaSendOptions(
+                mediaMetadata: FfiConverterOptionTypeMediaMetadata.read(from: &buf), 
+                caption: FfiConverterOptionString.read(from: &buf), 
+                replyToMsg: FfiConverterOptionString.read(from: &buf), 
+                replyContext: FfiConverterOptionTypeReplyContext.read(from: &buf), 
+                forwardInfo: FfiConverterOptionTypeForwardInfo.read(from: &buf), 
+                fileId: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MediaSendOptions, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeMediaMetadata.write(value.mediaMetadata, into: &buf)
+        FfiConverterOptionString.write(value.caption, into: &buf)
+        FfiConverterOptionString.write(value.replyToMsg, into: &buf)
+        FfiConverterOptionTypeReplyContext.write(value.replyContext, into: &buf)
+        FfiConverterOptionTypeForwardInfo.write(value.forwardInfo, into: &buf)
+        FfiConverterOptionString.write(value.fileId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMediaSendOptions_lift(_ buf: RustBuffer) throws -> MediaSendOptions {
+    return try FfiConverterTypeMediaSendOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMediaSendOptions_lower(_ value: MediaSendOptions) -> RustBuffer {
+    return FfiConverterTypeMediaSendOptions.lower(value)
 }
 
 
@@ -9371,6 +9454,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 42952) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich() != 59880) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559) {

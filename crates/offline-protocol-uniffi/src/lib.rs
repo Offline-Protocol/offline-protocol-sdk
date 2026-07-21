@@ -9,7 +9,8 @@
 use offline_protocol::{
     DeduplicatorMode as CoreDeduplicatorMode, DeviceCapabilitySnapshot as CoreDeviceSnapshot,
     EstablishmentState as CoreEstablishmentState, Event as CoreEvent,
-    MetricsFrame as CoreMetricsFrame, MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer,
+    MediaSendOptions as CoreMediaSendOptions, MetricsFrame as CoreMetricsFrame,
+    MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer,
     NoopTelemetrySink as CoreNoopTelemetrySink, OfflineProtocol as CoreProtocol,
     OverflowPolicy as CoreOverflowPolicy, PendingQueueConfig as CorePendingQueueConfig,
     PresenceStatus as CorePresenceStatus, ProtocolConfig as CoreConfig,
@@ -1420,6 +1421,17 @@ pub struct SendMessageOptions {
     pub reply_context: Option<ReplyContext>,
     pub media_metadata: Option<MediaMetadata>,
     pub forward_info: Option<ForwardInfo>,
+}
+
+/// Options for `send_media_rich`, mirroring the core `MediaSendOptions`.
+#[derive(Debug, Clone)]
+pub struct MediaSendOptions {
+    pub media_metadata: Option<MediaMetadata>,
+    pub caption: Option<String>,
+    pub reply_to_msg: Option<String>,
+    pub reply_context: Option<ReplyContext>,
+    pub forward_info: Option<ForwardInfo>,
+    pub file_id: Option<String>,
 }
 
 /// File transfer progress
@@ -4020,6 +4032,51 @@ impl OfflineProtocol {
                 file_name,
                 content_type.into(),
                 core_meta,
+            )
+            .map_err(map_send_error)
+    }
+
+    /// Sends a media attachment with rich options: like `send_media`, plus
+    /// caption, reply threading, quoted-reply context, forward attribution,
+    /// and a caller-supplied `file_id`. Rich fields are sealed inside the
+    /// chunk-0 MLS ciphertext for capable recipients and silently dropped
+    /// otherwise — never sent cleartext.
+    pub fn send_media_rich(
+        &self,
+        recipient: String,
+        file_data: Vec<u8>,
+        file_name: String,
+        content_type: ContentType,
+        options: MediaSendOptions,
+    ) -> Result<String, ProtocolError> {
+        // Validate the display-hint dictionaries into core types before
+        // taking the protocol lock; a hostile identifier fails the call.
+        let reply_context = options
+            .reply_context
+            .map(CoreReplyContext::try_from)
+            .transpose()?;
+        let forward_info = options
+            .forward_info
+            .map(CoreForwardInfo::try_from)
+            .transpose()?;
+
+        let core_options = CoreMediaSendOptions {
+            media_metadata: options.media_metadata.map(CoreMediaMetadata::from),
+            caption: options.caption,
+            reply_to_msg: options.reply_to_msg,
+            reply_context,
+            forward_info,
+            file_id: options.file_id,
+        };
+
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .send_media_with(
+                recipient,
+                file_data,
+                file_name,
+                content_type.into(),
+                core_options,
             )
             .map_err(map_send_error)
     }
