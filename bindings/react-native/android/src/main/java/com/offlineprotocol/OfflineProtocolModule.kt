@@ -1898,6 +1898,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun sendMediaRich(recipient: String, fileData: String, fileName: String, contentType: String, options: ReadableMap?, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val bytes = android.util.Base64.decode(fileData, android.util.Base64.DEFAULT)
+            val ct = parseContentType(contentType)
+            val sendOptions = MediaSendOptions(
+                mediaMetadata = parseRichMediaMetadata(options?.getMap("media_metadata")),
+                caption = options?.getString("caption"),
+                replyToMsg = options?.getString("reply_to_msg"),
+                replyContext = parseReplyContext(options?.getMap("reply_context")),
+                forwardInfo = parseForwardInfo(options?.getMap("forward_info")),
+                fileId = options?.getString("file_id")
+            )
+            val id = proto.sendMediaRich(recipient, bytes.map { it.toUByte() }, fileName, ct, sendOptions)
+            promise.resolve(id)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_SEND_MEDIA", "Failed to send media")
+        }
+    }
+
     private fun parseContentType(value: String): ContentType {
         return when (value.lowercase()) {
             "text" -> ContentType.TEXT
