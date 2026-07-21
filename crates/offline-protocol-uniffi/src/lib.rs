@@ -415,6 +415,60 @@ impl From<offline_protocol::Error> for ProtocolError {
 /// `ProtocolError::SendFailed`'s own display prefix already says the send
 /// failed, and stacking the transport prefix on top would read
 /// "Failed to send message: Send failed: ...".
+/// Serializes a received message for `receive_message`, in the core serde
+/// `Message` shape so the JSON round-trips straight back into
+/// `forward_message` — a media message missing `media_metadata` there would
+/// forward with its download URL and content key silently dropped. Every
+/// field core `Message` requires must be present (`app_id`, `ttl`, ...);
+/// `priority` uses the historical Debug casing (`"Medium"`), which core
+/// deserialization accepts via serde aliases. Locked down by the
+/// `receive_message_json_round_trips_into_core_message` test.
+fn received_message_to_json(msg: &offline_protocol_core::Message) -> Option<String> {
+    let msg_id = msg.id.as_str();
+    let mut json_value = serde_json::json!({
+        "id": msg.id.as_str(),
+        "sender": msg.sender.as_str(),
+        "recipient": msg.recipient.as_str(),
+        "app_id": msg.app_id.as_str(),
+        "content": msg.content,
+        "timestamp": msg.timestamp.as_millis(),
+        "lamport_clock": msg.lamport_clock.value(),
+        "ttl": msg.ttl.value(),
+        "hop_count": msg.hop_count.value(),
+        "priority": format!("{:?}", msg.priority),
+    });
+    if let Some(ref fwd) = msg.forwarded_from {
+        json_value["forwarded_from"] = serde_json::json!({
+            "original_sender": fwd.original_sender.as_str(),
+            "original_message_id": fwd.original_message_id.as_str(),
+            "original_timestamp": fwd.original_timestamp.as_millis(),
+            "forward_count": fwd.forward_count,
+        });
+    }
+    json_value["content_type"] = serde_json::json!(msg.content_type);
+    if let Some(ref media) = msg.media_metadata {
+        match serde_json::to_value(media) {
+            Ok(value) => json_value["media_metadata"] = value,
+            Err(e) => tracing::warn!(
+                message_id = %msg_id,
+                error = %e,
+                "Failed to serialize media metadata, omitting from message JSON"
+            ),
+        }
+    }
+    match serde_json::to_string(&json_value) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            tracing::error!(
+                message_id = %msg_id,
+                error = %e,
+                "Failed to serialize received message — message lost"
+            );
+            None
+        }
+    }
+}
+
 fn map_send_error(err: offline_protocol::Error) -> ProtocolError {
     match err {
         offline_protocol::Error::Transport(offline_protocol_transport::Error::SendFailed(msg)) => {
@@ -2744,13 +2798,18 @@ impl OfflineProtocol {
 
     /// Forwards a message to a new recipient with original sender attribution.
     ///
-    /// `original_message_json` must be the core-serde message shape (as
-    /// produced by `receive_message` or the `message_received` event).
-    /// Include `media_metadata` — with its `encryption_key`/`iv` — when
-    /// forwarding cloud media: toward a rich-capable recipient those travel
-    /// inside the MLS-sealed body (the only carrier that can deliver media
-    /// secrets); toward legacy recipients the secrets are stripped at the
-    /// wire and only URL/attribution survive.
+    /// `original_message_json` must be the core-serde message shape. The
+    /// JSON returned by `receive_message` round-trips here directly. The
+    /// `message_received` event does NOT (different field names, no
+    /// `app_id`/`ttl`) — apps forwarding from event data must build the
+    /// core shape themselves: `id`, `sender`, `recipient`, `app_id`,
+    /// `priority` (lowercase or capitalized), `ttl`, `hop_count`,
+    /// `timestamp` (epoch millis), `content`, plus the optional rich
+    /// fields. Include `media_metadata` — with its `encryption_key`/`iv` —
+    /// when forwarding cloud media: toward a rich-capable recipient those
+    /// travel inside the MLS-sealed body (the only carrier that can
+    /// deliver media secrets); toward legacy recipients the secrets are
+    /// stripped at the wire and only URL/attribution survive.
     pub fn forward_message(
         &self,
         original_message_json: String,
@@ -2775,53 +2834,9 @@ impl OfflineProtocol {
     /// Receives the next message (returns JSON string or None)
     pub fn receive_message(&self) -> Option<String> {
         let mut protocol = recover_mutex(&self.inner, "inner");
-        protocol.receive_message().and_then(|msg| {
-            let msg_id = msg.id.as_str().to_string();
-            let mut json_value = serde_json::json!({
-                "id": msg.id.as_str(),
-                "sender": msg.sender.as_str(),
-                "recipient": msg.recipient.as_str(),
-                "content": msg.content,
-                "timestamp": msg.timestamp.as_millis(),
-                "lamport_clock": msg.lamport_clock.value(),
-                "hop_count": msg.hop_count.value(),
-                "priority": format!("{:?}", msg.priority),
-            });
-            if let Some(ref fwd) = msg.forwarded_from {
-                json_value["forwarded_from"] = serde_json::json!({
-                    "original_sender": fwd.original_sender.as_str(),
-                    "original_message_id": fwd.original_message_id.as_str(),
-                    "original_timestamp": fwd.original_timestamp.as_millis(),
-                    "forward_count": fwd.forward_count,
-                });
-            }
-            // Serialized with the core serde shape so the JSON round-trips
-            // straight back into `forward_message` — a media message without
-            // these fields would forward with its download URL and content
-            // key silently dropped.
-            json_value["content_type"] = serde_json::json!(msg.content_type);
-            if let Some(ref media) = msg.media_metadata {
-                match serde_json::to_value(media) {
-                    Ok(value) => json_value["media_metadata"] = value,
-                    Err(e) => tracing::warn!(
-                        message_id = %msg_id,
-                        error = %e,
-                        "Failed to serialize media metadata, omitting from message JSON"
-                    ),
-                }
-            }
-            match serde_json::to_string(&json_value) {
-                Ok(json) => Some(json),
-                Err(e) => {
-                    tracing::error!(
-                        message_id = %msg_id,
-                        error = %e,
-                        "Failed to serialize received message — message lost"
-                    );
-                    None
-                }
-            }
-        })
+        protocol
+            .receive_message()
+            .and_then(|msg| received_message_to_json(&msg))
     }
 
     // ========================================================================
@@ -8126,5 +8141,71 @@ mod tests {
             .uninstall_telemetry_sink()
             .expect("uninstall must be idempotent");
         assert!(protocol.poll_telemetry_frame().is_none());
+    }
+
+    #[test]
+    fn receive_message_json_round_trips_into_core_message() {
+        // The documented `forward_message` contract: the JSON emitted by
+        // `receive_message` must parse back into a core `Message` — with
+        // the forwarding attribution and the cloud-media metadata
+        // (download URL + content key) intact. This is exactly what an app
+        // does when it forwards a received media message.
+        let mut msg = offline_protocol_core::Message::new(
+            offline_protocol_core::UserId::new("alice").unwrap(),
+            offline_protocol_core::UserId::new("bob").unwrap(),
+            offline_protocol_core::AppId::new("test-app").unwrap(),
+            "check out this photo",
+        );
+        msg.content_type = offline_protocol_core::ContentType::Image;
+        msg.media_metadata = Some(offline_protocol_core::MediaMetadata {
+            mime_type: "image/jpeg".to_string(),
+            file_name: "photo.jpg".to_string(),
+            file_size: 42,
+            duration_ms: None,
+            width: Some(10),
+            height: Some(10),
+            thumbnail_base64: None,
+            media_id: None,
+            download_url: Some("https://cdn.example/blob/1".to_string()),
+            thumbnail_url: None,
+            encryption_key: Some("a2V5LWJ5dGVz".to_string()),
+            iv: Some("aXYtYnl0ZXM=".to_string()),
+            ciphertext_hash: None,
+            sticker_provider: None,
+            sticker_remote_id: None,
+            sticker_kind: None,
+        });
+        msg.forwarded_from = Some(offline_protocol_core::ForwardInfo {
+            original_sender: offline_protocol_core::UserId::new("dave").unwrap(),
+            original_message_id: offline_protocol_core::MessageId::new(),
+            original_timestamp: offline_protocol_core::Timestamp::now(),
+            forward_count: 1,
+        });
+
+        let json = received_message_to_json(&msg).expect("serialization must succeed");
+        let parsed: offline_protocol_core::Message =
+            serde_json::from_str(&json).expect("receive_message JSON must parse as core Message");
+
+        assert_eq!(parsed.id, msg.id);
+        assert_eq!(parsed.sender, msg.sender);
+        assert_eq!(parsed.recipient, msg.recipient);
+        assert_eq!(parsed.app_id, msg.app_id);
+        assert_eq!(parsed.ttl, msg.ttl);
+        assert_eq!(parsed.priority, msg.priority);
+        assert_eq!(parsed.content, msg.content);
+        assert_eq!(
+            parsed.content_type,
+            offline_protocol_core::ContentType::Image
+        );
+        let media = parsed.media_metadata.expect("media metadata must survive");
+        assert_eq!(media.encryption_key.as_deref(), Some("a2V5LWJ5dGVz"));
+        assert_eq!(media.iv.as_deref(), Some("aXYtYnl0ZXM="));
+        assert_eq!(
+            media.download_url.as_deref(),
+            Some("https://cdn.example/blob/1")
+        );
+        let fwd = parsed.forwarded_from.expect("attribution must survive");
+        assert_eq!(fwd.original_sender.as_str(), "dave");
+        assert_eq!(fwd.forward_count, 1);
     }
 }
