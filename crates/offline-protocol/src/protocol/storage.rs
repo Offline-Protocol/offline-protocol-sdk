@@ -1,12 +1,12 @@
 //! Storage persistence methods for protocol state.
 
 use super::{
-    storage_keys, OfflineProtocol, OutboxEntry, PeerCapabilities, PendingMessage,
-    ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
+    storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry, PeerCapabilities,
+    PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
     MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
     WELCOME_LIFECYCLE_TTL_SECS,
 };
-use crate::constants::MAX_OUTBOX_ENTRIES;
+use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::{Error, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{LamportClock, MessageId};
@@ -790,6 +790,135 @@ impl OfflineProtocol {
         if let Some(storage) = &self.message_storage {
             if let Err(e) = storage.delete(storage_keys::OUTBOX, message_id) {
                 warn!(message_id = %message_id, error = %e, "Failed to delete outbox key");
+            }
+        }
+    }
+
+    // ========================================================================
+    // MEDIA TRANSFER DESCRIPTOR PERSISTENCE
+    // ========================================================================
+
+    /// Persists a media transfer descriptor (never chunk bytes) to storage.
+    ///
+    /// Best-effort and infallible, like [`Self::persist_outbox_entry`]: a
+    /// failed write only costs the crash-recovery signal, not the transfer.
+    pub(crate) fn persist_media_descriptor(&self, descriptor: &MediaTransferDescriptor) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        match serde_json::to_vec(descriptor) {
+            Ok(data) => {
+                if let Err(e) =
+                    storage.store(storage_keys::MEDIA_DESCRIPTORS, &descriptor.file_id, &data)
+                {
+                    warn!(file_id = %descriptor.file_id, error = %e, "Failed to persist media descriptor");
+                }
+            }
+            Err(e) => {
+                warn!(file_id = %descriptor.file_id, error = %e, "Failed to serialize media descriptor");
+            }
+        }
+    }
+
+    /// Removes a persisted media transfer descriptor (and any restored copy).
+    ///
+    /// Called wherever the in-memory transfer is removed — completion, abort,
+    /// stale sweep — and when a restored descriptor is consumed by a resend,
+    /// so a descriptor only ever survives into a restore when the process
+    /// died mid-transfer.
+    pub(crate) fn remove_media_descriptor(&mut self, file_id: &str) {
+        self.restored_media_descriptors.remove(file_id);
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::MEDIA_DESCRIPTORS, file_id) {
+            warn!(file_id = %file_id, error = %e, "Failed to clear persisted media descriptor");
+        }
+    }
+
+    /// Restores persisted media transfer descriptors on startup.
+    ///
+    /// Recovery rules mirror [`Self::restore_outbox`]:
+    /// - corrupted entries are dropped from storage and skipped;
+    /// - entries older than the outbox lifetime are dropped — the app has
+    ///   long settled that message's fate, a resend signal would be noise;
+    /// - the total is pruned to `MAX_MEDIA_DESCRIPTORS`, keeping the newest
+    ///   by `queued_at` (overflow deleted from storage).
+    ///
+    /// The survivors are parked in `restored_media_descriptors`; `start()`
+    /// drains them into `MediaResendRequired` events once the event pipeline
+    /// is live.
+    pub(crate) fn restore_media_descriptors(&mut self) -> Result<()> {
+        let Some(storage) = &self.message_storage else {
+            return Ok(());
+        };
+
+        let file_ids = storage
+            .list_keys(storage_keys::MEDIA_DESCRIPTORS)
+            .map_err(|e| Error::Other(format!("Failed to list media descriptors: {}", e)))?;
+
+        let lifetime = ChronoDuration::milliseconds(
+            self.config.reliability.retry.outbox_max_lifetime_ms as i64,
+        );
+        let now = Utc::now();
+
+        let mut restored: Vec<MediaTransferDescriptor> = Vec::new();
+        for file_id in file_ids {
+            let loaded = self.message_storage.as_ref().and_then(|s| {
+                s.load(storage_keys::MEDIA_DESCRIPTORS, &file_id)
+                    .ok()
+                    .flatten()
+            });
+            let Some(data) = loaded else {
+                continue;
+            };
+
+            let descriptor = match serde_json::from_slice::<MediaTransferDescriptor>(&data) {
+                Ok(descriptor) => descriptor,
+                Err(e) => {
+                    warn!(file_id = %file_id, error = %e, "Dropping corrupted media descriptor");
+                    self.delete_media_descriptor_key(&file_id);
+                    continue;
+                }
+            };
+
+            if descriptor.queued_at + lifetime <= now {
+                debug!(file_id = %file_id, "Dropping expired media descriptor");
+                self.delete_media_descriptor_key(&file_id);
+                continue;
+            }
+
+            restored.push(descriptor);
+        }
+
+        if restored.len() > MAX_MEDIA_DESCRIPTORS {
+            restored.sort_by_key(|d| std::cmp::Reverse(d.queued_at));
+            for descriptor in restored.drain(MAX_MEDIA_DESCRIPTORS..) {
+                self.delete_media_descriptor_key(&descriptor.file_id);
+            }
+        }
+
+        let count = restored.len();
+        for descriptor in restored {
+            self.restored_media_descriptors
+                .insert(descriptor.file_id.clone(), descriptor);
+        }
+        if count > 0 {
+            info!(
+                count = count,
+                "Restored media transfer descriptors from storage"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Deletes a media descriptor key from storage (restore-internal, mirrors
+    /// [`Self::delete_outbox_key`]).
+    fn delete_media_descriptor_key(&self, file_id: &str) {
+        if let Some(storage) = &self.message_storage {
+            if let Err(e) = storage.delete(storage_keys::MEDIA_DESCRIPTORS, file_id) {
+                warn!(file_id = %file_id, error = %e, "Failed to delete media descriptor key");
             }
         }
     }

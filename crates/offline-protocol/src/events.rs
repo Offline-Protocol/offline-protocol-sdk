@@ -608,6 +608,22 @@ pub enum Event {
         file_id: Option<String>,
     },
 
+    /// An outbound media transfer was in flight when the previous process
+    /// died. The SDK persists only the transfer descriptor (never chunk
+    /// bytes), so it cannot resume the transfer itself: the app must
+    /// re-supply the file bytes via `send_media` with this `file_id` —
+    /// they are checksum-validated against the original transfer.
+    MediaResendRequired {
+        /// File identifier of the interrupted transfer.
+        file_id: String,
+        /// Recipient's user ID.
+        recipient: String,
+        /// Original file name.
+        file_name: String,
+        /// Total file size in bytes.
+        file_size: u64,
+    },
+
     /// A pending ACK was evicted due to capacity constraints.
     AckEvicted {
         /// ID of the message whose ACK was evicted.
@@ -1390,6 +1406,21 @@ impl Event {
         }
     }
 
+    /// Creates a MediaResendRequired event.
+    pub fn media_resend_required(
+        file_id: String,
+        recipient: String,
+        file_name: String,
+        file_size: u64,
+    ) -> Self {
+        Self::MediaResendRequired {
+            file_id,
+            recipient,
+            file_name,
+            file_size,
+        }
+    }
+
     /// Creates an AckEvicted event.
     pub fn ack_evicted(message_id: MessageId, priority: &str, reason: String) -> Self {
         Self::AckEvicted {
@@ -1967,6 +1998,7 @@ impl Event {
             Self::MessageDeferred { .. } => "protocol.message.deferred",
             Self::MessageRetrying { .. } => "protocol.message.retrying",
             Self::MessageUndeliverable { .. } => "protocol.message.undeliverable",
+            Self::MediaResendRequired { .. } => "protocol.media.resend_required",
             Self::AckEvicted { .. } => "protocol.ack.evicted",
             Self::FragmentAssemblyEvicted { .. } => "protocol.fragment.assembly_evicted",
             Self::RelayDemotedBattery { .. } => "protocol.relay.demoted_battery",
@@ -2306,6 +2338,18 @@ impl fmt::Debug for Event {
                 .field("recipient", &"[REDACTED]")
                 .field("reason", reason)
                 .field("file_id", file_id)
+                .finish(),
+            Self::MediaResendRequired {
+                file_id,
+                recipient: _,
+                file_name,
+                file_size,
+            } => f
+                .debug_struct("MediaResendRequired")
+                .field("file_id", file_id)
+                .field("recipient", &"[REDACTED]")
+                .field("file_name", file_name)
+                .field("file_size", file_size)
                 .finish(),
             Self::AckEvicted {
                 message_id,

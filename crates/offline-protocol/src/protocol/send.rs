@@ -2,13 +2,14 @@
 
 use super::{
     base64_encode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
-    ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions, OfflineProtocol,
-    OutboundMediaTransfer, OutboundSendPreparation, OutboxEntry, PendingConnectionRequest,
-    PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1,
-    RichSendExtras, SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState,
-    MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS,
-    MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1,
-    PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions, MediaTransferDescriptor,
+    OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation, OutboxEntry,
+    PendingConnectionRequest, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
+    RichPayloadV1, RichSendExtras, SendMessageOptions, TypingIndicatorPayload,
+    WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO,
+    MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
+    MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
 };
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
@@ -1431,6 +1432,21 @@ impl OfflineProtocol {
                     file_id
                 )));
             }
+            // A restored descriptor under this file_id means this send is
+            // the app answering MediaResendRequired: the re-supplied bytes
+            // must be the original ones — the receiver may already hold
+            // chunks of the interrupted attempt, and a silent content swap
+            // under the same id would fail its integrity check at best.
+            if let Some(descriptor) = self.restored_media_descriptors.get(file_id) {
+                use sha2::{Digest, Sha256};
+                let resupplied_checksum = format!("{:x}", Sha256::digest(&file_data));
+                if resupplied_checksum != descriptor.file_checksum {
+                    return Err(Error::InvalidArgument(format!(
+                        "file_id {} resend bytes do not match the interrupted transfer's checksum",
+                        file_id
+                    )));
+                }
+            }
         }
 
         // Prevent sending media to blocked users. Blocking is bidirectional:
@@ -1552,6 +1568,24 @@ impl OfflineProtocol {
                 rich_extras: rich_extras.clone(),
             },
         );
+
+        // Persist the crash-recovery descriptor (no chunk bytes) so a
+        // restart mid-transfer can tell the app to re-initiate via
+        // MediaResendRequired. A same-file_id resend consumes the restored
+        // copy here — its checksum was validated at the boundary above.
+        if let Some(first_chunk) = chunks.first() {
+            let descriptor = MediaTransferDescriptor {
+                file_id: file_id.clone(),
+                recipient: recipient_str.clone(),
+                file_name: first_chunk.file_name.clone(),
+                file_size: first_chunk.file_size,
+                file_checksum: first_chunk.file_checksum.clone(),
+                content_type,
+                queued_at: Utc::now(),
+            };
+            self.restored_media_descriptors.remove(&file_id);
+            self.persist_media_descriptor(&descriptor);
+        }
 
         let mut window_state = OutboundTransferState::new(chunks, window_size);
         let initial_batch = window_state.next_chunks_to_send();
@@ -2328,6 +2362,7 @@ impl OfflineProtocol {
         if completed {
             self.outbound_media_transfers.remove(&file_id);
             self.outbound_media_windows.remove(&file_id);
+            self.remove_media_descriptor(&file_id);
         }
     }
 
@@ -2353,6 +2388,10 @@ impl OfflineProtocol {
         self.outbound_media_chunks
             .retain(|_, (candidate_file_id, _)| candidate_file_id.as_str() != file_id);
         self.outbound_media_windows.remove(file_id);
+        // A terminal abort is settled state — the app hears MediaSendFailed
+        // now, so a MediaResendRequired for it after a restart would be
+        // stale noise.
+        self.remove_media_descriptor(file_id);
         warn!(
             file_id = %file_id,
             reason = %reason,
@@ -2394,6 +2433,9 @@ impl OfflineProtocol {
             .retain(|_, (file_id, _)| !stale_outbound_file_ids.contains(file_id));
         self.outbound_media_windows
             .retain(|file_id, _| !stale_outbound_file_ids.contains(file_id));
+        for file_id in &stale_outbound_file_ids {
+            self.remove_media_descriptor(file_id);
+        }
     }
 
     // ========================================================================

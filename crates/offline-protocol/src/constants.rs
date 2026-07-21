@@ -59,6 +59,12 @@ pub const DEFAULT_MEDIA_WINDOW_SIZE: usize = 4;
 /// Smaller than the main outbox since the sliding window limits in-flight chunks.
 pub const MAX_MEDIA_OUTBOX_ENTRIES: usize = 100;
 
+/// Maximum persisted outbound media transfer descriptors restored after a
+/// restart (newest-first). Small on purpose: each maps to a
+/// `MediaResendRequired` the app is expected to act on, and concurrent
+/// transfers are already capped per peer.
+pub const MAX_MEDIA_DESCRIPTORS: usize = 16;
+
 /// Maximum concurrent outbound media transfers per recipient when chunks are
 /// MLS-encrypted.
 ///

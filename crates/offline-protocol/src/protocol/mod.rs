@@ -264,6 +264,11 @@ pub struct OfflineProtocol {
     /// Sliding-window state for outbound file transfers, keyed by file_id.
     /// Chunks are only sent when the window has capacity (previous chunks ACKed).
     outbound_media_windows: HashMap<String, OutboundTransferState>,
+    /// Descriptors of transfers that were in flight when the previous process
+    /// died, restored from storage. Drained on `start()` into one
+    /// `MediaResendRequired` event each; also consulted by `send_media_with`
+    /// to checksum-validate a same-`file_id` resend.
+    restored_media_descriptors: HashMap<String, MediaTransferDescriptor>,
 
     /// Mesh service registry and handler (extracted crate).
     mesh_services: MeshServices,
@@ -402,6 +407,7 @@ impl OfflineProtocol {
             outbound_media_transfers: HashMap::new(),
             outbound_media_chunks: HashMap::new(),
             outbound_media_windows: HashMap::new(),
+            restored_media_descriptors: HashMap::new(),
             mesh_services: MeshServices::new(),
             group_mesh: crate::group_mesh::GroupMeshState::default(),
             known_peer_public_keys: HashMap::new(),
@@ -482,6 +488,7 @@ impl OfflineProtocol {
             self.restore_peer_capabilities(&manager);
             self.restore_welcome_lifecycles()?;
             self.restore_outbox()?;
+            self.restore_media_descriptors()?;
             self.restore_both_create_awaiting_decrypt();
             Ok(())
         })();
@@ -526,6 +533,7 @@ impl OfflineProtocol {
         self.restore_tofu_keys();
         self.restore_blocked_users();
         self.restore_outbox()?;
+        self.restore_media_descriptors()?;
         info!("Message persistence enabled");
         Ok(())
     }
@@ -734,6 +742,21 @@ impl OfflineProtocol {
         // the rest with backoff. Runs at start() rather than at restore time
         // because transports aren't up yet during initialize_mls.
         self.flush_outbox_all();
+
+        // Media transfers that died with the previous process cannot be
+        // re-driven — only their descriptors survive (never chunk bytes).
+        // Tell the app which transfers to re-initiate, now that the event
+        // pipeline is live. The descriptors stay parked (and persisted)
+        // until the resend consumes them or the restore TTL prunes them,
+        // so an app that misses this signal gets it again next restart.
+        for descriptor in self.restored_media_descriptors.values() {
+            self.emit_event(Event::media_resend_required(
+                descriptor.file_id.clone(),
+                descriptor.recipient.clone(),
+                descriptor.file_name.clone(),
+                descriptor.file_size,
+            ));
+        }
 
         Ok(())
     }

@@ -126,6 +126,7 @@ mod tests {
         "protocol.message.deferred",
         "protocol.message.retrying",
         "protocol.message.undeliverable",
+        "protocol.media.resend_required",
         "protocol.ack.evicted",
         "protocol.fragment.assembly_evicted",
         "protocol.relay.demoted_battery",
@@ -299,6 +300,7 @@ mod tests {
             | Event::MessageDeferred { .. }
             | Event::MessageRetrying { .. }
             | Event::MessageUndeliverable { .. }
+            | Event::MediaResendRequired { .. }
             | Event::AckEvicted { .. }
             | Event::FragmentAssemblyEvicted { .. }
             | Event::RelayDemotedBattery { .. }
@@ -486,6 +488,12 @@ mod tests {
                 recipient: String::new(),
                 reason: String::new(),
                 file_id: None,
+            },
+            Event::MediaResendRequired {
+                file_id: String::new(),
+                recipient: String::new(),
+                file_name: String::new(),
+                file_size: 0,
             },
             Event::AckEvicted {
                 message_id: String::new(),
