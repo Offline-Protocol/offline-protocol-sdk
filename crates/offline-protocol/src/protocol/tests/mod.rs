@@ -4610,6 +4610,272 @@ fn test_flush_dedup_hit_drops_already_dispatched_message() {
 }
 
 #[test]
+fn test_message_deferred_includes_next_retry_at() {
+    // The deferred event must carry the retry queue's actual schedule, not
+    // a None the app has to guess around.
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+    protocol.start().unwrap();
+
+    let before_ms = chrono::Utc::now().timestamp_millis();
+    protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    let captured = events.lock().unwrap();
+    let deferred = captured
+        .iter()
+        .find_map(|event| match event {
+            Event::MessageDeferred { next_retry_at, .. } => Some(*next_retry_at),
+            _ => None,
+        })
+        .expect("MessageDeferred must be emitted for a failed send");
+    let next_retry_at = deferred.expect("next_retry_at must be populated from the retry queue");
+    assert!(
+        next_retry_at >= before_ms + 60_000,
+        "next_retry_at {} must reflect the 60s backoff (now {})",
+        next_retry_at,
+        before_ms
+    );
+}
+
+#[test]
+fn test_retry_failure_emits_message_retrying() {
+    // Every re-schedule after a failed retry attempt surfaces as a
+    // MessageRetrying event with the new count and the queue's schedule.
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert_eq!(protocol.retry_queue_size(), 1);
+
+    // 1ms backoff: wait it out so the entry is ready; the retry fails
+    // again and must re-schedule loudly.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    protocol.process_retry_queue().unwrap();
+
+    let captured = events.lock().unwrap();
+    let retrying = captured
+        .iter()
+        .find_map(|event| match event {
+            Event::MessageRetrying {
+                message_id: id,
+                recipient,
+                retry_count,
+                next_retry_at,
+            } => Some((id.clone(), recipient.clone(), *retry_count, *next_retry_at)),
+            _ => None,
+        })
+        .expect("MessageRetrying must be emitted when a retry attempt fails");
+    assert_eq!(retrying.0, message_id.as_str());
+    assert_eq!(retrying.1, "bob");
+    assert_eq!(retrying.2, 1);
+    assert!(retrying.3 > 0);
+}
+
+#[test]
+fn test_unreachable_relay_verdict_emits_message_undeliverable_non_terminal() {
+    // The relay's recipient_unreachable DeliveryError for a plain DM used
+    // to die in a silent `return Ok(())`. It must surface as a
+    // non-terminal MessageUndeliverable: event out, outbox entry intact.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(protocol.outbox.contains_key(&message_id));
+
+    // Non-unreachable reasons stay with the generic retry machinery.
+    protocol
+        .on_transport_send_failed(&message_id.as_str(), Some("timeout".to_string()))
+        .unwrap();
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageUndeliverable { .. })),
+        "Non-unreachable failure must not emit MessageUndeliverable"
+    );
+
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    let captured = events.lock().unwrap();
+    let undeliverable = captured
+        .iter()
+        .find_map(|event| match event {
+            Event::MessageUndeliverable {
+                message_id: id,
+                recipient,
+                reason,
+                file_id,
+            } => Some((
+                id.clone(),
+                recipient.clone(),
+                reason.clone(),
+                file_id.clone(),
+            )),
+            _ => None,
+        })
+        .expect("MessageUndeliverable must be emitted for an unreachable DM recipient");
+    assert_eq!(undeliverable.0, message_id.as_str());
+    assert_eq!(undeliverable.1, "bob");
+    assert!(undeliverable.2.starts_with("recipient_unreachable"));
+    assert_eq!(undeliverable.3, None);
+    drop(captured);
+
+    // Non-terminal: the outbox entry survives so retries continue.
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "MessageUndeliverable must not settle the outbox entry"
+    );
+}
+
+#[test]
+fn test_unreachable_verdict_without_outbox_entry_is_dropped() {
+    // No outbox entry means no recipient to attribute — the verdict is
+    // logged and dropped, never emitted with a made-up recipient.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    protocol
+        .on_transport_send_failed(
+            &MessageId::new().as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageUndeliverable { .. })),
+        "Unattributable unreachable verdict must not emit an event"
+    );
+}
+
+#[test]
+fn test_unreachable_media_chunk_resolves_file_id() {
+    // A media chunk's unreachable verdict carries the owning transfer's
+    // file_id so the app can correlate it to the media send.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    // Plant a media outbox entry + chunk mapping directly (a full MLS
+    // media transfer setup is exercised elsewhere; this test targets the
+    // lookup wiring).
+    let chunk_message = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "chunk-bytes",
+    );
+    let chunk_id = chunk_message.id.clone();
+    protocol.media_outbox.insert(
+        chunk_id.clone(),
+        OutboxEntry {
+            message: chunk_message,
+            attempt_count: 1,
+            first_sent_at: chrono::Utc::now(),
+            last_sent_at: chrono::Utc::now(),
+            last_transport: Some(TransportType::BLE),
+        },
+    );
+    protocol
+        .outbound_media_chunks
+        .insert(chunk_id.clone(), ("file_abc".to_string(), 3));
+
+    protocol
+        .on_transport_send_failed(
+            &chunk_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    let captured = events.lock().unwrap();
+    let file_id = captured
+        .iter()
+        .find_map(|event| match event {
+            Event::MessageUndeliverable { file_id, .. } => Some(file_id.clone()),
+            _ => None,
+        })
+        .expect("MessageUndeliverable must fire for an unreachable media chunk");
+    assert_eq!(file_id.as_deref(), Some("file_abc"));
+}
+
+#[test]
 fn test_require_encryption_allows_connection_control_messages() {
     let mut config = create_test_config();
     config.encryption.enabled = true;

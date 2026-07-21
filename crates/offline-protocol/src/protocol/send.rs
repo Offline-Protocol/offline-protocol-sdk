@@ -18,7 +18,7 @@ use crate::file_transfer::{FileChunk, OutboundTransferState};
 use crate::media_envelope::{encode_media_envelope, MediaChunkPlaintext, MediaRichExtras};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 use crate::{Error, Result};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
     AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, UserId,
     TTL,
@@ -306,7 +306,8 @@ impl OfflineProtocol {
                 Ok(message_id)
             }
             Err(err) => {
-                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                let next_retry_at =
+                    self.handle_send_failure(&message, current_transport.or(previous_transport))?;
                 warn!(
                     message_id = %message.id,
                     error = %err,
@@ -316,7 +317,7 @@ impl OfflineProtocol {
                     message.id.clone(),
                     format!("Transport send failed: {}", err),
                     0,
-                    None,
+                    next_retry_at.map(|at| at.timestamp_millis()),
                 ));
                 Ok(message_id)
             }
@@ -355,7 +356,8 @@ impl OfflineProtocol {
                 Ok(message_id)
             }
             Err(err) => {
-                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                let next_retry_at =
+                    self.handle_send_failure(&message, current_transport.or(previous_transport))?;
                 // send_via_transport does not record retry failures internally
                 // (unlike TransportManager::send), so record explicitly here.
                 self.transport_manager.record_retry_failure(transport);
@@ -369,7 +371,7 @@ impl OfflineProtocol {
                     message.id.clone(),
                     format!("Send via {:?} failed: {}", transport, err),
                     0,
-                    None,
+                    next_retry_at.map(|at| at.timestamp_millis()),
                 ));
                 Ok(message_id)
             }
@@ -413,7 +415,8 @@ impl OfflineProtocol {
                 self.handle_send_success(&message, current_transport)?;
             }
             Err(err) => {
-                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                let _ =
+                    self.handle_send_failure(&message, current_transport.or(previous_transport))?;
                 warn!(
                     message_id = %message.id,
                     recipient = %recipient,
@@ -1671,7 +1674,8 @@ impl OfflineProtocol {
                     self.emit_transport_switch_event(previous_transport, current_transport)?;
                 }
                 Err(err) => {
-                    self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                    let _ = self
+                        .handle_send_failure(&message, current_transport.or(previous_transport))?;
                     // send_via_transport does not record retry failures internally.
                     self.transport_manager
                         .record_retry_failure(pinned_transport);
@@ -1998,23 +2002,26 @@ impl OfflineProtocol {
     /// (e.g. `send_via_forced_transport`) must record the failure themselves.
     /// `TransportManager::send()` already records failures internally, so
     /// calling it here would double-count.
+    /// Returns the absolute time the retry was scheduled for (`None` when the
+    /// message was already queued for retry), so callers can surface it in
+    /// `MessageDeferred` instead of guessing.
     pub(super) fn handle_send_failure(
         &mut self,
         message: &Message,
         transport: Option<TransportType>,
-    ) -> Result<()> {
+    ) -> Result<Option<DateTime<Utc>>> {
         // Ensure message is persisted to outbox for recovery
         self.ensure_outbox_entry(message);
 
         // Schedule retry (enqueue is infallible — no attempt limit)
-        self.retry_queue.enqueue(message.clone(), 0);
+        let next_retry_at = self.retry_queue.enqueue(message.clone(), 0);
 
         warn!(
             message_id = %message.id,
             transport = ?transport,
             "Deferred message due to send error"
         );
-        Ok(())
+        Ok(next_retry_at)
     }
 
     /// Confirms that a message was successfully sent by the transport layer.
@@ -2131,6 +2138,10 @@ impl OfflineProtocol {
         }
 
         let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
+            // Not a connection request, not a welcome: a plain DM or media
+            // chunk. Surface the relay's verdict instead of silently
+            // no-oping on it.
+            self.emit_message_undeliverable_if_unreachable(message_id, transport_error.as_deref());
             return Ok(());
         };
         // A reason tagged "recipient_unreachable" (the internet bridge's
@@ -2161,6 +2172,55 @@ impl OfflineProtocol {
             "transport_failed",
         )?;
         Ok(())
+    }
+
+    /// Surfaces a relay `recipient_unreachable` verdict for a plain DM or
+    /// media chunk as a non-terminal [`Event::MessageUndeliverable`].
+    ///
+    /// The outbox entry stays put and the retry machinery keeps running —
+    /// this is the early "recipient offline" signal, not a settlement.
+    /// Messages without an outbox entry (nothing to attribute a recipient
+    /// from) are skipped.
+    fn emit_message_undeliverable_if_unreachable(
+        &mut self,
+        message_id: &str,
+        transport_error: Option<&str>,
+    ) {
+        let Some(reason) =
+            transport_error.filter(|r| r.starts_with(SEND_FAIL_REASON_RECIPIENT_UNREACHABLE))
+        else {
+            return;
+        };
+        let Ok(parsed_id) = MessageId::from_str(message_id) else {
+            return;
+        };
+        let Some(entry) = self
+            .outbox
+            .get(&parsed_id)
+            .or_else(|| self.media_outbox.get(&parsed_id))
+        else {
+            debug!(
+                message_id = %message_id,
+                "Unreachable verdict for message without outbox entry, dropping"
+            );
+            return;
+        };
+        let recipient = entry.message.recipient.as_str().to_string();
+        let file_id = self
+            .outbound_media_chunks
+            .get(&parsed_id)
+            .map(|(file_id, _)| file_id.clone());
+        warn!(
+            message_id = %message_id,
+            file_id = ?file_id,
+            "Recipient unreachable for in-flight message (non-terminal, retries continue)"
+        );
+        self.emit_event(Event::message_undeliverable(
+            parsed_id,
+            recipient,
+            reason.to_string(),
+            file_id,
+        ));
     }
 
     /// Classifies an outbound internet frame as a server-plane control op the

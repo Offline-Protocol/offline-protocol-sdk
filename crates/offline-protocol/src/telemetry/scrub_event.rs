@@ -308,6 +308,22 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             retry_count: _,
             next_retry_at: _,
         } => {}
+        Event::MessageRetrying {
+            message_id: _,
+            recipient,
+            retry_count: _,
+            next_retry_at: _,
+        } => {
+            hash_string(recipient, scrubber);
+        }
+        Event::MessageUndeliverable {
+            message_id: _,
+            recipient,
+            reason: _,
+            file_id: _,
+        } => {
+            hash_string(recipient, scrubber);
+        }
         Event::AckEvicted {
             message_id: _,
             priority: _,
@@ -649,6 +665,8 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::MediaSent { .. }
         | Event::MediaSendFailed { .. }
         | Event::MessageDeferred { .. }
+        | Event::MessageRetrying { .. }
+        | Event::MessageUndeliverable { .. }
         | Event::AckEvicted { .. }
         | Event::FragmentAssemblyEvicted { .. }
         | Event::RelayDemotedBattery { .. }
