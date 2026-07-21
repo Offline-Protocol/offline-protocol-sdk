@@ -1671,9 +1671,9 @@ fn parse_encrypted_payload_reads_legacy_compact_and_wrapped_json_forms() {
 }
 
 /// Helper: like [`feed_key_package`] but advertising `rich_versions`
-/// (sealed rich payload capability).
+/// (sealed rich payload capability). Also used by `group_mesh_tests`.
 #[cfg(test)]
-fn feed_key_package_with_rich(
+pub(crate) fn feed_key_package_with_rich(
     protocol: &mut OfflineProtocol,
     sender: &str,
     rich_versions: Vec<u8>,

@@ -588,6 +588,8 @@ mod tests {
                 message_id: String::new(),
                 reply_to_msg: None,
                 forward_info: None,
+                media_metadata: None,
+                content_type: None,
             },
             Event::GroupMemberAdded {
                 group_id: String::new(),
