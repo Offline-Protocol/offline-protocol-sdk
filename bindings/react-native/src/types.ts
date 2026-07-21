@@ -37,7 +37,15 @@ export interface RetryConfig {
   maxDelayMs?: number;
   /** Exponential backoff multiplier */
   backoffMultiplier?: number;
-  /** Maximum lifetime for outbox messages in milliseconds */
+  /**
+   * Maximum lifetime for outbox messages in milliseconds (default 3600000
+   * = 1h). Applied end-to-end from `ProtocolConfig.reliability.retry`: the
+   * JS bridge forwards it verbatim on init (applyInitialRuntimeConfig →
+   * native updateRetryConfig → Rust update_retry_config), where it bounds
+   * store-and-forward outbox entries and, after a restart, prunes both
+   * restored outbox entries and persisted media transfer descriptors
+   * (see MediaResendRequiredEvent).
+   */
   outboxMaxLifetimeMs?: number;
 }
 
@@ -1351,6 +1359,51 @@ export interface MessageDeferredEvent extends BaseEvent {
   next_retry_at?: number;
 }
 
+/**
+ * Message retrying event — a retry was scheduled after a failed attempt
+ * (transport send error or ACK timeout). Non-terminal: MessageDelivered or
+ * MessageFailed still settles the message.
+ */
+export interface MessageRetryingEvent extends BaseEvent {
+  type: 'message_retrying';
+  message_id: string;
+  recipient: string;
+  retry_count: number;
+  /** Absolute time the retry is scheduled for (Unix timestamp ms). */
+  next_retry_at: number;
+}
+
+/**
+ * Message undeliverable event — the transport reported the recipient
+ * unreachable for an in-flight message (e.g. the internet relay's
+ * DeliveryError). Non-terminal: the message stays in the outbox and keeps
+ * retrying; this is the early "recipient offline" signal.
+ */
+export interface MessageUndeliverableEvent extends BaseEvent {
+  type: 'message_undeliverable';
+  message_id: string;
+  recipient: string;
+  /** Transport-reported reason (starts with `recipient_unreachable`). */
+  reason: string;
+  /** Owning media transfer when the message is a media chunk. */
+  file_id?: string;
+}
+
+/**
+ * Media resend required event — an outbound media transfer was in flight
+ * when the previous process died. The SDK persists only the transfer
+ * descriptor (never chunk bytes), so the app must re-supply the file bytes
+ * via sendMedia with this file_id; they are checksum-validated against the
+ * original transfer.
+ */
+export interface MediaResendRequiredEvent extends BaseEvent {
+  type: 'media_resend_required';
+  file_id: string;
+  recipient: string;
+  file_name: string;
+  file_size: number;
+}
+
 // ============================================================================
 // DORS OBSERVABILITY EVENTS (from SDK DORS decision / escalation)
 // ============================================================================
@@ -1533,6 +1586,9 @@ export type ProtocolEvent =
   | ReadReceiptReceivedEvent
   | MessageRelayedEvent
   | MessageDeferredEvent
+  | MessageRetryingEvent
+  | MessageUndeliverableEvent
+  | MediaResendRequiredEvent
   | SecurityWarningEvent
   | TofuResetEvent;
 
