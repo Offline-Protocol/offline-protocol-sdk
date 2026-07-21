@@ -1488,11 +1488,19 @@ impl OfflineProtocol {
                 )));
             }
             // A restored descriptor under this file_id means this send is
-            // the app answering MediaResendRequired: the re-supplied bytes
-            // must be the original ones — the receiver may already hold
+            // the app answering MediaResendRequired: it must target the
+            // original recipient (a redirect would consume the descriptor
+            // and orphan the interrupted transfer's resend forever) and
+            // re-supply the original bytes — the receiver may already hold
             // chunks of the interrupted attempt, and a silent content swap
             // under the same id would fail its integrity check at best.
             if let Some(descriptor) = self.restored_media_descriptors.get(file_id) {
+                if descriptor.recipient != recipient_str {
+                    return Err(Error::InvalidArgument(format!(
+                        "file_id {} belongs to an interrupted transfer to a different recipient",
+                        file_id
+                    )));
+                }
                 use sha2::{Digest, Sha256};
                 let resupplied_checksum = format!("{:x}", Sha256::digest(&file_data));
                 if resupplied_checksum != descriptor.file_checksum {
