@@ -258,6 +258,24 @@ dictionary SendMessageOptions {
     ForwardInfo? forward_info = null;
 };
 
+// Options for send_media_rich. The rich fields (caption, reply_to_msg,
+// reply_context, forward_info) only ever travel inside the MLS-sealed
+// chunk-0 plaintext, and only toward recipients whose key package advertised
+// rich_versions support; toward anyone else — including every plaintext
+// (encryption opt-out) transfer — they are silently dropped, never sent
+// cleartext. All fields defaulted so callers can pass only what they need.
+// An unparsable reply_to_msg, rich extras over 32 KiB serialized, or a
+// file_id that is empty, over 4096 bytes, or already carried by an active
+// outbound transfer are rejected — all InvalidArgument.
+dictionary MediaSendOptions {
+    MediaMetadata? media_metadata = null;
+    string? caption = null;
+    string? reply_to_msg = null;
+    ReplyContext? reply_context = null;
+    ForwardInfo? forward_info = null;
+    string? file_id = null;
+};
+
 // File transfer progress information
 dictionary FileProgress {
     string file_id;
@@ -975,7 +993,15 @@ interface OfflineProtocol {
     // Media and file transfer
     [Throws=ProtocolError]
     string send_media(string recipient, sequence<u8> file_data, string file_name, ContentType content_type, MediaMetadata? media_metadata);
-    
+
+    // Rich media send surface: like send_media, but accepting MediaSendOptions
+    // (caption, reply threading, quoted-reply context, forward attribution,
+    // caller-supplied file_id). Rich fields travel sealed inside the chunk-0
+    // MLS ciphertext toward rich-capable recipients and are silently dropped
+    // otherwise — never sent cleartext.
+    [Throws=ProtocolError]
+    string send_media_rich(string recipient, sequence<u8> file_data, string file_name, ContentType content_type, MediaSendOptions options);
+
     [Throws=ProtocolError]
     string send_file(string recipient, sequence<u8> file_data, string file_name);
     
