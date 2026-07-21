@@ -15,6 +15,7 @@ import {
   type SendFileParams,
   type SendMediaParams,
   type MediaMetadata,
+  type ReplyContext,
   type InternetTransportConfig,
   type WifiDirectTransportConfig,
 } from '@offline-protocol/mesh-sdk';
@@ -23,6 +24,7 @@ interface OfflineProtocolWithMls extends OfflineProtocol {
   isMlsInitialized(): Promise<boolean>;
 }
 import { useOfflineProtocol } from '../hooks/useOfflineProtocol';
+import type { MediaSendExtras } from '../hooks/useFileTransfer';
 import { generateUserId } from '../utils/user';
 import {
   DEFAULT_RELAY_SERVER_URL,
@@ -157,6 +159,10 @@ export interface Message {
   isFromMe: boolean;
   isEncrypted?: boolean;
   replyToMsg?: string;
+  /** Sealed quoted-reply context (sent by us, or restored from the event). */
+  replyContext?: ReplyContext;
+  /** Sealed media caption (from file_received rich extras). */
+  caption?: string;
   contentType?: string;
   mediaMetadata?: {
     mimeType: string;
@@ -224,6 +230,7 @@ interface ProtocolContextType {
     content: string,
     priority?: MessagePriority,
     replyToMsg?: string,
+    replyContext?: ReplyContext,
   ) => Promise<void>;
   markAsRead: (chatId: string) => void;
   updateUserName: (name: string) => void;
@@ -245,9 +252,9 @@ interface ProtocolContextType {
   ) => Promise<TransportMetricsSnapshot | null>;
   sendFile: (params: SendFileParams) => Promise<string | null>;
   sendMedia: (params: SendMediaParams) => Promise<string | null>;
-  sendImage: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
-  sendVoiceNote: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
-  sendVideo: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
+  sendImage: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata, extras?: MediaSendExtras) => Promise<string | null>;
+  sendVoiceNote: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata, extras?: MediaSendExtras) => Promise<string | null>;
+  sendVideo: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata, extras?: MediaSendExtras) => Promise<string | null>;
   cancelFileTransfer: (fileId: string) => Promise<boolean>;
   addOptimisticMessage: (recipientId: string, message: Message) => void;
   rejectConnectionRequest: (peerId: string) => Promise<void>;
@@ -1164,6 +1171,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       content: string,
       priority: MessagePriority = MessagePriority.Medium,
       replyToMsg?: string,
+      replyContext?: ReplyContext,
     ) => {
       try {
         console.log(
@@ -1179,6 +1187,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           content,
           priority,
           replyToMsg,
+          replyContext,
         );
         if (!messageId) {
           throw new Error('Message ID not returned');
@@ -1201,6 +1210,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           isFromMe: true,
           isEncrypted,
           replyToMsg,
+          replyContext,
         };
 
         setChats(prevChats => {
@@ -1718,6 +1728,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               isFromMe: false,
               isEncrypted,
               replyToMsg: msgEvent.reply_to_msg || msgEvent.replyToMsg,
+              replyContext: msgEvent.reply_context,
               contentType: msgEvent.content_type,
               mediaMetadata: msgEvent.media_metadata ? {
                 mimeType: msgEvent.media_metadata.mime_type ?? '',
@@ -1853,10 +1864,13 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               senderId,
               recipientId: currentUserId,
               content: fe.file_data ?? '',
-              timestamp: Date.now(),
+              timestamp: fe.timestamp || Date.now(),
               priority: MessagePriority.Medium,
               status: 'delivered',
               isFromMe: false,
+              caption: fe.caption,
+              replyToMsg: fe.reply_to_msg,
+              replyContext: fe.reply_context,
               contentType: fe.content_type || 'file',
               mediaMetadata: fe.media_metadata ? {
                 mimeType: fe.media_metadata.mime_type ?? '',
