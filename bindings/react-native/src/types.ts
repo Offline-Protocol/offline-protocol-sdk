@@ -1377,7 +1377,9 @@ export interface MessageRetryingEvent extends BaseEvent {
  * Message undeliverable event — the transport reported the recipient
  * unreachable for an in-flight message (e.g. the internet relay's
  * DeliveryError). Non-terminal: the message stays in the outbox and keeps
- * retrying; this is the early "recipient offline" signal.
+ * retrying; this is the early "recipient offline" signal. May fire multiple
+ * times for the same message_id while the recipient remains offline (once
+ * per retried attempt that reaches the relay).
  */
 export interface MessageUndeliverableEvent extends BaseEvent {
   type: 'message_undeliverable';

@@ -594,8 +594,10 @@ pub enum Event {
     /// Non-terminal: the message stays in the outbox and keeps retrying —
     /// this is the early signal that the recipient is offline, so the app
     /// can surface "pending" state or trigger its own presence watch.
-    /// `file_id` is set when the message is a chunk of an outbound media
-    /// transfer.
+    /// May fire multiple times for the same `message_id` while the
+    /// recipient remains offline (once per retried attempt that reaches
+    /// the relay). `file_id` is set when the message is a chunk of an
+    /// outbound media transfer.
     MessageUndeliverable {
         /// ID of the affected message.
         message_id: String,
