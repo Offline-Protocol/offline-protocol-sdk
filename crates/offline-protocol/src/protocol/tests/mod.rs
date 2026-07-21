@@ -5453,6 +5453,101 @@ fn test_dm_unreachable_parks_counter_pruned_with_outbox() {
 }
 
 #[test]
+fn test_exhausted_probe_ack_budget_reparks_instead_of_settling() {
+    // A mesh reachability probe re-enters the ACK machinery when its send
+    // locally succeeds into the mesh, but over BLE it can never earn the
+    // relay verdict that would re-park it. When that fresh budget exhausts
+    // while the recipient still holds a live unreachable-park counter, the
+    // DM must re-park (counter escalated, next probe scheduled) instead of
+    // settling terminally — settlement stays reserved for delivery or
+    // outbox-lifetime expiry.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+    assert!(!protocol.ack_manager.is_waiting_for_ack(&message_id));
+
+    // Make the scheduled probe due now and drive it through the real retry
+    // machinery: the BLE send succeeds locally and re-registers an ACK.
+    let probe_message = protocol.outbox.get(&message_id).unwrap().message.clone();
+    protocol.retry_queue.remove(&message_id.as_str());
+    protocol
+        .retry_queue
+        .enqueue_with_delay(probe_message, 1, 0)
+        .unwrap();
+    protocol.process().unwrap();
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "A locally-successful probe send must re-enter the ACK machinery"
+    );
+
+    // Burn the probe's fresh budget: no ACK will ever arrive over the mesh
+    // (0ms timeout stands in for the elapsed waits).
+    let max_retries = protocol.config.reliability.retry.max_retries;
+    protocol.ack_manager.remove_ack(&message_id);
+    protocol
+        .ack_manager
+        .register_pending_ack(message_id.clone(), Some(0))
+        .unwrap();
+    for _ in 0..max_retries {
+        protocol.ack_manager.increment_retry_count(&message_id);
+    }
+    protocol.process().unwrap();
+
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "Probe exhaustion with a live park counter must not settle terminally"
+    );
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "Re-parked DM must stay in the outbox"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "Re-park must drop the exhausted ACK"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&2),
+        "Re-park must escalate the counter"
+    );
+    let next_probe = protocol
+        .retry_queue
+        .time_until_next_retry()
+        .expect("re-park must schedule the next probe");
+    assert!(
+        next_probe > chrono::Duration::seconds(15),
+        "Next probe must use the escalated interval"
+    );
+    assert!(next_probe <= chrono::Duration::seconds(30));
+}
+
+#[test]
 fn test_require_encryption_allows_connection_control_messages() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
