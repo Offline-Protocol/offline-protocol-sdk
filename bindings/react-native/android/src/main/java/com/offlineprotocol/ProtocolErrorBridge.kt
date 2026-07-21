@@ -4,7 +4,8 @@ import uniffi.offline_protocol.ProtocolException
 
 /**
  * A typed protocol failure surfaced to JS as a stable rejection code.
- * Codes mirror the UDL ProtocolError variant names (see types-uniffi.ts).
+ * Codes mirror the UDL ProtocolError variant names (see the ProtocolError
+ * enum in crates/offline-protocol-uniffi/src/offline_protocol.udl).
  */
 internal data class BridgeProtocolError(
     val code: String,

@@ -3,7 +3,8 @@
 //
 //  Maps typed protocol failures to the stable JS-visible rejection codes.
 //  Keep in lockstep with the Android module's ProtocolErrorBridge.kt —
-//  both mirror the UDL ProtocolError variant names (see types-uniffi.ts).
+//  both mirror the UDL ProtocolError variant names (see the ProtocolError
+//  enum in crates/offline-protocol-uniffi/src/offline_protocol.udl).
 //
 
 import Foundation
