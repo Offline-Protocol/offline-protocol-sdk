@@ -265,9 +265,12 @@ pub struct OfflineProtocol {
     /// Chunks are only sent when the window has capacity (previous chunks ACKed).
     outbound_media_windows: HashMap<String, OutboundTransferState>,
     /// Descriptors of transfers that were in flight when the previous process
-    /// died, restored from storage. Drained on `start()` into one
-    /// `MediaResendRequired` event each; also consulted by `send_media_with`
-    /// to checksum-validate a same-`file_id` resend.
+    /// died, restored from storage. `start()` emits one `MediaResendRequired`
+    /// event each but deliberately does NOT drain them: entries stay parked
+    /// (and persisted) until a same-`file_id` resend consumes them — after
+    /// `send_media_with` checksum-validates the re-supplied bytes against
+    /// the descriptor — or the restore TTL prunes them, so an app that
+    /// misses the signal gets it again next restart.
     restored_media_descriptors: HashMap<String, MediaTransferDescriptor>,
 
     /// Mesh service registry and handler (extracted crate).
