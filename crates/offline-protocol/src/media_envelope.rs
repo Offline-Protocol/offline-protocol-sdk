@@ -16,17 +16,28 @@
 //! The plaintext that the envelope's ciphertext decrypts to carries the chunk
 //! bytes plus the fields that previously leaked in cleartext on the chunk-0
 //! `Message` (media metadata — including file name and preview thumbnail —
-//! and the original content type):
+//! and the original content type), and, since envelope v2, the rich message
+//! extras (caption, reply threading, quoted-reply context, forward
+//! attribution):
 //!
 //! ```text
 //! [flags:1]
 //! [flags & 0x01: meta_len:4 LE][MediaMetadata JSON]
 //! [flags & 0x02: oct_len:1][original content type string]
+//! [flags & 0x04: rich_len:4 LE][MediaRichExtras JSON]
 //! [chunk bytes = remainder]   (FileChunk::to_bytes)
 //! ```
+//!
+//! Flag bits are NOT additively safe on their own — a decoder that ignored an
+//! unknown bit would slurp the field's bytes as chunk data. Any chunk carrying
+//! a flag beyond a receiver's known set must therefore ship under a bumped
+//! envelope version (chunk 0 with rich extras ships as v2), so an old decoder
+//! rejects the chunk cleanly at the version check instead of corrupting the
+//! file; `decode` also rejects unknown flag bits outright as backstop.
 
-use offline_protocol_core::{ContentType, MediaMetadata};
+use offline_protocol_core::{ContentType, ForwardInfo, MediaMetadata, ReplyContext};
 use offline_protocol_mls::EncryptedMessage;
+use serde::{Deserialize, Serialize};
 
 /// Magic prefix identifying an encrypted media envelope in `binary_content`.
 pub(crate) const MEDIA_ENVELOPE_MAGIC: [u8; 2] = *b"ML";
@@ -35,8 +46,18 @@ pub(crate) const MEDIA_ENVELOPE_MAGIC: [u8; 2] = *b"ML";
 /// binary encoding.
 pub(crate) const MEDIA_ENVELOPE_VERSION_MLS_V1: u8 = 0x01;
 
+/// Envelope version 2: same payload as v1, but the decrypted plaintext may
+/// carry the rich-extras field (`FLAG_RICH_EXTRAS`). Emitted only on chunk 0
+/// and only toward recipients that advertised `RICH_PAYLOAD_V1` in their key
+/// package, so a v1-only receiver never sees it; if a gating bug ever sends it
+/// anyway, the old decoder rejects the unknown version instead of misparsing.
+pub(crate) const MEDIA_ENVELOPE_VERSION_MLS_V2: u8 = 0x02;
+
 const FLAG_MEDIA_METADATA: u8 = 0x01;
 const FLAG_ORIGINAL_CONTENT_TYPE: u8 = 0x02;
+const FLAG_RICH_EXTRAS: u8 = 0x04;
+
+const KNOWN_FLAGS: u8 = FLAG_MEDIA_METADATA | FLAG_ORIGINAL_CONTENT_TYPE | FLAG_RICH_EXTRAS;
 
 /// MediaMetadata JSON is small (thumbnail ≤ 2 KB base64); 256 KB is generous.
 /// The plaintext is authenticated by MLS before parsing, so this is
@@ -48,12 +69,14 @@ pub(crate) fn is_media_envelope(data: &[u8]) -> bool {
     data.len() > 2 && data[0..2] == MEDIA_ENVELOPE_MAGIC
 }
 
-/// Wraps an encrypted chunk in the versioned media envelope.
-pub(crate) fn encode_media_envelope(encrypted: &EncryptedMessage) -> Vec<u8> {
+/// Wraps an encrypted chunk in the versioned media envelope. `version` is
+/// [`MEDIA_ENVELOPE_VERSION_MLS_V2`] when the plaintext carries rich extras,
+/// [`MEDIA_ENVELOPE_VERSION_MLS_V1`] otherwise.
+pub(crate) fn encode_media_envelope(encrypted: &EncryptedMessage, version: u8) -> Vec<u8> {
     let payload = encrypted.to_bytes();
     let mut buf = Vec::with_capacity(3 + payload.len());
     buf.extend_from_slice(&MEDIA_ENVELOPE_MAGIC);
-    buf.push(MEDIA_ENVELOPE_VERSION_MLS_V1);
+    buf.push(version);
     buf.extend_from_slice(&payload);
     buf
 }
@@ -68,14 +91,54 @@ pub(crate) fn decode_media_envelope(data: &[u8]) -> Result<EncryptedMessage, Str
         return Err("missing media envelope magic".to_string());
     }
     let version = data[2];
-    if version != MEDIA_ENVELOPE_VERSION_MLS_V1 {
+    if version != MEDIA_ENVELOPE_VERSION_MLS_V1 && version != MEDIA_ENVELOPE_VERSION_MLS_V2 {
         return Err(format!("unsupported media envelope version {}", version));
     }
     EncryptedMessage::from_bytes(&data[3..]).map_err(|e| e.to_string())
 }
 
+/// Rich message extras sealed on chunk 0 of a media transfer: caption, reply
+/// threading, quoted-reply context, and forward attribution. Only ever
+/// encoded toward recipients that advertised `RICH_PAYLOAD_V1` (under a v2
+/// envelope) and never carried on the wire `Message` — plaintext (opt-out)
+/// transfers drop them entirely. Additive fields go straight into this
+/// struct (serde-default), needing no new flag bit or envelope version.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct MediaRichExtras {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) caption: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reply_to_msg: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reply_context: Option<ReplyContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forward_info: Option<ForwardInfo>,
+}
+
+impl MediaRichExtras {
+    /// Whether any rich field is present (empty extras never encode).
+    pub(crate) fn is_any(&self) -> bool {
+        self.caption.is_some()
+            || self.reply_to_msg.is_some()
+            || self.reply_context.is_some()
+            || self.forward_info.is_some()
+    }
+}
+
+/// Manual Debug: caption and quoted text are message content and must not
+/// end up in logs by accident (same rule as `Event`'s redacting Debug).
+impl std::fmt::Debug for MediaRichExtras {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaRichExtras")
+            .field("caption", &self.caption.is_some())
+            .field("reply_to_msg", &"[REDACTED]")
+            .field("reply_context", &self.reply_context.is_some())
+            .field("forward_info", &self.forward_info.is_some())
+            .finish()
+    }
+}
+
 /// The authenticated plaintext of an encrypted media chunk.
-#[derive(Debug)]
 pub(crate) struct MediaChunkPlaintext {
     /// `FileChunk::to_bytes()` of the carried chunk.
     pub chunk_bytes: Vec<u8>,
@@ -86,6 +149,26 @@ pub(crate) struct MediaChunkPlaintext {
 
     /// Original content type (image, video, ...), present on chunk 0 only.
     pub original_content_type: Option<ContentType>,
+
+    /// Rich message extras, present on chunk 0 only and only toward
+    /// rich-capable recipients. Forces the v2 envelope when set.
+    pub rich_extras: Option<MediaRichExtras>,
+}
+
+/// Manual Debug: elides chunk bytes and delegates to the field types'
+/// redacting Debug impls for anything content-bearing.
+impl std::fmt::Debug for MediaChunkPlaintext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaChunkPlaintext")
+            .field(
+                "chunk_bytes",
+                &format!("[{} bytes]", self.chunk_bytes.len()),
+            )
+            .field("media_metadata", &self.media_metadata.is_some())
+            .field("original_content_type", &self.original_content_type)
+            .field("rich_extras", &self.rich_extras)
+            .finish()
+    }
 }
 
 impl MediaChunkPlaintext {
@@ -121,6 +204,22 @@ impl MediaChunkPlaintext {
                 ));
             }
         }
+        let rich_json = match &self.rich_extras {
+            Some(rich) => Some(
+                serde_json::to_vec(rich)
+                    .map_err(|e| format!("failed to serialize rich extras: {}", e))?,
+            ),
+            None => None,
+        };
+        if let Some(rich) = &rich_json {
+            if rich.len() > MAX_METADATA_JSON_LEN {
+                return Err(format!(
+                    "rich extras length {} exceeds maximum {}",
+                    rich.len(),
+                    MAX_METADATA_JSON_LEN
+                ));
+            }
+        }
 
         let mut flags = 0u8;
         if meta_json.is_some() {
@@ -129,10 +228,14 @@ impl MediaChunkPlaintext {
         if oct.is_some() {
             flags |= FLAG_ORIGINAL_CONTENT_TYPE;
         }
+        if rich_json.is_some() {
+            flags |= FLAG_RICH_EXTRAS;
+        }
 
         let mut buf = Vec::with_capacity(
             1 + meta_json.as_ref().map_or(0, |m| 4 + m.len())
                 + oct.as_ref().map_or(0, |s| 1 + s.len())
+                + rich_json.as_ref().map_or(0, |r| 4 + r.len())
                 + self.chunk_bytes.len(),
         );
         buf.push(flags);
@@ -145,8 +248,23 @@ impl MediaChunkPlaintext {
             buf.push(bytes.len() as u8);
             buf.extend_from_slice(bytes);
         }
+        if let Some(rich) = rich_json {
+            buf.extend_from_slice(&(rich.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&rich);
+        }
         buf.extend_from_slice(&self.chunk_bytes);
         Ok(buf)
+    }
+
+    /// The envelope version this plaintext must ship under: v2 when rich
+    /// extras are present (so a pre-rich receiver rejects at the version
+    /// check instead of slurping the field as chunk bytes), v1 otherwise.
+    pub(crate) fn envelope_version(&self) -> u8 {
+        if self.rich_extras.is_some() {
+            MEDIA_ENVELOPE_VERSION_MLS_V2
+        } else {
+            MEDIA_ENVELOPE_VERSION_MLS_V1
+        }
     }
 
     /// Parses a decrypted media chunk plaintext.
@@ -155,6 +273,12 @@ impl MediaChunkPlaintext {
             return Err("empty media chunk plaintext".to_string());
         }
         let flags = data[0];
+        // A flag we don't know means a field we can't skip — everything after
+        // the known fields would be misread as chunk bytes. Fail clean; the
+        // sender should have bumped the envelope version for such a chunk.
+        if flags & !KNOWN_FLAGS != 0 {
+            return Err(format!("unknown media chunk flags {:#04x}", flags));
+        }
         let mut pos = 1;
 
         let media_metadata = if flags & FLAG_MEDIA_METADATA != 0 {
@@ -199,10 +323,36 @@ impl MediaChunkPlaintext {
             None
         };
 
+        let rich_extras = if flags & FLAG_RICH_EXTRAS != 0 {
+            if pos + 4 > data.len() {
+                return Err("unexpected end of data reading rich extras length".to_string());
+            }
+            let mut length_bytes = [0u8; 4];
+            length_bytes.copy_from_slice(&data[pos..pos + 4]);
+            let rich_len = u32::from_le_bytes(length_bytes) as usize;
+            pos += 4;
+            if rich_len > MAX_METADATA_JSON_LEN {
+                return Err(format!(
+                    "rich extras length {} exceeds maximum {}",
+                    rich_len, MAX_METADATA_JSON_LEN
+                ));
+            }
+            if pos + rich_len > data.len() {
+                return Err("unexpected end of data reading rich extras".to_string());
+            }
+            let rich: MediaRichExtras = serde_json::from_slice(&data[pos..pos + rich_len])
+                .map_err(|e| format!("invalid rich extras JSON: {}", e))?;
+            pos += rich_len;
+            Some(rich)
+        } else {
+            None
+        };
+
         Ok(Self {
             chunk_bytes: data[pos..].to_vec(),
             media_metadata,
             original_content_type,
+            rich_extras,
         })
     }
 }
@@ -244,25 +394,54 @@ mod tests {
         }
     }
 
+    fn sample_rich_extras() -> MediaRichExtras {
+        use offline_protocol_core::UserId;
+        MediaRichExtras {
+            caption: Some("look at this".to_string()),
+            reply_to_msg: Some("0192aaaa-bbbb-cccc-dddd-eeeeffff0000".to_string()),
+            reply_context: Some(ReplyContext {
+                sender: UserId::new("carol").unwrap(),
+                text: "the original".to_string(),
+                timestamp: None,
+                reply_media_label: None,
+                reply_content_type: Some("text".to_string()),
+            }),
+            forward_info: None,
+        }
+    }
+
     #[test]
     fn test_envelope_roundtrip() {
         let encrypted = sample_encrypted();
-        let envelope = encode_media_envelope(&encrypted);
+        for version in [MEDIA_ENVELOPE_VERSION_MLS_V1, MEDIA_ENVELOPE_VERSION_MLS_V2] {
+            let envelope = encode_media_envelope(&encrypted, version);
 
-        assert!(is_media_envelope(&envelope));
-        let decoded = decode_media_envelope(&envelope).unwrap();
-        assert_eq!(decoded.ciphertext, encrypted.ciphertext);
-        assert_eq!(decoded.group_id, encrypted.group_id);
-        assert_eq!(decoded.sender_id, encrypted.sender_id);
+            assert!(is_media_envelope(&envelope));
+            assert_eq!(envelope[2], version);
+            let decoded = decode_media_envelope(&envelope).unwrap();
+            assert_eq!(decoded.ciphertext, encrypted.ciphertext);
+            assert_eq!(decoded.group_id, encrypted.group_id);
+            assert_eq!(decoded.sender_id, encrypted.sender_id);
+        }
     }
 
     #[test]
     fn test_envelope_unknown_version_rejected() {
-        let mut envelope = encode_media_envelope(&sample_encrypted());
+        let mut envelope =
+            encode_media_envelope(&sample_encrypted(), MEDIA_ENVELOPE_VERSION_MLS_V1);
         envelope[2] = 0x7F;
         assert!(decode_media_envelope(&envelope)
             .unwrap_err()
             .contains("version"));
+    }
+
+    #[test]
+    fn test_v2_envelope_rejected_by_v1_only_version_check() {
+        // What a pre-rich receiver does with a v2 envelope: its decoder only
+        // accepts 0x01, so the chunk dies at the version check (clean drop)
+        // rather than having the rich field slurped into the file bytes.
+        let envelope = encode_media_envelope(&sample_encrypted(), MEDIA_ENVELOPE_VERSION_MLS_V2);
+        assert_ne!(envelope[2], MEDIA_ENVELOPE_VERSION_MLS_V1);
     }
 
     #[test]
@@ -287,11 +466,14 @@ mod tests {
             chunk_bytes: vec![7; 64],
             media_metadata: None,
             original_content_type: None,
+            rich_extras: None,
         };
+        assert_eq!(plain.envelope_version(), MEDIA_ENVELOPE_VERSION_MLS_V1);
         let decoded = MediaChunkPlaintext::decode(&plain.encode().unwrap()).unwrap();
         assert_eq!(decoded.chunk_bytes, vec![7; 64]);
         assert!(decoded.media_metadata.is_none());
         assert!(decoded.original_content_type.is_none());
+        assert!(decoded.rich_extras.is_none());
     }
 
     #[test]
@@ -300,6 +482,7 @@ mod tests {
             chunk_bytes: vec![42; 16],
             media_metadata: Some(sample_metadata()),
             original_content_type: Some(ContentType::Image),
+            rich_extras: None,
         };
         let decoded = MediaChunkPlaintext::decode(&plain.encode().unwrap()).unwrap();
 
@@ -308,6 +491,79 @@ mod tests {
         assert_eq!(meta.file_name, "photo.jpg");
         assert_eq!(meta.thumbnail_base64.as_deref(), Some("dGh1bWI="));
         assert_eq!(decoded.original_content_type, Some(ContentType::Image));
+        assert!(decoded.rich_extras.is_none());
+    }
+
+    #[test]
+    fn test_plaintext_roundtrip_with_rich_extras() {
+        let plain = MediaChunkPlaintext {
+            chunk_bytes: vec![42; 16],
+            media_metadata: Some(sample_metadata()),
+            original_content_type: Some(ContentType::Image),
+            rich_extras: Some(sample_rich_extras()),
+        };
+        assert_eq!(plain.envelope_version(), MEDIA_ENVELOPE_VERSION_MLS_V2);
+        let decoded = MediaChunkPlaintext::decode(&plain.encode().unwrap()).unwrap();
+
+        assert_eq!(decoded.chunk_bytes, vec![42; 16]);
+        assert_eq!(decoded.original_content_type, Some(ContentType::Image));
+        let rich = decoded.rich_extras.unwrap();
+        assert_eq!(rich, sample_rich_extras());
+    }
+
+    #[test]
+    fn test_plaintext_without_rich_extras_is_byte_identical_to_v1_encoding() {
+        // The rich field must be pay-for-what-you-use: a no-extras chunk
+        // encodes exactly as it did before the field existed.
+        let plain = MediaChunkPlaintext {
+            chunk_bytes: vec![9; 8],
+            media_metadata: Some(sample_metadata()),
+            original_content_type: Some(ContentType::Image),
+            rich_extras: None,
+        };
+        let bytes = plain.encode().unwrap();
+        assert_eq!(bytes[0] & FLAG_RICH_EXTRAS, 0);
+        assert_eq!(bytes[0], FLAG_MEDIA_METADATA | FLAG_ORIGINAL_CONTENT_TYPE);
+    }
+
+    #[test]
+    fn test_plaintext_decode_unknown_flag_rejected() {
+        // An unknown flag bit means an unskippable field: fail clean instead
+        // of slurping it as chunk bytes.
+        let plain = MediaChunkPlaintext {
+            chunk_bytes: vec![1, 2, 3],
+            media_metadata: None,
+            original_content_type: None,
+            rich_extras: None,
+        };
+        let mut bytes = plain.encode().unwrap();
+        bytes[0] |= 0x40;
+        assert!(MediaChunkPlaintext::decode(&bytes)
+            .unwrap_err()
+            .contains("unknown media chunk flags"));
+    }
+
+    #[test]
+    fn test_plaintext_decode_malformed_rich_extras_rejected() {
+        // Rich extras are MLS-authenticated, so malformed JSON is a sender
+        // bug or malice — drop the chunk like malformed metadata, don't
+        // guess.
+        let garbage = b"not json";
+        let mut bytes = vec![FLAG_RICH_EXTRAS];
+        bytes.extend_from_slice(&(garbage.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(garbage);
+        assert!(MediaChunkPlaintext::decode(&bytes)
+            .unwrap_err()
+            .contains("invalid rich extras JSON"));
+    }
+
+    #[test]
+    fn test_plaintext_decode_oversized_rich_extras_rejected() {
+        let mut bytes = vec![FLAG_RICH_EXTRAS];
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(MediaChunkPlaintext::decode(&bytes)
+            .unwrap_err()
+            .contains("rich extras length"));
     }
 
     #[test]
@@ -316,6 +572,7 @@ mod tests {
             chunk_bytes: vec![1, 2, 3],
             media_metadata: Some(sample_metadata()),
             original_content_type: Some(ContentType::Video),
+            rich_extras: Some(sample_rich_extras()),
         };
         let bytes = plain.encode().unwrap();
         // Truncations inside the metadata/content-type headers must fail
@@ -341,11 +598,25 @@ mod tests {
             chunk_bytes: vec![1, 2, 3],
             media_metadata: Some(meta),
             original_content_type: None,
+            rich_extras: None,
         };
         assert!(plain
             .encode()
             .unwrap_err()
             .contains("media metadata length"));
+    }
+
+    #[test]
+    fn test_plaintext_encode_oversized_rich_extras_rejected() {
+        let mut rich = sample_rich_extras();
+        rich.caption = Some("A".repeat(MAX_METADATA_JSON_LEN + 1));
+        let plain = MediaChunkPlaintext {
+            chunk_bytes: vec![1, 2, 3],
+            media_metadata: None,
+            original_content_type: None,
+            rich_extras: Some(rich),
+        };
+        assert!(plain.encode().unwrap_err().contains("rich extras length"));
     }
 
     #[test]

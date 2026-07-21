@@ -242,8 +242,10 @@ impl FileChunk {
     }
 
     /// Maximum allowed length for a string field (file_id, file_name, checksum)
-    /// in the binary wire format. Prevents allocation bombs from crafted payloads.
-    const MAX_STRING_FIELD_LEN: usize = 4096;
+    /// in the binary wire format. Prevents allocation bombs from crafted
+    /// payloads. `pub(crate)`: also bounds caller-supplied file ids at the
+    /// `send_media_with` boundary.
+    pub(crate) const MAX_STRING_FIELD_LEN: usize = 4096;
     /// Maximum allowed chunk data length in the binary wire format.
     const MAX_CHUNK_DATA_LEN: usize = 128 * 1024 * 1024; // 128 MB
 

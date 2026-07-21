@@ -496,6 +496,25 @@ pub enum Event {
         media_metadata: Option<MediaMetadata>,
         /// Base64-encoded reassembled file data.
         file_data: String,
+        /// When the sender queued the transfer (chunk-0 outer message
+        /// timestamp, wall-clock ms) — for display ordering alongside
+        /// `MessageReceived.timestamp`. Absent only if the chunk-0 record
+        /// was evicted before completion.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<i64>,
+        /// Caption text from the sealed chunk-0 rich extras.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
+        /// ID of the message this media replies to (sealed chunk-0 extras).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to_msg: Option<String>,
+        /// Quoted-reply context (sealed chunk-0 extras). Boxed to keep the
+        /// `Event` enum's by-value size in check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_context: Option<Box<ReplyContextEvent>>,
+        /// Forwarding attribution (sealed chunk-0 extras).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forward_info: Option<ForwardInfoEvent>,
     },
 
     /// An inbound file transfer was dropped before completion — the receiver
@@ -1225,6 +1244,7 @@ impl Event {
     }
 
     /// Creates a FileReceived event.
+    #[allow(clippy::too_many_arguments)]
     pub fn file_received(
         file_id: String,
         file_name: String,
@@ -1233,6 +1253,11 @@ impl Event {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         file_data: Vec<u8>,
+        timestamp: Option<i64>,
+        caption: Option<String>,
+        reply_to_msg: Option<String>,
+        reply_context: Option<&offline_protocol_core::ReplyContext>,
+        forward_info: Option<&offline_protocol_core::ForwardInfo>,
     ) -> Self {
         use base64::{engine::general_purpose::STANDARD, Engine};
         Self::FileReceived {
@@ -1243,6 +1268,11 @@ impl Event {
             content_type: content_type.to_string(),
             media_metadata,
             file_data: STANDARD.encode(&file_data),
+            timestamp,
+            caption,
+            reply_to_msg,
+            reply_context: reply_context.map(|rc| Box::new(ReplyContextEvent::from(rc))),
+            forward_info: forward_info.map(ForwardInfoEvent::from),
         }
     }
 
@@ -2122,6 +2152,11 @@ impl fmt::Debug for Event {
                 content_type,
                 media_metadata: _,
                 file_data,
+                timestamp,
+                caption,
+                reply_to_msg: _,
+                reply_context,
+                forward_info,
             } => f
                 .debug_struct("FileReceived")
                 .field("file_id", file_id)
@@ -2130,6 +2165,11 @@ impl fmt::Debug for Event {
                 .field("sender", &"[REDACTED]")
                 .field("content_type", content_type)
                 .field("file_data", &format!("[{} bytes base64]", file_data.len()))
+                .field("timestamp", timestamp)
+                .field("caption", &caption.is_some())
+                .field("reply_to_msg", &"[REDACTED]")
+                .field("reply_context", &reply_context.is_some())
+                .field("forward_info", &forward_info.is_some())
                 .finish(),
             Self::FileReceiveFailed {
                 file_id,
@@ -2822,6 +2862,11 @@ mod tests {
             ContentType::Image,
             None,
             vec![1, 2, 3, 4],
+            None,
+            None,
+            None,
+            None,
+            None,
         );
 
         match event {
@@ -2840,6 +2885,95 @@ mod tests {
                 assert_eq!(sender, "alice");
                 assert_eq!(content_type, "image");
                 assert!(!file_data.is_empty());
+            }
+            _ => panic!("Wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_file_received_event_rich_fields_absent_from_json_when_none() {
+        // The rich fields are additive on the event's JSON wire form: a
+        // plain transfer must serialize exactly as it did before they
+        // existed, so older consumers see no new keys.
+        let event = Event::file_received(
+            "file123".to_string(),
+            "f.bin".to_string(),
+            4,
+            "alice".to_string(),
+            ContentType::File,
+            None,
+            vec![1, 2, 3, 4],
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        for key in [
+            "timestamp",
+            "caption",
+            "reply_to_msg",
+            "reply_context",
+            "forward_info",
+        ] {
+            assert!(json.get(key).is_none(), "{} must be absent when unset", key);
+        }
+    }
+
+    #[test]
+    fn test_file_received_event_rich_fields_round_trip() {
+        use offline_protocol_core::UserId;
+        let rc = offline_protocol_core::ReplyContext {
+            sender: UserId::new("carol").unwrap(),
+            text: "the original".to_string(),
+            timestamp: None,
+            reply_media_label: None,
+            reply_content_type: Some("text".to_string()),
+        };
+        let fwd = offline_protocol_core::ForwardInfo {
+            original_sender: UserId::new("dave").unwrap(),
+            original_message_id: offline_protocol_core::MessageId::new(),
+            original_timestamp: offline_protocol_core::Timestamp::now(),
+            forward_count: 1,
+        };
+        let event = Event::file_received(
+            "file123".to_string(),
+            "photo.jpg".to_string(),
+            1024,
+            "alice".to_string(),
+            ContentType::Image,
+            None,
+            vec![1, 2, 3],
+            Some(1_700_000_000_000),
+            Some("look".to_string()),
+            Some("0192aaaa-bbbb-cccc-dddd-eeeeffff0000".to_string()),
+            Some(&rc),
+            Some(&fwd),
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: Event = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Event::FileReceived {
+                timestamp,
+                caption,
+                reply_to_msg,
+                reply_context,
+                forward_info,
+                ..
+            } => {
+                assert_eq!(timestamp, Some(1_700_000_000_000));
+                assert_eq!(caption.as_deref(), Some("look"));
+                assert_eq!(
+                    reply_to_msg.as_deref(),
+                    Some("0192aaaa-bbbb-cccc-dddd-eeeeffff0000")
+                );
+                let rc = reply_context.expect("reply_context must round-trip");
+                assert_eq!(rc.sender, "carol");
+                assert_eq!(rc.text, "the original");
+                let fwd = forward_info.expect("forward_info must round-trip");
+                assert_eq!(fwd.original_sender, "dave");
+                assert_eq!(fwd.forward_count, 1);
             }
             _ => panic!("Wrong event type"),
         }

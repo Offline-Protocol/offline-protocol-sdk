@@ -18,7 +18,7 @@ pub(crate) use decryption_queue::PendingDecryptionQueue;
 pub use decryption_queue::PendingQueueMetrics;
 pub(crate) use prefixes::*;
 pub(crate) use types::*;
-pub use types::{ProtocolState, SendMessageOptions};
+pub use types::{MediaSendOptions, ProtocolState, SendMessageOptions};
 
 use crate::file_transfer::{FileTransferManager, OutboundTransferState};
 use crate::mls_observability::{MlsEventEmitter, MlsEventRateLimiter, NoopMlsEventEmitter};

@@ -16401,6 +16401,376 @@ fn test_media_end_to_end_encrypted_transfer() {
     assert_eq!(meta.thumbnail_base64.as_deref(), Some("c2VjcmV0LXRodW1i"));
 }
 
+/// Rich options for media sends used across the rich-media tests: caption,
+/// reply threading, quoted-reply context, and forward attribution.
+fn sample_media_rich_options(reply_to: &str) -> MediaSendOptions {
+    MediaSendOptions {
+        media_metadata: Some(sample_media_metadata(2048)),
+        caption: Some("vacation shot".to_string()),
+        reply_to_msg: Some(reply_to.to_string()),
+        reply_context: Some(offline_protocol_core::ReplyContext {
+            sender: UserId::new("bob").unwrap(),
+            text: "quoted text".to_string(),
+            timestamp: None,
+            reply_media_label: None,
+            reply_content_type: Some("text".to_string()),
+        }),
+        forward_info: Some(offline_protocol_core::ForwardInfo {
+            original_sender: UserId::new("dave").unwrap(),
+            original_message_id: offline_protocol_core::MessageId::new(),
+            original_timestamp: offline_protocol_core::Timestamp::now(),
+            forward_count: 2,
+        }),
+        file_id: None,
+    }
+}
+
+/// Captures full FileReceived events (not the reduced tuple) for rich-field
+/// assertions.
+fn capture_file_received_events(protocol: &mut OfflineProtocol) -> Arc<Mutex<Vec<Event>>> {
+    let store: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let store_clone = store.clone();
+    protocol.on_event(move |event| {
+        if matches!(event, Event::FileReceived { .. }) {
+            store_clone.lock().unwrap().push(event.clone());
+        }
+    });
+    store
+}
+
+#[test]
+fn test_send_media_rich_e2e_seals_extras_and_bumps_chunk0_envelope() {
+    use crate::media_envelope::{MEDIA_ENVELOPE_VERSION_MLS_V1, MEDIA_ENVELOPE_VERSION_MLS_V2};
+
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    alice.peer_rich_payload.insert("bob".to_string());
+
+    let received = capture_file_received_events(&mut bob);
+
+    // 10 KB over 4 KB BLE chunks = 3 chunks — proves the rich extras (and
+    // the v2 envelope) ride chunk 0 only.
+    let file_data: Vec<u8> = (0..10_240u32).map(|i| (i % 251) as u8).collect();
+    let options = sample_media_rich_options(&offline_protocol_core::MessageId::new().as_str());
+    let reply_id = options.reply_to_msg.clone().unwrap();
+    alice
+        .send_media_with(
+            "bob",
+            file_data.clone(),
+            "rich-photo.jpg",
+            ContentType::Image,
+            options,
+        )
+        .unwrap();
+
+    let mut envelope_versions: Vec<u8> = Vec::new();
+    let mut rounds = 0;
+    while received.lock().unwrap().is_empty() {
+        rounds += 1;
+        assert!(rounds < 32, "media transfer did not complete");
+
+        let outbound = alice_handle.sent_messages();
+        alice_handle.clear_sent_messages();
+        for msg in outbound {
+            if msg.content_type == ContentType::FileChunk {
+                let binary = msg.binary_content.as_ref().expect("chunk carries binary");
+                assert!(crate::media_envelope::is_media_envelope(binary));
+                envelope_versions.push(binary[2]);
+                // The rich extras must never appear in wire cleartext.
+                let wire = serde_json::to_string(&msg).unwrap();
+                assert!(!wire.contains("vacation shot"));
+                assert!(!wire.contains("quoted text"));
+                assert!(!wire.contains("dave"));
+            }
+            bob_handle.queue_message(msg);
+        }
+        while bob.receive_message().is_some() {}
+
+        let acks = bob_handle.sent_messages();
+        bob_handle.clear_sent_messages();
+        for msg in acks {
+            alice_handle.queue_message(msg);
+        }
+        while alice.receive_message().is_some() {}
+        alice.pump_media_transfers();
+    }
+
+    assert_eq!(envelope_versions.len(), 3);
+    assert_eq!(
+        envelope_versions
+            .iter()
+            .filter(|v| **v == MEDIA_ENVELOPE_VERSION_MLS_V2)
+            .count(),
+        1,
+        "exactly chunk 0 ships under the v2 envelope"
+    );
+    assert!(envelope_versions
+        .iter()
+        .all(|v| *v == MEDIA_ENVELOPE_VERSION_MLS_V1 || *v == MEDIA_ENVELOPE_VERSION_MLS_V2));
+
+    let got = received.lock().unwrap();
+    assert_eq!(got.len(), 1);
+    match &got[0] {
+        Event::FileReceived {
+            file_name,
+            sender,
+            content_type,
+            caption,
+            reply_to_msg,
+            reply_context,
+            forward_info,
+            timestamp,
+            file_data: file_data_b64,
+            ..
+        } => {
+            assert_eq!(file_name, "rich-photo.jpg");
+            assert_eq!(sender, "alice");
+            assert_eq!(content_type, &ContentType::Image.to_string());
+            assert_eq!(caption.as_deref(), Some("vacation shot"));
+            assert_eq!(reply_to_msg.as_deref(), Some(reply_id.as_str()));
+            let rc = reply_context.as_ref().expect("reply context must survive");
+            assert_eq!(rc.sender, "bob");
+            assert_eq!(rc.text, "quoted text");
+            let fwd = forward_info.as_ref().expect("forward info must survive");
+            assert_eq!(fwd.original_sender, "dave");
+            assert_eq!(fwd.forward_count, 2);
+            assert!(
+                timestamp.is_some(),
+                "chunk-0 message timestamp must surface"
+            );
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            assert_eq!(STANDARD.decode(file_data_b64).unwrap(), file_data);
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn test_send_media_rich_extras_dropped_for_non_capable_peer() {
+    use crate::media_envelope::MEDIA_ENVELOPE_VERSION_MLS_V1;
+
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    // bob never advertised RICH_PAYLOAD_V1.
+
+    let received = capture_file_received_events(&mut bob);
+
+    alice
+        .send_media_with(
+            "bob",
+            vec![0xAB; 1024],
+            "plain-photo.jpg",
+            ContentType::Image,
+            sample_media_rich_options(&offline_protocol_core::MessageId::new().as_str()),
+        )
+        .unwrap();
+
+    // The transfer degrades to what plain send_media sends: v1 envelope, no
+    // rich extras anywhere on the wire.
+    let outbound = alice_handle.sent_messages();
+    alice_handle.clear_sent_messages();
+    assert!(!outbound.is_empty());
+    for msg in &outbound {
+        let binary = msg.binary_content.as_ref().unwrap();
+        assert_eq!(binary[2], MEDIA_ENVELOPE_VERSION_MLS_V1);
+        let wire = serde_json::to_string(msg).unwrap();
+        assert!(!wire.contains("vacation shot"));
+    }
+    for msg in outbound {
+        bob_handle.queue_message(msg);
+    }
+    while bob.receive_message().is_some() {}
+
+    let got = received.lock().unwrap();
+    assert_eq!(got.len(), 1);
+    match &got[0] {
+        Event::FileReceived {
+            caption,
+            reply_to_msg,
+            reply_context,
+            forward_info,
+            media_metadata,
+            ..
+        } => {
+            assert!(caption.is_none());
+            assert!(reply_to_msg.is_none());
+            assert!(reply_context.is_none());
+            assert!(forward_info.is_none());
+            // Non-rich metadata still travels as before.
+            assert!(media_metadata.is_some());
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn test_send_media_rich_extras_dropped_when_kill_switch_off() {
+    use crate::media_envelope::MEDIA_ENVELOPE_VERSION_MLS_V1;
+
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.encryption.rich_payload_enabled = false;
+    let mut alice = OfflineProtocol::new(config).unwrap();
+    alice
+        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let alice_handle = mock_transport.clone();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    alice.start().unwrap();
+
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    // Even a recorded peer capability must not override the kill switch.
+    alice.peer_rich_payload.insert("bob".to_string());
+
+    alice
+        .send_media_with(
+            "bob",
+            vec![0xCD; 512],
+            "gated.jpg",
+            ContentType::Image,
+            sample_media_rich_options(&offline_protocol_core::MessageId::new().as_str()),
+        )
+        .unwrap();
+
+    for msg in alice_handle.sent_messages() {
+        let binary = msg.binary_content.as_ref().unwrap();
+        assert_eq!(binary[2], MEDIA_ENVELOPE_VERSION_MLS_V1);
+        let wire = serde_json::to_string(&msg).unwrap();
+        assert!(!wire.contains("vacation shot"));
+    }
+}
+
+#[test]
+fn test_send_media_rich_extras_never_ride_plaintext_transfer() {
+    // Explicit encryption opt-out: the transfer leaves as legacy plaintext
+    // chunks and the rich extras are dropped entirely — never cleartext.
+    let mut config = create_test_config_for_user("alice");
+    config.encryption = crate::EncryptionConfig::disabled();
+
+    let mut alice = OfflineProtocol::new(config).unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let alice_handle = mock_transport.clone();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    alice.start().unwrap();
+
+    alice
+        .send_media_with(
+            "bob",
+            vec![9u8; 512],
+            "open.bin",
+            ContentType::File,
+            sample_media_rich_options(&offline_protocol_core::MessageId::new().as_str()),
+        )
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    assert!(!sent.is_empty());
+    for msg in &sent {
+        let binary = msg.binary_content.as_ref().unwrap();
+        assert!(!crate::media_envelope::is_media_envelope(binary));
+        let wire = serde_json::to_string(msg).unwrap();
+        assert!(!wire.contains("vacation shot"));
+        assert!(!wire.contains("quoted text"));
+    }
+}
+
+#[test]
+fn test_send_media_rich_invalid_reply_to_rejected() {
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let result = alice.send_media_with(
+        "bob",
+        vec![1, 2, 3],
+        "f.bin",
+        ContentType::File,
+        MediaSendOptions {
+            reply_to_msg: Some("not-a-message-id".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(result, Err(crate::Error::InvalidArgument(_))));
+}
+
+#[test]
+fn test_send_media_rich_oversized_extras_rejected() {
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let result = alice.send_media_with(
+        "bob",
+        vec![1, 2, 3],
+        "f.bin",
+        ContentType::File,
+        MediaSendOptions {
+            caption: Some("A".repeat(MAX_RICH_EXTRAS_BYTES + 1)),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(result, Err(crate::Error::InvalidArgument(_))));
+}
+
+#[test]
+fn test_send_media_custom_file_id_honored_and_validated() {
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let file_id = alice
+        .send_media_with(
+            "bob",
+            vec![1u8; 64],
+            "custom.bin",
+            ContentType::File,
+            MediaSendOptions {
+                file_id: Some("file_custom_1".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(file_id, "file_custom_1");
+
+    // Reusing the id while the transfer is active must fail...
+    let collision = alice.send_media_with(
+        "bob",
+        vec![2u8; 64],
+        "again.bin",
+        ContentType::File,
+        MediaSendOptions {
+            file_id: Some("file_custom_1".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(collision, Err(crate::Error::InvalidArgument(_))));
+
+    // ...as must out-of-bounds ids.
+    for bad in [String::new(), "x".repeat(4097)] {
+        let result = alice.send_media_with(
+            "bob",
+            vec![3u8; 64],
+            "bad.bin",
+            ContentType::File,
+            MediaSendOptions {
+                file_id: Some(bad),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(result, Err(crate::Error::InvalidArgument(_))));
+    }
+}
+
 #[test]
 fn test_plaintext_media_rejected_once_session_confirmed() {
     let (mut alice, _alice_handle) = media_test_protocol("alice");
@@ -16886,6 +17256,7 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
         chunk_bytes: chunk.to_bytes(),
         media_metadata: None,
         original_content_type: None,
+        rich_extras: None,
     };
     let encrypted = {
         let mls = carol.mls_manager.as_ref().unwrap().clone();
@@ -16903,7 +17274,10 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
         "",
     );
     msg.content_type = ContentType::FileChunk;
-    msg.binary_content = Some(encode_media_envelope(&encrypted));
+    msg.binary_content = Some(encode_media_envelope(
+        &encrypted,
+        crate::media_envelope::MEDIA_ENVELOPE_VERSION_MLS_V1,
+    ));
     bob_handle.queue_message(msg);
     while bob.receive_message().is_some() {}
 
@@ -17267,7 +17641,10 @@ fn test_media_chunk_hard_decrypt_failure_emits_decryption_failed_event() {
         "",
     );
     msg.content_type = ContentType::FileChunk;
-    msg.binary_content = Some(encode_media_envelope(&encrypted));
+    msg.binary_content = Some(encode_media_envelope(
+        &encrypted,
+        crate::media_envelope::MEDIA_ENVELOPE_VERSION_MLS_V1,
+    ));
     bob_handle.queue_message(msg);
     while bob.receive_message().is_some() {}
 

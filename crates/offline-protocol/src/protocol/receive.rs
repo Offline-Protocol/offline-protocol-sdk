@@ -398,8 +398,9 @@ impl OfflineProtocol {
         // SEC-H1: encrypted chunks carry the chunk bytes, media metadata, and
         // original content type inside the MLS ciphertext; legacy plaintext
         // chunks carry them on the wire Message and are accepted only where
-        // policy allows.
-        let (chunk, media_metadata, original_content_type) = if let Some(ref binary) =
+        // policy allows. Rich extras (caption, reply, forward) only ever come
+        // from the sealed plaintext — never from the wire Message.
+        let (chunk, media_metadata, original_content_type, rich_extras) = if let Some(ref binary) =
             message.binary_content
         {
             if is_media_envelope(binary) {
@@ -440,7 +441,12 @@ impl OfflineProtocol {
                         return;
                     }
                 };
-                (chunk, inner.media_metadata, inner.original_content_type)
+                (
+                    chunk,
+                    inner.media_metadata,
+                    inner.original_content_type,
+                    inner.rich_extras,
+                )
             } else {
                 if !self.accept_plaintext_content(&sender) {
                     warn!(
@@ -466,7 +472,7 @@ impl OfflineProtocol {
                     }
                 };
                 let (meta, oct) = Self::wire_media_metadata(message);
-                (chunk, meta, oct)
+                (chunk, meta, oct, None)
             }
         } else {
             if !self.accept_plaintext_content(&sender) {
@@ -493,7 +499,7 @@ impl OfflineProtocol {
                 }
             };
             let (meta, oct) = Self::wire_media_metadata(message);
-            (chunk, meta, oct)
+            (chunk, meta, oct, None)
         };
 
         let file_id = chunk.file_id.clone();
@@ -513,6 +519,8 @@ impl OfflineProtocol {
                             media_metadata,
                             last_updated_at: Instant::now(),
                             sender: sender.clone(),
+                            rich_extras,
+                            timestamp_ms: message.timestamp.as_millis(),
                         },
                     );
                 } else if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
@@ -567,9 +575,17 @@ impl OfflineProtocol {
                 return;
             };
             let metadata_entry = self.pending_media_metadata.remove(&file_id);
-            let (content_type, media_metadata) = metadata_entry
-                .map(|entry| (entry.content_type, entry.media_metadata))
-                .unwrap_or((ContentType::File, None));
+            let (content_type, media_metadata, rich_extras, timestamp_ms) = metadata_entry
+                .map(|entry| {
+                    (
+                        entry.content_type,
+                        entry.media_metadata,
+                        entry.rich_extras,
+                        Some(entry.timestamp_ms),
+                    )
+                })
+                .unwrap_or((ContentType::File, None, None, None));
+            let rich_extras = rich_extras.unwrap_or_default();
 
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::file_received(
@@ -580,6 +596,11 @@ impl OfflineProtocol {
                     content_type,
                     media_metadata,
                     file_data,
+                    timestamp_ms,
+                    rich_extras.caption,
+                    rich_extras.reply_to_msg,
+                    rich_extras.reply_context.as_ref(),
+                    rich_extras.forward_info.as_ref(),
                 ));
             }
         }

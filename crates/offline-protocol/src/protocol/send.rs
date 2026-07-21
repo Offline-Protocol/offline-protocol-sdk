@@ -2,20 +2,20 @@
 
 use super::{
     base64_encode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
-    ConnectionRequestPayload, KeyPackagePayload, OfflineProtocol, OutboundMediaTransfer,
-    OutboundSendPreparation, OutboxEntry, PendingConnectionRequest, PendingMessage,
-    PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras,
-    SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS,
-    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions, OfflineProtocol,
+    OutboundMediaTransfer, OutboundSendPreparation, OutboxEntry, PendingConnectionRequest,
+    PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1,
+    RichSendExtras, SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState,
+    MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS,
+    MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1,
+    PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
 };
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
 };
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
-use crate::media_envelope::{encode_media_envelope, MediaChunkPlaintext};
+use crate::media_envelope::{encode_media_envelope, MediaChunkPlaintext, MediaRichExtras};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 use crate::{Error, Result};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -1295,6 +1295,43 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
     ) -> Result<String> {
+        self.send_media_with(
+            recipient,
+            file_data,
+            file_name,
+            content_type,
+            MediaSendOptions {
+                media_metadata,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Sends a media attachment with rich options: the chunk-0 media
+    /// metadata (as on [`Self::send_media`]), plus caption, reply threading,
+    /// quoted-reply context, forward attribution, and an optional
+    /// caller-supplied `file_id`.
+    ///
+    /// The rich fields only ever travel inside the MLS-sealed chunk-0
+    /// plaintext (under the v2 media envelope), and only toward recipients
+    /// whose key package advertised `rich_versions` support (gated by
+    /// `EncryptionConfig::rich_payload_enabled`). Toward anyone else —
+    /// including every plaintext (encryption opt-out) transfer — they are
+    /// silently dropped, never sent cleartext.
+    ///
+    /// Returns `InvalidArgument` for an unparsable `reply_to_msg`, rich
+    /// extras whose serialized size exceeds 32 KiB, or a `file_id` that is
+    /// empty, over the wire field bound, or already carried by an active
+    /// outbound transfer. Encryption preconditions match
+    /// [`Self::send_media`].
+    pub fn send_media_with(
+        &mut self,
+        recipient: impl Into<String>,
+        file_data: Vec<u8>,
+        file_name: impl Into<String>,
+        content_type: ContentType,
+        options: MediaSendOptions,
+    ) -> Result<String> {
         {
             let state = lock_shared_state(&self.shared_state)?;
             if state.state != ProtocolState::Running {
@@ -1304,6 +1341,51 @@ impl OfflineProtocol {
 
         let recipient_str: String = recipient.into();
         let file_name_str: String = file_name.into();
+        let media_metadata = options.media_metadata;
+
+        // Validate the reply id like send_message_with does — a malformed id
+        // fails the call instead of riding sealed to the receiver.
+        if let Some(reply_to) = options.reply_to_msg.as_deref() {
+            MessageId::from_str(reply_to)
+                .map_err(|e| Error::InvalidArgument(format!("Invalid reply_to_msg: {}", e)))?;
+        }
+
+        let rich_extras = MediaRichExtras {
+            caption: options.caption,
+            reply_to_msg: options.reply_to_msg,
+            reply_context: options.reply_context,
+            forward_info: options.forward_info,
+        };
+        // Same boundary cap as send_message_with: an oversized quote or
+        // caption would inflate the sealed chunk-0 plaintext into heavy
+        // fragmentation. Enforced before the capability gate so the caller
+        // hears about it even when the extras would be dropped.
+        if rich_extras.is_any() {
+            let extras_len = serde_json::to_vec(&rich_extras)
+                .map_err(|e| Error::Serialization(e.to_string()))?
+                .len();
+            if extras_len > MAX_RICH_EXTRAS_BYTES {
+                return Err(Error::InvalidArgument(format!(
+                    "Rich extras too large: {} bytes serialized (max {})",
+                    extras_len, MAX_RICH_EXTRAS_BYTES
+                )));
+            }
+        }
+
+        if let Some(file_id) = options.file_id.as_deref() {
+            if file_id.is_empty() || file_id.len() > FileChunk::MAX_STRING_FIELD_LEN {
+                return Err(Error::InvalidArgument(format!(
+                    "file_id length must be 1..={} bytes",
+                    FileChunk::MAX_STRING_FIELD_LEN
+                )));
+            }
+            if self.outbound_media_transfers.contains_key(file_id) {
+                return Err(Error::InvalidArgument(format!(
+                    "file_id {} already has an active outbound transfer",
+                    file_id
+                )));
+            }
+        }
 
         // Prevent sending media to blocked users. Blocking is bidirectional:
         // we neither receive from nor send to a blocked peer.
@@ -1358,7 +1440,25 @@ impl OfflineProtocol {
             self.warn_plaintext_send(&recipient_str);
         }
 
-        let file_id = format!("file_{}", MessageId::new().as_str());
+        // Rich extras seal only toward recipients that advertised the rich
+        // payload, and only on the encrypted path; everyone else — including
+        // every plaintext (opt-out) transfer — gets the plain transfer.
+        // Dropped here, never sent cleartext.
+        let rich_extras = if !rich_extras.is_any() {
+            None
+        } else if self.should_auto_encrypt() && self.rich_seal_active(&recipient_str) {
+            Some(rich_extras)
+        } else {
+            debug!(
+                recipient = %recipient_str,
+                "Dropping rich media extras: recipient did not advertise sealed rich payload support"
+            );
+            None
+        };
+
+        let file_id = options
+            .file_id
+            .unwrap_or_else(|| format!("file_{}", MessageId::new().as_str()));
         let pinned_transport = self.select_media_transport()?;
 
         let (chunk_size, window_size) = match pinned_transport {
@@ -1403,6 +1503,7 @@ impl OfflineProtocol {
                 delivered_chunks: HashSet::new(),
                 last_updated_at: Instant::now(),
                 media_metadata: media_metadata.clone(),
+                rich_extras: rich_extras.clone(),
             },
         );
 
@@ -1422,12 +1523,14 @@ impl OfflineProtocol {
             pinned_transport,
             content_type,
             media_metadata.as_ref(),
+            rich_extras.as_ref(),
         )?;
 
         Ok(file_id)
     }
 
     /// Sends a batch of file chunks, wiring each into the outbox and media tracking.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn send_media_chunk_batch(
         &mut self,
         file_id: &str,
@@ -1436,6 +1539,7 @@ impl OfflineProtocol {
         pinned_transport: TransportType,
         content_type: ContentType,
         media_metadata: Option<&MediaMetadata>,
+        rich_extras: Option<&MediaRichExtras>,
     ) -> Result<()> {
         for chunk in chunks {
             let chunk_index = chunk.chunk_index;
@@ -1450,13 +1554,22 @@ impl OfflineProtocol {
             // metadata (file name, preview thumbnail, original content type)
             // travel inside the MLS ciphertext — the wire Message carries none
             // of them. The plaintext fields are only populated when
-            // auto-encryption is inactive.
+            // auto-encryption is inactive. Rich extras (caption, reply,
+            // forward) exist only on this sealed path, chunk 0 only; their
+            // presence bumps the envelope to v2 so a pre-rich receiver
+            // rejects cleanly instead of misparsing.
             let (binary_payload, wire_metadata, wire_original_ct) = if self.should_auto_encrypt() {
                 let inner = MediaChunkPlaintext {
                     chunk_bytes: chunk.to_bytes(),
                     media_metadata: meta_for_chunk,
                     original_content_type: (chunk_index == 0).then_some(content_type),
+                    rich_extras: if chunk_index == 0 {
+                        rich_extras.cloned()
+                    } else {
+                        None
+                    },
                 };
+                let envelope_version = inner.envelope_version();
                 let sealed = inner
                     .encode()
                     .map_err(Error::Serialization)
@@ -1476,7 +1589,11 @@ impl OfflineProtocol {
                         return Err(err);
                     }
                 };
-                (encode_media_envelope(&encrypted), None, false)
+                (
+                    encode_media_envelope(&encrypted, envelope_version),
+                    None,
+                    false,
+                )
             } else {
                 (chunk.to_bytes(), meta_for_chunk, chunk_index == 0)
             };
@@ -1570,6 +1687,7 @@ impl OfflineProtocol {
                 transfer.pinned_transport,
                 transfer.content_type,
                 transfer.media_metadata.as_ref(),
+                transfer.rich_extras.as_ref(),
             ) {
                 warn!(
                     file_id = %file_id,
