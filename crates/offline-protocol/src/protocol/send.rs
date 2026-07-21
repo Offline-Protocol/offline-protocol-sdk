@@ -208,6 +208,14 @@ impl OfflineProtocol {
     /// If the message was already forwarded, the original attribution is preserved
     /// and `forward_count` is incremented.
     ///
+    /// Toward a recipient that advertised the sealed rich payload, the
+    /// attribution and the original `media_metadata` — including any
+    /// cloud-media `encryption_key`/`iv` secrets — travel inside the MLS-sealed
+    /// `__RICH_V1__` body, so forwarded cloud media stays openable. Toward
+    /// anyone else they ride the legacy cleartext outer fields, from which
+    /// the transport chokepoint strips the secrets — attribution and display
+    /// hints survive, but the media key cannot be delivered.
+    ///
     /// # Arguments
     ///
     /// * `original_message` - The message to forward
@@ -245,6 +253,15 @@ impl OfflineProtocol {
             ));
         }
 
+        // FileChunk is an internal transport content type (see
+        // `send_message_with`): a forwarded message stamped with it would be
+        // ACKed and then dropped by the receiver's file-transfer manager.
+        if original_message.content_type == ContentType::FileChunk {
+            return Err(Error::InvalidArgument(
+                "FileChunk is an internal content type and cannot be forwarded".to_string(),
+            ));
+        }
+
         // Build ForwardInfo: preserve original attribution, increment count
         let forward_info = ForwardInfo::from_message(original_message);
 
@@ -252,6 +269,31 @@ impl OfflineProtocol {
             return Err(Error::InvalidArgument(format!(
                 "Forward count {} exceeds maximum of {}",
                 forward_info.forward_count, MAX_FORWARD_COUNT,
+            )));
+        }
+
+        // Sealed-path extras: toward a rich-capable recipient the attribution
+        // and the original media metadata (including cloud-media key/iv
+        // secrets, which only the sealed body may carry — the wire chokepoint
+        // strips them from the cleartext outer field) travel inside the
+        // `__RICH_V1__` body. The outer copies set below remain the fallback
+        // for non-capable recipients; the receiver's sealed-body restore is
+        // authoritative and overwrites them when the seal happened.
+        let rich = RichSendExtras {
+            reply_context: None,
+            media_metadata: original_message.media_metadata.clone(),
+            forward_info: Some(forward_info.clone()),
+        };
+        // Same boundary cap as `send_message_with` — enforced here, not at
+        // seal time, so a forward queued behind session establishment is
+        // always known to seal at flush.
+        let extras_len = serde_json::to_vec(&rich)
+            .map_err(|e| Error::Serialization(e.to_string()))?
+            .len();
+        if extras_len > MAX_RICH_EXTRAS_BYTES {
+            return Err(Error::InvalidArgument(format!(
+                "Rich extras too large: {} bytes serialized (max {})",
+                extras_len, MAX_RICH_EXTRAS_BYTES
             )));
         }
 
@@ -265,7 +307,7 @@ impl OfflineProtocol {
             Some(forward_info.clone()),
             original_message.content_type,
             original_message.media_metadata.clone(),
-            None,
+            Some(&rich),
             None,
             "forward_message_session_pending",
         )? {
@@ -951,12 +993,14 @@ impl OfflineProtocol {
                 // file-transfer manager — worse than a plain relay drop,
                 // which at least fails the ACK and retries. Only when
                 // nothing rides outer (`forwarded_from`/`media_metadata`
-                // both absent): the forward path deliberately carries those
-                // as cleartext outer fields with no sealed copy, and the
-                // receiver's sealed-body restore overwrites outer copies
-                // wholesale — sealing here would wipe them. Bare Text seals
-                // nothing: no hint to protect, and the unsealed form keeps
-                // the plaintext floor maximal.
+                // both absent): fresh forwards thread their attribution and
+                // media metadata through `rich` above, so this outer-only
+                // shape survives solely in messages queued by an older build
+                // (persisted `PendingMessage`s with no `rich`), where the
+                // receiver's wholesale sealed-body restore would wipe the
+                // outer copies a hint-only seal can't replicate. Bare Text
+                // seals nothing: no hint to protect, and the unsealed form
+                // keeps the plaintext floor maximal.
                 None if content_type != ContentType::Text
                     && forwarded_from.is_none()
                     && media_metadata.is_none()
@@ -1265,9 +1309,12 @@ impl OfflineProtocol {
                 ) {
                     Ok(mut message) => {
                         // Restore outer fields: forward attribution and its
-                        // media_metadata deliberately ride outer cleartext
-                        // (plain sends store None for both — their rich
-                        // copies are sealed or dropped by prepare above).
+                        // media_metadata ride outer as the fallback for
+                        // non-capable recipients (secrets stripped at the
+                        // wire); when `msg.rich` sealed above, the receiver's
+                        // sealed-body restore overwrites these wholesale.
+                        // Plain sends store None for both — their rich
+                        // copies are sealed or dropped by prepare above.
                         message.forwarded_from = msg.forwarded_from.clone();
                         message.content_type = msg.content_type;
                         message.media_metadata = msg.media_metadata.clone();
