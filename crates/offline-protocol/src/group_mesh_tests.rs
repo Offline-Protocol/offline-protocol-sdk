@@ -8706,6 +8706,13 @@ fn group_forward_seals_media_secrets_when_all_members_capable() {
     // Secrets and the sealed body live only inside the MLS ciphertext.
     assert!(!wire.content.contains("a2V5LWJ5dGVz"));
     assert!(!wire.content.contains("https://cdn.example/blob/1"));
+    // When the body sealed, the payload forward_info copy is omitted: every
+    // member reads the sealed attribution, so a hop-visible copy would
+    // expose the original sender to relays for nobody's benefit.
+    assert!(
+        !wire.content.contains("dave"),
+        "sealed forward must not carry hop-visible attribution"
+    );
 
     let bob_message = make_message("alice", "bob", &wire.content);
     let result = bob.process_internal_message(&bob_message);
@@ -8759,7 +8766,6 @@ fn group_forward_drops_media_when_member_capability_unknown() {
     bob.on_event(move |event| {
         bob_events_clone.lock().unwrap().push(event);
     });
-
     let original = group_cloud_media_original("dave", "alice");
     alice
         .forward_message_to_group(&original, &group_id, None)
