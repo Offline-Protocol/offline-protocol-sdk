@@ -4422,6 +4422,194 @@ fn test_require_encryption_pending_flush_encrypts_and_delivers() {
 }
 
 #[test]
+fn test_flush_pending_message_keeps_queued_id() {
+    // The id returned to the caller at queue time (SessionNotReady) must be
+    // the id the message eventually dispatches under — MessageDeferred and
+    // the later MessageSent/Delivered/Failed correlate through it.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let queued_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.generate_key_package().unwrap();
+    {
+        let mls = protocol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+    protocol.confirm_session_state("bob", "test_setup").unwrap();
+
+    protocol.flush_pending_messages("bob").unwrap();
+
+    let sent = transport_handle.sent_messages();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].id, queued_id,
+        "Flushed message must keep the id returned at queue time"
+    );
+    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+}
+
+#[test]
+fn test_flush_requeue_keeps_queued_id_and_storage() {
+    // A flush attempted while the session is still not ready re-queues the
+    // message — under the SAME id, and without clearing the persisted copy.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let queued_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Session never established: flush re-queues rather than sending.
+    protocol.flush_pending_messages("bob").unwrap();
+
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+    let pending = protocol.pending_encrypted_messages.get("bob").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].message_id, queued_id,
+        "Re-queued pending message must keep its original id"
+    );
+    let persisted = protocol
+        .load_pending_messages_from_storage("bob")
+        .expect("pending messages must remain persisted after a re-queue");
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(
+        persisted[0].message_id, queued_id,
+        "Persisted snapshot must keep the original id across a re-queue"
+    );
+}
+
+#[test]
+fn test_flush_drops_pending_for_blocked_recipient() {
+    // A recipient blocked after messages were queued: flush drops the queue
+    // (memory + storage) instead of retrying into UserBlocked forever.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert_eq!(
+        protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .map_or(0, Vec::len),
+        1
+    );
+
+    protocol.block_user("bob").unwrap();
+    protocol.flush_pending_messages("bob").unwrap();
+
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(
+        protocol.load_pending_messages_from_storage("bob").is_none(),
+        "Persisted pending messages must be cleared for a blocked recipient"
+    );
+}
+
+#[test]
+fn test_flush_dedup_hit_drops_already_dispatched_message() {
+    // With stable ids, a message whose id is already in the deduplicator
+    // (e.g. stale storage snapshot restored after the send went out) is
+    // dropped at flush rather than dispatched again or retried forever.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let queued_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.deduplicator.mark_seen(queued_id.clone());
+
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.generate_key_package().unwrap();
+    {
+        let mls = protocol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+    protocol.confirm_session_state("bob", "test_setup").unwrap();
+
+    protocol.flush_pending_messages("bob").unwrap();
+
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert!(
+        !protocol.pending_encrypted_messages.contains_key("bob"),
+        "Dedup-hit message must be dropped, not re-queued"
+    );
+}
+
+#[test]
 fn test_require_encryption_allows_connection_control_messages() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
