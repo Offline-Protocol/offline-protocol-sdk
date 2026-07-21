@@ -172,6 +172,7 @@ impl OfflineProtocol {
             options.content_type.unwrap_or_default(),
             None,
             Some(&rich),
+            None,
             "send_message_session_pending",
         )? {
             OutboundSendPreparation::Ready(content) => content,
@@ -262,6 +263,7 @@ impl OfflineProtocol {
             Some(forward_info.clone()),
             original_message.content_type,
             original_message.media_metadata.clone(),
+            None,
             None,
             "forward_message_session_pending",
         )? {
@@ -913,6 +915,7 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         rich: Option<&RichSendExtras>,
+        existing_id: Option<MessageId>,
         reconciliation_reason: &'static str,
     ) -> Result<OutboundSendPreparation> {
         if self.should_auto_encrypt() {
@@ -997,6 +1000,7 @@ impl OfflineProtocol {
                             content_type,
                             media_metadata,
                             rich_extras.cloned(),
+                            existing_id,
                             reconciliation_reason,
                         )?;
                         return Ok(OutboundSendPreparation::Queued(queued_id));
@@ -1021,6 +1025,7 @@ impl OfflineProtocol {
                         content_type,
                         media_metadata,
                         rich_extras.cloned(),
+                        existing_id,
                         reconciliation_reason,
                     )?;
                     Ok(OutboundSendPreparation::Queued(queued_id))
@@ -1066,12 +1071,14 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         rich: Option<RichSendExtras>,
+        existing_id: Option<MessageId>,
         reconciliation_reason: &'static str,
     ) -> Result<MessageId> {
-        // Generate an ID without ticking the Lamport clock.
-        // The real tick happens when flush_pending_messages re-sends
-        // via send_message after the session is established.
-        let message_id = MessageId::new();
+        // Fresh sends mint an ID without ticking the Lamport clock — the
+        // real tick happens when flush_pending_messages re-sends after the
+        // session is established. A flush-time re-queue passes the id the
+        // caller already holds so Deferred/Sent/Delivered stay correlatable.
+        let message_id = existing_id.unwrap_or_default();
 
         debug!(
             recipient = %recipient,
@@ -1144,85 +1151,121 @@ impl OfflineProtocol {
     }
 
     /// Flushes pending messages for a recipient after session is established.
+    ///
+    /// Every message flushes through one unified path — prepare (re-making
+    /// the seal-or-drop decision for rich extras against the recipient's
+    /// *current* capability; the key package that confirmed this session may
+    /// have advertised it), create, restore outer fields, then dispatch —
+    /// and keeps the `message_id` returned to the caller at queue time, so
+    /// `MessageDeferred` correlates with the eventual
+    /// `MessageSent`/`MessageDelivered`/`MessageFailed`. A re-queue (session
+    /// flapped back to not-ready) keeps the id too.
     pub(super) fn flush_pending_messages(&mut self, recipient: &str) -> Result<()> {
         if let Some(pending) = self.pending_encrypted_messages.remove(recipient) {
+            // Blocking is bidirectional (we neither receive from nor send
+            // to): a recipient blocked after messages were queued drops the
+            // queue outright — retrying would fail with UserBlocked forever.
+            if self.is_user_blocked(recipient) {
+                info!(
+                    recipient = %recipient,
+                    count = pending.len(),
+                    "Dropping pending messages for blocked recipient"
+                );
+                self.clear_pending_messages_from_storage(recipient);
+                return Ok(());
+            }
+
             info!(recipient = %recipient, count = pending.len(), "Flushing pending messages");
             let mut remaining = Vec::new();
 
             for msg in pending {
-                let result = if msg.forwarded_from.is_some() {
-                    // Re-send with the stored ForwardInfo directly (don't
-                    // re-derive via forward_message to avoid double-incrementing
-                    // forward_count). Also restore content_type and media_metadata.
-                    let final_content = match self.prepare_outbound_content(
-                        recipient,
-                        &msg.content,
-                        msg.priority,
-                        None,
-                        msg.forwarded_from.clone(),
-                        msg.content_type,
-                        msg.media_metadata.clone(),
-                        None,
-                        "forward_message_flush_pending",
-                    )? {
-                        OutboundSendPreparation::Ready(c) => c,
-                        OutboundSendPreparation::Queued(message_id) => {
-                            // Re-queued for later (session still not ready).
-                            debug!(original_id = %msg.message_id, new_id = %message_id, "Forwarded pending message re-queued");
-                            continue;
-                        }
-                    };
+                // With stable ids the deduplicator now guards against a
+                // double flush (e.g. a stale storage snapshot restored after
+                // the message already went out): a dedup hit means this id
+                // was dispatched before — drop it, don't retry forever.
+                if self.deduplicator.is_duplicate(&msg.message_id) {
+                    debug!(
+                        message_id = %msg.message_id,
+                        "Pending message already dispatched (dedup hit), dropping"
+                    );
+                    continue;
+                }
 
-                    let mut message =
-                        self.create_message(recipient, final_content, Some(msg.priority), None)?;
-                    message.forwarded_from = msg.forwarded_from.clone();
-                    message.content_type = msg.content_type;
-                    message.media_metadata = msg.media_metadata.clone();
-                    self.dispatch_prepared_message(message)
-                } else {
-                    // Non-forward flushes all re-send through the rich
-                    // surface: the seal-or-drop decision for option-borne
-                    // rich extras is re-made against the recipient's
-                    // *current* capability (the key package that confirmed
-                    // this session may have advertised it), and the stored
-                    // content_type survives — plain `send_message` would
-                    // reset it to Text.
-                    let rich = msg.rich.clone().unwrap_or_default();
-                    self.send_message_with(
-                        recipient,
-                        msg.content.clone(),
-                        SendMessageOptions {
-                            priority: Some(msg.priority),
-                            reply_to_msg: msg
-                                .reply_to_msg
-                                .as_ref()
-                                .map(|id| id.as_str().to_string()),
-                            content_type: Some(msg.content_type),
-                            reply_context: rich.reply_context,
-                            media_metadata: rich.media_metadata,
-                            forward_info: rich.forward_info,
-                            via_transport: None,
-                        },
-                    )
-                };
-                match result {
-                    Ok(id) => {
-                        // Note: The new message will have a new ID, but the original ID was already returned to the caller
-                        debug!(original_id = %msg.message_id, new_id = %id, "Sent pending message");
+                let final_content = match self.prepare_outbound_content(
+                    recipient,
+                    &msg.content,
+                    msg.priority,
+                    msg.reply_to_msg.clone(),
+                    msg.forwarded_from.clone(),
+                    msg.content_type,
+                    msg.media_metadata.clone(),
+                    msg.rich.as_ref(),
+                    Some(msg.message_id.clone()),
+                    "flush_pending",
+                ) {
+                    Ok(OutboundSendPreparation::Ready(c)) => c,
+                    Ok(OutboundSendPreparation::Queued(message_id)) => {
+                        // Re-queued for later (session still not ready),
+                        // keeping the original id.
+                        debug!(message_id = %message_id, "Pending message re-queued");
+                        continue;
                     }
                     Err(e) => {
-                        warn!(original_id = %msg.message_id, error = %e, "Failed to send pending message");
+                        warn!(message_id = %msg.message_id, error = %e, "Failed to prepare pending message");
+                        remaining.push(msg);
+                        continue;
+                    }
+                };
+
+                let message = match self.create_message(
+                    recipient,
+                    final_content,
+                    Some(msg.priority),
+                    msg.reply_to_msg.clone(),
+                ) {
+                    Ok(mut message) => {
+                        // Restore outer fields: forward attribution and its
+                        // media_metadata deliberately ride outer cleartext
+                        // (plain sends store None for both — their rich
+                        // copies are sealed or dropped by prepare above).
+                        message.forwarded_from = msg.forwarded_from.clone();
+                        message.content_type = msg.content_type;
+                        message.media_metadata = msg.media_metadata.clone();
+                        message.id = msg.message_id.clone();
+                        message
+                    }
+                    Err(e) => {
+                        warn!(message_id = %msg.message_id, error = %e, "Failed to create pending message");
+                        remaining.push(msg);
+                        continue;
+                    }
+                };
+
+                match self.dispatch_prepared_message(message) {
+                    Ok(id) => {
+                        debug!(message_id = %id, "Sent pending message");
+                    }
+                    Err(e) => {
+                        warn!(message_id = %msg.message_id, error = %e, "Failed to send pending message");
                         remaining.push(msg);
                     }
                 }
             }
 
+            // Messages that re-queued above re-inserted themselves into the
+            // map (and persisted) — merge failures in behind them rather
+            // than clobbering the entry, and only clear storage when
+            // neither survives.
             if remaining.is_empty() {
-                self.clear_pending_messages_from_storage(recipient);
+                if !self.pending_encrypted_messages.contains_key(recipient) {
+                    self.clear_pending_messages_from_storage(recipient);
+                }
             } else {
-                self.persist_pending_messages_snapshot(recipient, &remaining);
                 self.pending_encrypted_messages
-                    .insert(recipient.to_string(), remaining);
+                    .entry(recipient.to_string())
+                    .or_default()
+                    .extend(remaining);
+                self.persist_pending_messages_for_recipient(recipient);
             }
         }
         Ok(())
