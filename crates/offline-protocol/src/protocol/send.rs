@@ -1175,6 +1175,16 @@ impl OfflineProtocol {
                     count = pending.len(),
                     "Dropping pending messages for blocked recipient"
                 );
+                // The caller holds these ids (returned at queue time,
+                // correlated via MessageDeferred) — settle each one so the
+                // app isn't left waiting on ids that will never resolve.
+                for msg in &pending {
+                    self.emit_event(Event::message_failed(
+                        msg.message_id.clone(),
+                        "Recipient blocked".to_string(),
+                        0,
+                    ));
+                }
                 self.clear_pending_messages_from_storage(recipient);
                 return Ok(());
             }
@@ -1188,10 +1198,29 @@ impl OfflineProtocol {
                 // the message already went out): a dedup hit means this id
                 // was dispatched before — drop it, don't retry forever.
                 if self.deduplicator.is_duplicate(&msg.message_id) {
-                    debug!(
-                        message_id = %msg.message_id,
-                        "Pending message already dispatched (dedup hit), dropping"
-                    );
+                    if self.deduplicator.is_exact() {
+                        // Exact mode: the hit is authoritative — this id
+                        // already went out and was settled then.
+                        debug!(
+                            message_id = %msg.message_id,
+                            "Pending message already dispatched (dedup hit), dropping"
+                        );
+                    } else {
+                        // Bloom mode: the hit may be a false positive for a
+                        // message that never went out, and dispatching anyway
+                        // would error-loop on the same filter. Settle loudly
+                        // so the app can resend under a fresh id instead of
+                        // losing the message silently.
+                        warn!(
+                            message_id = %msg.message_id,
+                            "Pending message dropped on probabilistic dedup hit"
+                        );
+                        self.emit_event(Event::message_failed(
+                            msg.message_id.clone(),
+                            "Duplicate suppressed at flush (probabilistic dedup; possible false positive)".to_string(),
+                            0,
+                        ));
+                    }
                     continue;
                 }
 
