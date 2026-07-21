@@ -2371,8 +2371,12 @@ impl OfflineProtocol {
     /// peer's missing ACK burns the full `max_retries` budget in minutes
     /// (`process_timed_out_acks`) and settles a 7-day outbox message
     /// terminally; a re-driven send re-registers a fresh ACK, so the budget
-    /// only ever burns against a peer believed reachable. Settlement is
-    /// reserved for delivery or outbox-lifetime expiry.
+    /// normally burns only against a peer believed reachable. The exception
+    /// is the mesh reachability probe below: its send re-enters the ACK
+    /// machinery but can never earn a relay verdict over a mesh carrier, so
+    /// exhaustion with a live park counter *re-parks* instead of settling
+    /// ([`Self::try_repark_exhausted_dm`]). Settlement is reserved for
+    /// delivery or outbox-lifetime expiry.
     ///
     /// Carrier guard, mirroring `apply_recipient_unreachable_failure`: with
     /// a local mesh carrier (BLE / WiFi-Direct) up, the peer may be a room
@@ -2413,7 +2417,6 @@ impl OfflineProtocol {
             },
         };
         let recipient = entry.message.recipient.as_str().to_string();
-        let message = entry.message.clone();
         let attempt_count = entry.attempt_count;
         let file_id = self
             .outbound_media_chunks
@@ -2435,9 +2438,20 @@ impl OfflineProtocol {
             return;
         }
 
+        self.park_unreachable_dm(&parsed_id, &recipient, attempt_count);
+    }
+
+    /// The park action shared by the relay-verdict path
+    /// ([`Self::handle_recipient_unreachable_for_message`]) and the
+    /// exhausted-probe path ([`Self::try_repark_exhausted_dm`]): drops the
+    /// pending ACK and any scheduled retry so nothing burns budget against
+    /// the offline peer, then — only with a local mesh carrier up —
+    /// schedules the escalating reachability probe. The message is cloned
+    /// from the outbox only on that probe branch.
+    fn park_unreachable_dm(&mut self, message_id: &MessageId, recipient: &str, attempt_count: u32) {
         // Park: no pending ACK to time out, no backoff-scheduled resend.
-        self.ack_manager.remove_ack(&parsed_id);
-        self.retry_queue.remove(message_id);
+        self.ack_manager.remove_ack(message_id);
+        self.retry_queue.remove(&message_id.as_str());
 
         let mesh_carrier_available = self
             .transport_manager
@@ -2448,7 +2462,7 @@ impl OfflineProtocol {
             let parks = {
                 let count = self
                     .dm_unreachable_parks
-                    .entry(recipient.clone())
+                    .entry(recipient.to_string())
                     .or_insert(0);
                 *count = count.saturating_add(1);
                 *count
@@ -2457,11 +2471,14 @@ impl OfflineProtocol {
             // pre-cap value — no overflow risk.
             let retry_in_secs = (WELCOME_NO_CARRIER_RETRY_SECS << (parks - 1).min(6))
                 .min(WELCOME_UNREACHABLE_RETRY_CAP_SECS);
-            let _ = self.retry_queue.enqueue_with_delay(
-                message,
-                attempt_count,
-                (retry_in_secs * 1000) as u64,
-            );
+            if let Some(entry) = self.outbox.get(message_id) {
+                let message = entry.message.clone();
+                let _ = self.retry_queue.enqueue_with_delay(
+                    message,
+                    attempt_count,
+                    (retry_in_secs * 1000) as u64,
+                );
+            }
             debug!(
                 message_id = %message_id,
                 recipient = %recipient,
@@ -2476,6 +2493,56 @@ impl OfflineProtocol {
                 "Parked unreachable DM edge-only (no local mesh carrier)"
             );
         }
+    }
+
+    /// Re-parks a plain DM whose ACK retry budget just exhausted while its
+    /// recipient still holds a live unreachable-park counter, returning
+    /// `true` when the caller (`handle_max_retries_exceeded`) must skip
+    /// terminal settlement.
+    ///
+    /// A live counter means the relay declared the peer offline and no
+    /// reachability edge has fired since (every edge clears it), so the
+    /// exhausted budget was burnt by mesh reachability probes — sends that
+    /// locally succeed into the mesh but can never earn a relay verdict —
+    /// not by a peer believed reachable. Settling terminally here would
+    /// reintroduce the ~15-minute `message_failed` the park exists to
+    /// prevent; re-parking keeps settlement reserved for delivery or
+    /// outbox-lifetime expiry (the escalation cap bounds probe traffic, the
+    /// outbox lifetime + absolute cap bound the entry itself).
+    ///
+    /// Deliberately narrow: pending connection requests keep their typed
+    /// terminal path, welcomes keep their own lifecycle, and media chunks
+    /// (never in `outbox`, and never counted) keep retry exhaustion →
+    /// transfer abort → `MediaResendRequired`.
+    pub(super) fn try_repark_exhausted_dm(&mut self, message_id: &MessageId) -> bool {
+        if self
+            .pending_connection_requests
+            .contains_key(&message_id.as_str())
+        {
+            return false;
+        }
+        if self
+            .find_welcome_peer_by_message_id(&message_id.as_str())
+            .is_some()
+        {
+            return false;
+        }
+        let Some(entry) = self.outbox.get(message_id) else {
+            return false;
+        };
+        let recipient = entry.message.recipient.as_str();
+        if !self.dm_unreachable_parks.contains_key(recipient) {
+            return false;
+        }
+        let recipient = recipient.to_string();
+        let attempt_count = entry.attempt_count;
+        debug!(
+            message_id = %message_id,
+            recipient = %recipient,
+            "ACK budget exhausted by reachability probes; re-parking instead of settling"
+        );
+        self.park_unreachable_dm(message_id, &recipient, attempt_count);
+        true
     }
 
     /// Classifies an outbound internet frame as a server-plane control op the

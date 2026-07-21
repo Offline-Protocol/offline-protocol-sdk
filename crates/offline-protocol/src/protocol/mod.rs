@@ -86,7 +86,9 @@ pub struct OfflineProtocol {
     /// mirrors `WelcomeLifecycleRecord::unreachable_parks`). Reset on every
     /// reachability edge (`flush_outbox_for_peer` / `flush_outbox_all`) and
     /// on delivery; pruned alongside `cleanup_outbox` so only peers that
-    /// still hold outbox entries can retain a counter. In-memory only: a
+    /// still hold outbox entries can retain a counter. While live, ACK
+    /// exhaustion for the recipient's plain DMs re-parks instead of
+    /// settling terminally (`try_repark_exhausted_dm`). In-memory only: a
     /// restart re-drives the outbox anyway, which is itself a fresh probe.
     dm_unreachable_parks: HashMap<String, u32>,
 
@@ -1876,6 +1878,14 @@ impl OfflineProtocol {
         message_id: &MessageId,
         retry_count: u32,
     ) -> Result<()> {
+        // A plain DM whose recipient still holds a live unreachable-park
+        // counter re-parks instead of settling: the exhausted budget was
+        // burnt by mesh reachability probes, which can never earn the relay
+        // verdict that would have re-parked it (see try_repark_exhausted_dm).
+        if self.try_repark_exhausted_dm(message_id) {
+            return Ok(());
+        }
+
         // Retry exhaustion is terminal for a connection request: settle the
         // pending entry and surface the typed undeliverable signal alongside
         // the generic message_failed, so apps keep connection-request
