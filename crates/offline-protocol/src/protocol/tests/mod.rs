@@ -17485,6 +17485,202 @@ fn rich_send_seals_content_type_against_relay_rewrite() {
     );
 }
 
+/// Fixture: a received cloud-media message, as an app hands it back to
+/// `forward_message` — download URL plus the content-encryption secrets.
+#[cfg(test)]
+fn cloud_media_original(sender: &str, recipient: &str) -> Message {
+    let mut original = Message::new(
+        UserId::new(sender).unwrap(),
+        UserId::new(recipient).unwrap(),
+        AppId::new("test-app").unwrap(),
+        "check out this photo",
+    );
+    original.content_type = ContentType::Image;
+    let mut media = sample_media_metadata(42);
+    media.download_url = Some("https://cdn.example/blob/1".to_string());
+    media.encryption_key = Some("a2V5LWJ5dGVz".to_string());
+    media.iv = Some("aXYtYnl0ZXM=".to_string());
+    original.media_metadata = Some(media);
+    original
+}
+
+#[test]
+fn forward_message_seals_media_secrets_for_capable_recipient() {
+    // The forward-path half of the cloud-media contract: forwarding a
+    // message whose metadata carries the content key must deliver that key
+    // to a rich-capable recipient — inside the sealed body, never outer.
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+
+    let original = cloud_media_original("dave", "alice");
+    alice.forward_message(&original, "bob", None).unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("forwarded message must reach the wire");
+    // The secrets ride only inside the ciphertext (the outer copy is
+    // stripped by the transport chokepoint at wire encoding).
+    assert!(!enc.content.contains("a2V5LWJ5dGVz"));
+
+    let result = bob.process_internal_message(enc);
+    let Some(InternalMessageResult::Decrypted(text)) = result else {
+        panic!("forwarded message must decrypt, got {result:?}");
+    };
+    let mut delivered = enc.clone();
+    OfflineProtocol::apply_decrypted_content(&mut delivered, text);
+
+    assert_eq!(delivered.content, "check out this photo");
+    let media = delivered
+        .media_metadata
+        .expect("sealed media metadata restored");
+    assert_eq!(media.encryption_key.as_deref(), Some("a2V5LWJ5dGVz"));
+    assert_eq!(media.iv.as_deref(), Some("aXYtYnl0ZXM="));
+    assert_eq!(
+        media.download_url.as_deref(),
+        Some("https://cdn.example/blob/1")
+    );
+    let fwd = delivered
+        .forwarded_from
+        .expect("attribution restored from the sealed body");
+    assert_eq!(fwd.original_sender.as_str(), "dave");
+    assert_eq!(fwd.forward_count, 1);
+    assert_eq!(
+        delivered.content_type,
+        ContentType::Image,
+        "sealed content_type copy must survive the forward"
+    );
+}
+
+#[test]
+fn forward_message_outer_fallback_for_legacy_recipient() {
+    // Toward a recipient that never advertised rich_versions the extras
+    // must not seal: the plaintext stays bare text, attribution and the
+    // display-hint metadata ride outer (secrets stripped at the wire), and
+    // nothing rich leaks into the ciphertext.
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    // Bob never fed alice a rich-capable key package.
+
+    let original = cloud_media_original("dave", "alice");
+    alice.forward_message(&original, "bob", None).unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("forwarded message must reach the wire");
+
+    // Outer fallback: attribution and non-secret metadata preserved for the
+    // legacy recipient.
+    let outer_fwd = enc.forwarded_from.as_ref().expect("outer attribution");
+    assert_eq!(outer_fwd.original_sender.as_str(), "dave");
+    let outer_media = enc.media_metadata.as_ref().expect("outer media metadata");
+    assert_eq!(
+        outer_media.download_url.as_deref(),
+        Some("https://cdn.example/blob/1")
+    );
+
+    // Bare text inside the ciphertext — no sealed body toward a legacy peer.
+    let result = bob.process_internal_message(enc);
+    assert!(
+        matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "check out this photo"),
+        "forward toward a legacy recipient must drop extras to bare text, got {result:?}"
+    );
+}
+
+#[test]
+fn forwarded_media_flush_seals_secrets_for_capable_recipient() {
+    // The queued half: a forward parked behind session establishment stores
+    // both the outer copies and the rich extras (the exact shape
+    // `forward_message` queues), and the flush re-seal must deliver the
+    // media secrets end-to-end.
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+
+    let original = cloud_media_original("dave", "alice");
+    let forward_info = offline_protocol_core::ForwardInfo::from_message(&original);
+    let rich = RichSendExtras {
+        reply_context: None,
+        media_metadata: original.media_metadata.clone(),
+        forward_info: Some(forward_info.clone()),
+    };
+    alice.queue_pending_message(
+        "bob",
+        &original.content,
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        Some(forward_info),
+        ContentType::Image,
+        original.media_metadata.clone(),
+        Some(rich),
+    );
+    alice.flush_pending_messages("bob").unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("flushed forward must reach the wire");
+
+    let result = bob.process_internal_message(enc);
+    let Some(InternalMessageResult::Decrypted(text)) = result else {
+        panic!("flushed forward must decrypt, got {result:?}");
+    };
+    let mut delivered = enc.clone();
+    OfflineProtocol::apply_decrypted_content(&mut delivered, text);
+
+    assert_eq!(delivered.content, "check out this photo");
+    let media = delivered
+        .media_metadata
+        .expect("sealed media metadata restored after flush");
+    assert_eq!(media.encryption_key.as_deref(), Some("a2V5LWJ5dGVz"));
+    assert!(delivered.forwarded_from.is_some());
+}
+
+#[test]
+fn forward_message_rejects_oversized_media_metadata() {
+    // The forward boundary enforces the same extras cap as
+    // `send_message_with`, so a queued forward can never fail its seal at
+    // flush time and re-queue forever.
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+
+    let mut original = cloud_media_original("dave", "alice");
+    if let Some(media) = original.media_metadata.as_mut() {
+        media.thumbnail_base64 = Some("x".repeat(MAX_RICH_EXTRAS_BYTES + 1));
+    }
+    let err = alice.forward_message(&original, "bob", None).unwrap_err();
+    assert!(
+        matches!(err, crate::Error::InvalidArgument(_)),
+        "oversized forward extras must be rejected, got: {err:?}"
+    );
+    assert!(err.to_string().contains("Rich extras too large"));
+}
+
+#[test]
+fn forward_message_rejects_file_chunk_content_type() {
+    // FileChunk is internal transport routing: forwarding it would get the
+    // message ACKed and then dropped by the receiver's file-transfer
+    // manager. Rejected at the boundary, like `send_message_with`.
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+
+    let mut original = cloud_media_original("dave", "alice");
+    original.content_type = ContentType::FileChunk;
+    let err = alice.forward_message(&original, "bob", None).unwrap_err();
+    assert!(
+        matches!(err, crate::Error::InvalidArgument(_)),
+        "FileChunk forward must be rejected, got: {err:?}"
+    );
+    assert!(err.to_string().contains("cannot be forwarded"));
+}
+
 #[test]
 fn content_type_only_send_seals_hint_against_relay_rewrite() {
     // Even WITHOUT rich extras, a non-Text hint toward a capable recipient

@@ -422,8 +422,10 @@ pub(crate) struct RichPayloadV1 {
     /// hint — or worse, restamp it `FileChunk` and get the decrypted
     /// message routed into the file-transfer manager and dropped. Fresh
     /// sends with a non-Text hint seal a hint-only body even without
-    /// extras; forwards don't (their attribution deliberately rides outer,
-    /// which a sealed body would wipe on restore).
+    /// extras. Forwards seal their attribution and media metadata as
+    /// extras toward capable recipients; only legacy queued forwards
+    /// (persisted by older builds, outer-only) skip the hint-only seal,
+    /// since a sealed body would wipe their outer copies on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) content_type: Option<ContentType>,
 }
