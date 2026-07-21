@@ -15985,6 +15985,79 @@ fn rich_send_seals_content_type_against_relay_rewrite() {
 }
 
 #[test]
+fn content_type_only_send_seals_hint_against_relay_rewrite() {
+    // Even WITHOUT rich extras, a non-Text hint toward a capable recipient
+    // seals a hint-only body — otherwise a relay could still restamp plain
+    // sealed sends FileChunk (ACKed as delivered, then dropped by the
+    // file-transfer manager).
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+
+    alice
+        .send_message_with(
+            "bob",
+            "voice caption",
+            SendMessageOptions {
+                content_type: Some(ContentType::VoiceNote),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("hint-only message must reach the wire");
+    let mut tampered = enc.clone();
+    tampered.content_type = ContentType::FileChunk;
+
+    let result = bob.process_internal_message(&tampered);
+    let Some(InternalMessageResult::Decrypted(text)) = result else {
+        panic!("tampered outer hint must not break decryption, got {result:?}");
+    };
+    assert!(
+        text.starts_with(internal_prefixes::RICH_V1),
+        "a non-Text hint must seal even without extras"
+    );
+    OfflineProtocol::apply_decrypted_content(&mut tampered, text);
+    assert_eq!(tampered.content, "voice caption");
+    assert_eq!(
+        tampered.content_type,
+        ContentType::VoiceNote,
+        "sealed hint must overwrite the relay-rewritten outer value"
+    );
+}
+
+#[test]
+fn plain_text_send_without_extras_stays_bare() {
+    // Bare Text toward a capable peer must NOT grow a sealed wrapper:
+    // there is no hint to protect, and the unsealed plaintext form stays
+    // the interop floor.
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+
+    alice
+        .send_message_with("bob", "just text", SendMessageOptions::default())
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let enc = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("message must reach the wire");
+    let result = bob.process_internal_message(enc);
+    assert!(
+        matches!(result, Some(InternalMessageResult::Decrypted(ref text)) if text == "just text"),
+        "bare Text must stay unsealed, got {result:?}"
+    );
+}
+
+#[test]
 fn rich_payload_flush_after_restart_seals_with_restored_capability() {
     // Issue #200's user-visible half: a rich message queued before an app
     // restart must still seal its extras when the post-restart flush runs.

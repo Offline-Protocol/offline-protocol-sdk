@@ -344,10 +344,11 @@ pub struct SendMessageOptions {
     /// ID of the message this is replying to.
     pub reply_to_msg: Option<String>,
     /// Content type stamped on the outer message (defaults to Text). A
-    /// coarse rendering hint — the actual content stays MLS-sealed. When
-    /// rich extras seal, a copy travels inside the sealed body and the
-    /// receiver treats that copy as authoritative, so a relay cannot
-    /// rewrite the hint on rich messages. Must not be
+    /// coarse rendering hint — the actual content stays MLS-sealed. Toward
+    /// a recipient that advertised the sealed rich payload, a copy travels
+    /// inside the sealed body — whenever extras seal, or the hint itself is
+    /// non-Text — and the receiver treats that copy as authoritative, so a
+    /// relay cannot rewrite the hint. Must not be
     /// [`ContentType::FileChunk`] (an internal transport content type; the
     /// receiver would route the message into its file-transfer manager and
     /// drop it) — rejected as `InvalidArgument`.
@@ -383,9 +384,12 @@ pub(crate) struct RichPayloadV1 {
     /// the body first shipped: absent from bodies sealed by older senders,
     /// in which case the outer value stands. When present it is
     /// authoritative on receive (except `FileChunk`, refused there like at
-    /// the send boundary), so a relay can no longer restamp a rich message's
-    /// rendering hint — or worse, restamp it `FileChunk` and get the
-    /// decrypted message routed into the file-transfer manager and dropped.
+    /// the send boundary), so a relay can no longer restamp the rendering
+    /// hint — or worse, restamp it `FileChunk` and get the decrypted
+    /// message routed into the file-transfer manager and dropped. Fresh
+    /// sends with a non-Text hint seal a hint-only body even without
+    /// extras; forwards don't (their attribution deliberately rides outer,
+    /// which a sealed body would wipe on restore).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) content_type: Option<ContentType>,
 }
