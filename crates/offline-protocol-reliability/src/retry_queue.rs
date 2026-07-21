@@ -146,10 +146,15 @@ impl RetryQueue {
     ///
     /// * `message` - The message to queue for retry
     /// * `retry_count` - Current retry count (used for backoff calculation)
-    pub fn enqueue(&mut self, message: Message, retry_count: u32) {
+    ///
+    /// # Returns
+    ///
+    /// The absolute time the retry is scheduled for, or `None` if the
+    /// message was already queued (nothing was scheduled).
+    pub fn enqueue(&mut self, message: Message, retry_count: u32) -> Option<DateTime<Utc>> {
         // Prevent duplicate entries for the same message
         if self.index.contains_key(&message.id.as_str()) {
-            return;
+            return None;
         }
 
         let delay_ms = self.config.delay_for_retry(retry_count);
@@ -165,6 +170,7 @@ impl RetryQueue {
 
         self.index.insert(message.id.as_str(), ());
         self.queue.push(entry);
+        Some(retry_at)
     }
 
     /// Dequeues the next message that is ready for retry.

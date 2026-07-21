@@ -970,7 +970,7 @@ impl OfflineProtocol {
 
         // Re-enqueue any messages beyond the batch limit so they aren't lost
         for (message, attempt_count) in iter {
-            self.retry_queue.enqueue(message, attempt_count);
+            let _ = self.retry_queue.enqueue(message, attempt_count);
         }
     }
 
@@ -1006,7 +1006,7 @@ impl OfflineProtocol {
                 debug!(message_id = %message.id, "Flush send succeeded");
             }
             Err(e) => {
-                self.retry_queue.enqueue(message.clone(), attempt_count);
+                let _ = self.retry_queue.enqueue(message.clone(), attempt_count);
                 debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
             }
         }
@@ -1746,11 +1746,24 @@ impl OfflineProtocol {
                 }
                 Err(e) => {
                     // Re-enqueue with incremented retry count for backoff
-                    self.retry_queue
+                    let next_retry_at = self
+                        .retry_queue
                         .enqueue(entry.message.clone(), entry.retry_count + 1);
 
                     if let Some(transport) = forced_transport.or(previous_transport) {
                         self.transport_manager.record_retry_failure(transport);
+                    }
+
+                    // Surface the schedule so apps can show retry state
+                    // instead of inferring it from silence. None = the id
+                    // was already queued; the earlier emission stands.
+                    if let Some(retry_at) = next_retry_at {
+                        self.emit_event(Event::message_retrying(
+                            entry.message.id.clone(),
+                            entry.message.recipient.as_str().to_string(),
+                            entry.retry_count + 1,
+                            retry_at.timestamp_millis(),
+                        ));
                     }
 
                     debug!(
@@ -1850,12 +1863,21 @@ impl OfflineProtocol {
             .or_else(|| self.media_outbox.get(message_id))
         {
             let message_clone = entry.message.clone();
+            let recipient = entry.message.recipient.as_str().to_string();
             let last_transport = entry.last_transport;
 
             // enqueue is infallible (retry queue has no attempt limit)
-            self.retry_queue.enqueue(message_clone, retry_count);
+            let next_retry_at = self.retry_queue.enqueue(message_clone, retry_count);
             if let Some(transport) = last_transport {
                 self.transport_manager.record_retry_failure(transport);
+            }
+            if let Some(retry_at) = next_retry_at {
+                self.emit_event(Event::message_retrying(
+                    message_id.clone(),
+                    recipient,
+                    retry_count,
+                    retry_at.timestamp_millis(),
+                ));
             }
         } else {
             self.handle_missing_outbox_entry(message_id, retry_count)?;

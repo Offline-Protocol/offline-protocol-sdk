@@ -572,6 +572,42 @@ pub enum Event {
         next_retry_at: Option<i64>,
     },
 
+    /// A retry for a previously deferred/unacked message was scheduled.
+    ///
+    /// Emitted each time the retry machinery re-queues a message after a
+    /// failed attempt (transport send error or ACK timeout). Non-terminal:
+    /// `MessageDelivered` or `MessageFailed` still settles the message.
+    MessageRetrying {
+        /// ID of the retrying message.
+        message_id: String,
+        /// Recipient's user ID.
+        recipient: String,
+        /// Retry count this schedule corresponds to.
+        retry_count: u32,
+        /// Absolute time the retry is scheduled for (Unix timestamp ms).
+        next_retry_at: i64,
+    },
+
+    /// The transport layer reported the recipient unreachable for an
+    /// in-flight message (e.g. the internet relay's DeliveryError).
+    ///
+    /// Non-terminal: the message stays in the outbox and keeps retrying —
+    /// this is the early signal that the recipient is offline, so the app
+    /// can surface "pending" state or trigger its own presence watch.
+    /// `file_id` is set when the message is a chunk of an outbound media
+    /// transfer.
+    MessageUndeliverable {
+        /// ID of the affected message.
+        message_id: String,
+        /// Recipient's user ID.
+        recipient: String,
+        /// Transport-reported reason (starts with `recipient_unreachable`).
+        reason: String,
+        /// Owning media transfer when the message is a media chunk.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+    },
+
     /// A pending ACK was evicted due to capacity constraints.
     AckEvicted {
         /// ID of the message whose ACK was evicted.
@@ -1324,6 +1360,36 @@ impl Event {
         }
     }
 
+    /// Creates a MessageRetrying event.
+    pub fn message_retrying(
+        message_id: MessageId,
+        recipient: String,
+        retry_count: u32,
+        next_retry_at: i64,
+    ) -> Self {
+        Self::MessageRetrying {
+            message_id: message_id.as_str(),
+            recipient,
+            retry_count,
+            next_retry_at,
+        }
+    }
+
+    /// Creates a MessageUndeliverable event.
+    pub fn message_undeliverable(
+        message_id: MessageId,
+        recipient: String,
+        reason: String,
+        file_id: Option<String>,
+    ) -> Self {
+        Self::MessageUndeliverable {
+            message_id: message_id.as_str(),
+            recipient,
+            reason,
+            file_id,
+        }
+    }
+
     /// Creates an AckEvicted event.
     pub fn ack_evicted(message_id: MessageId, priority: &str, reason: String) -> Self {
         Self::AckEvicted {
@@ -1899,6 +1965,8 @@ impl Event {
             Self::MediaSent { .. } => "protocol.media.sent",
             Self::MediaSendFailed { .. } => "protocol.media.send_failed",
             Self::MessageDeferred { .. } => "protocol.message.deferred",
+            Self::MessageRetrying { .. } => "protocol.message.retrying",
+            Self::MessageUndeliverable { .. } => "protocol.message.undeliverable",
             Self::AckEvicted { .. } => "protocol.ack.evicted",
             Self::FragmentAssemblyEvicted { .. } => "protocol.fragment.assembly_evicted",
             Self::RelayDemotedBattery { .. } => "protocol.relay.demoted_battery",
@@ -2214,6 +2282,30 @@ impl fmt::Debug for Event {
                 .field("reason", reason)
                 .field("retry_count", retry_count)
                 .field("next_retry_at", next_retry_at)
+                .finish(),
+            Self::MessageRetrying {
+                message_id,
+                recipient: _,
+                retry_count,
+                next_retry_at,
+            } => f
+                .debug_struct("MessageRetrying")
+                .field("message_id", message_id)
+                .field("recipient", &"[REDACTED]")
+                .field("retry_count", retry_count)
+                .field("next_retry_at", next_retry_at)
+                .finish(),
+            Self::MessageUndeliverable {
+                message_id,
+                recipient: _,
+                reason,
+                file_id,
+            } => f
+                .debug_struct("MessageUndeliverable")
+                .field("message_id", message_id)
+                .field("recipient", &"[REDACTED]")
+                .field("reason", reason)
+                .field("file_id", file_id)
                 .finish(),
             Self::AckEvicted {
                 message_id,
