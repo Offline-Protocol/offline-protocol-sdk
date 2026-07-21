@@ -1835,14 +1835,8 @@ impl OfflineProtocol {
         // Retry exhaustion is terminal for a connection request: settle the
         // pending entry and surface the typed undeliverable signal alongside
         // the generic message_failed, so apps keep connection-request
-        // context without parsing reason strings. The TTL still gates
-        // emission — a signal that stale belongs to a request the app has
-        // long stopped waiting on.
-        let undeliverable_recipient = self
-            .pending_connection_requests
-            .remove(&message_id.as_str())
-            .filter(|pending| pending.sent_at.elapsed() <= PENDING_CONNECTION_REQUEST_TTL)
-            .map(|pending| pending.recipient);
+        // context without parsing reason strings.
+        let undeliverable_recipient = self.take_undeliverable_connection_request(message_id);
 
         let state = lock_shared_state(&self.shared_state).map_err(|e| {
             error!(

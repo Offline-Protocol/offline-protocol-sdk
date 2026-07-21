@@ -46,7 +46,10 @@ export interface RetryConfig {
    * store-and-forward outbox entries and, after a restart, prunes both
    * restored outbox entries and persisted media transfer descriptors
    * (see MediaResendRequiredEvent). Expiry is terminal and emits
-   * `message_failed` with reason `"Outbox lifetime exceeded"`.
+   * `message_failed` with reason `"Outbox lifetime exceeded"` (capacity
+   * eviction likewise emits `"Outbox capacity exceeded"`). The restore
+   * refresh is bounded: an entry older than 4× this lifetime in total is
+   * dropped terminally instead of re-granted a window.
    */
   outboxMaxLifetimeMs?: number;
 }
@@ -1031,7 +1034,9 @@ export interface ConnectionRequestUndeliverableEvent extends BaseEvent {
   message_id: string;
   /**
    * Failure reason: starts with `recipient_unreachable` (transport-level
-   * offline signal) or is `max_retries_exceeded` (retry budget exhausted).
+   * offline signal), or is `max_retries_exceeded` (retry budget exhausted),
+   * `outbox_lifetime_exceeded` (aged out of the store-and-forward outbox),
+   * or `outbox_capacity_exceeded` (evicted when the outbox hit capacity).
    */
   reason: string;
 }

@@ -671,12 +671,17 @@ impl OfflineProtocol {
     /// - any stray media entry is dropped (they must never be resurrected);
     /// - the total is pruned to `MAX_OUTBOX_ENTRIES`, keeping the newest by
     ///   `last_sent_at`;
-    /// - the TTL clock is carrier-relative: an entry whose `last_sent_at` has
-    ///   already lapsed the outbox lifetime is refreshed rather than restored
-    ///   already-expired, so it gets a fresh delivery window once a carrier
-    ///   reappears (mirrors the Welcome lifecycle repair). This runs *after*
-    ///   the prune, so a refreshed (now-stamped) clock can't sort as the newest
-    ///   and crowd genuinely-fresh entries out of the kept set;
+    /// - an entry whose total age (from `first_sent_at`) exceeds
+    ///   [`OUTBOX_ABSOLUTE_LIFETIME_FACTOR`] × the outbox lifetime is dropped
+    ///   terminally with a `message_failed`, so repeated restarts can't
+    ///   re-grant a fresh window forever;
+    /// - otherwise the TTL clock is carrier-relative: an entry whose
+    ///   `last_sent_at` has already lapsed the outbox lifetime is refreshed
+    ///   rather than restored already-expired, so it gets a fresh delivery
+    ///   window once a carrier reappears (mirrors the Welcome lifecycle
+    ///   repair). This runs *after* the prune, so a refreshed (now-stamped)
+    ///   clock can't sort as the newest and crowd genuinely-fresh entries out
+    ///   of the kept set;
     /// - pre-existing in-memory entries not yet in storage are persisted, so
     ///   memory and storage are consistent once restore returns.
     pub(crate) fn restore_outbox(&mut self) -> Result<()> {
@@ -722,6 +727,35 @@ impl OfflineProtocol {
             restored.push(entry);
         }
 
+        // Drop entries past the absolute lifetime cap before anything else:
+        // the carrier-relative refresh below would otherwise re-grant them a
+        // fresh window on every restart, indefinitely. This is a terminal
+        // drop — emit `message_failed` like the in-process expiry does.
+        let absolute_cap = lifetime * crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR;
+        let now = Utc::now();
+        let mut absolutely_expired: Vec<OutboxEntry> = Vec::new();
+        restored.retain(|entry| {
+            if entry.last_sent_at + lifetime <= now && entry.first_sent_at + absolute_cap <= now {
+                absolutely_expired.push(entry.clone());
+                return false;
+            }
+            true
+        });
+        for entry in &absolutely_expired {
+            self.delete_outbox_key(&entry.message.id.as_str());
+            info!(
+                event = "outbox_entry_dropped",
+                message_id = %entry.message.id,
+                repair_action = "absolute_lifetime_exceeded",
+                "outbox_entry_dropped"
+            );
+            self.emit_event(crate::events::Event::message_failed(
+                entry.message.id.clone(),
+                "Outbox lifetime exceeded".to_string(),
+                entry.attempt_count,
+            ));
+        }
+
         // Prune to capacity BEFORE refreshing TTLs, keeping the newest by
         // last_sent_at. Delete the pruned overflow from storage so it can't
         // linger and be re-restored. Ordering matters: refreshing a lapsed
@@ -738,7 +772,6 @@ impl OfflineProtocol {
         // lifetime so it survives the first cleanup tick and gets a fresh chance
         // once a carrier appears. Collect the refreshed clones so the repair can
         // be re-persisted below, once the mutable borrow of `restored` is gone.
-        let now = Utc::now();
         let mut refreshed: Vec<OutboxEntry> = Vec::new();
         for entry in &mut restored {
             if entry.last_sent_at + lifetime <= now {

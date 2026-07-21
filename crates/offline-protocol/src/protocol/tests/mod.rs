@@ -14629,6 +14629,270 @@ fn test_cleanup_outbox_expiry_settles_pending_connection_request() {
     );
 }
 
+/// Capacity eviction is as terminal as expiry: the entry and its persisted
+/// copy are gone, so it must emit `message_failed` rather than leave the
+/// app showing the message as pending forever.
+#[test]
+fn test_outbox_capacity_eviction_emits_message_failed() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let first_id = protocol
+        .send_message(
+            "bob",
+            "oldest, will be evicted",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    // Backdate so the eviction victim is deterministic regardless of
+    // timestamp resolution across the flood below.
+    protocol
+        .outbox
+        .get_mut(&first_id)
+        .expect("first message must be in the outbox")
+        .last_sent_at -= ChronoDuration::seconds(60);
+
+    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+        let _ = protocol.send_message(
+            "bob",
+            &format!("filler-{i}"),
+            None::<MessagePriority>,
+            None::<String>,
+        );
+    }
+
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        crate::constants::MAX_OUTBOX_ENTRIES
+    );
+    let captured = events.lock().unwrap();
+    let evicted: Vec<_> = captured
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed {
+                message_id, reason, ..
+            } if reason == "Outbox capacity exceeded" => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        evicted,
+        vec![first_id.as_str()],
+        "capacity eviction must emit exactly one terminal message_failed, for the oldest entry"
+    );
+}
+
+/// A connection request evicted at outbox capacity settles its pending
+/// entry and emits the typed undeliverable event, like the expiry and
+/// max-retries paths.
+#[test]
+fn test_outbox_capacity_eviction_settles_pending_connection_request() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let sent_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+    protocol
+        .outbox
+        .get_mut(&sent_id)
+        .expect("connection request must be in the outbox")
+        .last_sent_at -= ChronoDuration::seconds(60);
+
+    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+        let _ = protocol.send_message(
+            "bob",
+            &format!("filler-{i}"),
+            None::<MessagePriority>,
+            None::<String>,
+        );
+    }
+
+    let captured = events.lock().unwrap();
+    let undeliverable = captured
+        .iter()
+        .find_map(|e| match e {
+            Event::ConnectionRequestUndeliverable {
+                recipient,
+                message_id,
+                reason,
+            } => Some((recipient.clone(), message_id.clone(), reason.clone())),
+            _ => None,
+        })
+        .expect("connection request eviction must emit undeliverable");
+    assert_eq!(undeliverable.0, "bob");
+    assert_eq!(undeliverable.1, sent_id.as_str());
+    assert_eq!(undeliverable.2, "outbox_capacity_exceeded");
+    drop(captured);
+
+    assert!(
+        protocol.pending_connection_requests.is_empty(),
+        "capacity eviction must settle the pending connection request entry"
+    );
+}
+
+/// Media chunks settle through the transfer abort (`media_resend_required`
+/// path), never a per-chunk `message_failed` — lock down the asymmetry.
+#[test]
+fn test_cleanup_outbox_media_expiry_does_not_emit_message_failed() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    config.reliability.retry.outbox_max_lifetime_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let media_msg = Message::builder(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .content_type(ContentType::FileChunk)
+    .requires_ack(true)
+    .build();
+    protocol.media_outbox.insert(
+        media_msg.id.clone(),
+        OutboxEntry {
+            message: media_msg.clone(),
+            attempt_count: 0,
+            first_sent_at: chrono::Utc::now() - ChronoDuration::seconds(1),
+            last_sent_at: chrono::Utc::now() - ChronoDuration::seconds(1),
+            last_transport: None,
+        },
+    );
+
+    protocol.cleanup_expired_entries();
+
+    assert!(protocol.media_outbox.is_empty(), "media entry must expire");
+    let captured = events.lock().unwrap();
+    assert!(
+        !captured
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "media chunk expiry must not emit a per-chunk message_failed"
+    );
+}
+
+/// The carrier-relative TTL refresh on restore must not re-grant a fresh
+/// window forever: past the absolute cap (factor × lifetime from
+/// `first_sent_at`) the entry is dropped terminally instead.
+#[test]
+fn test_restore_outbox_drops_absolutely_expired() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let now = chrono::Utc::now();
+    // lifetime 1s → absolute cap 4s.
+    let lifetime_ms = 1000;
+
+    let dead = test_message("bob", "past the absolute cap");
+    let dead_id = dead.id.clone();
+    store_outbox_entry(
+        &storage,
+        &OutboxEntry {
+            message: dead,
+            attempt_count: 3,
+            first_sent_at: now - ChronoDuration::seconds(10),
+            last_sent_at: now - ChronoDuration::seconds(5),
+            last_transport: None,
+        },
+    );
+
+    let lapsed = test_message("bob", "lapsed but within the cap");
+    let lapsed_id = lapsed.id.clone();
+    store_outbox_entry(
+        &storage,
+        &OutboxEntry {
+            message: lapsed,
+            attempt_count: 1,
+            first_sent_at: now - ChronoDuration::seconds(3),
+            last_sent_at: now - ChronoDuration::seconds(2),
+            last_transport: None,
+        },
+    );
+
+    let mut config = create_test_config();
+    config.reliability.retry.outbox_max_lifetime_ms = lifetime_ms;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        1,
+        "only the within-cap entry should be restored"
+    );
+    let restored = protocol
+        .outbox
+        .get(&lapsed_id)
+        .expect("the lapsed-but-within-cap entry must be restored");
+    assert!(
+        restored.last_sent_at + ChronoDuration::milliseconds(lifetime_ms as i64) > now,
+        "the restored entry's carrier-relative TTL must be refreshed"
+    );
+
+    let keys = storage.list_keys(storage_keys::OUTBOX).unwrap();
+    assert_eq!(keys.len(), 1, "the dead entry must be deleted from storage");
+    assert!(!keys.iter().any(|k| *k == dead_id.as_str()));
+
+    let captured = events.lock().unwrap();
+    let failed: Vec<_> = captured
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed {
+                message_id, reason, ..
+            } => Some((message_id.clone(), reason.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        failed,
+        vec![(dead_id.as_str(), "Outbox lifetime exceeded".to_string())],
+        "the absolutely-expired entry must settle terminally, and only that one"
+    );
+}
+
 #[test]
 fn test_flush_outbox_for_peer_includes_media_outbox() {
     let mut config = create_test_config();
