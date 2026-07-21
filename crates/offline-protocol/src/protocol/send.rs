@@ -1160,8 +1160,9 @@ impl OfflineProtocol {
     /// the seal-or-drop decision for rich extras against the recipient's
     /// *current* capability; the key package that confirmed this session may
     /// have advertised it), create, restore outer fields, then dispatch —
-    /// and keeps the `message_id` returned to the caller at queue time, so
-    /// `MessageDeferred` correlates with the eventual
+    /// and keeps the `message_id` the caller received from `send_message*`
+    /// at queue time (no event fires on queueing — the returned id is the
+    /// correlation anchor), so that id matches the eventual
     /// `MessageSent`/`MessageDelivered`/`MessageFailed`. A re-queue (session
     /// flapped back to not-ready) keeps the id too.
     pub(super) fn flush_pending_messages(&mut self, recipient: &str) -> Result<()> {
@@ -1175,9 +1176,9 @@ impl OfflineProtocol {
                     count = pending.len(),
                     "Dropping pending messages for blocked recipient"
                 );
-                // The caller holds these ids (returned at queue time,
-                // correlated via MessageDeferred) — settle each one so the
-                // app isn't left waiting on ids that will never resolve.
+                // The caller holds these ids (returned by `send_message*`
+                // at queue time) — settle each one so the app isn't left
+                // waiting on ids that will never resolve.
                 for msg in &pending {
                     self.emit_event(Event::message_failed(
                         msg.message_id.clone(),
