@@ -11,7 +11,7 @@
 
 use crate::protocol::{
     base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload,
-    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras, MAX_RICH_EXTRAS_BYTES,
+    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras,
 };
 use crate::{Error, Event, Result};
 use chrono::{DateTime, Utc};
@@ -2404,24 +2404,12 @@ impl OfflineProtocol {
         media_metadata: Option<&MediaMetadata>,
         forward_info: Option<&ForwardInfo>,
     ) -> Result<()> {
-        let rich = RichSendExtras {
+        RichSendExtras {
             reply_context: None,
             media_metadata: media_metadata.cloned(),
             forward_info: forward_info.cloned(),
-        };
-        if !rich.is_any() {
-            return Ok(());
         }
-        let extras_len = serde_json::to_vec(&rich)
-            .map_err(|e| Error::Serialization(e.to_string()))?
-            .len();
-        if extras_len > MAX_RICH_EXTRAS_BYTES {
-            return Err(Error::InvalidArgument(format!(
-                "Rich extras too large: {} bytes serialized (max {})",
-                extras_len, MAX_RICH_EXTRAS_BYTES
-            )));
-        }
-        Ok(())
+        .check_size()
     }
 
     /// Shared implementation for sending and forwarding group messages.

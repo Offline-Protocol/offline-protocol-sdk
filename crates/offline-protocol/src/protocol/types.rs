@@ -332,6 +332,27 @@ impl RichSendExtras {
     pub(crate) fn is_any(&self) -> bool {
         self.reply_context.is_some() || self.media_metadata.is_some() || self.forward_info.is_some()
     }
+
+    /// Enforces [`MAX_RICH_EXTRAS_BYTES`] on the serialized extras. Shared
+    /// by every rich send boundary (`send_message_with`, the forward paths,
+    /// and the group surface) — enforced there, never at seal time, so a
+    /// queued or re-sent message is always known to seal (see the
+    /// constant's doc). Empty extras always pass.
+    pub(crate) fn check_size(&self) -> crate::Result<()> {
+        if !self.is_any() {
+            return Ok(());
+        }
+        let extras_len = serde_json::to_vec(self)
+            .map_err(|e| Error::Serialization(e.to_string()))?
+            .len();
+        if extras_len > MAX_RICH_EXTRAS_BYTES {
+            return Err(Error::InvalidArgument(format!(
+                "Rich extras too large: {} bytes serialized (max {})",
+                extras_len, MAX_RICH_EXTRAS_BYTES
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Options for `OfflineProtocol::send_message_with`: priority and reply

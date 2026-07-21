@@ -153,17 +153,7 @@ impl OfflineProtocol {
         // failure there would re-queue the message forever. The cap keeps an
         // oversized quote or thumbnail from inflating the MLS plaintext into
         // heavy transport fragmentation.
-        if rich.is_any() {
-            let extras_len = serde_json::to_vec(&rich)
-                .map_err(|e| Error::Serialization(e.to_string()))?
-                .len();
-            if extras_len > MAX_RICH_EXTRAS_BYTES {
-                return Err(Error::InvalidArgument(format!(
-                    "Rich extras too large: {} bytes serialized (max {})",
-                    extras_len, MAX_RICH_EXTRAS_BYTES
-                )));
-            }
-        }
+        rich.check_size()?;
 
         let final_content = match self.prepare_outbound_content(
             &recipient_str,
@@ -287,15 +277,7 @@ impl OfflineProtocol {
         // Same boundary cap as `send_message_with` — enforced here, not at
         // seal time, so a forward queued behind session establishment is
         // always known to seal at flush.
-        let extras_len = serde_json::to_vec(&rich)
-            .map_err(|e| Error::Serialization(e.to_string()))?
-            .len();
-        if extras_len > MAX_RICH_EXTRAS_BYTES {
-            return Err(Error::InvalidArgument(format!(
-                "Rich extras too large: {} bytes serialized (max {})",
-                extras_len, MAX_RICH_EXTRAS_BYTES
-            )));
-        }
+        rich.check_size()?;
 
         // Prepare content (may encrypt). ForwardInfo is threaded through so
         // it survives the pending-message queue if the session isn't ready.
