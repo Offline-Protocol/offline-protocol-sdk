@@ -9159,3 +9159,107 @@ fn group_buffered_drain_restores_sealed_media() {
         Some("dave")
     );
 }
+
+#[test]
+fn group_hint_only_send_seals_content_type_toward_capable_group() {
+    // A non-Text hint with no extras must still seal toward a capable
+    // group (mirroring the DM hint-only seal): the group payload has no
+    // outer content_type carrier, so an unsealed hint would not merely go
+    // unprotected — it would be lost outright. Toward a not-fully-capable
+    // group the hint drops and the plaintext stays bare.
+    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Hint Only Group");
+    let alice_handle = wire_mock_transport(&mut alice);
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    // Bob's capability not yet known: the hint drops, plaintext stays bare.
+    alice
+        .send_group_message_with(
+            &group_id,
+            "legacy voice note",
+            GroupSendOptions {
+                content_type: Some(offline_protocol_core::ContentType::VoiceNote),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "bob",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+    alice
+        .send_group_message_with(
+            &group_id,
+            "sealed voice note",
+            GroupSendOptions {
+                content_type: Some(offline_protocol_core::ContentType::VoiceNote),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    for wire in alice_handle.sent_messages() {
+        if wire.content.starts_with(internal_prefixes::GROUP_MLS_MSG) {
+            bob.process_internal_message(&make_message("alice", "bob", &wire.content));
+        }
+    }
+
+    let events = bob_events.lock().unwrap();
+    let received: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::GroupMessageReceived {
+                content,
+                content_type,
+                ..
+            } => Some((content.as_str(), content_type.as_deref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        received,
+        vec![
+            ("legacy voice note", None),
+            ("sealed voice note", Some("voice_note")),
+        ],
+        "hint must drop toward a not-fully-capable group and seal once every member is capable"
+    );
+}
+
+#[test]
+fn group_rich_seal_gate_requires_every_member_capable() {
+    // Mixed capability: one member without an advertised rich capability
+    // fails the gate for the whole group (one ciphertext serves every
+    // member); the self entry is exempt from the check.
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    alice
+        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::default()))
+        .unwrap();
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "bob",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+
+    let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+    assert!(
+        !alice.group_rich_seal_active(&members),
+        "a member with unknown capability must fail the gate for the whole group"
+    );
+
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "carol",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+    assert!(
+        alice.group_rich_seal_active(&members),
+        "gate passes once every non-self member advertised the capability"
+    );
+}
