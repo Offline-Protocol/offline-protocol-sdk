@@ -33,7 +33,7 @@
     "build:uniffi:android": "bash scripts/build-uniffi-android.sh",
     "build:uniffi:all": "bash scripts/build-uniffi-all.sh",
     "generate:bindings": "bash scripts/generate-bindings.sh",
-    "prepublishOnly": "npm run build && bash scripts/prepare-npm.sh",
+    "prepublishOnly": "npm run clean && npm run build && bash scripts/prepare-npm.sh",
     "clean": "rm -rf lib/"
   },
   "keywords": [
