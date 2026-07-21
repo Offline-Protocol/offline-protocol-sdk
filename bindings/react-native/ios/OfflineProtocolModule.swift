@@ -1705,7 +1705,40 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_MEDIA", fallbackMessage: "Failed to send media")
         }
     }
-    
+
+    @objc func sendMediaRich(_ recipient: String,
+                             fileData: String,
+                             fileName: String,
+                             contentType: String,
+                             options: NSDictionary?,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_SEND_MEDIA", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            guard let data = Data(base64Encoded: fileData) else {
+                rejecter("ERROR_SEND_MEDIA", "Invalid base64 file data", nil)
+                return
+            }
+            let ct = parseContentType(contentType)
+            let dict = options as? [String: Any]
+            let sendOptions = MediaSendOptions(
+                mediaMetadata: parseRichMediaMetadata(dict?["media_metadata"] as? [String: Any]),
+                caption: dict?["caption"] as? String,
+                replyToMsg: dict?["reply_to_msg"] as? String,
+                replyContext: parseReplyContext(dict?["reply_context"] as? [String: Any]),
+                forwardInfo: parseForwardInfo(dict?["forward_info"] as? [String: Any]),
+                fileId: dict?["file_id"] as? String
+            )
+            let fileId = try proto.sendMediaRich(recipient: recipient, fileData: Array(data), fileName: fileName, contentType: ct, options: sendOptions)
+            resolver(fileId)
+        } catch {
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_MEDIA", fallbackMessage: "Failed to send media")
+        }
+    }
+
     private func parseContentType(_ value: String) -> ContentType {
         switch value.lowercased() {
         case "text": return .text

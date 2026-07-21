@@ -111,6 +111,14 @@ RCT_EXTERN_METHOD(sendMedia:(NSString *)recipient
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(sendMediaRich:(NSString *)recipient
+                  fileData:(NSString *)fileData
+                  fileName:(NSString *)fileName
+                  contentType:(NSString *)contentType
+                  options:(NSDictionary *)options
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(getFileProgress:(NSString *)fileId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)

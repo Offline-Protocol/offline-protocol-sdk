@@ -1111,15 +1111,93 @@ export class OfflineProtocol {
    * @returns File ID for tracking progress
    */
   async sendMedia(params: SendMediaParams): Promise<string> {
-    const nativeMeta = params.mediaMetadata
+    // Rich params — and any of the extended (cloud/sticker) metadata
+    // fields, which the plain native method does not map — route to the
+    // rich native method; the plain path is left untouched. Rich fields
+    // only ever travel sealed inside the chunk-0 MLS ciphertext (toward
+    // recipients that support it), or are dropped — never cleartext.
+    const meta = params.mediaMetadata;
+    const hasExtendedMetadata =
+      meta !== undefined &&
+      (meta.mediaId !== undefined ||
+        meta.downloadUrl !== undefined ||
+        meta.thumbnailUrl !== undefined ||
+        meta.encryptionKey !== undefined ||
+        meta.iv !== undefined ||
+        meta.ciphertextHash !== undefined ||
+        meta.stickerProvider !== undefined ||
+        meta.stickerRemoteId !== undefined ||
+        meta.stickerKind !== undefined);
+    const hasRichOptions =
+      params.caption !== undefined ||
+      params.replyToMsg !== undefined ||
+      params.replyContext !== undefined ||
+      params.forwardInfo !== undefined ||
+      params.fileId !== undefined ||
+      hasExtendedMetadata;
+
+    if (hasRichOptions) {
+      const options = {
+        media_metadata: meta
+          ? {
+              mime_type: meta.mimeType,
+              file_name: meta.fileName,
+              file_size: meta.fileSize,
+              duration_ms: meta.durationMs ?? null,
+              width: meta.width ?? null,
+              height: meta.height ?? null,
+              thumbnail_base64: meta.thumbnailBase64 ?? null,
+              media_id: meta.mediaId ?? null,
+              download_url: meta.downloadUrl ?? null,
+              thumbnail_url: meta.thumbnailUrl ?? null,
+              encryption_key: meta.encryptionKey ?? null,
+              iv: meta.iv ?? null,
+              ciphertext_hash: meta.ciphertextHash ?? null,
+              sticker_provider: meta.stickerProvider ?? null,
+              sticker_remote_id: meta.stickerRemoteId ?? null,
+              sticker_kind: meta.stickerKind ?? null,
+            }
+          : null,
+        caption: params.caption ?? null,
+        reply_to_msg: params.replyToMsg ?? null,
+        reply_context: params.replyContext
+          ? {
+              sender: params.replyContext.sender,
+              text: params.replyContext.text,
+              timestamp: params.replyContext.timestamp ?? null,
+              reply_media_label: params.replyContext.reply_media_label ?? null,
+              reply_content_type:
+                params.replyContext.reply_content_type ?? null,
+            }
+          : null,
+        forward_info: params.forwardInfo
+          ? {
+              original_sender: params.forwardInfo.original_sender,
+              original_message_id: params.forwardInfo.original_message_id,
+              original_timestamp: params.forwardInfo.original_timestamp,
+              forward_count: params.forwardInfo.forward_count,
+            }
+          : null,
+        file_id: params.fileId ?? null,
+      };
+      return await OfflineProtocolNativeModule.sendMediaRich(
+        params.recipient,
+        params.fileData,
+        params.fileName,
+        params.contentType,
+        options,
+      );
+    }
+
+    const nativeMeta = meta
       ? {
-          mime_type: params.mediaMetadata.mimeType,
-          file_name: params.mediaMetadata.fileName,
-          file_size: params.mediaMetadata.fileSize,
-          duration_ms: params.mediaMetadata.durationMs,
-          width: params.mediaMetadata.width,
-          height: params.mediaMetadata.height,
-          thumbnail_base64: params.mediaMetadata.thumbnailBase64,
+          mime_type: meta.mimeType,
+          file_name: meta.fileName,
+          file_size: meta.fileSize,
+          duration_ms: meta.durationMs,
+          width: meta.width,
+          height: meta.height,
+          thumbnail_base64: meta.thumbnailBase64,
         }
       : null;
 

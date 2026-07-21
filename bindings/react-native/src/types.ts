@@ -605,6 +605,23 @@ export interface SendMediaParams {
   contentType: ContentType;
   /** Optional media metadata (dimensions, duration, thumbnail, etc.) */
   mediaMetadata?: MediaMetadata;
+  /**
+   * Caption text. Travels sealed inside the chunk-0 MLS ciphertext toward
+   * recipients that advertised rich payload support and is silently dropped
+   * otherwise — never sent cleartext.
+   */
+  caption?: string;
+  /** ID of the message this media replies to. Sealed-only, like caption. */
+  replyToMsg?: string;
+  /** Quoted-reply context. Sealed-only, like caption. */
+  replyContext?: ReplyContext;
+  /** Forward attribution. Sealed-only, like caption. */
+  forwardInfo?: ForwardInfo;
+  /**
+   * Caller-supplied file id for the transfer (minted when absent). Must not
+   * collide with an active outbound transfer; max 4096 bytes.
+   */
+  fileId?: string;
 }
 
 /**
@@ -793,6 +810,20 @@ export interface FileReceivedEvent extends BaseEvent {
   media_metadata?: MediaMetadataEvent;
   /** Base64-encoded reassembled file data. */
   file_data: string;
+  /**
+   * When the sender queued the transfer (chunk-0 message timestamp,
+   * wall-clock ms) — for display ordering alongside
+   * `MessageReceivedEvent.timestamp`.
+   */
+  timestamp?: number;
+  /** Caption text from the sealed chunk-0 rich extras. */
+  caption?: string;
+  /** ID of the message this media replies to (sealed chunk-0 extras). */
+  reply_to_msg?: string;
+  /** Quoted-reply context (sealed chunk-0 extras). */
+  reply_context?: ReplyContext;
+  /** Forwarding attribution (sealed chunk-0 extras). */
+  forward_info?: ForwardInfo;
 }
 
 /**
