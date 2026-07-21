@@ -3419,12 +3419,14 @@ impl OfflineProtocol {
 
     /// Internet: Peers the platform layer should watch via relay
     /// `CheckPresence` queries — every peer with an undelivered or
-    /// session-unproven MLS welcome. The platform polls this on its
-    /// presence-watch tick and unions it with its own signals
-    /// (`DeliveryError` recipients).
+    /// session-unproven MLS welcome, plus every recipient of a pending or
+    /// unreachable-parked outbox message. The platform polls this on its
+    /// presence-watch tick; the SDK now owns the "watch my DeliveryError
+    /// recipients" duty, so the platform no longer needs to union in its
+    /// own list (the presence-online answer is what re-drives parked DMs).
     pub fn internet_presence_watchlist(&self) -> Vec<String> {
         let protocol = recover_mutex(&self.inner, "inner");
-        protocol.welcome_pending_peers()
+        protocol.presence_watch_peers()
     }
 
     // ========================================================================
