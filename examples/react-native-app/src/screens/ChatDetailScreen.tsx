@@ -28,7 +28,7 @@ import { Icon } from '../components/Icon';
 import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
 import { Message } from '../providers/ProtocolProvider';
-import { MessagePriority, type ReplyContext } from '@offline-protocol/mesh-sdk';
+import { MessagePriority, ContentType, type ReplyContext } from '@offline-protocol/mesh-sdk';
 import { getUserInitials, generateAvatarColor } from '../utils/user';
 
 const MEDIA_CONTENT_TYPES = new Set(['image', 'video', 'audio', 'voice_note', 'video_note', 'file']);
@@ -65,6 +65,17 @@ function formatFileSize(bytes: number): string {
 
 const REPLY_EXCERPT_MAX_CHARS = 120;
 
+// The SDK parses replyToMsg as a strict message UUID and rejects the whole
+// send on anything else. Media bubbles carry locally-minted ids
+// ("media_<ts>") or transfer file ids ("file_<uuid>"), so gate what goes to
+// the SDK and let the sealed reply context carry the quote for those.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function toSdkReplyId(id?: string): string | undefined {
+  return id && UUID_RE.test(id) ? id : undefined;
+}
+
 /**
  * Build the sealed ReplyContext for a message being replied to, so the
  * recipient can render a quote preview without a local copy of the
@@ -81,7 +92,11 @@ function buildReplyContext(original: Message): ReplyContext | undefined {
     sender: original.senderId,
     text: isMedia
       ? getMediaLabel(original.contentType!)
-      : original.content.slice(0, REPLY_EXCERPT_MAX_CHARS),
+      : // Slice by code point, not UTF-16 unit — a plain .slice() can cut an
+        // emoji's surrogate pair in half at the boundary.
+        Array.from(original.content)
+          .slice(0, REPLY_EXCERPT_MAX_CHARS)
+          .join(''),
     timestamp: original.timestamp,
     reply_media_label: isMedia
       ? original.mediaMetadata?.fileName || getMediaLabel(original.contentType!)
@@ -481,7 +496,7 @@ export function ChatDetailScreen({
     sendImage,
     sendVoiceNote,
     sendVideo,
-    sendFile,
+    sendMedia,
     isOnline,
     connectedPeersCount,
     encryptedPeers,
@@ -629,7 +644,7 @@ export function ChatDetailScreen({
         peerId,
         text,
         priority,
-        replyingToMessage?.id,
+        toSdkReplyId(replyingToMessage?.id),
         replyingToMessage ? buildReplyContext(replyingToMessage) : undefined,
       );
       setInputText('');
@@ -694,7 +709,7 @@ export function ChatDetailScreen({
         : undefined;
       const extras = {
         caption,
-        replyToMsg: replyingToMessage?.id,
+        replyToMsg: toSdkReplyId(replyingToMessage?.id),
         replyContext,
       };
       if (isVideo) {
@@ -788,7 +803,7 @@ export function ChatDetailScreen({
           width: asset.width,
           height: asset.height,
         },
-        { caption, replyToMsg: replyingToMessage?.id, replyContext },
+        { caption, replyToMsg: toSdkReplyId(replyingToMessage?.id), replyContext },
       );
       if (caption) setInputText('');
       setReplyingToMessage(null);
@@ -827,7 +842,26 @@ export function ChatDetailScreen({
       setSendingMedia(true);
       const base64 = await RNFS.readFile(result.uri, 'base64');
       const fileName = result.name ?? `file_${Date.now()}`;
-      await sendFile({ recipient: peerId, fileData: base64, fileName });
+      const caption = inputText.trim() || undefined;
+      const replyContext = replyingToMessage
+        ? buildReplyContext(replyingToMessage)
+        : undefined;
+      await sendMedia({
+        recipient: peerId,
+        fileData: base64,
+        fileName,
+        contentType: ContentType.File,
+        mediaMetadata: {
+          mimeType: result.type ?? 'application/octet-stream',
+          fileName,
+          fileSize: result.size ?? 0,
+        },
+        caption,
+        replyToMsg: toSdkReplyId(replyingToMessage?.id),
+        replyContext,
+      });
+      if (caption) setInputText('');
+      setReplyingToMessage(null);
       addOptimisticMediaMessage({
         id: `media_${Date.now()}`,
         senderId: currentUserId,
@@ -838,6 +872,9 @@ export function ChatDetailScreen({
         status: 'sending',
         isFromMe: true,
         contentType: 'file',
+        caption,
+        replyToMsg: replyingToMessage?.id,
+        replyContext,
         mediaMetadata: {
           mimeType: result.type ?? 'application/octet-stream',
           fileName,
@@ -851,7 +888,7 @@ export function ChatDetailScreen({
     } finally {
       setSendingMedia(false);
     }
-  }, [peerId, sendFile, currentUserId, addOptimisticMediaMessage]);
+  }, [peerId, sendMedia, currentUserId, addOptimisticMediaMessage, inputText, replyingToMessage]);
 
   const showAttachmentOptions = useCallback(() => {
     if (Platform.OS === 'ios') {
