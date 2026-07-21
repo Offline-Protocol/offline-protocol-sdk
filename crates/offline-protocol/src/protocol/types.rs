@@ -446,12 +446,12 @@ pub(crate) struct PendingConnectionRequest {
 /// window must cover that dwell plus the bridge's correlation window.
 ///
 /// Also deliberately wider than the worst-case default ACK retry schedule
-/// (10 retries, 1s initial delay, x2 backoff capped at 30s — up to ~290s
-/// end to end): retry exhaustion is the last settlement point that can
-/// still emit a typed undeliverable event, so the window must outlive it
-/// with headroom.
+/// (10 retries, 1s initial delay, x2 backoff capped at 5 min, plus a 10s
+/// ACK timeout per attempt — up to ~910s end to end): retry exhaustion is
+/// the last settlement point that can still emit a typed undeliverable
+/// event, so the window must outlive it with headroom.
 pub(crate) const PENDING_CONNECTION_REQUEST_TTL: std::time::Duration =
-    std::time::Duration::from_secs(600);
+    std::time::Duration::from_secs(1800);
 
 /// Cap on tracked outbound connection requests (oldest evicted first).
 pub(crate) const MAX_PENDING_CONNECTION_REQUESTS: usize = 64;

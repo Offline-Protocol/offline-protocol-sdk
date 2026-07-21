@@ -1897,10 +1897,10 @@ impl OfflineProtocol {
         };
 
         if !outbox.contains_key(&message.id) && outbox.len() >= capacity {
-            if let Some((oldest_id, last_transport)) = outbox
+            if let Some((oldest_id, last_transport, attempt_count)) = outbox
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_sent_at)
-                .map(|(id, entry)| (id.clone(), entry.last_transport))
+                .map(|(id, entry)| (id.clone(), entry.last_transport, entry.attempt_count))
             {
                 if let Some(transport) = last_transport {
                     self.transport_manager.record_delivery_failure(transport);
@@ -1915,6 +1915,30 @@ impl OfflineProtocol {
                     self.clear_outbox_entry_from_storage(&oldest_id);
                 }
                 self.handle_outbound_media_chunk_failed(&oldest_id, "outbox eviction");
+                if !is_media {
+                    // Capacity eviction is as terminal as expiry: the entry
+                    // and its persisted copy are gone, so without an event
+                    // the app shows the message as pending forever. (Media
+                    // chunks surface through the transfer abort above.)
+                    self.emit_event(Event::message_failed(
+                        oldest_id.clone(),
+                        "Outbox capacity exceeded".to_string(),
+                        attempt_count,
+                    ));
+                    if let Some(recipient) = self.take_undeliverable_connection_request(&oldest_id)
+                    {
+                        warn!(
+                            recipient = %recipient,
+                            message_id = %oldest_id,
+                            "Connection request undeliverable: outbox capacity exceeded"
+                        );
+                        self.emit_event(Event::connection_request_undeliverable(
+                            recipient,
+                            oldest_id.as_str(),
+                            "outbox_capacity_exceeded".to_string(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -2000,6 +2024,22 @@ impl OfflineProtocol {
         self.media_outbox.remove(message_id)
     }
 
+    /// Settles the pending connection-request entry for `message_id` when a
+    /// terminal drop occurs (max retries, outbox expiry, capacity eviction),
+    /// returning the recipient the caller should emit
+    /// `connection_request_undeliverable` for. The TTL gates emission — a
+    /// signal that stale belongs to a request the app has long stopped
+    /// waiting on — but the entry is removed either way.
+    pub(super) fn take_undeliverable_connection_request(
+        &mut self,
+        message_id: &MessageId,
+    ) -> Option<String> {
+        self.pending_connection_requests
+            .remove(&message_id.as_str())
+            .filter(|pending| pending.sent_at.elapsed() <= PENDING_CONNECTION_REQUEST_TTL)
+            .map(|pending| pending.recipient)
+    }
+
     pub(super) fn cleanup_outbox(&mut self) {
         let cutoff = Utc::now()
             - ChronoDuration::milliseconds(
@@ -2038,12 +2078,7 @@ impl OfflineProtocol {
                 "Outbox lifetime exceeded".to_string(),
                 attempt_count,
             ));
-            let undeliverable_recipient = self
-                .pending_connection_requests
-                .remove(&message_id.as_str())
-                .filter(|pending| pending.sent_at.elapsed() <= PENDING_CONNECTION_REQUEST_TTL)
-                .map(|pending| pending.recipient);
-            if let Some(recipient) = undeliverable_recipient {
+            if let Some(recipient) = self.take_undeliverable_connection_request(&message_id) {
                 warn!(
                     recipient = %recipient,
                     message_id = %message_id,

@@ -121,7 +121,7 @@ The outbox persists messages that require acknowledgment. It serves as the sourc
 | Max media entries | 100 | File chunk messages |
 | Max lifetime | 7 days | `outbox_max_lifetime_ms` |
 
-When the outbox is full, the oldest entry is evicted. When a message exceeds its lifetime and has no pending ACK, it is dropped and a terminal `message_failed` event (reason `"Outbox lifetime exceeded"`) is emitted so the app can settle its UI state.
+When the outbox is full, the oldest entry is evicted with a terminal `message_failed` event (reason `"Outbox capacity exceeded"`). When a message exceeds its lifetime and has no pending ACK, it is dropped and a terminal `message_failed` event (reason `"Outbox lifetime exceeded"`) is emitted so the app can settle its UI state.
 
 **Important**: When a message storage backend is configured, regular-message outbox entries are persisted and restored on the next `start()` with a refreshed delivery window. Media chunks are never persisted — an interrupted transfer surfaces as `media_resend_required` instead. See [Client-Side Persistence](#client-side-persistence) for the app-side layer.
 
@@ -260,7 +260,7 @@ reliability: {
 
 ## Client-Side Persistence
 
-When a message storage backend is configured, the SDK persists regular-message outbox entries and restores them on the next `start()` with a refreshed delivery window (media chunks are never persisted — see `media_resend_required`). Client applications should still maintain their own persistence layer for message history and UI state.
+When a message storage backend is configured, the SDK persists regular-message outbox entries and restores them on the next `start()` with a refreshed delivery window (media chunks are never persisted — see `media_resend_required`). The refresh is bounded: an entry whose total age exceeds 4× the outbox lifetime (28 days at the default) is dropped at restore with a terminal `message_failed` instead of re-granted a window. Client applications should still maintain their own persistence layer for message history and UI state.
 
 ### Recommended Pattern
 

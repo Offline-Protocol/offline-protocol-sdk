@@ -16,6 +16,18 @@ pub const ACK_TRANSPORT_KEY: &str = "ack_transport";
 /// This prevents unbounded memory growth when messages cannot be delivered.
 pub const MAX_OUTBOX_ENTRIES: usize = 500;
 
+/// Absolute cap on a restored outbox entry's total lifetime, as a multiple
+/// of `outbox_max_lifetime_ms`, measured from `first_sent_at`.
+///
+/// The restore path refreshes the carrier-relative TTL of an entry that
+/// lapsed while the process was down (restart ⇒ fresh delivery window).
+/// Without an absolute bound, an app used briefly once past each lifetime
+/// keeps re-granting the entry a fresh window forever, so "expiry is
+/// terminal" would only hold in-process. Past this cap the entry is dropped
+/// at restore with a terminal `message_failed` instead of refreshed
+/// (4 × 7 days = 28 days at the default lifetime).
+pub const OUTBOX_ABSOLUTE_LIFETIME_FACTOR: i32 = 4;
+
 /// Maximum number of messages to keep in history for topology visualization.
 /// This prevents unbounded memory growth while maintaining enough history
 /// for accurate network statistics.
