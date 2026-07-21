@@ -2469,21 +2469,21 @@ impl OfflineProtocol {
         // the group ciphertext (media secrets must never leave the AEAD
         // boundary), and only when every other member advertised the
         // capability — a legacy member would render the sealed body as
-        // literal JSON text. The attribution also rides the hop-visible
-        // payload below as the fallback for non-capable groups; media
-        // metadata has no such fallback and simply drops. A non-Text hint
-        // seals a hint-only body even without extras (mirroring the DM
-        // path): the group payload has no outer content_type carrier, so an
-        // unsealed hint would not merely go unprotected — it would be lost.
+        // literal JSON text. For unsealed sends the attribution rides the
+        // hop-visible payload below as the fallback; media metadata has no
+        // such fallback and simply drops. A non-Text hint seals a
+        // hint-only body even without extras (mirroring the DM path): the
+        // group payload has no outer content_type carrier, so an unsealed
+        // hint would not merely go unprotected — it would be lost.
         let extras = RichSendExtras {
             reply_context: None,
             media_metadata,
             forward_info: forward_info.clone(),
         };
+        let sealed = (extras.is_any() || content_type != ContentType::Text)
+            && self.group_rich_seal_active(&members);
         let sealed_body;
-        let plaintext: &str = if (extras.is_any() || content_type != ContentType::Text)
-            && self.group_rich_seal_active(&members)
-        {
+        let plaintext: &str = if sealed {
             sealed_body = Self::seal_rich_payload(content, &extras, content_type)?;
             &sealed_body
         } else {
@@ -2496,6 +2496,15 @@ impl OfflineProtocol {
             }
             content
         };
+
+        // When the body sealed, every member reads the sealed attribution
+        // and the receiver ignores the payload copy wholesale — omit it
+        // rather than expose original-sender metadata to relays and mesh
+        // hops for nobody's benefit. (A stale-cache just-added non-capable
+        // member loses degraded-display attribution in that window;
+        // accepted, consistent with them rendering the sealed body as
+        // literal JSON anyway.)
+        let payload_forward_info = if sealed { None } else { forward_info };
 
         // Encrypt via MLS — release the guard immediately after encryption
         // to minimize lock contention during the fan-out phase.
@@ -2519,7 +2528,7 @@ impl OfflineProtocol {
                 &ciphertext_b64,
                 epoch,
                 reply_to_msg,
-                forward_info.clone(),
+                payload_forward_info.clone(),
             ) {
                 let member_count = members.iter().filter(|m| m.as_str() != self_id).count() as u32;
                 self.emit_event(Event::group_message_sent(
@@ -2538,7 +2547,7 @@ impl OfflineProtocol {
             ciphertext: ciphertext_b64,
             epoch,
             reply_to: reply_to_msg.map(|s| s.to_string()),
-            forward_info,
+            forward_info: payload_forward_info,
         };
         let base_content = format!(
             "{}{}",
