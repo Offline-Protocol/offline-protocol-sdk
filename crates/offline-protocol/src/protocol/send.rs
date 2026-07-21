@@ -780,6 +780,13 @@ impl OfflineProtocol {
     /// forces the extras to drop for the whole group. Conservative by
     /// design: an unknown member must never receive a sealed body their SDK
     /// would render as literal `__RICH_V1__` JSON.
+    ///
+    /// Best-effort within that design: callers pass the
+    /// `group_mesh.members` fan-out cache, which trails MLS membership
+    /// until the add/remove notification lands. In that window a
+    /// just-added non-capable member can receive one sealed body and
+    /// render it as literal JSON — degraded display, not a leak (every
+    /// group member is entitled to the sealed contents).
     pub(crate) fn group_rich_seal_active(&self, members: &[String]) -> bool {
         self.config.encryption.rich_payload_enabled
             && members

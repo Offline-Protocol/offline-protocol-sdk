@@ -9263,3 +9263,29 @@ fn group_rich_seal_gate_requires_every_member_capable() {
         "gate passes once every non-self member advertised the capability"
     );
 }
+
+#[test]
+fn group_send_rejects_internal_prefix_content() {
+    // Receivers parse decrypted group plaintext for the sealed `__RICH_V1__`
+    // body unconditionally, so user content must never be able to
+    // impersonate one (or any other reserved prefix) through the public
+    // group send APIs — same boundary rule as `send_message`.
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Prefix Guard Group");
+
+    let spoof = format!("{}{{\"text\":\"fake\"}}", internal_prefixes::RICH_V1);
+    let err = alice
+        .send_group_message(&group_id, &spoof, None, None)
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::Error::InvalidArgument(_)),
+        "internal-prefix group send must be rejected, got: {err:?}"
+    );
+
+    let err = alice
+        .send_group_message_with(&group_id, &spoof, GroupSendOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::Error::InvalidArgument(_)),
+        "internal-prefix rich group send must be rejected, got: {err:?}"
+    );
+}
