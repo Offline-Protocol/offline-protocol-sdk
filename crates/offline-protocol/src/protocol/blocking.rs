@@ -739,6 +739,8 @@ mod tests {
                 media_metadata: None,
                 last_updated_at: Instant::now(),
                 sender: "bob".to_string(),
+                rich_extras: None,
+                timestamp_ms: 0,
             },
         );
 

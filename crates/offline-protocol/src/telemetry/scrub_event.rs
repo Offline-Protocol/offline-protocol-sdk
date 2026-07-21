@@ -258,14 +258,27 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         } => {}
         Event::FileReceived {
             sender,
+            forward_info,
+            reply_context,
             file_id: _,
             file_name: _,
             file_size: _,
             content_type: _,
             media_metadata: _,
             file_data: _,
+            timestamp: _,
+            caption: _,
+            reply_to_msg: _,
         } => {
             hash_string(sender, scrubber);
+            if let Some(fi) = forward_info {
+                hash_string(&mut fi.original_sender, scrubber);
+            }
+            // The quoted sender is an identifier and gets hashed; the quoted
+            // text and caption are content and stay raw, like `content`.
+            if let Some(rc) = reply_context {
+                hash_string(&mut rc.sender, scrubber);
+            }
         }
         Event::FileReceiveFailed {
             sender,
@@ -749,6 +762,17 @@ mod tests {
             content_type: "image".into(),
             media_metadata: Some(secret_media_metadata()),
             file_data: String::new(),
+            timestamp: None,
+            caption: None,
+            reply_to_msg: None,
+            reply_context: Some(Box::new(ReplyContextEvent {
+                sender: "carol".into(),
+                text: "quoted".into(),
+                timestamp: None,
+                reply_media_label: None,
+                reply_content_type: None,
+            })),
+            forward_info: None,
         }
     }
 
@@ -781,12 +805,18 @@ mod tests {
             Event::FileReceived {
                 sender,
                 media_metadata,
+                reply_context,
                 ..
             } => {
                 assert_eq!(sender, hashed("alice"));
                 let meta = media_metadata.expect("metadata preserved");
                 assert!(meta.encryption_key.is_none());
                 assert!(meta.iv.is_none());
+                // The quoted sender is an identifier like MessageReceived's:
+                // hashed, while the quoted text stays raw content.
+                let rc = reply_context.expect("reply context preserved");
+                assert_eq!(rc.sender, hashed("carol"));
+                assert_eq!(rc.text, "quoted");
             }
             _ => panic!("unexpected variant"),
         }

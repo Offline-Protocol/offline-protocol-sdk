@@ -365,6 +365,35 @@ pub struct SendMessageOptions {
     pub via_transport: Option<TransportType>,
 }
 
+/// Options for `OfflineProtocol::send_media_with`: the chunk-0 media
+/// metadata (as on `send_media`), plus the rich fields introduced with the
+/// sealed rich payload and an optional caller-supplied `file_id`.
+///
+/// The rich fields (`caption`, `reply_to_msg`, `reply_context`,
+/// `forward_info`) only ever travel inside the MLS-sealed chunk-0 plaintext
+/// (v2 media envelope), and only toward recipients whose key package
+/// advertised `rich_versions` support. Toward anyone else — including every
+/// plaintext (encryption opt-out) transfer — they are silently dropped,
+/// never sent cleartext, so the transfer degrades to what plain
+/// `send_media` sends.
+#[derive(Debug, Clone, Default)]
+pub struct MediaSendOptions {
+    /// Media metadata delivered with chunk 0 (as on `send_media`).
+    pub media_metadata: Option<MediaMetadata>,
+    /// Caption text, delivered sealed-only.
+    pub caption: Option<String>,
+    /// ID of the message this media replies to, delivered sealed-only.
+    pub reply_to_msg: Option<String>,
+    /// Quoted-reply context, delivered sealed-only.
+    pub reply_context: Option<ReplyContext>,
+    /// Forward attribution, delivered sealed-only.
+    pub forward_info: Option<ForwardInfo>,
+    /// Caller-supplied file id for the transfer (minted when absent). Must
+    /// not collide with an active outbound transfer; bounded to the wire
+    /// `file_id` field limit.
+    pub file_id: Option<String>,
+}
+
 /// The sealed rich body: what `__RICH_V1__` + JSON carries inside the MLS
 /// plaintext. `text` is the user-visible content; the optional fields are
 /// restored onto the inbound message by `apply_decrypted_content` *after*
@@ -907,6 +936,13 @@ pub(crate) struct PendingMediaMetadataEntry {
     pub(crate) last_updated_at: Instant,
     /// Sender of the file transfer (used to drain partial transfers on block).
     pub(crate) sender: String,
+    /// Rich extras from the sealed chunk-0 plaintext. Never populated from
+    /// wire (legacy plaintext) chunks — the sealed body is the only trusted
+    /// carrier.
+    pub(crate) rich_extras: Option<crate::media_envelope::MediaRichExtras>,
+    /// The chunk-0 outer `Message` timestamp (wall-clock ms) — the sender's
+    /// send time, surfaced on `FileReceived` for display ordering.
+    pub(crate) timestamp_ms: i64,
 }
 
 #[derive(Clone)]
@@ -918,6 +954,10 @@ pub(crate) struct OutboundMediaTransfer {
     pub(crate) delivered_chunks: HashSet<u32>,
     pub(crate) last_updated_at: Instant,
     pub(crate) media_metadata: Option<MediaMetadata>,
+    /// Rich extras sealed into chunk 0 (already capability-gated at the
+    /// `send_media_with` boundary). Kept on the transfer because chunk
+    /// batches are (re-)encoded via `pump_media_transfers` too.
+    pub(crate) rich_extras: Option<crate::media_envelope::MediaRichExtras>,
 }
 
 pub(crate) enum OutboundSendPreparation {

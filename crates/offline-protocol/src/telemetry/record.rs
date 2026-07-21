@@ -443,6 +443,11 @@ mod tests {
                 content_type: String::new(),
                 media_metadata: None,
                 file_data: String::new(),
+                timestamp: None,
+                caption: None,
+                reply_to_msg: None,
+                reply_context: None,
+                forward_info: None,
             },
             Event::FileReceiveFailed {
                 file_id: String::new(),
