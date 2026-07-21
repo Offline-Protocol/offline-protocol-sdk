@@ -324,6 +324,14 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         } => {
             hash_string(recipient, scrubber);
         }
+        Event::MediaResendRequired {
+            file_id: _,
+            recipient,
+            file_name: _,
+            file_size: _,
+        } => {
+            hash_string(recipient, scrubber);
+        }
         Event::AckEvicted {
             message_id: _,
             priority: _,
@@ -667,6 +675,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::MessageDeferred { .. }
         | Event::MessageRetrying { .. }
         | Event::MessageUndeliverable { .. }
+        | Event::MediaResendRequired { .. }
         | Event::AckEvicted { .. }
         | Event::FragmentAssemblyEvicted { .. }
         | Event::RelayDemotedBattery { .. }

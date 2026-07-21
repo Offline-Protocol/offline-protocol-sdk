@@ -17225,6 +17225,222 @@ fn test_send_media_custom_file_id_honored_and_validated() {
     }
 }
 
+fn plaintext_media_protocol_with_storage(
+    user_id: &str,
+    storage: Arc<crate::mls::InMemoryStorage>,
+) -> (OfflineProtocol, MockTransport, Arc<Mutex<Vec<Event>>>) {
+    let mut config = create_test_config_for_user(user_id);
+    config.encryption = crate::EncryptionConfig::disabled();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    protocol.enable_message_persistence(storage).unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+    (protocol, handle, events)
+}
+
+#[test]
+fn test_media_descriptor_persisted_and_cleared_on_completion() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let (mut alice, _handle, _events) =
+        plaintext_media_protocol_with_storage("alice", Arc::clone(&storage));
+
+    let file_id = alice
+        .send_media("bob", vec![7u8; 64], "photo.bin", ContentType::File, None)
+        .unwrap();
+
+    assert!(
+        storage
+            .load(storage_keys::MEDIA_DESCRIPTORS, &file_id)
+            .unwrap()
+            .is_some(),
+        "Descriptor must be persisted while the transfer is in flight"
+    );
+
+    // Deliver every chunk: the completed transfer must take its
+    // crash-recovery descriptor with it.
+    let chunk_ids: Vec<_> = alice
+        .outbound_media_chunks
+        .iter()
+        .filter(|(_, (fid, _))| fid == &file_id)
+        .map(|(id, _)| id.clone())
+        .collect();
+    assert!(!chunk_ids.is_empty());
+    for chunk_id in chunk_ids {
+        alice.handle_outbound_media_chunk_delivered(&chunk_id);
+    }
+
+    assert!(!alice.outbound_media_transfers.contains_key(&file_id));
+    assert!(
+        storage
+            .load(storage_keys::MEDIA_DESCRIPTORS, &file_id)
+            .unwrap()
+            .is_none(),
+        "Completed transfer must delete its descriptor"
+    );
+}
+
+#[test]
+fn test_media_descriptor_cleared_on_abort() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let (mut alice, _handle, _events) =
+        plaintext_media_protocol_with_storage("alice", Arc::clone(&storage));
+
+    let file_id = alice
+        .send_media("bob", vec![7u8; 64], "photo.bin", ContentType::File, None)
+        .unwrap();
+    assert!(storage
+        .load(storage_keys::MEDIA_DESCRIPTORS, &file_id)
+        .unwrap()
+        .is_some());
+
+    alice.abort_outbound_media_transfer(&file_id, "test abort");
+
+    assert!(
+        storage
+            .load(storage_keys::MEDIA_DESCRIPTORS, &file_id)
+            .unwrap()
+            .is_none(),
+        "Aborted transfer must delete its descriptor (MediaSendFailed already settled it)"
+    );
+}
+
+#[test]
+fn test_media_resend_required_after_restart_with_checksum_validation() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let original_bytes = vec![7u8; 256];
+
+    // First life: transfer starts, process dies before completion.
+    let file_id = {
+        let (mut alice, _handle, _events) =
+            plaintext_media_protocol_with_storage("alice", Arc::clone(&storage));
+        alice
+            .send_media(
+                "bob",
+                original_bytes.clone(),
+                "photo.bin",
+                ContentType::File,
+                None,
+            )
+            .unwrap()
+    };
+
+    // Second life: restore must surface the interrupted transfer.
+    let (mut alice, _handle, events) =
+        plaintext_media_protocol_with_storage("alice", Arc::clone(&storage));
+
+    let resend = events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|event| match event {
+            Event::MediaResendRequired {
+                file_id: fid,
+                recipient,
+                file_name,
+                file_size,
+            } => Some((
+                fid.clone(),
+                recipient.clone(),
+                file_name.clone(),
+                *file_size,
+            )),
+            _ => None,
+        })
+        .expect("MediaResendRequired must be emitted on start() after a mid-transfer restart");
+    assert_eq!(resend.0, file_id);
+    assert_eq!(resend.1, "bob");
+    assert_eq!(resend.2, "photo.bin");
+    assert_eq!(resend.3, 256);
+
+    // Resending different bytes under the interrupted file_id is rejected.
+    let wrong = alice.send_media_with(
+        "bob",
+        vec![8u8; 256],
+        "photo.bin",
+        ContentType::File,
+        MediaSendOptions {
+            file_id: Some(file_id.clone()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(wrong, Err(crate::Error::InvalidArgument(_))),
+        "Checksum mismatch must reject the resend, got {:?}",
+        wrong.map(|_| ())
+    );
+
+    // The original bytes pass validation and consume the descriptor.
+    let resent = alice
+        .send_media_with(
+            "bob",
+            original_bytes,
+            "photo.bin",
+            ContentType::File,
+            MediaSendOptions {
+                file_id: Some(file_id.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(resent, file_id);
+    assert!(
+        !alice.restored_media_descriptors.contains_key(&file_id),
+        "A successful resend must consume the restored descriptor"
+    );
+    assert!(
+        storage
+            .load(storage_keys::MEDIA_DESCRIPTORS, &file_id)
+            .unwrap()
+            .is_some(),
+        "The resent transfer persists a fresh descriptor of its own"
+    );
+}
+
+#[test]
+fn test_media_descriptor_restore_prunes_expired() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let (mut alice, _handle, _events) =
+        plaintext_media_protocol_with_storage("alice", Arc::clone(&storage));
+
+    // Plant a descriptor older than the outbox lifetime (default 1h).
+    let stale = MediaTransferDescriptor {
+        file_id: "file_stale".to_string(),
+        recipient: "bob".to_string(),
+        file_name: "old.bin".to_string(),
+        file_size: 10,
+        file_checksum: "00".repeat(32),
+        content_type: ContentType::File,
+        queued_at: chrono::Utc::now() - ChronoDuration::hours(2),
+    };
+    alice.persist_media_descriptor(&stale);
+
+    alice.restore_media_descriptors().unwrap();
+
+    assert!(
+        !alice.restored_media_descriptors.contains_key("file_stale"),
+        "Expired descriptor must not be restored"
+    );
+    assert!(
+        storage
+            .load(storage_keys::MEDIA_DESCRIPTORS, "file_stale")
+            .unwrap()
+            .is_none(),
+        "Expired descriptor must be deleted from storage"
+    );
+}
+
 #[test]
 fn test_plaintext_media_rejected_once_session_confirmed() {
     let (mut alice, _alice_handle) = media_test_protocol("alice");

@@ -809,6 +809,11 @@ pub(crate) mod storage_keys {
     /// intentionally excluded because file transfers are not persisted and
     /// must be re-initiated by the app after a restart.
     pub const OUTBOX: &str = "outbox";
+    /// Key type for persisted outbound media transfer descriptors, keyed by
+    /// file id. Descriptor-only (never chunk bytes): a descriptor surviving
+    /// into a restore marks a transfer the app must re-initiate, surfaced
+    /// via `MediaResendRequired`.
+    pub const MEDIA_DESCRIPTORS: &str = "media_descriptors";
     /// Key type for the Lamport clock value.
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
@@ -958,6 +963,31 @@ pub(crate) struct OutboundMediaTransfer {
     /// `send_media_with` boundary). Kept on the transfer because chunk
     /// batches are (re-)encoded via `pump_media_transfers` too.
     pub(crate) rich_extras: Option<crate::media_envelope::MediaRichExtras>,
+}
+
+/// Crash-scoped descriptor of an in-flight outbound media transfer.
+///
+/// Persisted (no chunk bytes — see commit 42d1b86's rationale: resurrected
+/// chunks can never complete, and per-chunk secure-storage writes are
+/// expensive) when a transfer starts and deleted whenever the in-memory
+/// transfer is removed (completed, aborted, or stale-swept). A descriptor
+/// found on restore therefore means the app died mid-transfer:
+/// [`crate::events::Event::MediaResendRequired`] is emitted so the app can
+/// re-supply the bytes via `send_media_with` under the same `file_id`,
+/// validated against `file_checksum`.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct MediaTransferDescriptor {
+    pub(crate) file_id: String,
+    pub(crate) recipient: String,
+    pub(crate) file_name: String,
+    pub(crate) file_size: u64,
+    /// SHA-256 hex of the plaintext file bytes (same value every chunk
+    /// carries as `FileChunk::file_checksum`).
+    pub(crate) file_checksum: String,
+    pub(crate) content_type: ContentType,
+    /// Wall-clock start of the transfer; restore prunes by
+    /// `outbox_max_lifetime_ms` age.
+    pub(crate) queued_at: DateTime<Utc>,
 }
 
 pub(crate) enum OutboundSendPreparation {
