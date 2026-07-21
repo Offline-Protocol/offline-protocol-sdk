@@ -40,3 +40,72 @@ pub const SMALL_NETWORK_RELAY_THRESHOLD: usize = 5;
 
 /// Density factor numerator for relay probability calculation.
 pub const RELAY_DENSITY_FACTOR_NUMERATOR: f32 = 5.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The RN native bridges rebuild the whole `RetryConfig` from JSON in
+    /// `updateRetryConfig`, filling absent fields from hardcoded fallbacks.
+    /// A fallback that drifts from the Rust defaults silently overrides the
+    /// SDK default for every field the app didn't set (this happened once:
+    /// `maxRetries` 3 vs 10). This test pins the bridge literals to the
+    /// constants above; when a default changes here, it fails until both
+    /// bridge files are updated.
+    #[test]
+    fn rn_bridge_retry_fallbacks_match_rust_defaults() {
+        let rn_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let kotlin_path =
+            rn_root.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
+        let swift_path = rn_root.join("ios/OfflineProtocolModule.swift");
+
+        // The guard only applies in the repo checkout; skip when the
+        // bindings tree isn't present (e.g. a vendored crate).
+        let (Ok(kotlin), Ok(swift)) = (
+            std::fs::read_to_string(&kotlin_path),
+            std::fs::read_to_string(&swift_path),
+        ) else {
+            eprintln!("bindings tree not present, skipping RN fallback drift check");
+            return;
+        };
+
+        let kotlin_expected = [
+            format!("json.optInt(\"maxRetries\", {DEFAULT_MAX_RETRIES})"),
+            format!("json.optLong(\"initialDelayMs\", {DEFAULT_INITIAL_DELAY_MS})"),
+            format!("json.optLong(\"maxDelayMs\", {DEFAULT_MAX_DELAY_MS})"),
+            format!("json.optDouble(\"backoffMultiplier\", {DEFAULT_BACKOFF_MULTIPLIER:.1})"),
+            format!("json.optLong(\"outboxMaxLifetimeMs\", {DEFAULT_OUTBOX_LIFETIME_MS})"),
+        ];
+        for expected in &kotlin_expected {
+            assert!(
+                kotlin.contains(expected),
+                "RN Android bridge retry fallback drifted from the Rust default: \
+                 expected `{expected}` in {}",
+                kotlin_path.display()
+            );
+        }
+
+        let swift_expected = [
+            format!("(config[\"maxRetries\"] as? NSNumber)?.uint32Value ?? {DEFAULT_MAX_RETRIES}"),
+            format!(
+                "(config[\"initialDelayMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_INITIAL_DELAY_MS}"
+            ),
+            format!("(config[\"maxDelayMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_MAX_DELAY_MS}"),
+            format!(
+                "(config[\"backoffMultiplier\"] as? NSNumber)?.floatValue ?? {DEFAULT_BACKOFF_MULTIPLIER:.1}"
+            ),
+            format!(
+                "(config[\"outboxMaxLifetimeMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_OUTBOX_LIFETIME_MS}"
+            ),
+        ];
+        for expected in &swift_expected {
+            assert!(
+                swift.contains(expected),
+                "RN iOS bridge retry fallback drifted from the Rust default: \
+                 expected `{expected}` in {}",
+                swift_path.display()
+            );
+        }
+    }
+}
