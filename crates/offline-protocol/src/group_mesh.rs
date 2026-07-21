@@ -3256,17 +3256,15 @@ impl OfflineProtocol {
         Option<String>,
         Option<crate::events::ForwardInfoEvent>,
     ) {
-        if text.starts_with(internal_prefixes::RICH_V1) {
-            if let Some(rich) = RichPayloadV1::parse_sealed(&text, sender) {
-                return (
-                    rich.text,
-                    rich.media_metadata,
-                    rich.content_type.map(|ct| ct.to_string()),
-                    rich.forward_info
-                        .as_ref()
-                        .map(crate::events::ForwardInfoEvent::from),
-                );
-            }
+        if let Some(rich) = RichPayloadV1::parse_sealed(&text, sender) {
+            return (
+                rich.text,
+                rich.media_metadata,
+                rich.content_type.map(|ct| ct.to_string()),
+                rich.forward_info
+                    .as_ref()
+                    .map(crate::events::ForwardInfoEvent::from),
+            );
         }
         (
             text,
