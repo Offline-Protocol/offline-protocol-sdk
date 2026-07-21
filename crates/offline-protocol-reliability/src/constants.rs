@@ -13,13 +13,24 @@ pub const DEFAULT_MAX_RETRIES: u32 = 10;
 pub const DEFAULT_INITIAL_DELAY_MS: u64 = 1000;
 
 /// Maximum retry delay in milliseconds.
-pub const DEFAULT_MAX_DELAY_MS: u64 = 30000;
+///
+/// 5 minutes. Delivery latency does not ride on this ceiling: outbox
+/// flushes (start, transport reconnect, peer rediscovery, session
+/// establishment) bypass backoff timers entirely. The periodic retry is a
+/// safety net, and a lower ceiling only multiplies futile send attempts —
+/// and per-failure `MessageRetrying` events — while a peer stays offline
+/// within the 7-day outbox window.
+pub const DEFAULT_MAX_DELAY_MS: u64 = 300_000;
 
 /// Backoff multiplier for exponential backoff.
 pub const DEFAULT_BACKOFF_MULTIPLIER: f32 = 2.0;
 
 /// Maximum lifetime for messages in outbox (milliseconds).
-pub const DEFAULT_OUTBOX_LIFETIME_MS: u64 = 3600000;
+///
+/// 7 days, matching the app-layer presence-flush window: a peer is
+/// considered recoverable for up to 7 days offline, so queued messages
+/// must survive at least that long before the outbox gives up on them.
+pub const DEFAULT_OUTBOX_LIFETIME_MS: u64 = 604_800_000;
 
 /// Estimated size of an ACK entry in bytes (message ID + metadata).
 pub const ESTIMATED_ACK_SIZE_BYTES: usize = 40;

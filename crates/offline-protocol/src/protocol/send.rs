@@ -2015,9 +2015,13 @@ impl OfflineProtocol {
             {
                 continue;
             }
-            expired_from_outbox.push((message_id.clone(), entry.last_transport));
+            expired_from_outbox.push((
+                message_id.clone(),
+                entry.last_transport,
+                entry.attempt_count,
+            ));
         }
-        for (message_id, last_transport) in expired_from_outbox {
+        for (message_id, last_transport, attempt_count) in expired_from_outbox {
             if let Some(transport) = last_transport {
                 self.transport_manager.record_delivery_failure(transport);
             }
@@ -2025,6 +2029,32 @@ impl OfflineProtocol {
             self.outbox.remove(&message_id);
             self.clear_outbox_entry_from_storage(&message_id);
             self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
+
+            // Expiry is terminal: without an event the app shows the message
+            // as pending forever. Mirrors handle_max_retries_exceeded, which
+            // settles the same way when the retry budget runs out.
+            self.emit_event(Event::message_failed(
+                message_id.clone(),
+                "Outbox lifetime exceeded".to_string(),
+                attempt_count,
+            ));
+            let undeliverable_recipient = self
+                .pending_connection_requests
+                .remove(&message_id.as_str())
+                .filter(|pending| pending.sent_at.elapsed() <= PENDING_CONNECTION_REQUEST_TTL)
+                .map(|pending| pending.recipient);
+            if let Some(recipient) = undeliverable_recipient {
+                warn!(
+                    recipient = %recipient,
+                    message_id = %message_id,
+                    "Connection request undeliverable: outbox lifetime exceeded"
+                );
+                self.emit_event(Event::connection_request_undeliverable(
+                    recipient,
+                    message_id.as_str(),
+                    "outbox_lifetime_exceeded".to_string(),
+                ));
+            }
         }
 
         let mut expired_from_media = Vec::new();
