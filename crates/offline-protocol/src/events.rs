@@ -591,13 +591,17 @@ pub enum Event {
     /// The transport layer reported the recipient unreachable for an
     /// in-flight message (e.g. the internet relay's DeliveryError).
     ///
-    /// Non-terminal: the message stays in the outbox and keeps retrying —
-    /// this is the early signal that the recipient is offline, so the app
-    /// can surface "pending" state or trigger its own presence watch.
+    /// Non-terminal: the message stays in the outbox. A plain DM is
+    /// *parked* — its ACK retry budget stops burning while the peer is
+    /// provably offline — and is re-driven on reachability edges (transport
+    /// reconnect, peer discovery, presence-online; the SDK adds parked
+    /// recipients to the presence watchlist). It settles only via
+    /// `MessageDelivered` or, at outbox-lifetime expiry, `MessageFailed`.
+    /// Media chunks are not parked and keep the normal retry machinery.
     /// May fire multiple times for the same `message_id` while the
-    /// recipient remains offline (once per retried attempt that reaches
-    /// the relay). `file_id` is set when the message is a chunk of an
-    /// outbound media transfer.
+    /// recipient remains offline (once per attempt that reaches the
+    /// relay, e.g. mesh-carrier reachability probes). `file_id` is set
+    /// when the message is a chunk of an outbound media transfer.
     MessageUndeliverable {
         /// ID of the affected message.
         message_id: String,
