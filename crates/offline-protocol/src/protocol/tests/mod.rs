@@ -4948,10 +4948,21 @@ fn test_unreachable_relay_verdict_emits_message_undeliverable_non_terminal() {
     assert_eq!(undeliverable.3, None);
     drop(captured);
 
-    // Non-terminal: the outbox entry survives so retries continue.
+    // Non-terminal: the outbox entry survives, but the message is parked —
+    // no pending ACK left to burn max_retries against an offline peer.
     assert!(
         protocol.outbox.contains_key(&message_id),
         "MessageUndeliverable must not settle the outbox entry"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "Unreachable verdict must drop the pending ACK (park)"
+    );
+    // A BLE mock transport is up, so the park keeps a timed mesh
+    // reachability probe instead of going edge-only.
+    assert!(
+        protocol.retry_queue.contains(&message_id.as_str()),
+        "Mesh carrier present: park must schedule a reachability probe"
     );
 }
 
@@ -5050,6 +5061,395 @@ fn test_unreachable_media_chunk_resolves_file_id() {
         })
         .expect("MessageUndeliverable must fire for an unreachable media chunk");
     assert_eq!(file_id.as_deref(), Some("file_abc"));
+}
+
+#[test]
+fn test_unreachable_dm_parks_edge_only_without_mesh_carrier() {
+    // Internet-only carrier: the relay's unreachable verdict parks the DM
+    // fully edge-driven — pending ACK dropped, nothing on a retry timer —
+    // so the ACK timeout loop can never burn max_retries into a terminal
+    // message_failed against a peer that is provably offline.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(protocol.ack_manager.is_waiting_for_ack(&message_id));
+
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "Parked DM must stay in the outbox"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "Park must drop the pending ACK"
+    );
+    assert!(
+        !protocol.retry_queue.contains(&message_id.as_str()),
+        "No mesh carrier: park must be edge-only, nothing on a timer"
+    );
+
+    // With neither a pending ACK nor a retry entry, the tick loop has
+    // nothing to settle terminally.
+    protocol.process().unwrap();
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "A parked DM must not settle as message_failed"
+    );
+    assert!(protocol.outbox.contains_key(&message_id));
+}
+
+#[test]
+fn test_unreachable_dm_mesh_probe_escalates_and_resets_on_edge() {
+    // With a local mesh carrier up the peer may be a room away, so the park
+    // keeps a timed reachability probe whose interval escalates per
+    // consecutive unreachable park and resets on a reachability edge.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+    let first_delay = protocol
+        .retry_queue
+        .time_until_next_retry()
+        .expect("first park must schedule a probe");
+    assert!(first_delay > chrono::Duration::seconds(10));
+    assert!(first_delay <= chrono::Duration::seconds(15));
+
+    // Second consecutive park doubles the interval (15s -> 30s).
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&2));
+    let second_delay = protocol
+        .retry_queue
+        .time_until_next_retry()
+        .expect("second park must re-schedule the probe");
+    assert!(second_delay > chrono::Duration::seconds(20));
+    assert!(second_delay <= chrono::Duration::seconds(30));
+
+    // A per-peer reachability edge resets the escalation counter.
+    protocol.flush_outbox_for_peer("bob");
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), None);
+}
+
+#[test]
+fn test_unreachable_media_chunk_is_not_parked() {
+    // Media chunks keep the normal retry machinery: their offline story is
+    // retry exhaustion -> transfer abort -> persisted descriptor ->
+    // MediaResendRequired with app-resupplied bytes. Parking would strand
+    // chunk bytes in memory for the outbox lifetime instead.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let chunk_message = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "chunk-bytes",
+    );
+    let chunk_id = chunk_message.id.clone();
+    protocol.media_outbox.insert(
+        chunk_id.clone(),
+        OutboxEntry {
+            message: chunk_message,
+            attempt_count: 1,
+            first_sent_at: chrono::Utc::now(),
+            last_sent_at: chrono::Utc::now(),
+            last_transport: Some(TransportType::Internet),
+        },
+    );
+    protocol
+        .ack_manager
+        .register_pending_ack(chunk_id.clone(), None)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed(
+            &chunk_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&chunk_id),
+        "Media chunk must keep its pending ACK (not parked)"
+    );
+    assert!(protocol.media_outbox.contains_key(&chunk_id));
+    assert!(protocol.dm_unreachable_parks.is_empty());
+}
+
+#[test]
+fn test_parked_dm_redriven_with_fresh_ack_budget() {
+    // Every re-drive registers a fresh pending ACK, so the retry budget
+    // only ever burns against a peer believed reachable — attempts spent
+    // before the peer went offline don't count against post-recovery
+    // delivery.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Simulate a partly burned budget before the unreachable verdict.
+    protocol.ack_manager.increment_retry_count(&message_id);
+    protocol.ack_manager.increment_retry_count(&message_id);
+    protocol.ack_manager.increment_retry_count(&message_id);
+    assert_eq!(
+        protocol
+            .ack_manager
+            .get_pending_ack(&message_id)
+            .unwrap()
+            .retry_count,
+        3
+    );
+
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert!(!protocol.ack_manager.is_waiting_for_ack(&message_id));
+
+    // Carrier-level reachability edge (e.g. internet reconnect).
+    protocol.flush_outbox_all();
+
+    let pending = protocol
+        .ack_manager
+        .get_pending_ack(&message_id)
+        .expect("re-driven DM must be ACK-tracked again");
+    assert_eq!(
+        pending.retry_count, 0,
+        "Re-drive must start with a fresh ACK retry budget"
+    );
+}
+
+#[test]
+fn test_parked_dm_redriven_on_peer_presence_online() {
+    // The relay's presence-online answer is the un-park edge for peers
+    // watched via CheckPresence: it must immediately re-drive the parked
+    // DM.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert!(!protocol.ack_manager.is_waiting_for_ack(&message_id));
+
+    protocol.on_peer_presence("bob", true, None);
+
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "Presence-online must re-drive the parked DM"
+    );
+}
+
+#[test]
+fn test_presence_watch_peers_includes_parked_dm_recipients() {
+    // The SDK owns the "watch my DeliveryError recipients" duty: parked
+    // (and generally non-in-flight) outbox recipients join the CheckPresence
+    // watchlist, while a recipient whose message is in flight (awaiting
+    // ACK) is not watched.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let parked_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .send_message("carol", "hi", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed(
+            &parked_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    let watchlist = protocol.presence_watch_peers();
+    assert!(
+        watchlist.contains(&"bob".to_string()),
+        "Parked DM recipient must be presence-watched"
+    );
+    assert!(
+        !watchlist.contains(&"carol".to_string()),
+        "In-flight (ACK-pending) recipient is not watched"
+    );
+}
+
+#[test]
+fn test_cleanup_outbox_absolute_lifetime_cap_is_terminal_in_process() {
+    // The carrier-relative window slides on every send, and a parked DM's
+    // mesh reachability probe keeps sending — in a long-lived process only
+    // the absolute cap from first_sent_at bounds the entry's total
+    // lifetime (mirrors the restore path's cap).
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let lifetime_ms = protocol.config.reliability.retry.outbox_max_lifetime_ms as i64;
+    let over_cap = chrono::Utc::now()
+        - chrono::Duration::milliseconds(
+            lifetime_ms * (crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as i64) + 60_000,
+        );
+
+    let make_entry = |first_sent_at| {
+        let message = Message::new(
+            UserId::new("user123").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        let id = message.id.clone();
+        (
+            id,
+            OutboxEntry {
+                message,
+                attempt_count: 5,
+                first_sent_at,
+                last_sent_at: chrono::Utc::now(), // fresh: probe just sent
+                last_transport: None,
+            },
+        )
+    };
+
+    let (expired_id, expired_entry) = make_entry(over_cap);
+    let (fresh_id, fresh_entry) = make_entry(chrono::Utc::now());
+    protocol.outbox.insert(expired_id.clone(), expired_entry);
+    protocol.outbox.insert(fresh_id.clone(), fresh_entry);
+
+    protocol.cleanup_outbox();
+
+    assert!(
+        !protocol.outbox.contains_key(&expired_id),
+        "Entry past the absolute cap must be dropped despite a fresh last_sent_at"
+    );
+    assert!(
+        protocol.outbox.contains_key(&fresh_id),
+        "Entry inside both windows must survive"
+    );
+    let captured = events.lock().unwrap();
+    assert!(
+        captured.iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id, reason, .. }
+                if *message_id == expired_id.as_str() && reason == "Outbox lifetime exceeded"
+        )),
+        "Absolute-cap expiry must settle terminally"
+    );
+}
+
+#[test]
+fn test_dm_unreachable_parks_counter_pruned_with_outbox() {
+    // Only peers that still hold outbox entries may retain a park counter,
+    // so the map stays bounded by the outbox cap.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+
+    protocol.outbox.remove(&message_id);
+    protocol.cleanup_outbox();
+
+    assert!(
+        protocol.dm_unreachable_parks.is_empty(),
+        "Counter must be pruned once the peer holds no outbox entries"
+    );
 }
 
 #[test]
