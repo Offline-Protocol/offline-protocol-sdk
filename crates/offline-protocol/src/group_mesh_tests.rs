@@ -8629,3 +8629,387 @@ fn test_cleanup_sweep_releases_transport_dedup_for_expired_entries() {
         "Sweep-expired message must release its transport-level dedup entry"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sealed rich extras in group messages (cloud media forwarding)
+// ---------------------------------------------------------------------------
+
+/// Fixture: a received cloud-media message, as an app hands it back to
+/// `forward_message_to_group` — download URL plus content-encryption secrets.
+fn group_cloud_media_original(sender: &str, recipient: &str) -> offline_protocol_core::Message {
+    let mut original = make_message(sender, recipient, "check out this photo");
+    original.content_type = offline_protocol_core::ContentType::Image;
+    original.media_metadata = Some(offline_protocol_core::MediaMetadata {
+        mime_type: "image/jpeg".to_string(),
+        file_name: "secret-photo.jpg".to_string(),
+        file_size: 42,
+        duration_ms: None,
+        width: Some(10),
+        height: Some(10),
+        thumbnail_base64: None,
+        media_id: None,
+        download_url: Some("https://cdn.example/blob/1".to_string()),
+        thumbnail_url: None,
+        encryption_key: Some("a2V5LWJ5dGVz".to_string()),
+        iv: Some("aXYtYnl0ZXM=".to_string()),
+        ciphertext_hash: None,
+        sticker_provider: None,
+        sticker_remote_id: None,
+        sticker_kind: None,
+    });
+    original
+}
+
+/// Wires a capturing MockTransport into `protocol` and returns the handle.
+fn wire_mock_transport(
+    protocol: &mut OfflineProtocol,
+) -> offline_protocol_transport::MockTransport {
+    let mock = offline_protocol_transport::MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let handle = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    handle
+}
+
+#[test]
+fn group_forward_seals_media_secrets_when_all_members_capable() {
+    // The group half of the cloud-media forward contract: when every other
+    // member advertised the sealed rich payload, forwarding a cloud-media
+    // message into the group must deliver the media key inside the group
+    // MLS ciphertext — and never in the hop-visible payload JSON.
+    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Rich Forward Group");
+    let alice_handle = wire_mock_transport(&mut alice);
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "bob",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    let original = group_cloud_media_original("dave", "alice");
+    alice
+        .forward_message_to_group(&original, &group_id, None)
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let wire = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::GROUP_MLS_MSG))
+        .expect("group forward must reach the wire");
+    // Secrets and the sealed body live only inside the MLS ciphertext.
+    assert!(!wire.content.contains("a2V5LWJ5dGVz"));
+    assert!(!wire.content.contains("https://cdn.example/blob/1"));
+
+    let bob_message = make_message("alice", "bob", &wire.content);
+    let result = bob.process_internal_message(&bob_message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+    let events = bob_events.lock().unwrap();
+    let received = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMessageReceived { .. }))
+        .expect("bob must receive the forwarded group message");
+    let Event::GroupMessageReceived {
+        content,
+        media_metadata,
+        content_type,
+        forward_info,
+        ..
+    } = received
+    else {
+        unreachable!()
+    };
+    assert_eq!(content, "check out this photo");
+    let media = media_metadata
+        .as_ref()
+        .expect("sealed media metadata restored");
+    assert_eq!(media.encryption_key.as_deref(), Some("a2V5LWJ5dGVz"));
+    assert_eq!(media.iv.as_deref(), Some("aXYtYnl0ZXM="));
+    assert_eq!(
+        media.download_url.as_deref(),
+        Some("https://cdn.example/blob/1")
+    );
+    assert_eq!(content_type.as_deref(), Some("image"));
+    let fwd = forward_info
+        .as_ref()
+        .expect("forward attribution restored from the sealed body");
+    assert_eq!(fwd.original_sender, "dave");
+}
+
+#[test]
+fn group_forward_drops_media_when_member_capability_unknown() {
+    // Fail closed: one member whose rich capability we never learned (e.g.
+    // joined via someone else's Welcome) forces the extras to drop — a
+    // legacy member would render a sealed body as literal JSON text. The
+    // plaintext stays bare, attribution survives via the hop-visible
+    // payload copy, and no secret leaves in cleartext.
+    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Legacy Member Group");
+    let alice_handle = wire_mock_transport(&mut alice);
+    // Bob's rich capability is never fed to alice.
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    let original = group_cloud_media_original("dave", "alice");
+    alice
+        .forward_message_to_group(&original, &group_id, None)
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let wire = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::GROUP_MLS_MSG))
+        .expect("group forward must reach the wire");
+    assert!(!wire.content.contains("a2V5LWJ5dGVz"));
+    assert!(!wire.content.contains(internal_prefixes::RICH_V1));
+
+    let bob_message = make_message("alice", "bob", &wire.content);
+    bob.process_internal_message(&bob_message);
+
+    let events = bob_events.lock().unwrap();
+    let received = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMessageReceived { .. }))
+        .expect("bob must still receive the forwarded text");
+    let Event::GroupMessageReceived {
+        content,
+        media_metadata,
+        forward_info,
+        ..
+    } = received
+    else {
+        unreachable!()
+    };
+    assert_eq!(content, "check out this photo");
+    assert!(
+        media_metadata.is_none(),
+        "media metadata must drop toward a not-fully-capable group"
+    );
+    let fwd = forward_info
+        .as_ref()
+        .expect("payload attribution survives for legacy groups");
+    assert_eq!(fwd.original_sender, "dave");
+}
+
+#[test]
+fn group_send_with_seals_media_toward_capable_group() {
+    // Fresh group media send (send_group_message_with): same sealed
+    // carriage as the forward path.
+    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Rich Send Group");
+    let alice_handle = wire_mock_transport(&mut alice);
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "bob",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    let media = group_cloud_media_original("alice", "bob")
+        .media_metadata
+        .unwrap();
+    alice
+        .send_group_message_with(
+            &group_id,
+            "fresh cloud photo",
+            GroupSendOptions {
+                content_type: Some(offline_protocol_core::ContentType::Image),
+                media_metadata: Some(media),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let sent = alice_handle.sent_messages();
+    let wire = sent
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::GROUP_MLS_MSG))
+        .expect("group send must reach the wire");
+    assert!(!wire.content.contains("a2V5LWJ5dGVz"));
+
+    let bob_message = make_message("alice", "bob", &wire.content);
+    bob.process_internal_message(&bob_message);
+
+    let events = bob_events.lock().unwrap();
+    let Some(Event::GroupMessageReceived {
+        content,
+        media_metadata,
+        content_type,
+        ..
+    }) = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMessageReceived { .. }))
+    else {
+        panic!("bob must receive the rich group message");
+    };
+    assert_eq!(content, "fresh cloud photo");
+    assert_eq!(
+        media_metadata
+            .as_ref()
+            .and_then(|m| m.encryption_key.as_deref()),
+        Some("a2V5LWJ5dGVz")
+    );
+    assert_eq!(content_type.as_deref(), Some("image"));
+}
+
+#[test]
+fn group_relay_path_restores_sealed_media() {
+    // The relay-broadcast inbound path shares the sealed restore: a rich
+    // group ciphertext arriving via __GROUP_MSG__ must surface the media
+    // metadata exactly like the mesh path.
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Relay Rich Group");
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    let original = group_cloud_media_original("dave", "alice");
+    let sealed = OfflineProtocol::seal_rich_payload(
+        &original.content,
+        &crate::protocol::RichSendExtras {
+            reply_context: None,
+            media_metadata: original.media_metadata.clone(),
+            forward_info: Some(offline_protocol_core::ForwardInfo::from_message(&original)),
+        },
+        original.content_type,
+    )
+    .unwrap();
+    let encrypted = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        alice_mls
+            .encrypt_for_group(&gid, sealed.as_bytes())
+            .unwrap()
+    };
+
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &base64_encode(&encrypted.ciphertext),
+        "2026-07-21T00:00:00Z",
+        "relay-msg-1",
+        None,
+        None,
+    );
+
+    let events = bob_events.lock().unwrap();
+    let Some(Event::GroupMessageReceived {
+        content,
+        media_metadata,
+        forward_info,
+        ..
+    }) = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMessageReceived { .. }))
+    else {
+        panic!("relay rich message must surface");
+    };
+    assert_eq!(content, "check out this photo");
+    assert_eq!(
+        media_metadata
+            .as_ref()
+            .and_then(|m| m.encryption_key.as_deref()),
+        Some("a2V5LWJ5dGVz")
+    );
+    assert_eq!(
+        forward_info.as_ref().map(|f| f.original_sender.as_str()),
+        Some("dave")
+    );
+}
+
+#[test]
+fn group_sealed_parse_failure_surfaces_raw_text() {
+    // A malformed sealed body inside an authenticated group ciphertext must
+    // surface as raw text (never drop the message), with nothing restored —
+    // mirroring the DM fallback.
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Malformed Rich Group");
+
+    let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_events_clone = bob_events.clone();
+    bob.on_event(move |event| {
+        bob_events_clone.lock().unwrap().push(event);
+    });
+
+    let raw = format!("{}not-json", internal_prefixes::RICH_V1);
+    let encrypted = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        alice_mls.encrypt_for_group(&gid, raw.as_bytes()).unwrap()
+    };
+    let msg_payload = GroupMlsMessagePayload {
+        group_id: group_id.clone(),
+        ciphertext: base64_encode(&encrypted.ciphertext),
+        epoch: encrypted.epoch,
+        reply_to: None,
+        forward_info: None,
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_MSG,
+        serde_json::to_string(&msg_payload).unwrap()
+    );
+    bob.process_internal_message(&make_message("alice", "bob", &content));
+
+    let events = bob_events.lock().unwrap();
+    let Some(Event::GroupMessageReceived {
+        content,
+        media_metadata,
+        ..
+    }) = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMessageReceived { .. }))
+    else {
+        panic!("malformed rich body must still surface");
+    };
+    assert_eq!(content, &raw);
+    assert!(media_metadata.is_none());
+}
+
+#[test]
+fn group_send_with_rejects_file_chunk_and_oversized_extras() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Boundary Group");
+
+    let err = alice
+        .send_group_message_with(
+            &group_id,
+            "x",
+            GroupSendOptions {
+                content_type: Some(offline_protocol_core::ContentType::FileChunk),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(err, crate::Error::InvalidArgument(_)));
+
+    let mut original = group_cloud_media_original("dave", "alice");
+    original.content_type = offline_protocol_core::ContentType::FileChunk;
+    let err = alice
+        .forward_message_to_group(&original, &group_id, None)
+        .unwrap_err();
+    assert!(matches!(err, crate::Error::InvalidArgument(_)));
+
+    let mut original = group_cloud_media_original("dave", "alice");
+    if let Some(media) = original.media_metadata.as_mut() {
+        media.thumbnail_base64 = Some("x".repeat(crate::protocol::MAX_RICH_EXTRAS_BYTES + 1));
+    }
+    let err = alice
+        .forward_message_to_group(&original, &group_id, None)
+        .unwrap_err();
+    assert!(err.to_string().contains("Rich extras too large"));
+}

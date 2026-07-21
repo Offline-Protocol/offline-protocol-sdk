@@ -790,6 +790,22 @@ impl OfflineProtocol {
         self.config.encryption.rich_payload_enabled && self.peer_rich_payload.contains(recipient)
     }
 
+    /// Whether rich extras may seal into a group message: our own kill
+    /// switch is on and every non-self member advertised
+    /// [`RICH_PAYLOAD_V1`]. Group MLS encryption produces a single
+    /// ciphertext for all members, so one non-capable member — or one whose
+    /// key package we never saw directly (e.g. added by another member) —
+    /// forces the extras to drop for the whole group. Conservative by
+    /// design: an unknown member must never receive a sealed body their SDK
+    /// would render as literal `__RICH_V1__` JSON.
+    pub(crate) fn group_rich_seal_active(&self, members: &[String]) -> bool {
+        self.config.encryption.rich_payload_enabled
+            && members
+                .iter()
+                .filter(|m| m.as_str() != self.config.user_id)
+                .all(|m| self.peer_rich_payload.contains(m.as_str()))
+    }
+
     /// Wraps plaintext content and rich extras into the sealed
     /// `__RICH_V1__`-prefixed JSON body ([`RichPayloadV1`]). Callers must
     /// only invoke this on a path that MLS-encrypts the result — the sealed
@@ -800,7 +816,7 @@ impl OfflineProtocol {
     /// just when non-Text) so the receiver can treat the sealed copy as
     /// authoritative and a relay cannot rewrite the hint in either
     /// direction on a rich message.
-    pub(super) fn seal_rich_payload(
+    pub(crate) fn seal_rich_payload(
         content: &str,
         extras: &RichSendExtras,
         content_type: ContentType,

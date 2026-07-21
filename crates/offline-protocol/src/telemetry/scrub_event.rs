@@ -130,7 +130,8 @@ pub(crate) fn scrub_event<'a>(event: &'a Event, scrubber: &Scrubber) -> Cow<'a, 
 fn event_media_metadata(event: &Event) -> Option<&offline_protocol_core::MediaMetadata> {
     match event {
         Event::MessageReceived { media_metadata, .. }
-        | Event::FileReceived { media_metadata, .. } => media_metadata.as_ref(),
+        | Event::FileReceived { media_metadata, .. }
+        | Event::GroupMessageReceived { media_metadata, .. } => media_metadata.as_ref(),
         _ => None,
     }
 }
@@ -139,7 +140,8 @@ fn event_media_metadata(event: &Event) -> Option<&offline_protocol_core::MediaMe
 /// [`offline_protocol_core::MediaMetadata::without_secrets`].
 fn redact_media_secrets(event: &mut Event) {
     if let Event::MessageReceived { media_metadata, .. }
-    | Event::FileReceived { media_metadata, .. } = event
+    | Event::FileReceived { media_metadata, .. }
+    | Event::GroupMessageReceived { media_metadata, .. } = event
     {
         if let Some(meta) = media_metadata {
             *meta = meta.without_secrets();
@@ -445,6 +447,10 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             timestamp: _,
             message_id: _,
             reply_to_msg: _,
+            // Secrets already cleared by `redact_media_secrets`; the
+            // remaining metadata and the content-type hint carry no ids.
+            media_metadata: _,
+            content_type: _,
         } => {
             hash_string(group_id, scrubber);
             hash_string(sender, scrubber);
@@ -873,6 +879,31 @@ mod tests {
                 let meta = media_metadata.expect("metadata preserved");
                 assert!(meta.encryption_key.is_none());
                 assert!(meta.iv.is_none());
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn group_message_received_media_secrets_are_redacted_when_disabled() {
+        let event = Event::GroupMessageReceived {
+            group_id: "group-1".into(),
+            sender: "alice".into(),
+            content: "c".into(),
+            timestamp: "2026-07-21T00:00:00Z".into(),
+            message_id: "msg-1".into(),
+            reply_to_msg: None,
+            forward_info: None,
+            media_metadata: Some(secret_media_metadata()),
+            content_type: Some("image".into()),
+        };
+        let scrubbed = scrub_event(&event, &scrubber_disabled()).into_owned();
+        match scrubbed {
+            Event::GroupMessageReceived { media_metadata, .. } => {
+                let meta = media_metadata.expect("metadata preserved");
+                assert!(meta.encryption_key.is_none());
+                assert!(meta.iv.is_none());
+                assert_eq!(meta.download_url.as_deref(), Some("https://cdn.example/m1"));
             }
             _ => panic!("unexpected variant"),
         }

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tracing::warn;
 
 /// Retry interval for persisting session confirmation after a transient storage error.
 pub(crate) const CONFIRMATION_RETRY_INTERVAL_SECS: i64 = 5;
@@ -428,6 +429,43 @@ pub(crate) struct RichPayloadV1 {
     /// since a sealed body would wipe their outer copies on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) content_type: Option<ContentType>,
+}
+
+impl RichPayloadV1 {
+    /// Parses a sealed `__RICH_V1__` body out of decrypted MLS plaintext.
+    ///
+    /// Shared by the DM restore (`apply_decrypted_content`) and the group
+    /// message inbound paths. Never capability-gated (mirroring envelope
+    /// parsing): whatever a peer chose to seal, we try to read. Returns
+    /// `None` when the prefix is absent or the body fails to parse (logged;
+    /// callers surface the raw text rather than dropping an authenticated
+    /// message). A sealed `FileChunk` content-type claim is refused here —
+    /// mirroring the send boundary — so a hostile sender can never steer a
+    /// decrypted message into the file-transfer manager, which would drop
+    /// it.
+    pub(crate) fn parse_sealed(plaintext: &str, sender: &str) -> Option<Self> {
+        let sealed = plaintext.strip_prefix(super::internal_prefixes::RICH_V1)?;
+        match serde_json::from_str::<Self>(sealed) {
+            Ok(mut rich) => {
+                if rich.content_type == Some(ContentType::FileChunk) {
+                    warn!(
+                        sender = %sender,
+                        "Sealed rich payload claims the internal FileChunk content type, ignoring the hint"
+                    );
+                    rich.content_type = None;
+                }
+                Some(rich)
+            }
+            Err(e) => {
+                warn!(
+                    sender = %sender,
+                    error = %e,
+                    "Failed to parse sealed rich payload, surfacing raw text"
+                );
+                None
+            }
+        }
+    }
 }
 
 /// An outbound connection request awaiting a transport outcome (see

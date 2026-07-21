@@ -1125,6 +1125,8 @@ impl OfflineProtocol {
                             payload.message_id,
                             payload.reply_to_msg,
                             None,
+                            None,
+                            None,
                         ));
                     }
                 }

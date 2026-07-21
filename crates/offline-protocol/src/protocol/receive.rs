@@ -49,30 +49,21 @@ impl OfflineProtocol {
     /// dropping an authenticated message.
     pub(super) fn apply_decrypted_content(message: &mut Message, plaintext: String) {
         message.reply_context = None;
-        if let Some(sealed) = plaintext.strip_prefix(internal_prefixes::RICH_V1) {
-            match serde_json::from_str::<RichPayloadV1>(sealed) {
-                Ok(rich) => {
+        if plaintext.starts_with(internal_prefixes::RICH_V1) {
+            match RichPayloadV1::parse_sealed(&plaintext, message.sender.as_str()) {
+                Some(rich) => {
                     message.content = rich.text;
                     message.reply_context = rich.reply_context;
                     message.media_metadata = rich.media_metadata;
                     message.forwarded_from = rich.forward_info;
-                    match rich.content_type {
-                        Some(ContentType::FileChunk) => {
-                            warn!(
-                                sender = %message.sender,
-                                "Sealed rich payload claims the internal FileChunk content type, keeping outer value"
-                            );
-                        }
-                        Some(content_type) => message.content_type = content_type,
-                        None => {}
+                    // `parse_sealed` already refused a FileChunk claim; a
+                    // remaining None keeps the outer value (bodies sealed by
+                    // senders predating the field).
+                    if let Some(content_type) = rich.content_type {
+                        message.content_type = content_type;
                     }
                 }
-                Err(e) => {
-                    warn!(
-                        sender = %message.sender,
-                        error = %e,
-                        "Failed to parse sealed rich payload, surfacing raw text"
-                    );
+                None => {
                     message.content = plaintext;
                 }
             }

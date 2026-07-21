@@ -837,6 +837,16 @@ pub enum Event {
         /// Forwarding attribution (present when this is a forwarded message).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forward_info: Option<ForwardInfoEvent>,
+        /// Media metadata restored from the sealed `__RICH_V1__` body of a
+        /// rich group message (cloud attachments — including the
+        /// `encryption_key`/`iv` secrets, which only ever travel inside the
+        /// group MLS ciphertext). Absent on plain group messages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_metadata: Option<MediaMetadata>,
+        /// Content-type rendering hint from the sealed body (text, image,
+        /// video, ...). Absent on plain group messages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
     },
 
     /// A member was added to a group (from relay).
@@ -1669,6 +1679,7 @@ impl Event {
     }
 
     /// Creates a GroupMessageReceived event.
+    #[allow(clippy::too_many_arguments)]
     pub fn group_message_received(
         group_id: String,
         sender: String,
@@ -1677,6 +1688,8 @@ impl Event {
         message_id: String,
         reply_to_msg: Option<String>,
         forward_info: Option<ForwardInfoEvent>,
+        media_metadata: Option<MediaMetadata>,
+        content_type: Option<String>,
     ) -> Self {
         Self::GroupMessageReceived {
             group_id,
@@ -1686,6 +1699,8 @@ impl Event {
             message_id,
             reply_to_msg,
             forward_info,
+            media_metadata,
+            content_type,
         }
     }
 

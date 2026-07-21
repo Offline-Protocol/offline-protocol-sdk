@@ -11,11 +11,13 @@
 
 use crate::protocol::{
     base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload,
-    InternalMessageResult, OfflineProtocol,
+    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras, MAX_RICH_EXTRAS_BYTES,
 };
 use crate::{Error, Event, Result};
 use chrono::{DateTime, Utc};
-use offline_protocol_core::{ForwardInfo, Message, MessageId, MessagePriority};
+use offline_protocol_core::{
+    ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority,
+};
 use offline_protocol_mls::GroupRole;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
@@ -201,6 +203,31 @@ enum GroupDecryptOutcome {
 }
 
 // --- Group (mesh/MLS) payloads ---
+
+/// Options for `OfflineProtocol::send_group_message_with`: priority and
+/// reply threading (as on `send_group_message`), plus the rich media fields.
+///
+/// The rich fields (`content_type`, `media_metadata` — including any
+/// cloud-media `encryption_key`/`iv` secrets) only ever travel inside the
+/// MLS-sealed `__RICH_V1__` body of the group ciphertext, and only when
+/// *every* other group member advertised `rich_versions` support (one
+/// ciphertext serves the whole group, so one legacy or unknown-capability
+/// member forces the drop). Otherwise they are silently dropped — never
+/// sent cleartext — and the message degrades to what `send_group_message`
+/// sends.
+#[derive(Debug, Clone, Default)]
+pub struct GroupSendOptions {
+    /// Message priority (defaults to Medium).
+    pub priority: Option<MessagePriority>,
+    /// ID of the message this is replying to.
+    pub reply_to_msg: Option<String>,
+    /// Content-type rendering hint (text, image, video, ...), delivered
+    /// sealed-only. Must not be [`ContentType::FileChunk`].
+    pub content_type: Option<ContentType>,
+    /// Rich media metadata (cloud attachments — including the
+    /// `encryption_key`/`iv` secrets), delivered sealed-only.
+    pub media_metadata: Option<MediaMetadata>,
+}
 
 /// Payload for MLS-encrypted group messages sent via mesh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -631,18 +658,18 @@ impl OfflineProtocol {
                 let msg_id = message.id.as_str().to_string();
                 let timestamp = chrono::Utc::now().to_rfc3339();
                 info!(group_id = %payload.group_id, "Decrypted mesh group message");
-                let forward_info_event = payload
-                    .forward_info
-                    .as_ref()
-                    .map(crate::events::ForwardInfoEvent::from);
+                let (content, media_metadata, content_type, forward_info_event) =
+                    Self::restore_group_rich(text, payload.forward_info, sender);
                 self.emit_event(Event::group_message_received(
                     payload.group_id,
                     sender.to_string(),
-                    text,
+                    content,
                     timestamp,
                     msg_id,
                     payload.reply_to,
                     forward_info_event,
+                    media_metadata,
+                    content_type,
                 ));
                 InternalMessageResult::Consumed
             }
@@ -1501,21 +1528,21 @@ impl OfflineProtocol {
                             msg_id = %entry.message_id,
                             "Delivered buffered group message after group state caught up"
                         );
-                        let forward_info_event = entry
-                            .forward_info
-                            .as_ref()
-                            .map(crate::events::ForwardInfoEvent::from);
+                        let (content, media_metadata, content_type, forward_info_event) =
+                            Self::restore_group_rich(text, entry.forward_info, &entry.sender);
                         let timestamp = entry
                             .timestamp
                             .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
                         self.emit_event(Event::group_message_received(
                             group_id.to_string(),
                             entry.sender,
-                            text,
+                            content,
                             timestamp,
                             entry.message_id,
                             entry.reply_to,
                             forward_info_event,
+                            media_metadata,
+                            content_type,
                         ));
                     }
                     GroupDecryptOutcome::Retriable => {
@@ -2269,10 +2296,43 @@ impl OfflineProtocol {
     ) -> Result<Vec<MessageId>> {
         self.send_group_message_inner(
             group_id,
-            content.as_bytes(),
+            content,
             priority.unwrap_or(MessagePriority::Medium),
             reply_to_msg,
             None,
+            None,
+            ContentType::Text,
+        )
+    }
+
+    /// Like [`Self::send_group_message`], with rich media fields.
+    ///
+    /// The rich fields travel inside the MLS-sealed `__RICH_V1__` body of
+    /// the group ciphertext, and only when every other member advertised
+    /// `rich_versions` (see [`GroupSendOptions`]); otherwise they are
+    /// silently dropped, never cleartext.
+    pub fn send_group_message_with(
+        &mut self,
+        group_id: &str,
+        content: &str,
+        options: GroupSendOptions,
+    ) -> Result<Vec<MessageId>> {
+        // FileChunk is an internal transport content type — same boundary
+        // rule as `send_message_with`.
+        if options.content_type == Some(ContentType::FileChunk) {
+            return Err(Error::InvalidArgument(
+                "FileChunk is an internal content type and cannot be sent directly".to_string(),
+            ));
+        }
+        Self::check_group_rich_extras_size(options.media_metadata.as_ref(), None)?;
+        self.send_group_message_inner(
+            group_id,
+            content,
+            options.priority.unwrap_or(MessagePriority::Medium),
+            options.reply_to_msg.as_deref(),
+            None,
+            options.media_metadata,
+            options.content_type.unwrap_or_default(),
         )
     }
 
@@ -2282,6 +2342,13 @@ impl OfflineProtocol {
     /// the original sender and forward count. The message content is encrypted
     /// via MLS for the group and fan-out follows the same path as regular
     /// group messages (including relay broadcast when available).
+    ///
+    /// When every other group member advertised the sealed rich payload, the
+    /// attribution and the original `media_metadata` — including cloud-media
+    /// `encryption_key`/`iv` secrets, which only the sealed body may carry —
+    /// travel inside the group MLS ciphertext, so forwarded cloud media stays
+    /// openable. Otherwise the media metadata is dropped (never cleartext)
+    /// and only the hop-visible payload attribution survives.
     pub fn forward_message_to_group(
         &mut self,
         original_message: &Message,
@@ -2296,6 +2363,14 @@ impl OfflineProtocol {
             ));
         }
 
+        // FileChunk is an internal transport content type — same boundary
+        // rule as the DM forward path.
+        if original_message.content_type == ContentType::FileChunk {
+            return Err(Error::InvalidArgument(
+                "FileChunk is an internal content type and cannot be forwarded".to_string(),
+            ));
+        }
+
         let forward_info = ForwardInfo::from_message(original_message);
 
         if forward_info.forward_count > crate::constants::MAX_FORWARD_COUNT {
@@ -2306,36 +2381,68 @@ impl OfflineProtocol {
             )));
         }
 
+        Self::check_group_rich_extras_size(
+            original_message.media_metadata.as_ref(),
+            Some(&forward_info),
+        )?;
+
         self.send_group_message_inner(
             group_id,
-            original_message.content.as_bytes(),
+            &original_message.content,
             priority.unwrap_or(MessagePriority::Medium),
             None,
             Some(forward_info),
+            original_message.media_metadata.clone(),
+            original_message.content_type,
         )
+    }
+
+    /// Boundary cap for group rich extras, mirroring `send_message_with`:
+    /// bound the serialized extras here so the seal (or a relay-broadcast
+    /// fallback re-send) can never fail on size later.
+    fn check_group_rich_extras_size(
+        media_metadata: Option<&MediaMetadata>,
+        forward_info: Option<&ForwardInfo>,
+    ) -> Result<()> {
+        let rich = RichSendExtras {
+            reply_context: None,
+            media_metadata: media_metadata.cloned(),
+            forward_info: forward_info.cloned(),
+        };
+        if !rich.is_any() {
+            return Ok(());
+        }
+        let extras_len = serde_json::to_vec(&rich)
+            .map_err(|e| Error::Serialization(e.to_string()))?
+            .len();
+        if extras_len > MAX_RICH_EXTRAS_BYTES {
+            return Err(Error::InvalidArgument(format!(
+                "Rich extras too large: {} bytes serialized (max {})",
+                extras_len, MAX_RICH_EXTRAS_BYTES
+            )));
+        }
+        Ok(())
     }
 
     /// Shared implementation for sending and forwarding group messages.
     ///
-    /// Handles MLS encryption, member list caching, relay broadcast attempt,
-    /// per-member fan-out, and event emission.
+    /// Handles the sealed-rich decision, MLS encryption, member list
+    /// caching, relay broadcast attempt, per-member fan-out, and event
+    /// emission.
+    #[allow(clippy::too_many_arguments)]
     fn send_group_message_inner(
         &mut self,
         group_id: &str,
-        content_bytes: &[u8],
+        content: &str,
         priority: MessagePriority,
         reply_to_msg: Option<&str>,
         forward_info: Option<ForwardInfo>,
+        media_metadata: Option<MediaMetadata>,
+        content_type: ContentType,
     ) -> Result<Vec<MessageId>> {
-        // Encrypt via MLS — release the guard immediately after encryption
-        // to minimize lock contention during the fan-out phase.
-        let encrypted = {
-            let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id)?;
-            mls_guard.encrypt_for_group(&gid, content_bytes)?
-        };
-
         // Read member list from cache, falling back to MLS on cache miss.
+        // Fetched before encryption because the sealed-rich decision below
+        // needs the full membership: one ciphertext serves every member.
         let members = match self.group_mesh.members.get(group_id) {
             Some(m) => m.clone(),
             None => {
@@ -2354,6 +2461,40 @@ impl OfflineProtocol {
                 .members
                 .insert(group_id.to_string(), members.clone());
         }
+
+        // Rich extras travel only inside the sealed `__RICH_V1__` body of
+        // the group ciphertext (media secrets must never leave the AEAD
+        // boundary), and only when every other member advertised the
+        // capability — a legacy member would render the sealed body as
+        // literal JSON text. The attribution also rides the hop-visible
+        // payload below as the fallback for non-capable groups; media
+        // metadata has no such fallback and simply drops.
+        let extras = RichSendExtras {
+            reply_context: None,
+            media_metadata,
+            forward_info: forward_info.clone(),
+        };
+        let sealed_body;
+        let plaintext: &str = if extras.is_any() && self.group_rich_seal_active(&members) {
+            sealed_body = Self::seal_rich_payload(content, &extras, content_type)?;
+            &sealed_body
+        } else {
+            if extras.media_metadata.is_some() {
+                debug!(
+                    group_id = %group_id,
+                    "Group not fully rich-capable, dropping rich media metadata"
+                );
+            }
+            content
+        };
+
+        // Encrypt via MLS — release the guard immediately after encryption
+        // to minimize lock contention during the fan-out phase.
+        let encrypted = {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
+            mls_guard.encrypt_for_group(&gid, plaintext.as_bytes())?
+        };
 
         let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
         let epoch = encrypted.epoch;
@@ -3081,6 +3222,49 @@ impl OfflineProtocol {
     ///
     /// Returns the broadcast `MessageId` on success, or an error if the
     /// relay is unreachable.
+    /// Applies the sealed `__RICH_V1__` restore to a decrypted group
+    /// message plaintext, returning the event-ready fields: content, media
+    /// metadata, content-type hint, and forward attribution.
+    ///
+    /// Parsing is never capability-gated (whatever a peer chose to seal, we
+    /// try to read). The sealed attribution is authoritative over the
+    /// hop-visible payload copy — a relay can rewrite the latter but not
+    /// the former. A body that fails to parse surfaces as raw text with
+    /// nothing restored, mirroring the DM path: never drop an
+    /// authenticated message.
+    fn restore_group_rich(
+        text: String,
+        payload_forward_info: Option<ForwardInfo>,
+        sender: &str,
+    ) -> (
+        String,
+        Option<MediaMetadata>,
+        Option<String>,
+        Option<crate::events::ForwardInfoEvent>,
+    ) {
+        if text.starts_with(internal_prefixes::RICH_V1) {
+            if let Some(rich) = RichPayloadV1::parse_sealed(&text, sender) {
+                let forward_info = rich.forward_info.or(payload_forward_info);
+                return (
+                    rich.text,
+                    rich.media_metadata,
+                    rich.content_type.map(|ct| ct.to_string()),
+                    forward_info
+                        .as_ref()
+                        .map(crate::events::ForwardInfoEvent::from),
+                );
+            }
+        }
+        (
+            text,
+            None,
+            None,
+            payload_forward_info
+                .as_ref()
+                .map(crate::events::ForwardInfoEvent::from),
+        )
+    }
+
     fn try_relay_broadcast(
         &mut self,
         group_id: &str,
@@ -3668,6 +3852,8 @@ impl OfflineProtocol {
                     message_id.to_string(),
                     reply_to_msg,
                     forward_info_event,
+                    None,
+                    None,
                 ));
                 return;
             }
@@ -3676,14 +3862,18 @@ impl OfflineProtocol {
         match self.decrypt_group_application(group_id, ciphertext_bytes, sender) {
             GroupDecryptOutcome::Plaintext(pt) => match String::from_utf8(pt) {
                 Ok(text) => {
+                    let (content, media_metadata, content_type, forward_info_event) =
+                        Self::restore_group_rich(text, forward_info, sender);
                     self.emit_event(Event::group_message_received(
                         group_id.to_string(),
                         sender.to_string(),
-                        text,
+                        content,
                         timestamp.to_string(),
                         message_id.to_string(),
                         reply_to_msg,
                         forward_info_event,
+                        media_metadata,
+                        content_type,
                     ));
                 }
                 Err(_) => {
@@ -3726,6 +3916,8 @@ impl OfflineProtocol {
                     message_id.to_string(),
                     reply_to_msg,
                     forward_info_event,
+                    None,
+                    None,
                 ));
             }
             GroupDecryptOutcome::SecurityRejected | GroupDecryptOutcome::Failed => {
