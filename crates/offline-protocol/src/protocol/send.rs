@@ -9,7 +9,8 @@ use super::{
     WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO,
     MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
     MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
-    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
+    WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use crate::constants::{
     ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
@@ -2041,14 +2042,23 @@ impl OfflineProtocol {
     }
 
     pub(super) fn cleanup_outbox(&mut self) {
-        let cutoff = Utc::now()
+        let now = Utc::now();
+        let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms as i64;
+        let cutoff = now - ChronoDuration::milliseconds(lifetime_ms);
+        // In-process twin of the restore path's absolute cap
+        // (`restore_outbox`): the carrier-relative window slides on every
+        // send, and an unreachable-parked DM's mesh reachability probe keeps
+        // sending — without an absolute bound from `first_sent_at`, a
+        // long-lived process would keep such an entry alive forever.
+        let absolute_cutoff = now
             - ChronoDuration::milliseconds(
-                self.config.reliability.retry.outbox_max_lifetime_ms as i64,
+                lifetime_ms
+                    .saturating_mul(crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as i64),
             );
 
         let mut expired_from_outbox = Vec::new();
         for (message_id, entry) in &self.outbox {
-            if entry.last_sent_at >= cutoff {
+            if entry.last_sent_at >= cutoff && entry.first_sent_at >= absolute_cutoff {
                 continue;
             }
             if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(&entry.message.id)
@@ -2090,6 +2100,18 @@ impl OfflineProtocol {
                     "outbox_lifetime_exceeded".to_string(),
                 ));
             }
+        }
+
+        // Only peers that still hold outbox entries can retain an
+        // unreachable-park counter (bounds the map at the outbox cap).
+        if !self.dm_unreachable_parks.is_empty() {
+            let active: HashSet<&str> = self
+                .outbox
+                .values()
+                .map(|entry| entry.message.recipient.as_str())
+                .collect();
+            self.dm_unreachable_parks
+                .retain(|peer, _| active.contains(peer.as_str()));
         }
 
         let mut expired_from_media = Vec::new();
@@ -2302,9 +2324,9 @@ impl OfflineProtocol {
 
         let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
             // Not a connection request, not a welcome: a plain DM or media
-            // chunk. Surface the relay's verdict instead of silently
-            // no-oping on it.
-            self.emit_message_undeliverable_if_unreachable(message_id, transport_error.as_deref());
+            // chunk. Surface the relay's verdict and park plain DMs so the
+            // ACK retry budget stops burning against an offline peer.
+            self.handle_recipient_unreachable_for_message(message_id, transport_error.as_deref());
             return Ok(());
         };
         // A reason tagged "recipient_unreachable" (the internet bridge's
@@ -2337,14 +2359,34 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// Surfaces a relay `recipient_unreachable` verdict for a plain DM or
-    /// media chunk as a non-terminal [`Event::MessageUndeliverable`].
+    /// Handles a relay `recipient_unreachable` verdict for a plain DM or
+    /// media chunk: emits the non-terminal [`Event::MessageUndeliverable`],
+    /// then *parks* plain DMs.
     ///
-    /// The outbox entry stays put and the retry machinery keeps running —
-    /// this is the early "recipient offline" signal, not a settlement.
-    /// Messages without an outbox entry (nothing to attribute a recipient
-    /// from) are skipped.
-    fn emit_message_undeliverable_if_unreachable(
+    /// Parking drops the pending ACK and the retry-queue entry while the
+    /// outbox entry stays put — exactly the "stranded" state every re-drive
+    /// edge already flushes (`flush_outbox_all` on reconnect/start,
+    /// `flush_outbox_for_peer` on discovery and presence-online, the latter
+    /// fed by [`Self::presence_watch_peers`]). Without the park, the offline
+    /// peer's missing ACK burns the full `max_retries` budget in minutes
+    /// (`process_timed_out_acks`) and settles a 7-day outbox message
+    /// terminally; a re-driven send re-registers a fresh ACK, so the budget
+    /// only ever burns against a peer believed reachable. Settlement is
+    /// reserved for delivery or outbox-lifetime expiry.
+    ///
+    /// Carrier guard, mirroring `apply_recipient_unreachable_failure`: with
+    /// a local mesh carrier (BLE / WiFi-Direct) up, the peer may be a room
+    /// away — and possibly already a discovered neighbor, so no future edge
+    /// will fire for it. The message then keeps a timed reachability probe
+    /// whose interval escalates per consecutive park (15s → 600s cap,
+    /// per-peer counter reset on any reachability edge) instead of parking
+    /// edge-only.
+    ///
+    /// Media chunks are never parked: their offline story is retry
+    /// exhaustion → transfer abort → persisted descriptor →
+    /// `MediaResendRequired` with app-resupplied bytes. Messages without an
+    /// outbox entry (nothing to attribute a recipient from) are skipped.
+    fn handle_recipient_unreachable_for_message(
         &mut self,
         message_id: &str,
         transport_error: Option<&str>,
@@ -2357,18 +2399,22 @@ impl OfflineProtocol {
         let Ok(parsed_id) = MessageId::from_str(message_id) else {
             return;
         };
-        let Some(entry) = self
-            .outbox
-            .get(&parsed_id)
-            .or_else(|| self.media_outbox.get(&parsed_id))
-        else {
-            debug!(
-                message_id = %message_id,
-                "Unreachable verdict for message without outbox entry, dropping"
-            );
-            return;
+        let (entry, is_media) = match self.outbox.get(&parsed_id) {
+            Some(entry) => (entry, false),
+            None => match self.media_outbox.get(&parsed_id) {
+                Some(entry) => (entry, true),
+                None => {
+                    debug!(
+                        message_id = %message_id,
+                        "Unreachable verdict for message without outbox entry, dropping"
+                    );
+                    return;
+                }
+            },
         };
         let recipient = entry.message.recipient.as_str().to_string();
+        let message = entry.message.clone();
+        let attempt_count = entry.attempt_count;
         let file_id = self
             .outbound_media_chunks
             .get(&parsed_id)
@@ -2376,14 +2422,60 @@ impl OfflineProtocol {
         warn!(
             message_id = %message_id,
             file_id = ?file_id,
-            "Recipient unreachable for in-flight message (non-terminal, retries continue)"
+            parked = !is_media,
+            "Recipient unreachable for in-flight message (non-terminal)"
         );
         self.emit_event(Event::message_undeliverable(
-            parsed_id,
-            recipient,
+            parsed_id.clone(),
+            recipient.clone(),
             reason.to_string(),
             file_id,
         ));
+        if is_media {
+            return;
+        }
+
+        // Park: no pending ACK to time out, no backoff-scheduled resend.
+        self.ack_manager.remove_ack(&parsed_id);
+        self.retry_queue.remove(message_id);
+
+        let mesh_carrier_available = self
+            .transport_manager
+            .get_available_transports()
+            .keys()
+            .any(|transport| matches!(transport, TransportType::BLE | TransportType::WiFiDirect));
+        if mesh_carrier_available {
+            let parks = {
+                let count = self
+                    .dm_unreachable_parks
+                    .entry(recipient.clone())
+                    .or_insert(0);
+                *count = count.saturating_add(1);
+                *count
+            };
+            // parks >= 1 here; shift clamped so 15 << 6 = 960 is the largest
+            // pre-cap value — no overflow risk.
+            let retry_in_secs = (WELCOME_NO_CARRIER_RETRY_SECS << (parks - 1).min(6))
+                .min(WELCOME_UNREACHABLE_RETRY_CAP_SECS);
+            let _ = self.retry_queue.enqueue_with_delay(
+                message,
+                attempt_count,
+                (retry_in_secs * 1000) as u64,
+            );
+            debug!(
+                message_id = %message_id,
+                recipient = %recipient,
+                retry_in_secs = retry_in_secs,
+                parks = parks,
+                "Parked unreachable DM with escalating mesh reachability probe"
+            );
+        } else {
+            debug!(
+                message_id = %message_id,
+                recipient = %recipient,
+                "Parked unreachable DM edge-only (no local mesh carrier)"
+            );
+        }
     }
 
     /// Classifies an outbound internet frame as a server-plane control op the
@@ -2664,7 +2756,12 @@ impl OfflineProtocol {
                     );
                     self.handle_outbound_media_chunk_delivered(&message_id);
                     self.retry_queue.remove(&message_id.as_str());
-                    self.remove_outbox_entry(&message_id);
+                    if let Some(entry) = self.remove_outbox_entry(&message_id) {
+                        // Delivery proves reachability: the escalating
+                        // unreachable-probe interval starts over.
+                        self.dm_unreachable_parks
+                            .remove(entry.message.recipient.as_str());
+                    }
                 }
             }
         }

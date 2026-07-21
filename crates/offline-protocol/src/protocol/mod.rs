@@ -80,6 +80,16 @@ pub struct OfflineProtocol {
     /// to prevent large file transfers from evicting regular messages.
     media_outbox: HashMap<MessageId, OutboxEntry>,
 
+    /// Consecutive unreachable-park counter per recipient for plain DMs,
+    /// driving the escalating reachability-probe interval when a local mesh
+    /// carrier is up (see `handle_recipient_unreachable_for_message` —
+    /// mirrors `WelcomeLifecycleRecord::unreachable_parks`). Reset on every
+    /// reachability edge (`flush_outbox_for_peer` / `flush_outbox_all`) and
+    /// on delivery; pruned alongside `cleanup_outbox` so only peers that
+    /// still hold outbox entries can retain a counter. In-memory only: a
+    /// restart re-drives the outbox anyway, which is itself a fresh probe.
+    dm_unreachable_parks: HashMap<String, u32>,
+
     /// MLS manager for end-to-end encryption.
     mls_manager: Option<Arc<RwLock<MlsManager>>>,
 
@@ -367,6 +377,7 @@ impl OfflineProtocol {
             shared_state: Arc::new(Mutex::new(SharedState::new())),
             outbox: HashMap::new(),
             media_outbox: HashMap::new(),
+            dm_unreachable_parks: HashMap::new(),
             mls_manager: None,
             pending_encrypted_messages: HashMap::new(),
             pending_key_packages: HashMap::new(),
@@ -902,6 +913,11 @@ impl OfflineProtocol {
     /// Called when a peer is discovered to flush messages that were queued while
     /// the peer was unreachable, bypassing backoff timers.
     fn flush_outbox_for_peer(&mut self, peer_id: &str) {
+        // A per-peer reachability edge: the escalating unreachable-probe
+        // interval starts over (mirrors rearm_welcome_for_peer resetting
+        // unreachable_parks).
+        self.dm_unreachable_parks.remove(peer_id);
+
         // Collect matching messages from outbox + media_outbox
         let mut to_send: Vec<(Message, u32)> = Vec::new();
 
@@ -945,6 +961,10 @@ impl OfflineProtocol {
     /// Called when a transport becomes available (e.g. internet reconnects) to
     /// flush all queued messages, bypassing backoff timers.
     pub fn flush_outbox_all(&mut self) {
+        // A carrier-level reachability edge (reconnect / start): every
+        // escalating unreachable-probe interval starts over.
+        self.dm_unreachable_parks.clear();
+
         // Drain all entries from the retry queue (ignores timing)
         let retry_entries = self.retry_queue.drain_all();
 
@@ -998,6 +1018,30 @@ impl OfflineProtocol {
         for (message, attempt_count) in iter {
             let _ = self.retry_queue.enqueue(message, attempt_count);
         }
+    }
+
+    /// Peers the platform layer should watch via relay `CheckPresence`
+    /// queries: every peer with an undelivered or session-unproven MLS
+    /// welcome ([`Self::welcome_pending_peers`]) plus every recipient of an
+    /// outbox message not currently awaiting an ACK — which includes DMs
+    /// parked on a relay `recipient_unreachable` verdict. The relay's
+    /// presence-online answer lands in [`Self::on_peer_presence`], whose
+    /// `flush_outbox_for_peer` is what re-drives (un-parks) those messages,
+    /// so the SDK — not the app — owns the "watch my DeliveryError
+    /// recipients" duty. Bounded by the outbox cap (500 entries).
+    pub fn presence_watch_peers(&self) -> Vec<String> {
+        let mut peers = self.welcome_pending_peers();
+        let mut seen: std::collections::HashSet<String> = peers.iter().cloned().collect();
+        for entry in self.outbox.values() {
+            if self.ack_manager.is_waiting_for_ack(&entry.message.id) {
+                continue;
+            }
+            let recipient = entry.message.recipient.as_str();
+            if seen.insert(recipient.to_string()) {
+                peers.push(recipient.to_string());
+            }
+        }
+        peers
     }
 
     /// Attempts to send a single message as part of a flush operation.

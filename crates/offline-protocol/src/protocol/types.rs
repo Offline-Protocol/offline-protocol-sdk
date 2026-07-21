@@ -42,6 +42,9 @@ pub(crate) const WELCOME_MESH_CONFIRM_TIMEOUT_SECS: i64 = 15;
 /// instant a carrier surfaces the peer); this poll is only a safety net for a
 /// carrier returning without a fresh discovery event, so it is deliberately far
 /// slower than the data-plane retry interval to keep an offline device quiet.
+/// Also the base interval for the plain-DM unreachable reachability probe
+/// (`handle_recipient_unreachable_for_message`), which shares this
+/// escalation.
 pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
 /// Cap for the escalating retry interval of a welcome repeatedly parked
 /// `PeerUnreachable` while a mesh carrier is up (see
@@ -52,7 +55,9 @@ pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
 /// refunded — without escalation that is an unbounded 15s resend loop into
 /// the relay for as long as the peer stays offline. At the cap the steady
 /// state matches the presence-rescue cadence (one send per 10 min), which is
-/// cheap and self-resolving.
+/// cheap and self-resolving. Shared by the plain-DM unreachable probe
+/// (`handle_recipient_unreachable_for_message`, per-peer
+/// `dm_unreachable_parks` counter) for the same reason.
 pub(crate) const WELCOME_UNREACHABLE_RETRY_CAP_SECS: i64 = 600;
 /// Age limit for a welcome lifecycle to keep its peer on the presence
 /// watchlist (`welcome_pending_peers`). Without it the watch set only ever
