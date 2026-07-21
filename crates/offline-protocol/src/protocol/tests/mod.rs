@@ -17586,6 +17586,68 @@ fn test_media_resend_required_after_restart_with_checksum_validation() {
 }
 
 #[test]
+fn test_media_resend_rejects_recipient_mismatch() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let original_bytes = vec![7u8; 256];
+
+    // First life: transfer to bob starts, process dies before completion.
+    let file_id = {
+        let (mut alice, _handle, _events) =
+            plaintext_media_protocol_with_storage("alice", Arc::clone(&storage));
+        alice
+            .send_media(
+                "bob",
+                original_bytes.clone(),
+                "photo.bin",
+                ContentType::File,
+                None,
+            )
+            .unwrap()
+    };
+
+    let (mut alice, _handle, _events) =
+        plaintext_media_protocol_with_storage("alice", Arc::clone(&storage));
+
+    // Same bytes, wrong recipient: a redirect would consume the descriptor
+    // and orphan bob's interrupted transfer forever.
+    let redirected = alice.send_media_with(
+        "carol",
+        original_bytes.clone(),
+        "photo.bin",
+        ContentType::File,
+        MediaSendOptions {
+            file_id: Some(file_id.clone()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(redirected, Err(crate::Error::InvalidArgument(_))),
+        "Recipient mismatch must reject the resend, got {:?}",
+        redirected.map(|_| ())
+    );
+    assert!(
+        alice.restored_media_descriptors.contains_key(&file_id),
+        "A rejected resend must leave the descriptor parked"
+    );
+
+    // The original recipient still passes and consumes the descriptor.
+    let resent = alice
+        .send_media_with(
+            "bob",
+            original_bytes,
+            "photo.bin",
+            ContentType::File,
+            MediaSendOptions {
+                file_id: Some(file_id.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(resent, file_id);
+    assert!(!alice.restored_media_descriptors.contains_key(&file_id));
+}
+
+#[test]
 fn test_media_descriptor_restore_prunes_expired() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     let (mut alice, _handle, _events) =
