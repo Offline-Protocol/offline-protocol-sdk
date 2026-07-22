@@ -273,7 +273,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 Rich params (`replyContext`, `mediaMetadata`, `forwardInfo`, a non-default `contentType`) only ever travel sealed inside the MLS ciphertext, toward recipients whose SDK advertised rich-payload support; toward anyone else they are silently dropped — never sent cleartext — while `replyToMsg` threading survives. When any rich param is present the call routes to the native `sendMessageRich` method.
 
-> **Over-the-air JS updates (CodePush-style):** `sendMessageRich` is a native method. A JS-only update that starts passing rich params against an older native binary fails those calls (method not found); plain `sendMessage` calls are unaffected. Gate rich params on your native binary version.
+> **Over-the-air JS updates (CodePush-style):** `sendMessageRich` and `sendMediaRich` are native methods. A JS-only update that starts passing rich params against an older native binary fails those calls (method not found); plain `sendMessage`/`sendMedia` calls are unaffected. Gate rich params on your native binary version. Note the routing triggers below: for `sendMedia`, cloud/sticker `mediaMetadata` fields alone are enough to route to the native rich method.
 
 Connection-request failure contract: recipient offline emits `connection_request_undeliverable` (`reason` starts with `recipient_unreachable`); retry exhaustion emits it with `reason: 'max_retries_exceeded'` alongside the generic `message_failed`. Both carry the message ID returned by `sendConnectionRequest`. Answers arrive as `connection_accepted` / `connection_rejected`, correlated by peer id (`accepted_by` / `rejected_by`), not message ID.
 
@@ -358,7 +358,7 @@ Connection-request failure contract: recipient offline emits `connection_request
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | **sendFile** | `sendFile(params: SendFileParams): Promise<string>` | Sends a file; returns file ID. `params`: filePath, recipient, fileName?. |
-| **sendMedia** | `sendMedia(params: SendMediaParams): Promise<string>` | Sends media bytes; returns file ID. `params`: `recipient`, `fileData` (base64), `fileName`, `contentType`, `mediaMetadata?`, plus sealed-only rich params `caption?`, `replyToMsg?`, `replyContext?`, `forwardInfo?`, and `fileId?` (for answering `media_resend_required`). Rich params route to the native `sendMediaRich` method and travel sealed with chunk 0 — dropped, never cleartext, toward non-rich recipients. |
+| **sendMedia** | `sendMedia(params: SendMediaParams): Promise<string>` | Sends media bytes; returns file ID. `params`: `recipient`, `fileData` (base64), `fileName`, `contentType`, `mediaMetadata?`, plus sealed-only rich params `caption?`, `replyToMsg?`, `replyContext?`, `forwardInfo?`, and `fileId?` (for answering `media_resend_required`). Rich params — including the cloud/sticker `mediaMetadata` fields (`mediaId`, `downloadUrl`, `encryptionKey`, …), even with no other rich param — route to the native `sendMediaRich` method (same over-the-air-update caveat as `sendMessageRich`) and travel sealed with chunk 0 — dropped, never cleartext, toward non-rich recipients. |
 | **getFileProgress** | `getFileProgress(fileId): Promise<FileProgress \| null>` | Progress for a file transfer. |
 | **cancelFileTransfer** | `cancelFileTransfer(fileId): Promise<boolean>` | Cancels a transfer. |
 | **processFileChunk** | `processFileChunk(fileId, chunkIndex, data: number[]): Promise<void>` | Processes a file chunk (custom handling). |

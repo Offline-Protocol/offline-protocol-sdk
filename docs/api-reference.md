@@ -361,20 +361,21 @@ pub struct GroupRichReadiness {
 
 Point-in-time, advisory pre-check so apps can warn before sending (e.g. gray
 out the attachment button) instead of learning from `GroupRichExtrasDropped`
-after the drop. Exposed over UniFFI as `group_rich_readiness` and React Native
-as `meshGroupRichReadiness`.
+after the drop. `ready: false` with an empty `unknown_members` means only the
+local `rich_payload_enabled` kill switch blocks sealing. Exposed over UniFFI
+as `group_rich_readiness` and React Native as `meshGroupRichReadiness`.
 
 ```rust
 pub fn forward_message(
     &mut self,
-    original: &Message,
-    recipient: impl Into<String>,
+    original_message: &Message,
+    new_recipient: impl Into<String>,
     priority: Option<MessagePriority>,
 ) -> Result<MessageId>
 
 pub fn forward_message_to_group(
     &mut self,
-    original: &Message,
+    original_message: &Message,
     group_id: &str,
     priority: Option<MessagePriority>,
 ) -> Result<Vec<MessageId>>
