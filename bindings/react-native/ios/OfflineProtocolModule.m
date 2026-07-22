@@ -505,6 +505,10 @@ RCT_EXTERN_METHOD(meshGetGroupInfo:(NSString *)groupId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(meshGroupRichReadiness:(NSString *)groupId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(meshSetMemberRole:(NSString *)groupId
                   userId:(NSString *)userId
                   role:(NSString *)role

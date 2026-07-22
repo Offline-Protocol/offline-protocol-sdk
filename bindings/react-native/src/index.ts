@@ -40,6 +40,7 @@ import type {
   MlsWelcome,
   MlsSessionInfo,
   MlsGroupInfo,
+  GroupRichReadiness,
   EstablishmentState,
   TelemetryConfig,
   TelemetryListener,
@@ -2615,6 +2616,23 @@ export class OfflineProtocol {
       memberIds: result.memberIds ?? result.members ?? [],
       epoch: result.epoch,
       createdAt: result.createdAt ?? result.createdAtMs ?? 0,
+    };
+  }
+
+  /**
+   * Whether a rich group send right now would seal its extras, and which
+   * members hold the gate closed. Point-in-time and advisory: the send path
+   * re-evaluates the gate itself — use this to warn before sending instead
+   * of learning from a GroupRichExtrasDropped event after the drop.
+   *
+   * @param groupId - Group ID
+   * @returns Readiness snapshot ({ ready, unknownMembers })
+   */
+  async meshGroupRichReadiness(groupId: string): Promise<GroupRichReadiness> {
+    const result = await OfflineProtocolNativeModule.meshGroupRichReadiness(groupId);
+    return {
+      ready: !!result?.ready,
+      unknownMembers: result?.unknownMembers ?? [],
     };
   }
 

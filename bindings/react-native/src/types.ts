@@ -1928,6 +1928,24 @@ export interface MlsGroupInfo {
 }
 
 /**
+ * Snapshot of whether a rich group send right now would seal its extras.
+ * Point-in-time and advisory: capability knowledge changes with key-package
+ * exchanges, attested adds, and restarts, and the send path re-evaluates the
+ * gate itself — use this to warn before sending (e.g. gray out the attachment
+ * button) instead of learning from GroupRichExtrasDropped after the drop.
+ */
+export interface GroupRichReadiness {
+  /** True when every other member is known rich-capable and the local kill switch is on. */
+  ready: boolean;
+  /**
+   * Members not known to parse the sealed rich payload (unknown and
+   * known-non-support are indistinguishable). Empty when ready, and also
+   * empty when only the local kill switch blocks sealing.
+   */
+  unknownMembers: string[];
+}
+
+/**
  * MLS commit message for group state updates.
  * Used when members are added or removed from a group.
  */

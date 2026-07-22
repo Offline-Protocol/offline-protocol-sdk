@@ -3359,6 +3359,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * Whether a rich group send right now would seal its extras, and which
+     * members hold the gate closed (point-in-time, advisory).
+     */
+    @ReactMethod
+    fun meshGroupRichReadiness(groupId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val readiness = proto.groupRichReadiness(groupId)
+            val result = Arguments.createMap().apply {
+                putBoolean("ready", readiness.ready)
+                val unknownMembers = Arguments.createArray()
+                readiness.unknownMembers.forEach { unknownMembers.pushString(it) }
+                putArray("unknownMembers", unknownMembers)
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to get group rich readiness")
+        }
+    }
+
     @ReactMethod
     fun meshSetMemberRole(groupId: String, userId: String, role: String, promise: Promise) {
         try {
