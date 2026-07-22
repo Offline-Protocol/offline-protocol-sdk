@@ -120,6 +120,7 @@ impl OfflineProtocol {
         self.delete_peer_key_package_from_storage(user_id);
         self.peer_compact_envelope.remove(user_id);
         self.peer_rich_payload.remove(user_id);
+        self.peer_rich_attested.remove(user_id);
         self.delete_peer_capabilities_from_storage(user_id);
 
         // 3. Drop queued outbound messages that were waiting for session

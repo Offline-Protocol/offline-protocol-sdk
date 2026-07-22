@@ -3,8 +3,8 @@
 use super::{
     storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry, PeerCapabilities,
     PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
-    WELCOME_LIFECYCLE_TTL_SECS,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MAX_PERSISTED_CAPABILITY_VERSIONS,
+    MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::{Error, Result};
@@ -255,6 +255,52 @@ impl OfflineProtocol {
         }
     }
 
+    /// Loads the persisted capability record for a peer, if any. Best-effort:
+    /// storage or parse failures read as "no record".
+    fn load_peer_capabilities(&self, peer_id: &str) -> Option<PeerCapabilities> {
+        let storage = self.message_storage.as_ref()?;
+        let data = storage
+            .load(storage_keys::PEER_CAPABILITIES, peer_id)
+            .ok()??;
+        serde_json::from_slice::<PeerCapabilities>(&data).ok()
+    }
+
+    /// Records an inviter-attested rich-payload capability for a peer we
+    /// never directly exchanged key packages with (a group member added by
+    /// someone else). In-memory recording mirrors the direct path in
+    /// `handle_key_package_message`: gated by our own kill switch and
+    /// bounded like `key_package_sent_to`. Persistence stores the raw
+    /// attested versions merged into the peer's existing capability record
+    /// (never clobbering directly-advertised fields), matching the
+    /// "switches gate use, not knowledge" rule. A later direct key-package
+    /// exchange overwrites the whole record and evicts the in-memory entry
+    /// — direct knowledge is always authoritative.
+    pub(crate) fn record_attested_rich(&mut self, peer_id: &str, versions: &[u8]) {
+        if peer_id == self.config.user_id || !versions.contains(&RICH_PAYLOAD_V1) {
+            return;
+        }
+        // Direct self-advertisement already covers this peer; an attested
+        // duplicate would only go stale.
+        if self.peer_rich_payload.contains(peer_id) {
+            return;
+        }
+        if self.config.encryption.rich_payload_enabled {
+            if !self.peer_rich_attested.contains(peer_id)
+                && self.peer_rich_attested.len() >= MAX_KEY_PACKAGE_SENT_TO
+            {
+                self.peer_rich_attested.clear();
+            }
+            self.peer_rich_attested.insert(peer_id.to_string());
+        }
+        let mut caps = self.load_peer_capabilities(peer_id).unwrap_or_default();
+        caps.attested_rich_versions = versions
+            .iter()
+            .copied()
+            .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
+            .collect();
+        self.persist_peer_capabilities(peer_id, &caps);
+    }
+
     /// Repopulates the in-memory capability sets (`peer_compact_envelope`,
     /// `peer_rich_payload`) from the durable per-peer records, so a send
     /// right after relaunch — before any live key-package exchange — keeps
@@ -330,6 +376,11 @@ impl OfflineProtocol {
                 && caps.rich_versions.contains(&RICH_PAYLOAD_V1)
             {
                 self.peer_rich_payload.insert(peer_id.clone());
+            }
+            if self.config.encryption.rich_payload_enabled
+                && caps.attested_rich_versions.contains(&RICH_PAYLOAD_V1)
+            {
+                self.peer_rich_attested.insert(peer_id.clone());
             }
             kept += 1;
         }

@@ -80,6 +80,13 @@ impl OfflineProtocol {
                 self.peer_rich_payload.remove(sender);
             }
 
+            // A direct key package is authoritative for this peer: drop any
+            // inviter-attested rich entry (the durable side happens below —
+            // `from_advertised` never carries the attested field, and an
+            // all-empty advertisement deletes the record outright), so a
+            // stale or forged attestation cannot outlive real contact.
+            self.peer_rich_attested.remove(sender);
+
             // Persist the raw advertised end-to-end capabilities so they
             // survive restarts: the cached key package persisted below is
             // deleted once a session is established, but the capability must

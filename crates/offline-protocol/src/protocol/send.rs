@@ -773,26 +773,85 @@ impl OfflineProtocol {
     }
 
     /// Whether rich extras may seal into a group message: our own kill
-    /// switch is on and every non-self member advertised
-    /// [`RICH_PAYLOAD_V1`]. Group MLS encryption produces a single
-    /// ciphertext for all members, so one non-capable member — or one whose
-    /// key package we never saw directly (e.g. added by another member) —
-    /// forces the extras to drop for the whole group. Conservative by
-    /// design: an unknown member must never receive a sealed body their SDK
-    /// would render as literal `__RICH_V1__` JSON.
+    /// switch is on and every non-self member is known to parse
+    /// [`RICH_PAYLOAD_V1`] — either self-advertised in a directly received
+    /// key package (`peer_rich_payload`) or attested by a group inviter on
+    /// the Add commit / Welcome (`peer_rich_attested`; members added by
+    /// someone else never exchange key packages with us directly). Group
+    /// MLS encryption produces a single ciphertext for all members, so one
+    /// non-capable or capability-unknown member forces the extras to drop
+    /// for the whole group. Conservative by design: an unknown member must
+    /// never receive a sealed body their SDK would render as literal
+    /// `__RICH_V1__` JSON.
     ///
-    /// Best-effort within that design: callers pass the
-    /// `group_mesh.members` fan-out cache, which trails MLS membership
-    /// until the add/remove notification lands. In that window a
-    /// just-added non-capable member can receive one sealed body and
-    /// render it as literal JSON — degraded display, not a leak (every
-    /// group member is entitled to the sealed contents).
+    /// Attestation is third-party and may be stale or forged by a rogue
+    /// admin; the worst case is exactly the degraded display below, never a
+    /// leak, and direct contact evicts the attested entry. Best-effort
+    /// beyond that: callers pass the `group_mesh.members` fan-out cache,
+    /// which trails MLS membership until the add/remove notification
+    /// lands. In that window a just-added non-capable member can receive
+    /// one sealed body and render it as literal JSON — degraded display,
+    /// not a leak (every group member is entitled to the sealed contents).
     pub(crate) fn group_rich_seal_active(&self, members: &[String]) -> bool {
         self.config.encryption.rich_payload_enabled
             && members
                 .iter()
                 .filter(|m| m.as_str() != self.config.user_id)
-                .all(|m| self.peer_rich_payload.contains(m.as_str()))
+                .all(|m| {
+                    self.peer_rich_payload.contains(m.as_str())
+                        || self.peer_rich_attested.contains(m.as_str())
+                })
+    }
+
+    /// Group members (non-self) not known to parse the sealed rich payload
+    /// — neither directly advertised nor inviter-attested. These are the
+    /// members that hold `group_rich_seal_active` closed; the set absence
+    /// cannot distinguish "never heard from" from "known not capable".
+    pub(crate) fn group_rich_unknown_members(&self, members: &[String]) -> Vec<String> {
+        members
+            .iter()
+            .filter(|m| {
+                m.as_str() != self.config.user_id
+                    && !self.peer_rich_payload.contains(m.as_str())
+                    && !self.peer_rich_attested.contains(m.as_str())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The rich-payload versions we can attest for a peer when inviting it
+    /// into (or welcoming it to) a group: [`RICH_PAYLOAD_V1`] when the peer
+    /// is known capable (directly or itself attested — attestation chains
+    /// transitively, which is how knowledge reaches members several adds
+    /// removed from any direct exchange), `None` when unknown. `None` is
+    /// deliberately not a downgrade signal: absence of knowledge must never
+    /// evict what another member learned first-hand.
+    pub(crate) fn attestable_rich_versions(&self, peer_id: &str) -> Option<Vec<u8>> {
+        (self.peer_rich_payload.contains(peer_id) || self.peer_rich_attested.contains(peer_id))
+            .then(|| vec![RICH_PAYLOAD_V1])
+    }
+
+    /// Best-effort capability backfill for group members whose rich support
+    /// is unknown (pre-attestation groups, or an attestation chain broken by
+    /// an old-SDK inviter): send them our key package so their
+    /// `auto_key_exchange` reply teaches us theirs. Guarded by
+    /// `key_package_sent_to`, so repeated gate-failing group sends don't
+    /// re-probe the same peer; a peer that never replies is either
+    /// unreachable, old-SDK, or opted out — all of which correctly leave
+    /// the gate closed.
+    pub(crate) fn backfill_group_rich_capabilities(&mut self, unknown_members: &[String]) {
+        for member in unknown_members {
+            if self.key_package_sent_to.contains(member.as_str()) {
+                continue;
+            }
+            if let Err(e) = self.send_key_package_to(member, false) {
+                debug!(
+                    member = %member,
+                    error = %e,
+                    "Rich-capability backfill key package deferred (peer unreachable)"
+                );
+            }
+        }
     }
 
     /// Wraps plaintext content and rich extras into the sealed
