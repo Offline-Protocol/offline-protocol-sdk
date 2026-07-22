@@ -952,6 +952,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route(
@@ -1340,6 +1342,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_state(
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_topology(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
@@ -1843,6 +1847,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 760.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881.toShort()) {
@@ -3159,6 +3166,8 @@ public interface OfflineProtocolInterface {
     
     fun `getTransportMetrics`(`transportType`: TransportType): TransportMetrics?
     
+    fun `groupRichReadiness`(`groupId`: kotlin.String): GroupRichReadiness
+    
     fun `hasPendingKeyPackage`(`peerId`: kotlin.String): kotlin.Boolean
     
     fun `hasRoute`(`destination`: kotlin.String): kotlin.Boolean
@@ -4128,6 +4137,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(
         it,
         FfiConverterTypeTransportType.lower(`transportType`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `groupRichReadiness`(`groupId`: kotlin.String): GroupRichReadiness {
+            return FfiConverterTypeGroupRichReadiness.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(
+        it,
+        FfiConverterString.lower(`groupId`),_status)
 }
     }
     )
@@ -6053,6 +6076,42 @@ public object FfiConverterTypeGradientRoutingConfig: FfiConverterRustBuffer<Grad
             FfiConverterUInt.write(value.`maxRoutesPerDestination`, buf)
             FfiConverterULong.write(value.`routeTtlSecs`, buf)
             FfiConverterUInt.write(value.`maxRoutingTableSize`, buf)
+    }
+}
+
+
+
+data class GroupRichReadiness (
+    var `ready`: kotlin.Boolean
+    , 
+    var `unknownMembers`: List<kotlin.String>
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeGroupRichReadiness: FfiConverterRustBuffer<GroupRichReadiness> {
+    override fun read(buf: ByteBuffer): GroupRichReadiness {
+        return GroupRichReadiness(
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: GroupRichReadiness) = (
+            FfiConverterBoolean.allocationSize(value.`ready`) +
+            FfiConverterSequenceString.allocationSize(value.`unknownMembers`)
+    )
+
+    override fun write(value: GroupRichReadiness, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`ready`, buf)
+            FfiConverterSequenceString.write(value.`unknownMembers`, buf)
     }
 }
 
