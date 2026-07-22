@@ -137,6 +137,21 @@ pub struct OfflineProtocol {
     /// rich extras — never a cleartext fallback.
     peer_rich_payload: std::collections::HashSet<String>,
 
+    /// Peers whose sealed-rich-payload support we learned *indirectly*: a
+    /// group inviter attested it on the Add commit (to existing members) or
+    /// the Welcome (to the joining member), because the members of a group
+    /// never directly exchange key packages with everyone else. Kept
+    /// separate from `peer_rich_payload` (direct self-advertisement) so
+    /// direct knowledge can stay authoritative: any directly received key
+    /// package from a peer evicts its attested entry. Consulted only by
+    /// `group_rich_seal_active` — never DM sealing (which always has direct
+    /// knowledge: session establishment exchanges key packages) and never
+    /// envelope selection (a stale attestation there could corrupt
+    /// decoding; here the worst case is one member rendering a literal
+    /// `__RICH_V1__` body). Persisted inside `PeerCapabilities`, restored
+    /// on `initialize_mls`, bounded like `key_package_sent_to`.
+    peer_rich_attested: std::collections::HashSet<String>,
+
     /// Peers already flagged with a `PlaintextSend` security warning, so the
     /// explicit-opt-out plaintext path warns once per peer instead of once
     /// per message.
@@ -388,6 +403,7 @@ impl OfflineProtocol {
             confirmed_sessions: std::collections::HashSet::new(),
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_rich_payload: std::collections::HashSet::new(),
+            peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
             pending_queue: PendingDecryptionQueue::default(),
@@ -476,6 +492,7 @@ impl OfflineProtocol {
         let previous_outbox = self.outbox.clone();
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
+        let previous_peer_rich_attested = self.peer_rich_attested.clone();
 
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
@@ -520,6 +537,7 @@ impl OfflineProtocol {
             self.outbox = previous_outbox;
             self.peer_compact_envelope = previous_peer_compact_envelope;
             self.peer_rich_payload = previous_peer_rich_payload;
+            self.peer_rich_attested = previous_peer_rich_attested;
             return Err(err);
         }
 

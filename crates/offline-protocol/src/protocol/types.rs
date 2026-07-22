@@ -702,6 +702,16 @@ pub(crate) struct PeerCapabilities {
     pub(crate) env_versions: Vec<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) rich_versions: Vec<u8>,
+    /// Rich-payload versions a *group inviter* attested for this peer
+    /// (carried on the group Add commit / Welcome), as opposed to the
+    /// direct self-advertised `rich_versions` above. Kept separate because
+    /// the trust differs: attestation is third-party and may be stale, so a
+    /// direct key-package exchange overwrites the whole record (clearing
+    /// this field) — direct knowledge is always authoritative. Consulted
+    /// only by the group seal gate, never by DM sealing or envelope
+    /// selection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) attested_rich_versions: Vec<u8>,
 }
 
 /// Cap on how many advertised version entries persist per capability list
@@ -727,13 +737,16 @@ impl PeerCapabilities {
                 .copied()
                 .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
                 .collect(),
+            attested_rich_versions: Vec::new(),
         }
     }
 
     /// Whether any capability is advertised. Empty records are deleted
     /// rather than stored — the durable side of the downgrade semantics.
     pub(crate) fn is_any(&self) -> bool {
-        !self.env_versions.is_empty() || !self.rich_versions.is_empty()
+        !self.env_versions.is_empty()
+            || !self.rich_versions.is_empty()
+            || !self.attested_rich_versions.is_empty()
     }
 }
 

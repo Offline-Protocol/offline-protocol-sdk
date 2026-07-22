@@ -1925,6 +1925,7 @@ fn peer_capability_restore_prunes_overflow() {
     // like restore_peer_key_packages.
     let storage = Arc::new(InMemoryStorage::new());
     let caps = PeerCapabilities {
+        attested_rich_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
     };
@@ -2047,6 +2048,7 @@ fn peer_capability_restore_prefers_session_peers() {
     // admission the over-cap prune could evict bob's record while keeping
     // forged leftovers.
     let caps = PeerCapabilities {
+        attested_rich_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
     };
@@ -2114,6 +2116,161 @@ fn peer_capability_persist_truncates_version_lists() {
     let caps: PeerCapabilities = serde_json::from_slice(&data).unwrap();
     assert_eq!(caps.rich_versions.len(), MAX_PERSISTED_CAPABILITY_VERSIONS);
     assert!(caps.rich_versions.contains(&RICH_PAYLOAD_V1));
+}
+
+#[test]
+fn attested_rich_gates_group_seal_only_and_persists() {
+    // An inviter-attested capability must open the *group* seal gate for a
+    // peer we never directly exchanged with, survive a restart, and never
+    // leak into DM sealing (that path always has direct knowledge).
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    let members = vec!["user123".to_string(), "peer".to_string()];
+    assert!(!protocol.group_rich_seal_active(&members));
+
+    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
+    assert!(protocol.peer_rich_attested.contains("peer"));
+    assert!(protocol.group_rich_seal_active(&members));
+    assert!(
+        !protocol.rich_seal_active("peer") && !protocol.peer_supports_rich_payload("peer"),
+        "attestation must never open the DM seal gate"
+    );
+
+    let restarted = protocol_with_mls_storage(storage);
+    assert!(
+        restarted.peer_rich_attested.contains("peer"),
+        "attested capability must survive a restart"
+    );
+    assert!(restarted.group_rich_seal_active(&members));
+}
+
+#[test]
+fn attested_rich_ignores_non_v1_and_self() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage);
+    protocol.record_attested_rich("peer", &[99]);
+    assert!(!protocol.peer_rich_attested.contains("peer"));
+    protocol.record_attested_rich("user123", &[RICH_PAYLOAD_V1]);
+    assert!(!protocol.peer_rich_attested.contains("user123"));
+}
+
+#[test]
+fn direct_key_package_overrides_attested_rich() {
+    // Direct knowledge is authoritative in both directions: a package
+    // without the capability evicts a stale attestation (memory + disk),
+    // and one with it moves the peer to the direct set.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    let members = vec!["user123".to_string(), "peer".to_string()];
+
+    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut protocol, "peer", Vec::new());
+    assert!(!protocol.peer_rich_attested.contains("peer"));
+    assert!(!protocol.group_rich_seal_active(&members));
+    let restarted = protocol_with_mls_storage(storage.clone());
+    assert!(
+        !restarted.peer_rich_attested.contains("peer"),
+        "a direct downgrade must also kill the durable attested record"
+    );
+
+    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut protocol, "peer", vec![RICH_PAYLOAD_V1]);
+    assert!(protocol.peer_rich_payload.contains("peer"));
+    assert!(!protocol.peer_rich_attested.contains("peer"));
+    assert!(protocol.group_rich_seal_active(&members));
+
+    // Attesting a directly-known peer is a no-op — the direct entry already
+    // covers it, and a stale attested duplicate would outlive a downgrade.
+    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
+    assert!(!protocol.peer_rich_attested.contains("peer"));
+}
+
+#[test]
+fn attested_rich_kill_switch_gates_memory_but_keeps_record() {
+    // Same semantics as the direct sets: the kill switch gates recording
+    // and use, not knowledge — flipping it back on restores the attestation
+    // on the next run.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.rich_payload_enabled = false;
+    let mut gated = OfflineProtocol::new(config).unwrap();
+    gated.initialize_mls(storage.clone()).unwrap();
+    gated.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
+    assert!(!gated.peer_rich_attested.contains("peer"));
+
+    let restored = protocol_with_mls_storage(storage);
+    assert!(restored.peer_rich_attested.contains("peer"));
+}
+
+#[test]
+fn attested_rich_unblock_clears_record() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
+
+    protocol.block_user("peer").unwrap();
+    protocol.unblock_user("peer").unwrap();
+    assert!(!protocol.peer_rich_attested.contains("peer"));
+
+    let restarted = protocol_with_mls_storage(storage);
+    assert!(
+        !restarted.peer_rich_attested.contains("peer"),
+        "unblock's clean slate must extend to the attested record"
+    );
+}
+
+#[test]
+fn attested_rich_persist_truncates_and_merges_with_direct_record() {
+    // Attestation persists raw but truncated, and merges into an existing
+    // record without clobbering directly-advertised capabilities.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    feed_key_package_with_caps(
+        &mut protocol,
+        "peer",
+        vec![MLS_ENVELOPE_COMPACT_V1],
+        Vec::new(),
+    );
+
+    let mut versions = vec![RICH_PAYLOAD_V1];
+    versions.extend(2..=200u8);
+    protocol.record_attested_rich("peer", &versions);
+
+    let data = storage
+        .load(storage_keys::PEER_CAPABILITIES, "peer")
+        .unwrap()
+        .expect("record must persist");
+    let caps: PeerCapabilities = serde_json::from_slice(&data).unwrap();
+    assert_eq!(
+        caps.attested_rich_versions.len(),
+        MAX_PERSISTED_CAPABILITY_VERSIONS
+    );
+    assert!(caps.attested_rich_versions.contains(&RICH_PAYLOAD_V1));
+    assert!(
+        caps.env_versions.contains(&MLS_ENVELOPE_COMPACT_V1),
+        "attestation must merge into the record, not clobber direct capabilities"
+    );
+}
+
+#[test]
+fn attested_rich_flood_eviction_clears_at_cap() {
+    // Bounded like the direct sets: keyed by ids from (signed but
+    // TOFU-trusted) group control frames, so reset at capacity rather than
+    // growing without bound. Forgetting costs one re-attestation/backfill.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage);
+    for i in 0..MAX_KEY_PACKAGE_SENT_TO {
+        protocol.record_attested_rich(&format!("peer-{i}"), &[RICH_PAYLOAD_V1]);
+    }
+    assert_eq!(protocol.peer_rich_attested.len(), MAX_KEY_PACKAGE_SENT_TO);
+    protocol.record_attested_rich("one-more", &[RICH_PAYLOAD_V1]);
+    assert_eq!(
+        protocol.peer_rich_attested.len(),
+        1,
+        "at capacity the set resets before inserting"
+    );
+    assert!(protocol.peer_rich_attested.contains("one-more"));
 }
 
 #[test]
