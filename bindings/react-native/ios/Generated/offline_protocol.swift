@@ -876,6 +876,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getTransportMetrics(transportType: TransportType)  -> TransportMetrics?
     
+    func groupRelaySyncState(groupId: String) throws  -> RelaySyncState
+    
     func groupRichReadiness(groupId: String) throws  -> GroupRichReadiness
     
     func hasPendingKeyPackage(peerId: String)  -> Bool
@@ -987,6 +989,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func removeTransport(transportType: TransportType) throws 
     
     func renameGroup(groupId: String, newName: String) throws 
+    
+    func requestGroupRelayRegistration(groupId: String) throws  -> Bool
     
     func requestPrekeyBundle(username: String) throws  -> String
     
@@ -1565,6 +1569,15 @@ open func getTransportMetrics(transportType: TransportType) -> TransportMetrics?
 })
 }
     
+open func groupRelaySyncState(groupId: String)throws  -> RelaySyncState  {
+    return try  FfiConverterTypeRelaySyncState_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
 open func groupRichReadiness(groupId: String)throws  -> GroupRichReadiness  {
     return try  FfiConverterTypeGroupRichReadiness_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(
@@ -2044,6 +2057,15 @@ open func renameGroup(groupId: String, newName: String)throws   {try rustCallWit
         FfiConverterString.lower(newName),$0
     )
 }
+}
+    
+open func requestGroupRelayRegistration(groupId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
 }
     
 open func requestPrekeyBundle(username: String)throws  -> String  {
@@ -6714,6 +6736,78 @@ public func FfiConverterTypeRelayRole_lower(_ value: RelayRole) -> RustBuffer {
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum RelaySyncState: Equatable, Hashable {
+    
+    case synced
+    case pending
+    case unsynced
+
+
+
+}
+
+#if compiler(>=6)
+extension RelaySyncState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRelaySyncState: FfiConverterRustBuffer {
+    typealias SwiftType = RelaySyncState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RelaySyncState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .synced
+        
+        case 2: return .pending
+        
+        case 3: return .unsynced
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RelaySyncState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .synced:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pending:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unsynced:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRelaySyncState_lift(_ buf: RustBuffer) throws -> RelaySyncState {
+    return try FfiConverterTypeRelaySyncState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRelaySyncState_lower(_ value: RelaySyncState) -> RustBuffer {
+    return FfiConverterTypeRelaySyncState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum RoutingPhase: Equatable, Hashable {
     
     case scoreUpdated
@@ -9315,6 +9409,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state() != 42204) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 760) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9481,6 +9578,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 32723) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 5596) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933) {

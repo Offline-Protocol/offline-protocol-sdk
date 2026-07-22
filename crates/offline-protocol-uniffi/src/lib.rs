@@ -1694,6 +1694,25 @@ impl From<offline_protocol::GroupRichReadiness> for GroupRichReadiness {
     }
 }
 
+/// Relay-side registration state of a group (point-in-time; transitions
+/// surface as the `group_relay_sync_changed` event).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelaySyncState {
+    Synced,
+    Pending,
+    Unsynced,
+}
+
+impl From<offline_protocol::RelaySyncState> for RelaySyncState {
+    fn from(s: offline_protocol::RelaySyncState) -> Self {
+        match s {
+            offline_protocol::RelaySyncState::Synced => Self::Synced,
+            offline_protocol::RelaySyncState::Pending => Self::Pending,
+            offline_protocol::RelaySyncState::Unsynced => Self::Unsynced,
+        }
+    }
+}
+
 /// DORS configuration
 #[derive(Debug, Clone)]
 pub struct DorsConfig {
@@ -5233,6 +5252,29 @@ impl OfflineProtocol {
         guard
             .group_rich_readiness(&group_id)
             .map(GroupRichReadiness::from)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Relay-side registration state of a group (point-in-time; transitions
+    /// surface as the `group_relay_sync_changed` event).
+    pub fn group_relay_sync_state(
+        &self,
+        group_id: String,
+    ) -> Result<RelaySyncState, ProtocolError> {
+        let guard = self.lock_inner()?;
+        Ok(guard.group_relay_sync_state(&group_id).into())
+    }
+
+    /// Register (or re-register) a group with the relay server on demand.
+    /// Outcome arrives as `group_relay_sync_changed`; returns true when the
+    /// frame was queued or the group is already synced.
+    pub fn request_group_relay_registration(
+        &self,
+        group_id: String,
+    ) -> Result<bool, ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .request_group_relay_registration(&group_id)
             .map_err(ProtocolError::from)
     }
 

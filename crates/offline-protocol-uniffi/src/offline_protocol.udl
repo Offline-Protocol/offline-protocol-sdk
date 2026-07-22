@@ -87,6 +87,14 @@ dictionary GroupRichReadiness {
     sequence<string> unknown_members;
 };
 
+// Relay-side registration state of a group (group_relay_sync_state).
+// Transitions surface as the group_relay_sync_changed event.
+enum RelaySyncState {
+    "Synced",
+    "Pending",
+    "Unsynced",
+};
+
 // Establishment state for a peer (for SessionNotReady and get_establishment_state)
 enum EstablishmentState {
     "NoKeyPackage",
@@ -1299,6 +1307,19 @@ interface OfflineProtocol {
     // members hold the gate closed (point-in-time, advisory)
     [Throws=ProtocolError]
     GroupRichReadiness group_rich_readiness(string group_id);
+
+    // Relay-side registration state of a group (point-in-time; transitions
+    // surface as the group_relay_sync_changed event)
+    [Throws=ProtocolError]
+    RelaySyncState group_relay_sync_state(string group_id);
+
+    // Register (or re-register) a group with the relay server on demand —
+    // the supported path before relay-dependent raw server commands
+    // (invite links). Outcome arrives as group_relay_sync_changed; returns
+    // true when the frame was queued or the group is already synced, false
+    // when relay grouping is disabled or Internet is unavailable
+    [Throws=ProtocolError]
+    boolean request_group_relay_registration(string group_id);
 
     // Set a member's role in a group (admin only, broadcasts to all members)
     [Throws=ProtocolError]

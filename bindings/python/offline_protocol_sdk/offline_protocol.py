@@ -623,6 +623,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 25216:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state() != 29095:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 53848:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 498:
@@ -734,6 +736,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 14605:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 50903:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 6912:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 43697:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1605,6 +1609,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transpor
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1946,6 +1956,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration.restype = ctypes.c_int8
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2435,6 +2451,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_to
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness.restype = ctypes.c_uint16
@@ -2603,6 +2622,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle.restype = ctypes.c_uint16
@@ -7446,6 +7468,54 @@ class _UniffiFfiConverterTypeProtocolState(_UniffiConverterRustBuffer):
 
 
 
+
+
+
+
+
+class RelaySyncState(enum.Enum):
+    
+    SYNCED = 0
+    
+    PENDING = 1
+    
+    UNSYNCED = 2
+    
+
+
+class _UniffiFfiConverterTypeRelaySyncState(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return RelaySyncState.SYNCED
+        if variant == 2:
+            return RelaySyncState.PENDING
+        if variant == 3:
+            return RelaySyncState.UNSYNCED
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == RelaySyncState.SYNCED:
+            return
+        if value == RelaySyncState.PENDING:
+            return
+        if value == RelaySyncState.UNSYNCED:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == RelaySyncState.SYNCED:
+            buf.write_i32(1)
+        if value == RelaySyncState.PENDING:
+            buf.write_i32(2)
+        if value == RelaySyncState.UNSYNCED:
+            buf.write_i32(3)
+
+
+
 class _UniffiFfiConverterMapStringString(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, items):
@@ -8648,6 +8718,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def get_transport_metrics(self, transport_type: TransportType) -> typing.Optional[TransportMetrics]:
         raise NotImplementedError
+    def group_relay_sync_state(self, group_id: str) -> RelaySyncState:
+        raise NotImplementedError
     def group_rich_readiness(self, group_id: str) -> GroupRichReadiness:
         raise NotImplementedError
     def has_pending_key_package(self, peer_id: str) -> bool:
@@ -8759,6 +8831,8 @@ class OfflineProtocolProtocol(typing.Protocol):
     def remove_transport(self, transport_type: TransportType) -> None:
         raise NotImplementedError
     def rename_group(self, group_id: str,new_name: str) -> None:
+        raise NotImplementedError
+    def request_group_relay_registration(self, group_id: str) -> bool:
         raise NotImplementedError
     def request_prekey_bundle(self, username: str) -> str:
         raise NotImplementedError
@@ -9600,6 +9674,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def group_relay_sync_state(self, group_id: str) -> RelaySyncState:
+        
+        _UniffiFfiConverterString.check_lower(group_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(group_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeRelaySyncState.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -10458,6 +10547,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def request_group_relay_registration(self, group_id: str) -> bool:
+        
+        _UniffiFfiConverterString.check_lower(group_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(group_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def request_prekey_bundle(self, username: str) -> str:
         
         _UniffiFfiConverterString.check_lower(username)
@@ -11306,6 +11410,7 @@ __all__ = [
     "PresenceStatus",
     "ProtocolError",
     "ProtocolState",
+    "RelaySyncState",
     "AckConfig",
     "BleFragment",
     "DedupConfig",
