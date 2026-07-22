@@ -168,7 +168,7 @@ jobs:
 
       # ubuntu-latest ships an Android SDK, but provision it explicitly so the
       # toolchain (and license acceptance) doesn't drift out from under us.
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
 
       - uses: gradle/actions/setup-gradle@v6
         with:
