@@ -627,6 +627,7 @@ mod tests {
             },
             Event::GroupRichExtrasDropped {
                 group_id: String::new(),
+                unknown_members: Vec::new(),
             },
             Event::GroupEpochForkDetected {
                 group_id: String::new(),

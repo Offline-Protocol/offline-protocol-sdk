@@ -11,7 +11,7 @@
 
 use crate::protocol::{
     base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload,
-    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras,
+    InternalMessageResult, OfflineProtocol, RichPayloadV1, RichSendExtras, RICH_PAYLOAD_V1,
 };
 use crate::{Error, Event, Result};
 use chrono::{DateTime, Utc};
@@ -229,6 +229,24 @@ pub struct GroupSendOptions {
     pub media_metadata: Option<MediaMetadata>,
 }
 
+/// Snapshot of whether a rich group send right now would seal its extras,
+/// from `OfflineProtocol::group_rich_readiness`. Point-in-time and
+/// advisory: capability knowledge changes with key-package exchanges,
+/// attested adds, and restarts, and the send path re-evaluates the gate
+/// itself — this exists so apps can warn before sending (e.g. gray out the
+/// attachment button) instead of learning from `GroupRichExtrasDropped`
+/// after the drop.
+#[derive(Debug, Clone)]
+pub struct GroupRichReadiness {
+    /// True when every other member is known rich-capable and the local
+    /// kill switch is on — rich extras would seal.
+    pub ready: bool,
+    /// Members not known to parse the sealed rich payload (unknown and
+    /// known-non-support are indistinguishable). Empty when `ready`, and
+    /// also empty when only the local kill switch blocks sealing.
+    pub unknown_members: Vec<String>,
+}
+
 /// Payload for MLS-encrypted group messages sent via mesh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GroupMlsMessagePayload {
@@ -260,6 +278,16 @@ pub(crate) struct GroupMlsWelcomePayload {
     /// Role assignments: user_id -> role.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub(crate) member_roles: HashMap<String, GroupRole>,
+    /// Rich-payload versions the inviter attests per existing member
+    /// (additive; absent from old SDKs), so the joiner can seal rich extras
+    /// toward members it never directly exchanged key packages with.
+    /// Entries only appear for members the inviter knows capable — absence
+    /// means "no information", never a downgrade. Recipient-side trust
+    /// bounds: entries are ignored for user ids outside the joined MLS
+    /// roster, and a later direct key-package exchange with a member
+    /// overrides its attested entry.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) member_rich: HashMap<String, Vec<u8>>,
 }
 
 /// Type of group membership commit operation.
@@ -292,6 +320,15 @@ pub(crate) struct GroupMlsCommitPayload {
     /// Role assigned to the affected member (for Add commits).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) role: Option<GroupRole>,
+    /// Rich-payload versions the inviter attests for the added member
+    /// (additive; absent from old SDKs or when the inviter has no
+    /// knowledge), so existing members — who never exchange key packages
+    /// with the newcomer — can keep sealing rich extras. Recipient-side
+    /// trust bounds mirror `role`: honored only for the member the MLS
+    /// state delta actually added and only from an admin sender, and a
+    /// later direct key-package exchange overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) affected_member_rich: Option<Vec<u8>>,
 }
 
 /// Payload for group leave notifications sent via mesh.
@@ -876,6 +913,20 @@ impl OfflineProtocol {
 
         if let Some(members) = join_result {
             let group_id = payload.group_id.clone();
+
+            // Record the inviter's rich-capability attestations for members
+            // we have never (and may never) directly exchange key packages
+            // with — without them every rich send into this group drops its
+            // extras. Bounded to the authoritative MLS roster we just
+            // joined: entries for non-members are attacker-suppliable dead
+            // weight and are ignored. `record_attested_rich` skips self,
+            // non-V1 lists, and peers we already know directly.
+            for (user_id, versions) in &payload.member_rich {
+                if members.contains(user_id) {
+                    self.record_attested_rich(user_id, versions);
+                }
+            }
+
             self.group_mesh.members.insert(group_id.clone(), members);
 
             // Store member roles from welcome payload
@@ -1145,15 +1196,23 @@ impl OfflineProtocol {
             }
         }
 
+        // Commit-payload metadata (role, rich attestation) is honored only
+        // for the member the MLS delta actually added and only from an
+        // admin sender — adds are admin-only, so a non-admin sender means
+        // forged metadata on a replayed/crafted frame.
+        let sender_is_admin = if actual_added.is_empty() {
+            false
+        } else {
+            self.check_is_admin(&payload.group_id, sender)
+                .unwrap_or(false)
+        };
+
         // Emit events based on actual MLS membership changes, not claimed affected_member
         for member in &actual_added {
             // Store the role from the commit payload only for the specific affected member,
             // and only if the sender is an admin (prevents non-admins from injecting elevated roles).
             if let (Some(role), Some(affected)) = (&payload.role, &payload.affected_member) {
                 if *member == affected {
-                    let sender_is_admin = self
-                        .check_is_admin(&payload.group_id, sender)
-                        .unwrap_or(false);
                     if sender_is_admin {
                         if let Ok(mls_guard) = self.read_mls_guard() {
                             if let Err(e) = mls_guard.set_member_role(&gid, member, *role) {
@@ -1167,6 +1226,18 @@ impl OfflineProtocol {
                             "Ignoring role from commit: sender is not admin"
                         );
                     }
+                }
+            }
+            // Record the inviter's rich-capability attestation for the
+            // newcomer — we existing members never exchange key packages
+            // with them, and without this one unknown member drops rich
+            // extras for the whole group. Same trust bounds as the role
+            // above; a later direct exchange overrides it.
+            if let (Some(versions), Some(affected)) =
+                (&payload.affected_member_rich, &payload.affected_member)
+            {
+                if *member == affected && sender_is_admin {
+                    self.record_attested_rich(member, versions);
                 }
             }
             self.emit_event(Event::group_member_added(
@@ -1950,6 +2021,31 @@ impl OfflineProtocol {
                 .unwrap_or_default()
         };
 
+        // Attest rich-payload capability both directions of the knowledge
+        // gap an add creates: existing members never exchange key packages
+        // with the invitee (commit field below), and the invitee never
+        // exchanges with anyone but us (welcome map here). Entries only
+        // exist for members we know capable — directly or via an earlier
+        // attestation, which is how knowledge chains across successive adds
+        // — so absence means "no information", never a downgrade. Our own
+        // entry self-advertises from config (belt to the key package sent
+        // above, whose delivery is best-effort).
+        let invitee_rich = self.attestable_rich_versions(invitee_user_id);
+        let member_rich: HashMap<String, Vec<u8>> = members
+            .iter()
+            .filter(|m| m.as_str() != invitee_user_id)
+            .filter_map(|m| {
+                if *m == self_id {
+                    self.config
+                        .encryption
+                        .rich_payload_enabled
+                        .then(|| (m.clone(), vec![RICH_PAYLOAD_V1]))
+                } else {
+                    self.attestable_rich_versions(m).map(|v| (m.clone(), v))
+                }
+            })
+            .collect();
+
         // Send Welcome to invitee
         let welcome_payload = GroupMlsWelcomePayload {
             group_id: group_id.to_string(),
@@ -1957,6 +2053,7 @@ impl OfflineProtocol {
             welcome_data: base64_encode(&welcome.welcome_data),
             member_list: members.clone(),
             member_roles,
+            member_rich,
         };
         let welcome_content = format!(
             "{}{}",
@@ -1975,6 +2072,7 @@ impl OfflineProtocol {
             epoch: commit.epoch,
             affected_member: Some(invitee_user_id.to_string()),
             role: Some(GroupRole::Member),
+            affected_member_rich: invitee_rich,
         };
         let commit_content = format!(
             "{}{}",
@@ -2100,6 +2198,7 @@ impl OfflineProtocol {
             epoch: commit_msg.epoch,
             affected_member: Some(member_id.to_string()),
             role: None,
+            affected_member_rich: None,
         };
         let commit_content = format!(
             "{}{}",
@@ -2427,6 +2526,33 @@ impl OfflineProtocol {
         .check_size()
     }
 
+    /// Whether a rich group send right now would seal its extras, and which
+    /// members are in the way. See [`GroupRichReadiness`]. Read-only: uses
+    /// the fan-out cache with an MLS fallback but never mutates state, and
+    /// does not probe unknown members (the send path's drop branch does).
+    pub fn group_rich_readiness(&self, group_id: &str) -> Result<GroupRichReadiness> {
+        let members = match self.group_mesh.members.get(group_id) {
+            Some(m) => m.clone(),
+            None => {
+                let mls_guard = self.read_mls_guard()?;
+                let gid = offline_protocol_mls::GroupId::new(group_id)?;
+                mls_guard
+                    .get_group_info(&gid)?
+                    .ok_or_else(|| Error::GroupNotFound(group_id.to_string()))?
+                    .members
+            }
+        };
+        let unknown_members = if self.config.encryption.rich_payload_enabled {
+            self.group_rich_unknown_members(&members)
+        } else {
+            Vec::new()
+        };
+        Ok(GroupRichReadiness {
+            ready: self.group_rich_seal_active(&members),
+            unknown_members,
+        })
+    }
+
     /// Shared implementation for sending and forwarding group messages.
     ///
     /// Handles the sealed-rich decision, MLS encryption, member list
@@ -2482,20 +2608,38 @@ impl OfflineProtocol {
             media_metadata,
             forward_info: forward_info.clone(),
         };
-        let sealed = (extras.is_any() || content_type != ContentType::Text)
-            && self.group_rich_seal_active(&members);
+        let wants_seal = extras.is_any() || content_type != ContentType::Text;
+        let sealed = wants_seal && self.group_rich_seal_active(&members);
         let sealed_body;
         let plaintext: &str = if sealed {
             sealed_body = Self::seal_rich_payload(content, &extras, content_type)?;
             &sealed_body
         } else {
+            // Members holding the gate closed (empty when the local kill
+            // switch is the cause — with recording disabled, listing every
+            // member would be noise, and probing them could not reopen the
+            // gate anyway). Probing sends them our key package so their
+            // auto-exchange reply teaches us their capability: unknown
+            // members are typically ones somebody else added, healed here
+            // for groups predating attestation or behind an old-SDK inviter.
+            let unknown = if self.config.encryption.rich_payload_enabled {
+                self.group_rich_unknown_members(&members)
+            } else {
+                Vec::new()
+            };
+            if wants_seal && !unknown.is_empty() {
+                self.backfill_group_rich_capabilities(&unknown);
+            }
             if extras.media_metadata.is_some() {
                 warn!(
                     group_id = %group_id,
                     "Group not fully rich-capable, dropping rich media metadata (members \
                      will receive the text without the media attachment)"
                 );
-                self.emit_event(Event::group_rich_extras_dropped(group_id.to_string()));
+                self.emit_event(Event::group_rich_extras_dropped(
+                    group_id.to_string(),
+                    unknown,
+                ));
             }
             content
         };
@@ -3459,6 +3603,7 @@ impl OfflineProtocol {
                         epoch: commit_msg.epoch,
                         affected_member: None,
                         role: None,
+                        affected_member_rich: None,
                     };
                     let commit_content = match serde_json::to_string(&commit_payload) {
                         Ok(json) => format!("{}{}", internal_prefixes::GROUP_MLS_COMMIT, json),
