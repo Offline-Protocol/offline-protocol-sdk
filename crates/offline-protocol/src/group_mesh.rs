@@ -2622,12 +2622,15 @@ impl OfflineProtocol {
             // auto-exchange reply teaches us their capability: unknown
             // members are typically ones somebody else added, healed here
             // for groups predating attestation or behind an old-SDK inviter.
-            let unknown = if self.config.encryption.rich_payload_enabled {
+            // Only sends that wanted to seal consume the set (backfill here,
+            // blame on the drop event below) — plain text sends skip the
+            // membership scan entirely.
+            let unknown = if wants_seal && self.config.encryption.rich_payload_enabled {
                 self.group_rich_unknown_members(&members)
             } else {
                 Vec::new()
             };
-            if wants_seal && !unknown.is_empty() {
+            if !unknown.is_empty() {
                 self.backfill_group_rich_capabilities(&unknown);
             }
             if extras.media_metadata.is_some() {
