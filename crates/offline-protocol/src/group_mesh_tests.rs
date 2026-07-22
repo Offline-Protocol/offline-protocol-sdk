@@ -9737,6 +9737,81 @@ fn non_admin_commit_attestation_is_ignored() {
 }
 
 #[test]
+fn group_kill_switch_drop_blames_nobody_and_skips_backfill() {
+    // With the local kill switch off, the drop event must carry empty
+    // unknown_members and the send must not probe anyone — even a member
+    // whose capability is genuinely unknown. Probing could not reopen a
+    // locally-switched-off gate, and blaming members for a local config
+    // choice would misdirect the app toward the wrong remedy.
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Kill Switch Blame Group");
+    let alice_handle = wire_mock_transport(&mut alice);
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "bob",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+    // Carol was added by someone else: capability unknown — the member the
+    // backfill WOULD probe if the gate were closed by her rather than by
+    // the kill switch.
+    alice
+        .group_mesh
+        .members
+        .get_mut(&group_id)
+        .unwrap()
+        .push("carol".to_string());
+    alice.config.encryption.rich_payload_enabled = false;
+
+    let alice_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let alice_events_clone = alice_events.clone();
+    alice.on_event(move |event| {
+        alice_events_clone.lock().unwrap().push(event);
+    });
+
+    let media = group_cloud_media_original("alice", "bob")
+        .media_metadata
+        .unwrap();
+    alice
+        .send_group_message_with(
+            &group_id,
+            "cloud photo",
+            GroupSendOptions {
+                content_type: Some(offline_protocol_core::ContentType::Image),
+                media_metadata: Some(media),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let events = alice_events.lock().unwrap();
+    let Some(Event::GroupRichExtrasDropped {
+        group_id: g,
+        unknown_members,
+    }) = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupRichExtrasDropped { .. }))
+    else {
+        panic!("kill-switch drop must emit GroupRichExtrasDropped");
+    };
+    assert_eq!(g, &group_id);
+    assert!(
+        unknown_members.is_empty(),
+        "kill-switch drop must blame nobody, got: {unknown_members:?}"
+    );
+
+    let kp_probes = alice_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| {
+            m.recipient.as_str() == "carol" && m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+        })
+        .count();
+    assert_eq!(
+        kp_probes, 0,
+        "kill-switch drop must not probe capability-unknown members"
+    );
+}
+
+#[test]
 fn group_drop_reports_unknown_members_and_backfills_capability() {
     // A gate-failing rich send must (a) name the members holding the gate
     // closed on the event and (b) probe them with our key package exactly
