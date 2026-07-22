@@ -927,6 +927,13 @@ pub enum Event {
     GroupRichExtrasDropped {
         /// MLS group identifier.
         group_id: String,
+        /// Members not known to parse the sealed rich payload — the ones
+        /// holding the seal gate closed. Absence of knowledge and known
+        /// non-support are indistinguishable here. Empty when the drop was
+        /// caused by the local `rich_payload_enabled` kill switch instead.
+        /// The SDK probes these members for their capability automatically;
+        /// apps can retry the send once a later attempt stops dropping.
+        unknown_members: Vec<String>,
     },
 
     /// An epoch fork was detected in a group — concurrent commits caused
@@ -1823,8 +1830,11 @@ impl Event {
     }
 
     /// Creates a GroupRichExtrasDropped event.
-    pub fn group_rich_extras_dropped(group_id: String) -> Self {
-        Self::GroupRichExtrasDropped { group_id }
+    pub fn group_rich_extras_dropped(group_id: String, unknown_members: Vec<String>) -> Self {
+        Self::GroupRichExtrasDropped {
+            group_id,
+            unknown_members,
+        }
     }
 
     /// Creates a GroupEpochForkDetected event.
@@ -2670,9 +2680,13 @@ impl fmt::Debug for Event {
                 .field("failed_count", &failed_members.len())
                 .field("succeeded_count", &succeeded_members.len())
                 .finish(),
-            Self::GroupRichExtrasDropped { group_id } => f
+            Self::GroupRichExtrasDropped {
+                group_id,
+                unknown_members,
+            } => f
                 .debug_struct("GroupRichExtrasDropped")
                 .field("group_id", group_id)
+                .field("unknown_count", &unknown_members.len())
                 .finish(),
             Self::GroupEpochForkDetected {
                 group_id,

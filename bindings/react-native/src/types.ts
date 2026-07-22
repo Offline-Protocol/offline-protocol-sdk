@@ -1209,6 +1209,14 @@ export interface GroupMessagePartialFailureEvent extends BaseEvent {
 export interface GroupRichExtrasDroppedEvent extends BaseEvent {
   type: 'group_rich_extras_dropped';
   group_id: string;
+  /**
+   * Members not known to parse the sealed rich payload — the ones holding
+   * the seal gate closed (unknown and known-non-support are
+   * indistinguishable). Empty when the drop was caused by the local
+   * `richPayloadEnabled` kill switch instead. The SDK probes these members
+   * for their capability automatically, so a later retry may stop dropping.
+   */
+  unknown_members: string[];
 }
 
 /**

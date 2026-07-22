@@ -512,8 +512,12 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             hash_each(failed_members, scrubber);
             hash_each(succeeded_members, scrubber);
         }
-        Event::GroupRichExtrasDropped { group_id } => {
+        Event::GroupRichExtrasDropped {
+            group_id,
+            unknown_members,
+        } => {
             hash_string(group_id, scrubber);
+            hash_each(unknown_members, scrubber);
         }
         Event::GroupEpochForkDetected {
             group_id,

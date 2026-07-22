@@ -31,7 +31,7 @@ pub use events::{
     DecryptionFailureCode, DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event,
     EventCallback, GroupInfoMember, PresenceSource, PresenceStatus, UserGroupSummary,
 };
-pub use group_mesh::GroupSendOptions;
+pub use group_mesh::{GroupRichReadiness, GroupSendOptions};
 pub use offline_protocol_services::MeshServices;
 pub use protocol::{MediaSendOptions, OfflineProtocol, SendMessageOptions};
 pub use transport_manager::TransportManager;

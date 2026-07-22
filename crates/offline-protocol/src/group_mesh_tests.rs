@@ -130,6 +130,7 @@ fn test_group_welcome_cannot_squat_session_slot() {
     // Ship that valid Welcome but relabel its `group_id` to squat the alice+bob
     // 1:1 session slot.
     let squat = GroupMlsWelcomePayload {
+        member_rich: HashMap::new(),
         group_id: "session:alice:bob".to_string(),
         group_name: None,
         welcome_data: base64_encode(&welcome.welcome_data),
@@ -356,6 +357,7 @@ fn test_group_mls_process_commit_empty_ciphertext_no_event() {
     // Simulate receiving a commit "add" message with empty ciphertext.
     // MLS processing will fail, so no membership event should be emitted.
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: String::new(),
@@ -489,6 +491,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
     assert_eq!(parsed_no_reply.epoch, 1);
 
     let welcome_payload = GroupMlsWelcomePayload {
+        member_rich: HashMap::new(),
         group_id: "group:def".to_string(),
         group_name: Some("Test Group".to_string()),
         welcome_data: "d2VsY29tZQ==".to_string(),
@@ -502,6 +505,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
     assert_eq!(parsed.member_list.len(), 2);
 
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: "group:ghi".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: "Y29tbWl0".to_string(),
@@ -677,6 +681,7 @@ fn test_group_mls_commit_with_spoofed_sender_rejected_not_buffered() {
     };
 
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::KeyUpdate,
         ciphertext: base64_encode(&commit.ciphertext),
@@ -775,6 +780,7 @@ fn test_group_mls_commit_unknown_group() {
 
     // Simulate receiving a commit for a group we don't belong to
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: "group:nonexistent".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"fake-commit-data"),
@@ -1093,6 +1099,7 @@ fn test_group_mls_welcome_bad_data_no_panic() {
 
     // Send a Welcome with invalid base64 welcome_data
     let welcome_payload = GroupMlsWelcomePayload {
+        member_rich: HashMap::new(),
         group_id: "group:bad-welcome".to_string(),
         group_name: Some("Bad Group".to_string()),
         welcome_data: "not-valid-base64!!!".to_string(),
@@ -1126,6 +1133,7 @@ fn test_group_mls_welcome_valid_base64_bad_mls_no_panic() {
 
     // Send a Welcome with valid base64 but garbage MLS data
     let welcome_payload = GroupMlsWelcomePayload {
+        member_rich: HashMap::new(),
         group_id: "group:garbage-mls".to_string(),
         group_name: Some("Garbage MLS".to_string()),
         welcome_data: base64_encode(b"this is not valid MLS data"),
@@ -1194,6 +1202,7 @@ fn test_group_mls_commit_oversized_ciphertext_rejected() {
     // Commit with oversized base64 ciphertext
     let oversized = "A".repeat(MAX_BASE64_PAYLOAD_SIZE + 1);
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: "group:oversized".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: oversized,
@@ -1392,6 +1401,7 @@ fn test_group_mls_commit_failure_buffers_for_retry() {
         sender: "alice".to_string(),
         message_id: "test-mid-1".to_string(),
         data: serde_json::to_string(&GroupMlsCommitPayload {
+            affected_member_rich: None,
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(b"commit-data"),
@@ -1437,6 +1447,7 @@ fn test_group_mls_pending_commit_buffer_cap() {
     // Fill the buffer beyond capacity via buffer_pending_commit
     for i in 0..(MAX_PENDING_COMMITS_PER_GROUP + 4) {
         let data = serde_json::to_string(&GroupMlsCommitPayload {
+            affected_member_rich: None,
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(format!("commit-{}", i).as_bytes()),
@@ -1510,6 +1521,7 @@ fn test_group_mls_commit_empty_ciphertext_not_buffered() {
 
     // Empty ciphertext — this is a malformed commit, not an ordering issue
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Remove,
         ciphertext: String::new(),
@@ -1730,6 +1742,7 @@ fn test_group_mls_drain_pending_commits_no_double_buffering() {
 
     // Manually insert pending commits with garbage ciphertext.
     let bad_commit = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: real_group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"not-a-real-mls-commit"),
@@ -1784,6 +1797,7 @@ fn test_group_mls_drain_pending_commits_expired_entries_dropped() {
 
     // Insert an expired pending commit
     let bad_commit = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"stale-commit"),
@@ -1825,6 +1839,7 @@ fn test_group_mls_handle_commit_permanent_failure_not_buffered() {
 
     // Simulate receiving a commit with valid base64 but garbage MLS bytes.
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"fake-but-decodable-commit"),
@@ -1861,6 +1876,7 @@ fn test_group_mls_commit_rejected_not_buffered() {
 
     // Empty ciphertext — should be rejected, not buffered
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: "group:reject-test".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: String::new(),
@@ -2332,6 +2348,7 @@ fn test_group_mls_commit_group_not_found_is_buffered_for_welcome_race() {
     // be buffered for retry after the join, not rejected. Retention is
     // bounded by the per-group/global caps and the TTL sweep.
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: "group:does-not-exist".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"some-commit-data"),
@@ -2369,6 +2386,7 @@ fn test_group_mls_commit_bad_deserialization_is_rejected_not_retriable() {
 
     // Valid base64 but garbage MLS bytes
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"this-is-not-mls"),
@@ -2612,6 +2630,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
         sender: "alice".to_string(),
         message_id: "test-mid-7".to_string(),
         data: serde_json::to_string(&GroupMlsCommitPayload {
+            affected_member_rich: None,
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(b"commit-1"),
@@ -2627,6 +2646,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
         sender: "bob".to_string(),
         message_id: "test-mid-8".to_string(),
         data: serde_json::to_string(&GroupMlsCommitPayload {
+            affected_member_rich: None,
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(b"commit-2"),
@@ -3407,6 +3427,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
 
     // Build a protocol-layer commit message from bob to alice
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::KeyUpdate,
         ciphertext: base64_encode(&bob_commit.ciphertext),
@@ -3681,6 +3702,7 @@ fn test_pending_commit_retry_count_incremented() {
 fn test_key_update_commit_type_serialization() {
     // Verify KeyUpdate serializes/deserializes correctly
     let payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: "test-group".to_string(),
         commit_type: GroupCommitType::KeyUpdate,
         ciphertext: "abc".to_string(),
@@ -4382,6 +4404,7 @@ fn test_non_key_update_commit_does_not_clear_fork_state() {
     // Wrap as an Add commit (non-KeyUpdate) — the MLS payload is valid and will
     // succeed in process_commit_core, but the commit_type is Add.
     let add_commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(&bob_update.ciphertext),
@@ -4423,6 +4446,7 @@ fn test_key_update_commit_clears_fork_state() {
     };
 
     let ku_commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::KeyUpdate,
         ciphertext: base64_encode(&bob_update.ciphertext),
@@ -5629,6 +5653,7 @@ fn test_welcome_payload_carries_roles() {
     roles.insert("bob".to_string(), GroupRole::Member);
 
     let payload = GroupMlsWelcomePayload {
+        member_rich: HashMap::new(),
         group_id: "group:test".to_string(),
         group_name: Some("Test".to_string()),
         welcome_data: "d2VsY29tZQ==".to_string(),
@@ -5644,6 +5669,7 @@ fn test_welcome_payload_carries_roles() {
 #[test]
 fn test_commit_payload_carries_role() {
     let payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: "group:test".to_string(),
         commit_type: GroupCommitType::Add,
         ciphertext: "abc".to_string(),
@@ -5657,6 +5683,7 @@ fn test_commit_payload_carries_role() {
 
     // None role should be omitted from JSON
     let payload_no_role = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: "group:test".to_string(),
         commit_type: GroupCommitType::Remove,
         ciphertext: "abc".to_string(),
@@ -6288,6 +6315,7 @@ fn test_welcome_payload_roles_stored_on_join() {
     roles.insert("bob".to_string(), GroupRole::Member);
 
     let welcome_payload = GroupMlsWelcomePayload {
+        member_rich: HashMap::new(),
         group_id: group_id.clone(),
         group_name: Some("Welcome Roles Test".to_string()),
         welcome_data: super::protocol::base64_encode(&welcome.welcome_data),
@@ -6361,6 +6389,7 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
     // ("user123"). Use garbage ciphertext so MLS decrypt fails, forcing
     // the self-removal fallback path.
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Remove,
         ciphertext: base64_encode(b"undecryptable-commit-ciphertext"),
@@ -6410,6 +6439,7 @@ fn test_self_removal_commit_from_non_admin_is_rejected() {
 
     // Eve (non-admin) sends a forged commit claiming to remove "user123"
     let commit_payload = GroupMlsCommitPayload {
+        affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Remove,
         ciphertext: base64_encode(b"garbage-ciphertext"),
@@ -8780,11 +8810,9 @@ fn group_forward_drops_media_when_member_capability_unknown() {
     // The drop is surfaced to the sending app — the send succeeded, but the
     // attachment did not go through.
     assert!(
-        alice_events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, Event::GroupRichExtrasDropped { group_id: g } if g == &group_id)),
+        alice_events.lock().unwrap().iter().any(
+            |e| matches!(e, Event::GroupRichExtrasDropped { group_id: g, .. } if g == &group_id)
+        ),
         "dropping rich media must emit GroupRichExtrasDropped to the sender"
     );
 
@@ -9358,11 +9386,9 @@ fn group_rich_kill_switch_drops_extras_even_when_all_members_capable() {
     assert!(content_type.is_none(), "kill switch must drop the hint");
 
     assert!(
-        alice_events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, Event::GroupRichExtrasDropped { group_id: g } if g == &group_id)),
+        alice_events.lock().unwrap().iter().any(
+            |e| matches!(e, Event::GroupRichExtrasDropped { group_id: g, .. } if g == &group_id)
+        ),
         "kill-switch drop must emit GroupRichExtrasDropped to the sender"
     );
 }
@@ -9391,4 +9417,440 @@ fn group_send_rejects_internal_prefix_content() {
         matches!(err, crate::Error::InvalidArgument(_)),
         "internal-prefix rich group send must be rejected, got: {err:?}"
     );
+}
+
+// ============================================================================
+// Group rich-capability attestation (inviter-propagated knowledge)
+// ============================================================================
+
+/// Real 3-party invite fixture: alice (admin) + bob in a group, then alice
+/// invites a real `carol` instance. Feeds the given capability knowledge
+/// into alice before the invite so its attestation payloads reflect it.
+/// Returns (alice, bob, carol, group_id) with the invite already performed
+/// and alice's outbox holding the Welcome (to carol) + Commit (to bob).
+fn setup_three_party_invite(
+    bob_rich_known: bool,
+    carol_rich_known: bool,
+) -> (OfflineProtocol, OfflineProtocol, OfflineProtocol, String) {
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    let mut carol = OfflineProtocol::new(create_test_config_for_user("carol")).unwrap();
+    alice.initialize_mls(storage_a).unwrap();
+    bob.initialize_mls(storage_b).unwrap();
+    carol.initialize_mls(storage_c).unwrap();
+    alice.start().unwrap();
+    bob.start().unwrap();
+    carol.start().unwrap();
+
+    let group_info = alice.create_group("Attestation Group").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+
+    // Bob joins through the real Welcome path (so his instance can later
+    // process the carol-add Commit and record its attestation).
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    use crate::protocol::ReceivedKeyPackage;
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    alice.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_kp.key_package_data,
+            local_expires_at_ms: now_ms + 600_000,
+        },
+    );
+    if bob_rich_known {
+        crate::protocol::tests::feed_key_package_with_rich(
+            &mut alice,
+            "bob",
+            vec![crate::protocol::RICH_PAYLOAD_V1],
+        );
+        // The synthetic capability advertisement clobbered the pending key
+        // package with junk bytes; restore the real one for the invite.
+        alice.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: {
+                    let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+                    // A fresh package: the first one may not be re-generated.
+                    bob_mls.generate_key_package().unwrap().key_package_data
+                },
+                local_expires_at_ms: now_ms + 600_000,
+            },
+        );
+    }
+    alice.invite_to_group(&group_id, "bob").unwrap();
+    let bob_welcome = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == "bob"
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        })
+        .expect("alice must have queued bob's Welcome")
+        .clone();
+    bob.process_internal_message(&make_message("alice", "bob", &bob_welcome.content));
+    assert!(
+        bob.group_mesh.members.contains_key(&group_id),
+        "bob must have joined via the Welcome"
+    );
+
+    // Carol's real key package, with capability knowledge as requested.
+    let carol_kp = {
+        let carol_mls = carol.mls_manager_for_testing().read().unwrap();
+        carol_mls.generate_key_package().unwrap()
+    };
+    if carol_rich_known {
+        crate::protocol::tests::feed_key_package_with_rich(
+            &mut alice,
+            "carol",
+            vec![crate::protocol::RICH_PAYLOAD_V1],
+        );
+    }
+    alice.pending_key_packages.insert(
+        "carol".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: carol_kp.key_package_data,
+            local_expires_at_ms: now_ms + 600_000,
+        },
+    );
+
+    alice.clear_outbox();
+    alice.invite_to_group(&group_id, "carol").unwrap();
+
+    (alice, bob, carol, group_id)
+}
+
+#[test]
+fn invite_attests_rich_capability_on_commit_and_welcome() {
+    let (alice, _bob, _carol, _group_id) = setup_three_party_invite(true, true);
+
+    let commit = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == "bob"
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        })
+        .expect("commit to bob must be queued");
+    let commit_payload: GroupMlsCommitPayload = serde_json::from_str(
+        commit
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_COMMIT)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        commit_payload.affected_member_rich,
+        Some(vec![crate::protocol::RICH_PAYLOAD_V1]),
+        "the commit must attest the invitee's known rich capability"
+    );
+
+    let welcome = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == "carol"
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        })
+        .expect("welcome to carol must be queued");
+    let welcome_payload: GroupMlsWelcomePayload = serde_json::from_str(
+        welcome
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_WELCOME)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        welcome_payload.member_rich.get("alice"),
+        Some(&vec![crate::protocol::RICH_PAYLOAD_V1]),
+        "the welcome must self-attest the inviter"
+    );
+    assert_eq!(
+        welcome_payload.member_rich.get("bob"),
+        Some(&vec![crate::protocol::RICH_PAYLOAD_V1]),
+        "the welcome must attest known existing members"
+    );
+    assert!(
+        !welcome_payload.member_rich.contains_key("carol"),
+        "the joiner needs no entry about itself"
+    );
+}
+
+#[test]
+fn invite_omits_attestation_for_unknown_members() {
+    // Absence of knowledge must propagate as absence — an entry (or the
+    // commit field) claiming capability for a member the inviter never
+    // heard from would poison the recipients' gates the wrong way.
+    let (alice, _bob, _carol, _group_id) = setup_three_party_invite(false, false);
+
+    let commit = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == "bob"
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        })
+        .expect("commit to bob must be queued");
+    let commit_payload: GroupMlsCommitPayload = serde_json::from_str(
+        commit
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_COMMIT)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(commit_payload.affected_member_rich, None);
+
+    let welcome = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == "carol"
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        })
+        .expect("welcome to carol must be queued");
+    let welcome_payload: GroupMlsWelcomePayload = serde_json::from_str(
+        welcome
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_WELCOME)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        welcome_payload.member_rich.get("alice"),
+        Some(&vec![crate::protocol::RICH_PAYLOAD_V1]),
+        "the inviter still self-attests"
+    );
+    assert!(!welcome_payload.member_rich.contains_key("bob"));
+}
+
+#[test]
+fn commit_attestation_teaches_existing_member() {
+    // Bob (an existing member) never exchanges key packages with carol; the
+    // attested capability on alice's Add commit must open bob's group gate.
+    let (alice, mut bob, _carol, group_id) = setup_three_party_invite(true, true);
+    let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+    // Bob already knows alice via the Welcome self-attestation, but carol
+    // is unknown until the commit lands.
+    assert!(!bob.group_rich_seal_active(&members));
+
+    let commit = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == "bob"
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        })
+        .expect("commit to bob must be queued")
+        .clone();
+    bob.process_internal_message(&make_message("alice", "bob", &commit.content));
+
+    assert!(
+        bob.group_rich_seal_active(&members),
+        "the admin's attested commit must teach bob the newcomer's capability"
+    );
+}
+
+#[test]
+fn welcome_attestation_lets_joiner_seal_and_ignores_non_roster_entries() {
+    let (alice, _bob, mut carol, group_id) = setup_three_party_invite(true, true);
+
+    let welcome = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == "carol"
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        })
+        .expect("welcome to carol must be queued")
+        .clone();
+
+    // A hostile / buggy inviter padding the map with non-members must not
+    // plant capability knowledge for them: entries are bounded to the
+    // authoritative MLS roster the joiner actually joined.
+    let mut payload: GroupMlsWelcomePayload = serde_json::from_str(
+        welcome
+            .content
+            .strip_prefix(internal_prefixes::GROUP_MLS_WELCOME)
+            .unwrap(),
+    )
+    .unwrap();
+    payload.member_rich.insert(
+        "mallory".to_string(),
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+    let tampered = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_WELCOME,
+        serde_json::to_string(&payload).unwrap()
+    );
+    carol.process_internal_message(&make_message("alice", "carol", &tampered));
+    assert!(
+        carol.group_mesh.members.contains_key(&group_id),
+        "carol must have joined via the Welcome"
+    );
+
+    let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+    assert!(
+        carol.group_rich_seal_active(&members),
+        "the welcome attestation must let the joiner seal toward members it \
+         never directly exchanged with"
+    );
+    assert!(
+        !carol.group_rich_seal_active(&vec!["carol".to_string(), "mallory".to_string()]),
+        "a non-roster map entry must not be recorded"
+    );
+}
+
+#[test]
+fn non_admin_commit_attestation_is_ignored() {
+    // The attestation shares the role field's trust bounds: honored only
+    // from an admin sender. Bob (a plain member) legitimately adds nobody —
+    // adds are admin-only — so an attestation on a commit whose sender
+    // isn't an admin is forged metadata by construction. Simulate it by
+    // demoting alice after the fact on bob's view: process the same commit
+    // with the sender's admin role removed.
+    let (alice, mut bob, _carol, group_id) = setup_three_party_invite(true, true);
+    let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+
+    // Strip alice's admin role in bob's local metadata before the commit
+    // arrives, so the sender fails bob's admin check.
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls
+            .set_member_role(&gid, "alice", GroupRole::Member)
+            .unwrap();
+    }
+
+    let commit = alice
+        .outbox_messages()
+        .find(|m| {
+            m.recipient.as_str() == "bob"
+                && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        })
+        .expect("commit to bob must be queued")
+        .clone();
+    bob.process_internal_message(&make_message("alice", "bob", &commit.content));
+
+    assert!(
+        !bob.group_rich_seal_active(&members),
+        "an attestation from a non-admin sender must be ignored"
+    );
+}
+
+#[test]
+fn group_drop_reports_unknown_members_and_backfills_capability() {
+    // A gate-failing rich send must (a) name the members holding the gate
+    // closed on the event and (b) probe them with our key package exactly
+    // once, so their auto-exchange reply can reopen the gate — the healing
+    // path for groups predating attestation.
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Backfill Group");
+    let alice_handle = wire_mock_transport(&mut alice);
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "bob",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+    // Carol was added by someone else: present in the fan-out cache, no
+    // capability knowledge. (MLS group state stays two-party; encryption
+    // does not consult the cache.)
+    alice
+        .group_mesh
+        .members
+        .get_mut(&group_id)
+        .unwrap()
+        .push("carol".to_string());
+
+    let alice_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let alice_events_clone = alice_events.clone();
+    alice.on_event(move |event| {
+        alice_events_clone.lock().unwrap().push(event);
+    });
+
+    let media = group_cloud_media_original("alice", "bob")
+        .media_metadata
+        .unwrap();
+    for _ in 0..2 {
+        alice
+            .send_group_message_with(
+                &group_id,
+                "cloud photo",
+                GroupSendOptions {
+                    content_type: Some(offline_protocol_core::ContentType::Image),
+                    media_metadata: Some(media.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    let events = alice_events.lock().unwrap();
+    let dropped = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupRichExtrasDropped { .. }))
+        .expect("drop event must be emitted");
+    let Event::GroupRichExtrasDropped {
+        group_id: g,
+        unknown_members,
+    } = dropped
+    else {
+        unreachable!()
+    };
+    assert_eq!(g, &group_id);
+    assert_eq!(
+        unknown_members,
+        &vec!["carol".to_string()],
+        "only the capability-unknown member is reported — bob is known capable"
+    );
+
+    let kp_probes = alice_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| {
+            m.recipient.as_str() == "carol" && m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+        })
+        .count();
+    assert_eq!(
+        kp_probes, 1,
+        "backfill must probe the unknown member exactly once across repeated sends"
+    );
+}
+
+#[test]
+fn group_rich_readiness_reports_gate_state() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Readiness Group");
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "bob",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+    alice
+        .group_mesh
+        .members
+        .get_mut(&group_id)
+        .unwrap()
+        .push("carol".to_string());
+
+    let readiness = alice.group_rich_readiness(&group_id).unwrap();
+    assert!(!readiness.ready);
+    assert_eq!(readiness.unknown_members, vec!["carol".to_string()]);
+
+    crate::protocol::tests::feed_key_package_with_rich(
+        &mut alice,
+        "carol",
+        vec![crate::protocol::RICH_PAYLOAD_V1],
+    );
+    let readiness = alice.group_rich_readiness(&group_id).unwrap();
+    assert!(readiness.ready);
+    assert!(readiness.unknown_members.is_empty());
+
+    // Kill switch off: not ready, but no members are blamed — probing them
+    // could not reopen the gate.
+    alice.config.encryption.rich_payload_enabled = false;
+    let readiness = alice.group_rich_readiness(&group_id).unwrap();
+    assert!(!readiness.ready);
+    assert!(readiness.unknown_members.is_empty());
+
+    assert!(matches!(
+        alice.group_rich_readiness("no-such-group"),
+        Err(crate::Error::GroupNotFound(_))
+    ));
 }
