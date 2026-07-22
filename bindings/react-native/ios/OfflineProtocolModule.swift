@@ -3331,6 +3331,27 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    /// Whether a rich group send right now would seal its extras, and which
+    /// members hold the gate closed (point-in-time, advisory).
+    @objc func meshGroupRichReadiness(_ groupId: String,
+                                      resolver: @escaping RCTPromiseResolveBlock,
+                                      rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let readiness = try proto.groupRichReadiness(groupId: groupId)
+            let result: [String: Any] = [
+                "ready": readiness.ready,
+                "unknownMembers": readiness.unknownMembers
+            ]
+            resolver(result)
+        } catch {
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to get group rich readiness")
+        }
+    }
+
     /// Set a member's role in a group (admin only).
     @objc func meshSetMemberRole(_ groupId: String,
                                   userId: String,
