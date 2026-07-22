@@ -76,7 +76,7 @@ dependencies {
         implementation 'com.facebook.react:react-android'
     } else {
         // For standalone build or testing
-        compileOnly 'com.facebook.react:react-android:0.76.0'
+        compileOnly 'com.facebook.react:react-android:0.86.0'
     }
 
     testImplementation 'junit:junit:4.13.2'
