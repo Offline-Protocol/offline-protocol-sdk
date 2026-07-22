@@ -898,6 +898,31 @@ pub enum Event {
         reason: String,
     },
 
+    /// The relay-side registration state of a group changed.
+    ///
+    /// `synced: true` fires only on the relay's positive registration
+    /// acknowledgment (a `GroupCreated` answering a registration this
+    /// device actually sent, over the Internet transport) — including the
+    /// idempotent re-sync ack after a membership change. It is the signal
+    /// that relay-dependent server commands for the group (invite links,
+    /// server-side fan-out) can be issued. `synced: false` fires when that
+    /// trust is revoked; `reason` says why. Not emitted for groups the
+    /// relay was never asked about.
+    GroupRelaySyncChanged {
+        /// MLS group identifier.
+        group_id: String,
+        /// Whether the relay currently holds a positively acknowledged
+        /// registration for this group.
+        synced: bool,
+        /// Why the state changed: `registered` (relay ack), `error`
+        /// (group-scoped relay error), `removed` (we were removed from the
+        /// group), `left` (local leave), `internet_dropped` (Internet
+        /// transport lost; re-registration re-arms on reconnect), or
+        /// `ack_timeout` (relay never answered the registration — likely a
+        /// relay without group support).
+        reason: String,
+    },
+
     /// A group message was sent to all members via mesh (MLS-encrypted fan-out).
     GroupMessageSent {
         /// MLS group identifier.
@@ -1803,6 +1828,15 @@ impl Event {
         Self::GroupError { reason }
     }
 
+    /// Creates a GroupRelaySyncChanged event.
+    pub fn group_relay_sync_changed(group_id: String, synced: bool, reason: &str) -> Self {
+        Self::GroupRelaySyncChanged {
+            group_id,
+            synced,
+            reason: reason.to_string(),
+        }
+    }
+
     /// Creates a GroupMessageSent event.
     pub fn group_message_sent(
         group_id: String,
@@ -2070,6 +2104,7 @@ impl Event {
             Self::GroupInfo { .. } => "protocol.group.info",
             Self::UserGroups { .. } => "protocol.group.user_groups",
             Self::GroupError { .. } => "protocol.group.error",
+            Self::GroupRelaySyncChanged { .. } => "protocol.group.relay_sync_changed",
             Self::GroupMessageSent { .. } => "protocol.group.message_sent",
             Self::GroupMessagePartialFailure { .. } => "protocol.group.message_partial_failure",
             Self::GroupRichExtrasDropped { .. } => "protocol.group.rich_extras_dropped",
@@ -2658,6 +2693,16 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::GroupError { reason } => f
                 .debug_struct("GroupError")
+                .field("reason", reason)
+                .finish(),
+            Self::GroupRelaySyncChanged {
+                group_id,
+                synced,
+                reason,
+            } => f
+                .debug_struct("GroupRelaySyncChanged")
+                .field("group_id", group_id)
+                .field("synced", synced)
                 .field("reason", reason)
                 .finish(),
             Self::GroupMessageSent {

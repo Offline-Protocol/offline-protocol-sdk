@@ -1089,6 +1089,18 @@ impl OfflineProtocol {
                     self.group_mesh
                         .relay_synced
                         .insert(payload.group_id.clone());
+                    // Emitted on the pending-consumed transition, NOT on the
+                    // set insert: an idempotent re-registration ack (post
+                    // membership change) finds the group already in
+                    // `relay_synced`, and apps awaiting that re-sync ack
+                    // (`ensure_group_registered`) must still hear it.
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::group_relay_sync_changed(
+                            payload.group_id.clone(),
+                            true,
+                            "registered",
+                        ));
+                    }
                 }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::group_created(payload.group_id, payload.name));
@@ -1267,15 +1279,26 @@ impl OfflineProtocol {
                         }
                     }
                     self.group_mesh.members.remove(&payload.group_id);
-                    self.group_mesh.relay_synced.remove(&payload.group_id);
+                    let was_synced = self.group_mesh.relay_synced.remove(&payload.group_id);
                     // The outstanding-registration correlation goes too, as
                     // in every other membership-teardown path: a pending
                     // entry surviving our removal could otherwise be claimed
                     // by a stale or forged __GROUP_CREATED__ after a re-join
                     // repopulates the member cache.
-                    self.group_mesh
+                    let was_pending = self
+                        .group_mesh
                         .relay_register_pending
-                        .remove(&payload.group_id);
+                        .remove(&payload.group_id)
+                        .is_some();
+                    if was_synced || was_pending {
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::group_relay_sync_changed(
+                                payload.group_id.clone(),
+                                false,
+                                "removed",
+                            ));
+                        }
+                    }
                 } else {
                     // Another member was removed. This mutates the group
                     // fan-out send cache (`group_mesh.members`), which
@@ -1393,11 +1416,27 @@ impl OfflineProtocol {
                 // a real one missed on an unusual arrival path would keep
                 // routing content into a relay that disowned the group.
                 if let Some(group_id) = &payload.group_id {
-                    self.group_mesh.relay_synced.remove(group_id);
+                    let was_synced = self.group_mesh.relay_synced.remove(group_id);
                     // The denial also answers any outstanding registration:
                     // drop the pending correlation so a later forged
                     // `__GROUP_CREATED__` cannot claim it.
-                    self.group_mesh.relay_register_pending.remove(group_id);
+                    let was_pending = self
+                        .group_mesh
+                        .relay_register_pending
+                        .remove(group_id)
+                        .is_some();
+                    // Only a revocation of state we actually tracked is a
+                    // sync change — a GroupError about a group the relay was
+                    // never asked to register is app-plane noise.
+                    if was_synced || was_pending {
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::group_relay_sync_changed(
+                                group_id.clone(),
+                                false,
+                                "error",
+                            ));
+                        }
+                    }
                 }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::group_error(payload.reason));

@@ -247,6 +247,25 @@ pub struct GroupRichReadiness {
     pub unknown_members: Vec<String>,
 }
 
+/// Relay-side registration state of a group, from
+/// `OfflineProtocol::group_relay_sync_state`. Point-in-time: transitions
+/// are surfaced as `GroupRelaySyncChanged` events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelaySyncState {
+    /// The relay positively acknowledged the group's registration on the
+    /// current connection — relay-dependent server commands for the group
+    /// (invite links, server-side fan-out) can be issued.
+    Synced,
+    /// A registration was sent and its acknowledgment is outstanding.
+    /// The SDK re-sends on a timer and gives up after a bounded number of
+    /// attempts (`GroupRelaySyncChanged { reason: "ack_timeout" }`).
+    Pending,
+    /// No registration is in flight — the group is unknown locally, the
+    /// Internet transport is down, relay grouping is disabled, or a prior
+    /// attempt was answered with an error / timed out.
+    Unsynced,
+}
+
 /// Payload for MLS-encrypted group messages sent via mesh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GroupMlsMessagePayload {
@@ -1110,10 +1129,19 @@ impl OfflineProtocol {
                         let _ = mls_guard.leave_group(&gid);
                     }
                     self.group_mesh.members.remove(&payload.group_id);
-                    self.group_mesh.relay_synced.remove(&payload.group_id);
-                    self.group_mesh
+                    let was_synced = self.group_mesh.relay_synced.remove(&payload.group_id);
+                    let was_pending = self
+                        .group_mesh
                         .relay_register_pending
-                        .remove(&payload.group_id);
+                        .remove(&payload.group_id)
+                        .is_some();
+                    if was_synced || was_pending {
+                        self.emit_event(Event::group_relay_sync_changed(
+                            payload.group_id.clone(),
+                            false,
+                            "removed",
+                        ));
+                    }
                     self.group_mesh
                         .pending_group_messages
                         .remove(&payload.group_id);
@@ -2371,8 +2399,19 @@ impl OfflineProtocol {
         // after we leave, and a stale one retried after a rapid re-invite
         // would expire with retry_count > 0 and falsely flag an epoch fork.
         self.group_mesh.members.remove(group_id);
-        self.group_mesh.relay_synced.remove(group_id);
-        self.group_mesh.relay_register_pending.remove(group_id);
+        let was_synced = self.group_mesh.relay_synced.remove(group_id);
+        let was_pending = self
+            .group_mesh
+            .relay_register_pending
+            .remove(group_id)
+            .is_some();
+        if was_synced || was_pending {
+            self.emit_event(Event::group_relay_sync_changed(
+                group_id.to_string(),
+                false,
+                "left",
+            ));
+        }
         self.group_mesh.pending_group_messages.remove(group_id);
         self.group_mesh.pending_commits.remove(group_id);
 
@@ -2551,6 +2590,56 @@ impl OfflineProtocol {
             ready: self.group_rich_seal_active(&members),
             unknown_members,
         })
+    }
+
+    /// The relay-side registration state of a group. See [`RelaySyncState`].
+    ///
+    /// `Synced` wins over an outstanding re-registration: once the relay has
+    /// positively acknowledged the group on this connection, its registry
+    /// entry survives regardless of any in-flight idempotent re-sync, so
+    /// relay-dependent commands are already safe to issue.
+    pub fn group_relay_sync_state(&self, group_id: &str) -> RelaySyncState {
+        if self.group_mesh.relay_synced.contains(group_id) {
+            RelaySyncState::Synced
+        } else if self
+            .group_mesh
+            .relay_register_pending
+            .contains_key(group_id)
+        {
+            RelaySyncState::Pending
+        } else {
+            RelaySyncState::Unsynced
+        }
+    }
+
+    /// Registers (or re-registers) a group with the relay server on demand.
+    ///
+    /// The supported path for making a mesh-created group known to the
+    /// relay before issuing relay-dependent server commands for it (invite
+    /// links, server-side fan-out) — never raw-send `CreateGroup`. The
+    /// outcome arrives asynchronously as `GroupRelaySyncChanged`:
+    /// `synced: true, reason: "registered"` on the relay's ack, `false`
+    /// with `"error"` / `"ack_timeout"` on denial or a relay that never
+    /// answers. Idempotent: an already-`Synced` group returns `Ok(true)`
+    /// without re-sending (the automatic re-sync on membership changes
+    /// covers roster updates).
+    ///
+    /// Returns `Ok(true)` when the registration frame was queued (or the
+    /// group is already synced), `Ok(false)` when relay grouping is
+    /// disabled or the Internet transport is unavailable, `Err` when the
+    /// group is unknown locally.
+    pub fn request_group_relay_registration(&mut self, group_id: &str) -> Result<bool> {
+        if self.group_mesh.relay_synced.contains(group_id) {
+            return Ok(true);
+        }
+        // Fresh membership, like the retry processor: the MLS roster is
+        // authoritative, the fan-out cache is the fallback.
+        let members = self
+            .refresh_group_members(group_id)
+            .ok()
+            .or_else(|| self.group_mesh.members.get(group_id).cloned())
+            .ok_or_else(|| Error::GroupNotFound(group_id.to_string()))?;
+        self.try_relay_register_group(group_id, None, &members)
     }
 
     /// Shared implementation for sending and forwarding group messages.
@@ -3829,9 +3918,23 @@ impl OfflineProtocol {
         } else if !internet_available && was_available {
             // Internet just went down — clear sync state. In-flight
             // registration acks can never arrive on this connection, so the
-            // pending set goes too (re-armed by the 0→1 re-sync).
-            self.group_mesh.relay_synced.clear();
-            self.group_mesh.relay_register_pending.clear();
+            // pending set goes too (re-armed by the 0→1 re-sync). Each
+            // affected group gets a sync-changed event: apps gating
+            // relay-dependent commands (invite links) must re-wait for the
+            // reconnect's re-registration ack.
+            let mut affected: Vec<String> = self.group_mesh.relay_synced.drain().collect();
+            for group_id in self.group_mesh.relay_register_pending.drain() {
+                if !affected.contains(&group_id.0) {
+                    affected.push(group_id.0);
+                }
+            }
+            for group_id in affected {
+                self.emit_event(Event::group_relay_sync_changed(
+                    group_id,
+                    false,
+                    "internet_dropped",
+                ));
+            }
         }
     }
 
@@ -3873,6 +3976,23 @@ impl OfflineProtocol {
                     attempts,
                     "Expired unanswered relay group registration"
                 );
+                // Giving up on a still-tracked, unsynced group is an
+                // app-visible outcome: without this event a caller awaiting
+                // the registration ack (`ensure_group_registered`) only
+                // learns via its own timeout. The other two removal causes
+                // stay silent — a vanished group already surfaced its
+                // teardown, and an already-synced group's stale entry is
+                // pure bookkeeping.
+                if attempts >= RELAY_REGISTER_MAX_ATTEMPTS
+                    && self.group_mesh.members.contains_key(&group_id)
+                    && !self.group_mesh.relay_synced.contains(&group_id)
+                {
+                    self.emit_event(Event::group_relay_sync_changed(
+                        group_id.clone(),
+                        false,
+                        "ack_timeout",
+                    ));
+                }
                 continue;
             }
             // Re-send with membership refreshed from MLS, like the 0→1

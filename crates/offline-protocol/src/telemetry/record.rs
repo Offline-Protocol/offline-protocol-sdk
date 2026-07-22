@@ -149,6 +149,7 @@ mod tests {
         "protocol.group.info",
         "protocol.group.user_groups",
         "protocol.group.error",
+        "protocol.group.relay_sync_changed",
         "protocol.group.message_sent",
         "protocol.group.message_partial_failure",
         "protocol.group.rich_extras_dropped",
@@ -324,6 +325,7 @@ mod tests {
             | Event::GroupInfo { .. }
             | Event::UserGroups { .. }
             | Event::GroupError { .. }
+            | Event::GroupRelaySyncChanged { .. }
             | Event::GroupMessageSent { .. }
             | Event::GroupMessagePartialFailure { .. }
             | Event::GroupRichExtrasDropped { .. }
@@ -613,6 +615,11 @@ mod tests {
             },
             Event::UserGroups { groups: Vec::new() },
             Event::GroupError {
+                reason: String::new(),
+            },
+            Event::GroupRelaySyncChanged {
+                group_id: String::new(),
+                synced: false,
                 reason: String::new(),
             },
             Event::GroupMessageSent {

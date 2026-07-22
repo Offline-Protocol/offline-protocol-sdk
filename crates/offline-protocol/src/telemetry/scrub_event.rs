@@ -496,6 +496,13 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             }
         }
         Event::GroupError { reason: _ } => {}
+        Event::GroupRelaySyncChanged {
+            group_id,
+            synced: _,
+            reason: _,
+        } => {
+            hash_string(group_id, scrubber);
+        }
         Event::GroupMessageSent {
             group_id,
             message_ids: _,
@@ -711,6 +718,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::GroupInfo { .. }
         | Event::UserGroups { .. }
         | Event::GroupError { .. }
+        | Event::GroupRelaySyncChanged { .. }
         | Event::GroupMessageSent { .. }
         | Event::GroupMessagePartialFailure { .. }
         | Event::GroupRichExtrasDropped { .. }
