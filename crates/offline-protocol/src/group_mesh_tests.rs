@@ -2769,6 +2769,320 @@ fn test_relay_sync_cleared_on_internet_lost() {
     );
 }
 
+/// Extracts (group_id, synced, reason) tuples from captured
+/// GroupRelaySyncChanged events, in emission order.
+fn sync_changed_events(events: &Arc<Mutex<Vec<Event>>>) -> Vec<(String, bool, String)> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::GroupRelaySyncChanged {
+                group_id,
+                synced,
+                reason,
+            } => Some((group_id.clone(), *synced, reason.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn test_group_relay_sync_changed_event_lifecycle() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    protocol.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Creation arms the registration → Pending, no sync-changed yet
+    // (enqueueing proves nothing — only the relay's answer is a state).
+    let info = protocol.create_group("Sync Event Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    assert_eq!(
+        protocol.group_relay_sync_state(&group_id),
+        crate::group_mesh::RelaySyncState::Pending
+    );
+    assert!(sync_changed_events(&events).is_empty());
+
+    // The relay's ack over the Internet path → synced:true/registered.
+    let ack = make_message(
+        "relay",
+        "user123",
+        &format!(
+            "__GROUP_CREATED__{{\"group_id\":\"{}\",\"name\":\"Sync Event Test\"}}",
+            group_id
+        ),
+    );
+    protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
+    assert_eq!(
+        sync_changed_events(&events),
+        vec![(group_id.clone(), true, "registered".to_string())]
+    );
+    assert_eq!(
+        protocol.group_relay_sync_state(&group_id),
+        crate::group_mesh::RelaySyncState::Synced
+    );
+
+    // A duplicate/forged ack with no registration outstanding is silent.
+    protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
+    assert_eq!(sync_changed_events(&events).len(), 1);
+
+    // An idempotent re-registration ack (membership change re-sync) must
+    // fire the event AGAIN even though the group is already in
+    // relay_synced — apps await exactly this after invite_to_group.
+    protocol.group_mesh.relay_register_pending.insert(
+        group_id.clone(),
+        crate::group_mesh::RelayRegisterPending {
+            armed_at: chrono::Utc::now(),
+            attempts: 1,
+        },
+    );
+    protocol.process_internal_message_via(&ack, Some(TransportType::Internet));
+    assert_eq!(
+        sync_changed_events(&events),
+        vec![
+            (group_id.clone(), true, "registered".to_string()),
+            (group_id.clone(), true, "registered".to_string()),
+        ]
+    );
+
+    // A group-scoped relay error revokes the sync → synced:false/error.
+    let error = make_message(
+        "relay",
+        "user123",
+        &format!(
+            "__GROUP_ERROR__{{\"reason\":\"Only admins can sync this group\",\"group_id\":\"{}\"}}",
+            group_id
+        ),
+    );
+    protocol.process_internal_message(&error);
+    assert_eq!(
+        sync_changed_events(&events).last().unwrap(),
+        &(group_id.clone(), false, "error".to_string())
+    );
+    assert_eq!(
+        protocol.group_relay_sync_state(&group_id),
+        crate::group_mesh::RelaySyncState::Unsynced
+    );
+
+    // A repeat error with nothing tracked is app-plane noise — no event.
+    protocol.process_internal_message(&error);
+    assert_eq!(sync_changed_events(&events).len(), 3);
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_relay_register_ack_timeout_emits_sync_changed() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    protocol.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let info = protocol.create_group("Timeout Event Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Exhausted attempts on a still-tracked, unsynced group → the give-up
+    // is app-visible (a caller awaiting the ack must not hang).
+    {
+        let pending = protocol
+            .group_mesh
+            .relay_register_pending
+            .get_mut(&group_id)
+            .unwrap();
+        pending.armed_at = chrono::Utc::now() - chrono::Duration::seconds(31);
+        pending.attempts = 3;
+    }
+    protocol.process_relay_register_retries();
+    assert_eq!(
+        sync_changed_events(&events),
+        vec![(group_id.clone(), false, "ack_timeout".to_string())]
+    );
+    assert_eq!(
+        protocol.group_relay_sync_state(&group_id),
+        crate::group_mesh::RelaySyncState::Unsynced
+    );
+
+    // A stale pending entry expiring while the group is already synced is
+    // pure bookkeeping — no event (the group's registration stands).
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+    protocol.group_mesh.relay_register_pending.insert(
+        group_id.clone(),
+        crate::group_mesh::RelayRegisterPending {
+            armed_at: chrono::Utc::now() - chrono::Duration::seconds(31),
+            attempts: 3,
+        },
+    );
+    protocol.process_relay_register_retries();
+    assert_eq!(sync_changed_events(&events).len(), 1);
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_internet_lost_emits_sync_changed_per_group() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    protocol.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // One synced group, one with only an in-flight registration: both lose
+    // their state on the 1→0 transition, both must surface it.
+    protocol.group_mesh.internet_was_available = true;
+    protocol
+        .group_mesh
+        .relay_synced
+        .insert("synced-group".to_string());
+    protocol.group_mesh.relay_register_pending.insert(
+        "pending-group".to_string(),
+        crate::group_mesh::RelayRegisterPending {
+            armed_at: chrono::Utc::now(),
+            attempts: 1,
+        },
+    );
+
+    protocol
+        .transport_manager_mut()
+        .remove_transport(TransportType::Internet);
+    protocol.check_relay_group_sync();
+
+    let mut emitted = sync_changed_events(&events);
+    emitted.sort();
+    assert_eq!(
+        emitted,
+        vec![
+            (
+                "pending-group".to_string(),
+                false,
+                "internet_dropped".to_string()
+            ),
+            (
+                "synced-group".to_string(),
+                false,
+                "internet_dropped".to_string()
+            ),
+        ]
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_request_group_relay_registration() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    // Unknown group → Err, regardless of transports.
+    assert!(protocol
+        .request_group_relay_registration("no-such-group")
+        .is_err());
+
+    // Without Internet the request is a clean no (nothing queued).
+    let info = protocol.create_group("Request Reg Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    protocol.start().unwrap();
+    assert_eq!(
+        protocol.request_group_relay_registration(&group_id).ok(),
+        Some(false)
+    );
+    assert_eq!(
+        protocol.group_relay_sync_state(&group_id),
+        crate::group_mesh::RelaySyncState::Unsynced
+    );
+
+    // With Internet the frame is queued and the correlation armed.
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    assert_eq!(
+        protocol.request_group_relay_registration(&group_id).ok(),
+        Some(true)
+    );
+    assert_eq!(
+        protocol.group_relay_sync_state(&group_id),
+        crate::group_mesh::RelaySyncState::Pending
+    );
+    let frames_after_request = internet_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| {
+            m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)
+        })
+        .count();
+    assert_eq!(frames_after_request, 1);
+
+    // Already synced → idempotent success without a redundant re-send.
+    protocol.group_mesh.relay_register_pending.remove(&group_id);
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+    assert_eq!(
+        protocol.request_group_relay_registration(&group_id).ok(),
+        Some(true)
+    );
+    let frames_after_synced = internet_handle
+        .sent_messages()
+        .iter()
+        .filter(|m| {
+            m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)
+        })
+        .count();
+    assert_eq!(
+        frames_after_synced, 1,
+        "an already-synced group must not re-register"
+    );
+
+    protocol.stop().unwrap();
+}
+
 #[test]
 fn test_relay_sync_disabled_config() {
     use offline_protocol_transport::mock::MockTransport;
@@ -6544,6 +6858,17 @@ fn test_plaintext_removal_notification_from_admin_cleans_up() {
             .relay_register_pending
             .contains_key(&group_id),
         "self-removal must clear the outstanding registration correlation"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::GroupRelaySyncChanged {
+                group_id: g,
+                synced: false,
+                reason,
+            } if g == &group_id && reason == "removed"
+        )),
+        "revoking tracked relay state on self-removal must surface as a sync change"
     );
 }
 

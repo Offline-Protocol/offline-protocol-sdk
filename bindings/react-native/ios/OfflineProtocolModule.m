@@ -509,6 +509,14 @@ RCT_EXTERN_METHOD(meshGroupRichReadiness:(NSString *)groupId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(meshGroupRelaySyncState:(NSString *)groupId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(meshRequestGroupRelayRegistration:(NSString *)groupId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(meshSetMemberRole:(NSString *)groupId
                   userId:(NSString *)userId
                   role:(NSString *)role
@@ -536,6 +544,9 @@ RCT_EXTERN_METHOD(checkInternetPresence:(NSString *)userId
 
 RCT_EXTERN_METHOD(internetSendRawCommand:(NSString *)json
                   resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(internetIsReady:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 // Presence, Typing, Read Receipts

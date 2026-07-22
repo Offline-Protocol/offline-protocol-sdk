@@ -41,6 +41,8 @@ import type {
   MlsSessionInfo,
   MlsGroupInfo,
   GroupRichReadiness,
+  RelaySyncState,
+  GroupRelaySyncChangedEvent,
   EstablishmentState,
   TelemetryConfig,
   TelemetryListener,
@@ -2637,6 +2639,133 @@ export class OfflineProtocol {
   }
 
   /**
+   * The relay-side registration state of a group. Point-in-time:
+   * transitions arrive as `group_relay_sync_changed` events.
+   *
+   * `'synced'` means the relay positively acknowledged the group's
+   * registration on the current connection — relay-dependent server
+   * commands for it (`CreateGroupInviteLink` & co. via
+   * `sendRawServerCommand`) can be issued. `'pending'` means a
+   * registration is in flight; `'unsynced'` means none is (Internet down,
+   * relay grouping disabled, or a prior attempt errored / timed out).
+   *
+   * @param groupId - Group ID
+   */
+  async groupRelaySyncState(groupId: string): Promise<RelaySyncState> {
+    return await OfflineProtocolNativeModule.meshGroupRelaySyncState(groupId);
+  }
+
+  /**
+   * Registers (or re-registers) a group with the relay server on demand —
+   * the supported path for making a mesh-created group known to the relay
+   * before issuing relay-dependent server commands for it. Never raw-send
+   * `CreateGroup`: it desyncs the SDK's registration tracking.
+   *
+   * Fire-and-event: the outcome arrives as `group_relay_sync_changed`
+   * (`ensureGroupRegistered` wraps the wait). Resolves true when the
+   * registration frame was queued (or the group is already synced), false
+   * when relay grouping is disabled or the Internet transport is
+   * unavailable; rejects when the group is unknown locally.
+   *
+   * @param groupId - Group ID
+   */
+  async requestGroupRelayRegistration(groupId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.meshRequestGroupRelayRegistration(
+      groupId
+    );
+  }
+
+  /**
+   * Resolves once the relay holds a positively acknowledged registration
+   * for the group — the gate to await before `CreateGroupInviteLink` and
+   * other relay-dependent raw server commands for a mesh-created group.
+   *
+   * Resolves immediately when the group is already synced; otherwise kicks
+   * a registration (when none is in flight) and waits for the
+   * `group_relay_sync_changed` outcome. Rejects on a negative outcome
+   * (`reason: 'error' | 'ack_timeout' | …`), when the registration cannot
+   * be sent (Internet down / relay grouping disabled / unknown group), or
+   * on timeout.
+   *
+   * The SDK re-sends an unanswered registration every 30s up to 3 attempts
+   * before giving up with `ack_timeout` (~90s worst case) — the default
+   * timeout covers that full cycle. A shorter timeout is fine for UI
+   * purposes: the SDK keeps retrying in the background and a later
+   * `group_relay_sync_changed` still fires on success.
+   *
+   * @param groupId - Group ID
+   * @param options - `timeoutMs`: how long to wait (default 100000)
+   */
+  async ensureGroupRegistered(
+    groupId: string,
+    options?: { timeoutMs?: number }
+  ): Promise<void> {
+    const timeoutMs = options?.timeoutMs ?? 100_000;
+
+    // Subscribe BEFORE the state check: an ack landing between check and
+    // subscribe would otherwise be missed and hang this until timeout.
+    let settle: (() => void) | undefined;
+    const outcome = new Promise<void>((resolve, reject) => {
+      const listener: EventListener<GroupRelaySyncChangedEvent> = (event) => {
+        if (event.group_id !== groupId) return;
+        if (event.synced) {
+          resolve();
+        } else {
+          reject(
+            new Error(
+              `Relay registration for group ${groupId} failed: ${event.reason}`
+            )
+          );
+        }
+      };
+      this.on('group_relay_sync_changed', listener);
+      settle = () => this.off('group_relay_sync_changed', listener);
+    });
+
+    try {
+      const state = await this.groupRelaySyncState(groupId);
+      if (state === 'synced') return;
+      if (state === 'unsynced') {
+        // Kick a registration; a clean false means it cannot reach the
+        // relay at all — fail fast rather than waiting out the timeout.
+        const queued = await this.requestGroupRelayRegistration(groupId);
+        if (!queued) {
+          throw new Error(
+            `Cannot register group ${groupId}: relay grouping disabled or Internet transport unavailable`
+          );
+        }
+      }
+      // state === 'pending' (or just kicked): await the relay's answer.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          outcome,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Timed out after ${timeoutMs}ms waiting for relay registration of group ${groupId}`
+                  )
+                ),
+              timeoutMs
+            );
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    } finally {
+      settle?.();
+      // The outcome promise may reject after we've already returned or
+      // thrown (e.g. a later revocation caught by the still-registered
+      // listener in the same tick); a detached rejection must not surface
+      // as an unhandled rejection.
+      outcome.catch(() => {});
+    }
+  }
+
+  /**
    * Sets a member's role in an MLS group (admin only).
    * Broadcasts role change to all group members.
    *
@@ -2806,6 +2935,11 @@ export class OfflineProtocol {
    * application-owned extension fields remain lossless. Correlate
    * request/response with your own `request_id` where the relay supports one.
    *
+   * Gate calls on `isInternetReady()` / the `internet_status_changed` event
+   * rather than probing with a command and retrying on false. For
+   * group-scoped commands (`CreateGroupInviteLink`, …) additionally await
+   * `ensureGroupRegistered(groupId)` first — the relay must know the group.
+   *
    * Do not send frame types the SDK itself manages (`SendMessage`,
    * `CreateGroup` / member deltas, `LeaveGroup`, `CheckPresence`, …): the
    * SDK cannot correlate their answers with its own in-flight state, and a
@@ -2826,6 +2960,26 @@ export class OfflineProtocol {
    */
   async sendRawServerCommand(json: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.internetSendRawCommand(json);
+  }
+
+  /**
+   * Whether the SDK's internet socket is connected AND relay-authenticated
+   * — the same gate `sendRawServerCommand` checks before writing. The
+   * positive replacement for app-side `relayStatus === 'authenticated'`
+   * tracking: gate raw sends on this (or on the `internet_status_changed`
+   * event) instead of probing with a command and retrying on false.
+   *
+   * Point-in-time; transitions arrive as `internet_status_changed` events.
+   * A ready socket can still defer an individual send (client-side rate
+   * limiter) — `sendRawServerCommand` returning false while ready means
+   * retry after a short delay.
+   *
+   * @returns true when connected and authenticated; false otherwise,
+   *          including when the internet transport was never initialized
+   *          (never throws)
+   */
+  async isInternetReady(): Promise<boolean> {
+    return await OfflineProtocolNativeModule.internetIsReady();
   }
 
   /**

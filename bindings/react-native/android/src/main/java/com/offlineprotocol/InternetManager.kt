@@ -199,6 +199,44 @@ class InternetManager(
      * `internet_server_message` event.
      */
     var serverMessageEmitter: ((String) -> Unit)? = null
+
+    /**
+     * Receives (connected, authenticated) transitions — the module forwards
+     * them as the `internet_status_changed` event, the positive readiness
+     * signal apps gate raw server commands on (`authenticated: true`
+     * replaces polling `sendRawServerCommand` for a non-false return).
+     * Deduplicated in [emitConnectionStatus]; every flag flip funnels
+     * through it, so the pair is only ever published on actual change.
+     */
+    var connectionStatusEmitter: ((connected: Boolean, authenticated: Boolean) -> Unit)? = null
+
+    /**
+     * Last (connected, authenticated) pair published, or null before the
+     * first. All mutation funnels run on the main handler (or, for
+     * [disconnect], are serialized against it by the stop path), matching
+     * the single-writer rule the state flags already follow.
+     */
+    private var lastEmittedStatus: Pair<Boolean, Boolean>? = null
+
+    /**
+     * Publishes the current (connected, authenticated) pair when it
+     * differs from the last published one — the single choke point for the
+     * `internet_status_changed` event, so scattered flag writes cannot
+     * double-fire or skip a transition. Call after every flag mutation.
+     */
+    private fun emitConnectionStatus() {
+        val status = Pair(isConnected.get(), isAuthenticated.get())
+        if (status == lastEmittedStatus) return
+        lastEmittedStatus = status
+        connectionStatusEmitter?.invoke(status.first, status.second)
+    }
+
+    /**
+     * True when the socket is connected AND relay-authenticated — the gate
+     * `sendRawCommand` checks. Point-in-time; transitions arrive as
+     * `internet_status_changed` events.
+     */
+    fun isReady(): Boolean = isConnected.get() && isAuthenticated.get()
     
     // Metrics. Atomic: send paths mutate on main, receive paths on the
     // OkHttp reader thread, and getMetrics() reads from the caller's thread.
@@ -499,6 +537,7 @@ class InternetManager(
         isConnected.set(false)
         isConnecting.set(false)
         isAuthenticated.set(false)
+        emitConnectionStatus()
     }
     
     private fun handleConnectionOpened(ws: WebSocket) {
@@ -516,6 +555,7 @@ class InternetManager(
             isConnected.set(true)
             isConnecting.set(false)
             isAuthenticated.set(false)
+            emitConnectionStatus()
             // Backoff deliberately NOT reset here: only a full authenticate
             // proves the connection good (handleAuthenticated). Resetting on
             // TCP open would let a persistently bad token cycle
@@ -610,6 +650,7 @@ class InternetManager(
             if (state == TransportState.STOPPING || state == TransportState.STOPPED) return@post
 
             isAuthenticated.set(true)
+            emitConnectionStatus()
             // The relay accepted us — this, not the TCP open, is what proves
             // the connection good and earns a backoff reset.
             reconnectAttempts.set(0)
@@ -662,6 +703,7 @@ class InternetManager(
         val wasConnected = isConnected.getAndSet(false)
         val wasAuthenticated = isAuthenticated.getAndSet(false)
         isConnecting.set(false)
+        emitConnectionStatus()
 
         // Stop polling immediately to prevent sending on dead connection
         stopMessagePolling()

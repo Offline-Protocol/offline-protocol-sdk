@@ -371,6 +371,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                 internetManager?.serverMessageEmitter = { [weak self] rawJson in
                     self?.emitServerMessageEvent(rawJson)
                 }
+                internetManager?.connectionStatusEmitter = { [weak self] connected, authenticated in
+                    self?.emitInternetStatusEvent(connected: connected, authenticated: authenticated)
+                }
                 print("[OfflineProtocolModule] Internet Manager initialized for user: \(config.userId)")
                 
                 // Extract and store internet config for use during start()
@@ -502,6 +505,23 @@ class OfflineProtocolModule: RCTEventEmitter {
                let jsonString = String(data: data, encoding: .utf8) {
                 sendEventToJS(Events.onEvent, body: ["eventJson": jsonString])
             }
+        }
+    }
+
+    /// Forwards an internet-transport readiness transition as the
+    /// `internet_status_changed` event. `authenticated: true` is the
+    /// positive gate for raw server commands (replaces app-side
+    /// `relayStatus === 'authenticated'` tracking).
+    fileprivate func emitInternetStatusEvent(connected: Bool, authenticated: Bool) {
+        guard hasListeners else { return }
+        let payload: [String: Any] = [
+            "type": "internet_status_changed",
+            "connected": connected,
+            "authenticated": authenticated
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+           let jsonString = String(data: data, encoding: .utf8) {
+            sendEventToJS(Events.onEvent, body: ["eventJson": jsonString])
         }
     }
 
@@ -1328,6 +1348,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                     newManager.delegate = self
                     newManager.serverMessageEmitter = { [weak self] rawJson in
                         self?.emitServerMessageEvent(rawJson)
+                    }
+                    newManager.connectionStatusEmitter = { [weak self] connected, authenticated in
+                        self?.emitInternetStatusEvent(connected: connected, authenticated: authenticated)
                     }
                     internetManager = newManager
                     emitDiagnostic(level: "info", message: "Internet manager created on demand")
@@ -3352,6 +3375,47 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    /// Relay-side registration state of a group ('synced' | 'pending' |
+    /// 'unsynced'). Point-in-time; transitions surface as
+    /// `group_relay_sync_changed` events.
+    @objc func meshGroupRelaySyncState(_ groupId: String,
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let state = try proto.groupRelaySyncState(groupId: groupId)
+            switch state {
+            case .synced: resolver("synced")
+            case .pending: resolver("pending")
+            case .unsynced: resolver("unsynced")
+            }
+        } catch {
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to get relay sync state")
+        }
+    }
+
+    /// Registers (or re-registers) a group with the relay server on demand —
+    /// the supported path before relay-dependent raw server commands
+    /// (invite links). Outcome arrives as `group_relay_sync_changed`;
+    /// resolves true when the frame was queued or the group is already
+    /// synced, false when relay grouping is disabled or Internet is down.
+    @objc func meshRequestGroupRelayRegistration(_ groupId: String,
+                                                 resolver: @escaping RCTPromiseResolveBlock,
+                                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            resolver(try proto.requestGroupRelayRegistration(groupId: groupId))
+        } catch {
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_MESH_GROUP", fallbackMessage: "Failed to request relay registration")
+        }
+    }
+
     /// Set a member's role in a group (admin only).
     @objc func meshSetMemberRole(_ groupId: String,
                                   userId: String,
@@ -3455,6 +3519,15 @@ class OfflineProtocolModule: RCTEventEmitter {
         manager.sendRawCommand(json: json) { written in
             resolver(written)
         }
+    }
+
+    /// Whether the internet socket is connected AND relay-authenticated —
+    /// the same gate `internetSendRawCommand` checks. Point-in-time;
+    /// transitions arrive as `internet_status_changed` events. Resolves
+    /// false (never rejects) when the internet transport isn't initialized.
+    @objc func internetIsReady(_ resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        resolver(internetManager?.isReady() ?? false)
     }
 
     // MARK: - Helpers

@@ -1179,6 +1179,29 @@ export interface GroupErrorEvent extends BaseEvent {
 }
 
 /**
+ * The relay-side registration state of a group changed.
+ *
+ * `synced: true` fires only on the relay's positive registration
+ * acknowledgment (including the idempotent re-sync ack after a membership
+ * change) — the signal that relay-dependent server commands for the group
+ * (invite links via `sendRawServerCommand`, server-side fan-out) can be
+ * issued. Await it via `ensureGroupRegistered`. `synced: false` fires when
+ * that trust is revoked; `reason` says why: `registered` (relay ack),
+ * `error` (group-scoped relay error — details arrive separately as
+ * `group_error` / the raw `GroupError` frame), `removed` (we were removed
+ * from the group), `left` (local leave), `internet_dropped` (transport
+ * lost; re-registration re-arms on reconnect), `ack_timeout` (the relay
+ * never answered — likely a relay without group support). Not emitted for
+ * groups the relay was never asked about.
+ */
+export interface GroupRelaySyncChangedEvent extends BaseEvent {
+  type: 'group_relay_sync_changed';
+  group_id: string;
+  synced: boolean;
+  reason: string;
+}
+
+/**
  * Group message sent event — a group message was sent to all members via mesh
  * (MLS-encrypted fan-out).
  */
@@ -1573,6 +1596,26 @@ export interface InternetServerMessageEvent extends BaseEvent {
 }
 
 /**
+ * Internet-transport readiness transition. `authenticated: true` is the
+ * positive gate for `sendRawServerCommand` — the replacement for app-side
+ * `relayStatus === 'authenticated'` tracking against a separate app-owned
+ * socket. `connected: true, authenticated: false` is the window where the
+ * socket is up but the relay has not accepted the auth token yet (raw
+ * sends still return false). Emitted only on actual transitions; query the
+ * current value with `isInternetReady()`.
+ */
+export interface InternetStatusChangedEvent extends BaseEvent {
+  type: 'internet_status_changed';
+  connected: boolean;
+  authenticated: boolean;
+}
+
+/**
+ * Relay-side registration state of a group (`groupRelaySyncState`).
+ */
+export type RelaySyncState = 'synced' | 'pending' | 'unsynced';
+
+/**
  * Union type of all events
  */
 export type ProtocolEvent =
@@ -1611,6 +1654,7 @@ export type ProtocolEvent =
   | GroupInfoEvent
   | UserGroupsEvent
   | GroupErrorEvent
+  | GroupRelaySyncChangedEvent
   | GroupMessageSentEvent
   | GroupMessagePartialFailureEvent
   | GroupRichExtrasDroppedEvent
@@ -1626,6 +1670,7 @@ export type ProtocolEvent =
   | ServiceResponseReceivedEvent
   | PresenceUpdatedEvent
   | InternetServerMessageEvent
+  | InternetStatusChangedEvent
   | TypingIndicatorReceivedEvent
   | ReadReceiptReceivedEvent
   | MessageRelayedEvent

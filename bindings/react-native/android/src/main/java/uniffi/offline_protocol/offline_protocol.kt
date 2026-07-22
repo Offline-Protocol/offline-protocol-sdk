@@ -952,6 +952,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package(
@@ -1063,6 +1065,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remo
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle(
 ): Short
@@ -1343,6 +1347,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_topolo
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1455,6 +1461,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_tra
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`newName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1849,6 +1857,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state() != 42204.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 760.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2015,6 +2026,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 32723.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 5596.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933.toShort()) {
@@ -3166,6 +3180,8 @@ public interface OfflineProtocolInterface {
     
     fun `getTransportMetrics`(`transportType`: TransportType): TransportMetrics?
     
+    fun `groupRelaySyncState`(`groupId`: kotlin.String): RelaySyncState
+    
     fun `groupRichReadiness`(`groupId`: kotlin.String): GroupRichReadiness
     
     fun `hasPendingKeyPackage`(`peerId`: kotlin.String): kotlin.Boolean
@@ -3277,6 +3293,8 @@ public interface OfflineProtocolInterface {
     fun `removeTransport`(`transportType`: TransportType)
     
     fun `renameGroup`(`groupId`: kotlin.String, `newName`: kotlin.String)
+    
+    fun `requestGroupRelayRegistration`(`groupId`: kotlin.String): kotlin.Boolean
     
     fun `requestPrekeyBundle`(`username`: kotlin.String): kotlin.String
     
@@ -4144,6 +4162,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `groupRelaySyncState`(`groupId`: kotlin.String): RelaySyncState {
+            return FfiConverterTypeRelaySyncState.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state(
+        it,
+        FfiConverterString.lower(`groupId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `groupRichReadiness`(`groupId`: kotlin.String): GroupRichReadiness {
             return FfiConverterTypeGroupRichReadiness.lift(
     callWithHandle {
@@ -4871,6 +4903,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    
+    @Throws(ProtocolException::class)override fun `requestGroupRelayRegistration`(`groupId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(
+        it,
+        FfiConverterString.lower(`groupId`),_status)
+}
+    }
+    )
+    }
     
 
     
@@ -8639,6 +8685,37 @@ public object FfiConverterTypeRelayRole: FfiConverterRustBuffer<RelayRole> {
     override fun allocationSize(value: RelayRole) = 4UL
 
     override fun write(value: RelayRole, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class RelaySyncState {
+    
+    SYNCED,
+    PENDING,
+    UNSYNCED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRelaySyncState: FfiConverterRustBuffer<RelaySyncState> {
+    override fun read(buf: ByteBuffer) = try {
+        RelaySyncState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: RelaySyncState) = 4UL
+
+    override fun write(value: RelaySyncState, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }

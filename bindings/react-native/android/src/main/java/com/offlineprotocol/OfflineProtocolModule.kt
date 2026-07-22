@@ -299,6 +299,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     emitDiagnostic(level, message, context)
                 }.also { manager ->
                     manager.serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) }
+                    manager.connectionStatusEmitter = { connected, authenticated ->
+                        emitInternetStatusEvent(connected, authenticated)
+                    }
                     manager.listener = object : TransportManagerListener {
                         override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
                             emitDiagnostic("info", "Internet transport state changed", mapOf(
@@ -425,6 +428,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             sendEvent(EVENT_NAME, params)
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Failed to emit diagnostic event", e)
+        }
+    }
+
+    /**
+     * Forwards an internet-transport readiness transition as the
+     * `internet_status_changed` event. `authenticated: true` is the
+     * positive gate for raw server commands (replaces app-side
+     * `relayStatus === 'authenticated'` tracking).
+     */
+    private fun emitInternetStatusEvent(connected: Boolean, authenticated: Boolean) {
+        try {
+            val json = JSONObject()
+            json.put("type", "internet_status_changed")
+            json.put("connected", connected)
+            json.put("authenticated", authenticated)
+            val params = Arguments.createMap().apply {
+                putString("eventJson", json.toString())
+            }
+            sendEvent(EVENT_NAME, params)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Failed to emit internet status event", e)
         }
     }
 
@@ -1382,6 +1406,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                             emitDiagnostic(level, message, context)
                         }.also { manager ->
                             manager.serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) }
+                            manager.connectionStatusEmitter = { connected, authenticated ->
+                                emitInternetStatusEvent(connected, authenticated)
+                            }
                         }
                         emitDiagnostic("info", "Internet manager created on demand")
                     }
@@ -3380,6 +3407,38 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * Relay-side registration state of a group ('synced' | 'pending' |
+     * 'unsynced'). Point-in-time; transitions surface as
+     * `group_relay_sync_changed` events.
+     */
+    @ReactMethod
+    fun meshGroupRelaySyncState(groupId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            promise.resolve(proto.groupRelaySyncState(groupId).name.lowercase())
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to get relay sync state")
+        }
+    }
+
+    /**
+     * Registers (or re-registers) a group with the relay server on demand —
+     * the supported path before relay-dependent raw server commands
+     * (invite links). Outcome arrives as `group_relay_sync_changed`;
+     * resolves true when the frame was queued or the group is already
+     * synced, false when relay grouping is disabled or Internet is down.
+     */
+    @ReactMethod
+    fun meshRequestGroupRelayRegistration(groupId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            promise.resolve(proto.requestGroupRelayRegistration(groupId))
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_MESH_GROUP", "Failed to request relay registration")
+        }
+    }
+
     @ReactMethod
     fun meshSetMemberRole(groupId: String, userId: String, role: String, promise: Promise) {
         try {
@@ -3458,6 +3517,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_INTERNET", "Failed to send raw server command")
         }
+    }
+
+    /**
+     * Whether the internet socket is connected AND relay-authenticated —
+     * the same gate `internetSendRawCommand` checks. Point-in-time;
+     * transitions arrive as `internet_status_changed` events. Resolves
+     * false (never rejects) when the internet transport isn't initialized.
+     */
+    @ReactMethod
+    fun internetIsReady(promise: Promise) {
+        promise.resolve(internetManager?.isReady() ?: false)
     }
 
     /**

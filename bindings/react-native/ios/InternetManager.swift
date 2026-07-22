@@ -270,6 +270,44 @@ public class InternetManager: NSObject, TransportManager {
     /// rate limiting, unknown types) — the module forwards them as the
     /// `internet_server_message` event.
     public var serverMessageEmitter: ((String) -> Void)?
+
+    /// Receives (connected, authenticated) transitions — the module forwards
+    /// them as the `internet_status_changed` event, the positive readiness
+    /// signal apps gate raw server commands on. Deduplicated in
+    /// [emitConnectionStatus]; every flag flip funnels through it. Mirrors
+    /// InternetManager.kt.
+    public var connectionStatusEmitter: ((Bool, Bool) -> Void)?
+
+    /// Last (connected, authenticated) pair published, or nil before the
+    /// first. Lock-guarded like the flags themselves: flips happen on main,
+    /// but the guard keeps the read-compare-store atomic against any future
+    /// caller.
+    private var _lastEmittedStatus: (Bool, Bool)?
+
+    /// Publishes the current (connected, authenticated) pair when it
+    /// differs from the last published one — the single choke point for the
+    /// `internet_status_changed` event, so scattered flag writes cannot
+    /// double-fire or skip a transition. Call after every flag mutation.
+    private func emitConnectionStatus() {
+        stateLock.lock()
+        let status = (_isConnected, _isAuthenticated)
+        if let last = _lastEmittedStatus, last == status {
+            stateLock.unlock()
+            return
+        }
+        _lastEmittedStatus = status
+        stateLock.unlock()
+        connectionStatusEmitter?(status.0, status.1)
+    }
+
+    /// True when the socket is connected AND relay-authenticated — the gate
+    /// `sendRawCommand` checks. Point-in-time; transitions arrive as
+    /// `internet_status_changed` events.
+    public func isReady() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _isConnected && _isAuthenticated
+    }
     
     // Metrics. Atomic (lock-guarded): send completions mutate on the
     // URLSession delegate queue, receive paths too, and getMetrics() reads
@@ -611,6 +649,7 @@ public class InternetManager: NSObject, TransportManager {
             isConnected = false
             isConnecting = false
             isAuthenticated = false
+            emitConnectionStatus()
         }
     }
 
@@ -653,6 +692,7 @@ public class InternetManager: NSObject, TransportManager {
         isConnected = true
         isConnecting = false
         isAuthenticated = false
+        emitConnectionStatus()
         // Backoff deliberately NOT reset here: only a full authenticate
         // proves the connection good (handleAuthenticated). Resetting on
         // TCP open would let a persistently bad token cycle
@@ -757,6 +797,7 @@ public class InternetManager: NSObject, TransportManager {
 
     private func handleAuthenticatedOnMain(userId: String, username: String) {
         isAuthenticated = true
+        emitConnectionStatus()
         cancelAuthTimeout()
         // The relay accepted us — this, not the TCP open, is what proves the
         // connection good and earns a backoff reset.
@@ -816,6 +857,7 @@ public class InternetManager: NSObject, TransportManager {
         isConnected = false
         isConnecting = false
         isAuthenticated = false
+        emitConnectionStatus()
 
         // The dead socket's auth watchdog must not fire into (or outlive)
         // whatever connection replaces it.
