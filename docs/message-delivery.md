@@ -13,10 +13,16 @@ send_message()
     │
     ├─ Transport available ──► Send ──► ACK tracking ──► MessageDelivered
     │                                       │
-    │                                       └─ ACK timeout ──► Retry via queue
-    │                                                              │
-    │                                                              ├─ Send succeeds ──► ACK tracking
-    │                                                              └─ Max ACK retries ──► MessageFailed
+    │                                       ├─ ACK timeout ──► Retry via queue (MessageRetrying)
+    │                                       │                      │
+    │                                       │                      ├─ Send succeeds ──► ACK tracking
+    │                                       │                      └─ Max ACK retries ──► MessageFailed
+    │                                       │                         (or re-park, if the recipient
+    │                                       │                          is parked as unreachable)
+    │                                       │
+    │                                       └─ Relay: recipient unreachable ──► MessageUndeliverable
+    │                                                              │              (message parked)
+    │                                                              └─ Reachability edge ──► fresh ACK budget
     │
     └─ Transport unavailable ──► Outbox + Retry Queue ──► MessageDeferred
                                         │
@@ -56,11 +62,11 @@ The system has two distinct retry mechanisms that serve different purposes:
 
 **ACK Retries** (ACK manager):
 - Fires when a message was sent but no acknowledgment arrived
+- Each re-schedule emits a non-terminal `MessageRetrying` event with the actual `next_retry_at`
 - Limited to `max_retries` attempts (default: 10)
-- After exhausting retries, the message permanently fails with `MessageFailed`
-- This is the only path to permanent failure
+- After exhausting retries, the message permanently fails with `MessageFailed` — unless the recipient is currently parked as unreachable, in which case the message re-parks instead of settling (see [Unreachable Recipients: Parking](#unreachable-recipients-parking))
 
-This separation is critical: a message that can't reach any transport should not be permanently failed. Only messages that were sent but never acknowledged count toward the retry limit.
+This separation is critical: a message that can't reach any transport should not be permanently failed. Only messages that were sent but never acknowledged count toward the retry limit. The terminal paths for a regular message are ACK-retry exhaustion (against a reachable peer) and outbox lifetime/capacity expiry — nothing else settles it as failed.
 
 ### Exponential Backoff
 
@@ -124,6 +130,33 @@ The outbox persists messages that require acknowledgment. It serves as the sourc
 When the outbox is full, the oldest entry is evicted with a terminal `message_failed` event (reason `"Outbox capacity exceeded"`). When a message exceeds its lifetime and has no pending ACK, it is dropped and a terminal `message_failed` event (reason `"Outbox lifetime exceeded"`) is emitted so the app can settle its UI state.
 
 **Important**: When a message storage backend is configured, regular-message outbox entries are persisted and restored on the next `start()` with a refreshed delivery window. Media chunks are never persisted — an interrupted transfer surfaces as `media_resend_required` instead. See [Client-Side Persistence](#client-side-persistence) for the app-side layer.
+
+## Unreachable Recipients: Parking
+
+When the internet relay reports a recipient unreachable for an in-flight regular message (its `recipient_unreachable` delivery verdict), the message does not burn its ACK retry budget against a peer that is provably offline. Instead it is **parked**:
+
+1. A non-terminal `MessageUndeliverable` event fires (`message_id`, `recipient`, `reason`, and `file_id` when the message is a media chunk)
+2. The pending ACK and the retry-queue entry are dropped — the retry machinery goes quiet
+3. The outbox entry stays put, so the message remains "in flight" and subject only to the outbox lifetime
+
+A parked message is re-driven with a fresh ACK budget on every reachability edge:
+
+- Transport reconnect (`internet_status_changed(true)`)
+- `start()` after a restart
+- The peer being discovered on a local transport
+- The peer coming online per presence — `internet_presence_watchlist()` includes recipients of pending/parked outbox messages, so the SDK owns presence-watching its own outbox; apps do not need their own watch queue for offline sends
+
+**Local mesh probing**: if a local mesh carrier (BLE / Wi-Fi Direct) is up when the park happens, the SDK keeps a timed reachability probe running instead of going fully quiet — the peer may be a room away even though the relay reports it offline. The probe interval escalates with each consecutive unreachable park (15s doubling up to a 600s cap) and resets on any reachability edge. If a probe attempt exhausts its ACK budget while the recipient still holds a live park counter, the message re-parks at the escalated interval rather than settling.
+
+**What parks and what doesn't**:
+
+| Message kind | Behavior on `recipient_unreachable` |
+|--------------|-------------------------------------|
+| Regular DM | Parked (as above) |
+| Media chunk | Not parked — normal retry exhaustion → transfer abort → `media_resend_required` |
+| Connection request | Not parked — settles immediately via `connection_request_undeliverable` |
+
+**Contract**: `MessageUndeliverable` is the "recipient is offline" signal and may fire repeatedly for the same message while the peer stays offline. Terminal settlement happens only at delivery (`MessageDelivered`) or outbox-lifetime expiry (`MessageFailed`). Apps that previously keyed "recipient offline" UX off the ~15-minute terminal `message_failed` should key it off `message_undeliverable` instead.
 
 ## ACK Cleanup
 
@@ -206,8 +239,11 @@ The delivery system emits events at each stage of the message lifecycle:
 |-------|------|------------|
 | `MessageSent` | Message accepted and sent via transport | `message_id`, `recipient`, `priority` |
 | `MessageDeferred` | Message queued for retry (transport unavailable) | `message_id`, `reason`, `retry_count`, `next_retry_at` |
+| `MessageRetrying` | Retry re-scheduled after a failed attempt (transport send error or ACK timeout); non-terminal | `message_id`, `recipient`, `retry_count`, `next_retry_at` |
+| `MessageUndeliverable` | Transport reported the recipient unreachable; message parked, non-terminal | `message_id`, `recipient`, `reason`, `file_id?` |
 | `MessageDelivered` | ACK received from recipient | `message_id`, `latency_ms`, `hop_count`, `transport` |
-| `MessageFailed` | Permanent failure (max ACK retries exceeded) | `message_id`, `reason`, `retry_count` |
+| `MessageFailed` | Terminal failure (max ACK retries, outbox lifetime or capacity exceeded) | `message_id`, `reason`, `retry_count` |
+| `MediaResendRequired` | Interrupted outbound media transfer detected at `start()`; app must re-supply the bytes via `send_media` with the same `file_id` | `file_id`, `recipient`, `file_name`, `file_size` |
 
 ### Event Flow Examples
 
@@ -223,7 +259,13 @@ MessageDeferred → (transport becomes available) → MessageDelivered
 
 **Permanent failure**:
 ```
-MessageSent → (ACK timeout) → (retry) → ... → MessageFailed
+MessageSent → (ACK timeout) → MessageRetrying → ... → MessageFailed
+```
+
+**Offline recipient (internet path)**:
+```
+MessageSent → MessageUndeliverable (parked) → (peer comes online) → MessageSent → MessageDelivered
+                                            → (7-day outbox lifetime expires) → MessageFailed
 ```
 
 ## Breaking Changes

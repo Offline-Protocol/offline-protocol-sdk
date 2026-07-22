@@ -465,6 +465,40 @@ For auto-decrypted messages surfaced to the app, the SDK sets `metadata.encrypte
 
 MLS control payloads (key package / welcome / ciphertext envelopes) are encoded as internal message content and handled by the SDK before app delivery.
 
+### Capability Negotiation & Payload Formats
+
+The signed key package doubles as a capability advertisement. Alongside the MLS
+material, a peer's key package carries version lists that the SDK uses to pick
+per-recipient payload formats — all negotiated automatically, nothing for apps
+to configure:
+
+| Capability | Advertises | Gates |
+|------------|-----------|-------|
+| `wire_versions` | Compact binary mesh framing (hop-local; in-memory, re-exchanged on connect) | `binaryWireEnabled` |
+| `env_versions` | Compact MLS envelope (base64 binary instead of JSON, ~2.7× smaller) | `encryption.compactEnvelopeEnabled` |
+| `rich_versions` | Sealed rich payload (`__RICH_V1__` body inside the MLS plaintext) | `encryption.richPayloadEnabled` |
+
+**Sealed rich payload**: quoted-reply context, rich media metadata (including
+cloud-media `encryption_key`/`iv` secrets), and forward attribution are wrapped
+around the message text *before* encryption, so the relay and mesh hops never
+see them. Toward a recipient without the capability, rich extras are silently
+dropped — never sent cleartext. Inbound parsing of every format is always on,
+independent of the kill switches.
+
+**Groups**: the same sealed body goes into the group MLS plaintext, but only
+when *every* other member is known rich-capable — either from a direct
+key-package exchange or attested by their inviter (Add commits and Welcomes
+carry the capability map, so members added by someone else stay sealable).
+If any member's capability is unknown, the extras drop (the text still sends),
+a `group_rich_extras_dropped` event fires with the unknown members, and the SDK
+probes them once so a later retry can seal. Apps can pre-check with
+`group_rich_readiness(groupId)` (RN: `meshGroupRichReadiness`).
+
+Per-peer `env_versions`/`rich_versions` capabilities persist across restarts;
+`wire_versions` is deliberately in-memory (hop-local, re-exchanged on connect).
+See [Wire Format Kill Switches](configuration.md#wire-format-kill-switches)
+for runtime disable semantics.
+
 ---
 
 ## API Reference

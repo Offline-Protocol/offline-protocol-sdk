@@ -284,6 +284,7 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 | `storePending` | boolean | true | Queue messages when no session exists |
 | `requireEncryption` | boolean | true | Fail send unless encryption is applied (fail-closed) |
 | `compactEnvelopeEnabled` | boolean | true | Emit the compact MLS envelope to recipients that advertise support (kill switch — see [Wire Format Kill Switches](#wire-format-kill-switches)) |
+| `richPayloadEnabled` | boolean | true | Seal rich extras (reply context, media metadata, forward attribution) inside the MLS ciphertext for capable recipients (kill switch — see [Wire Format Kill Switches](#wire-format-kill-switches)) |
 | `pendingQueue.maxPendingPerPeer` | number | 64 | Max queued encrypted pre-session messages per peer |
 | `pendingQueue.maxPendingGlobal` | number | 4096 | Max queued encrypted pre-session messages across all peers |
 | `pendingQueue.pendingTtlMs` | number | 120000 | TTL for queued encrypted pre-session messages |
@@ -339,26 +340,31 @@ Rust migration note:
 
 ### Wire Format Kill Switches
 
-The compact wire formats are negotiated per peer via the signed key package and
-can be disabled at runtime — without an SDK release — if a field interop issue
-ever surfaces:
+The negotiated wire formats are advertised per peer via the signed key package
+and can be disabled at runtime — without an SDK release — if a field interop
+issue ever surfaces:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `binaryWireEnabled` (top level) | boolean | true | Emit the compact binary wire codec on mesh hops to peers that advertise support (`wire_versions`) |
 | `encryption.compactEnvelopeEnabled` | boolean | true | Emit the compact MLS envelope on encrypted messages to recipients that advertise support (`env_versions`) |
+| `encryption.richPayloadEnabled` | boolean | true | Seal the rich payload (quoted-reply context, rich media metadata, forward attribution) inside the MLS ciphertext toward recipients that advertise support (`rich_versions`) |
 
+The three switches are independent — each format degrades separately.
 Disabling a switch stops **advertising and emitting** that format, so both
-directions fall back to the permanent JSON floor as key packages refresh.
-Parsing of inbound compact formats stays on regardless — the switches can never
-make a device unable to read a peer, and a disabled fleet interoperates with an
-enabled one automatically.
+directions fall back as key packages refresh: the wire and envelope switches
+fall back to the permanent JSON floor, and disabling `richPayloadEnabled` drops
+rich extras from outbound sends (messages degrade to plain text — rich fields
+are never sent cleartext). Parsing of inbound compact/sealed formats stays on
+regardless — the switches can never make a device unable to read a peer, and a
+disabled fleet interoperates with an enabled one automatically.
 
 ```typescript
 {
   binaryWireEnabled: false,         // Hop-local: mesh framing back to JSON
   encryption: {
     compactEnvelopeEnabled: false,  // End-to-end: MLS envelope back to JSON
+    richPayloadEnabled: false,      // End-to-end: stop sealing rich extras
   }
 }
 ```

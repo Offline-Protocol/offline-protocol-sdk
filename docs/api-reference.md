@@ -120,6 +120,17 @@ pub struct EncryptionConfig {
     /// Bounds and eviction policy for encrypted messages received
     /// before session readiness.
     pub pending_queue: PendingQueueConfig,
+
+    /// Emit the compact MLS envelope toward recipients that advertise
+    /// support (`env_versions` in their key package). Kill switch —
+    /// inbound parsing is always on. (default: true)
+    pub compact_envelope_enabled: bool,
+
+    /// Seal the rich payload (reply context, rich media metadata, forward
+    /// attribution) inside the MLS ciphertext toward recipients that
+    /// advertise support (`rich_versions`). Kill switch — inbound parsing
+    /// is always on; rich extras are never sent cleartext. (default: true)
+    pub rich_payload_enabled: bool,
 }
 ```
 
@@ -136,8 +147,13 @@ interface EncryptionConfig {
     pendingTtlMs?: number;      // Default: 120000
     overflowPolicy?: 'drop_oldest' | 'drop_newest'; // Default: drop_oldest
   };
+  compactEnvelopeEnabled?: boolean; // Default: true
+  richPayloadEnabled?: boolean;     // Default: true
 }
 ```
+
+See [Wire Format Kill Switches](configuration.md#wire-format-kill-switches) for
+what the last two flags gate and how they degrade.
 
 ### DorsConfig
 
@@ -254,6 +270,120 @@ pub fn receive_message(&mut self) -> Option<Message>
 ```
 
 Polls for the next received message (non-blocking).
+
+#### Rich Messaging (Sealed Extras)
+
+```rust
+pub fn send_message_with(
+    &mut self,
+    recipient: impl Into<String>,
+    content: impl Into<String>,
+    options: SendMessageOptions,
+) -> Result<MessageId>
+
+pub struct SendMessageOptions {
+    pub priority: Option<MessagePriority>,
+    pub reply_to_msg: Option<String>,
+    pub content_type: Option<ContentType>,     // outer rendering hint; sealed copy is authoritative
+    pub reply_context: Option<ReplyContext>,   // sealed-only
+    pub media_metadata: Option<MediaMetadata>, // sealed-only (incl. encryption_key/iv secrets)
+    pub forward_info: Option<ForwardInfo>,     // sealed-only
+}
+```
+
+Like `send_message`, but carrying rich extras: quoted-reply context, rich media
+metadata (cloud attachments and stickers, including their `encryption_key`/`iv`
+secrets), and forward attribution. Rich extras only ever travel *inside* the
+MLS ciphertext, toward recipients whose key package advertises support
+(`rich_versions`); toward anyone else they are silently dropped — never sent
+cleartext — and the message degrades to plain text with `reply_to_msg`
+threading intact. Rejects `ContentType::FileChunk` (internal transport type)
+and rich extras exceeding 32 KiB serialized, both as `InvalidArgument`.
+
+UniFFI exposes this as `send_message_rich(recipient, content, options)`; React
+Native routes `sendMessage` to it automatically when rich params are present
+(see the [React Native guide](react-native-integration.md)).
+
+```rust
+pub fn send_media_with(
+    &mut self,
+    recipient: impl Into<String>,
+    file_data: Vec<u8>,
+    file_name: impl Into<String>,
+    content_type: ContentType,
+    options: MediaSendOptions,
+) -> Result<String>  // file id
+
+pub struct MediaSendOptions {
+    pub media_metadata: Option<MediaMetadata>, // delivered with chunk 0
+    pub caption: Option<String>,               // sealed-only
+    pub reply_to_msg: Option<String>,          // sealed-only
+    pub reply_context: Option<ReplyContext>,   // sealed-only
+    pub forward_info: Option<ForwardInfo>,     // sealed-only
+    pub file_id: Option<String>,               // caller-supplied id (resends)
+}
+```
+
+Media-transfer counterpart (UniFFI: `send_media_rich`): the rich extras ride
+sealed with the transfer's chunk 0. A caller-supplied `file_id` is how an app
+answers `media_resend_required` after a restart.
+
+```rust
+pub fn send_group_message_with(
+    &mut self,
+    group_id: &str,
+    content: &str,
+    options: GroupSendOptions,
+) -> Result<Vec<MessageId>>
+
+pub struct GroupSendOptions {
+    pub priority: Option<MessagePriority>,
+    pub reply_to_msg: Option<String>,
+    pub content_type: Option<ContentType>,     // sealed-only
+    pub media_metadata: Option<MediaMetadata>, // sealed-only
+}
+```
+
+Group counterpart. Rich extras seal into the group MLS plaintext only when
+*every* other member is known rich-capable (directly or attested by their
+inviter); otherwise the text still sends but the extras drop, surfaced via the
+`GroupRichExtrasDropped` event — the SDK then probes the unknown members'
+capability once so a later retry can succeed.
+
+```rust
+pub fn group_rich_readiness(&self, group_id: &str) -> Result<GroupRichReadiness>
+
+pub struct GroupRichReadiness {
+    pub ready: bool,                  // a rich send right now would seal
+    pub unknown_members: Vec<String>, // members holding the gate closed
+}
+```
+
+Point-in-time, advisory pre-check so apps can warn before sending (e.g. gray
+out the attachment button) instead of learning from `GroupRichExtrasDropped`
+after the drop. Exposed over UniFFI as `group_rich_readiness` and React Native
+as `meshGroupRichReadiness`.
+
+```rust
+pub fn forward_message(
+    &mut self,
+    original: &Message,
+    recipient: impl Into<String>,
+    priority: Option<MessagePriority>,
+) -> Result<MessageId>
+
+pub fn forward_message_to_group(
+    &mut self,
+    original: &Message,
+    group_id: &str,
+    priority: Option<MessagePriority>,
+) -> Result<Vec<MessageId>>
+```
+
+Forwards carry attribution (`ForwardInfo`) and the original's media metadata.
+Toward rich-capable recipients both are sealed — the only way forwarded cloud
+media keeps its `encryption_key`/`iv` secrets, which are always stripped from
+cleartext frames at the wire boundary.
 
 #### Event Handling
 
@@ -416,7 +546,67 @@ MessageFailed {
 }
 ```
 
-Emitted when max retries exceeded.
+Terminal failure: max ACK retries exceeded, or the outbox lifetime/capacity
+dropped the message.
+
+#### MessageDeferred
+
+```rust
+MessageDeferred {
+    message_id: String,
+    reason: String,
+    retry_count: u32,
+    next_retry_at: Option<i64>,
+}
+```
+
+Emitted when a message is queued for retry because no transport could deliver
+it right now. Non-terminal.
+
+#### MessageRetrying
+
+```rust
+MessageRetrying {
+    message_id: String,
+    recipient: String,
+    retry_count: u32,
+    next_retry_at: i64,
+}
+```
+
+Emitted each time the retry machinery re-schedules a message after a failed
+attempt (transport send error or ACK timeout). Non-terminal.
+
+#### MessageUndeliverable
+
+```rust
+MessageUndeliverable {
+    message_id: String,
+    recipient: String,
+    reason: String,          // starts with "recipient_unreachable"
+    file_id: Option<String>, // set when the message is a media chunk
+}
+```
+
+The transport reported the recipient unreachable (e.g. the internet relay's
+delivery verdict). Non-terminal: a plain DM is *parked* and re-driven on
+reachability edges. See [Message Delivery](message-delivery.md#unreachable-recipients-parking).
+
+#### MediaResendRequired
+
+```rust
+MediaResendRequired {
+    file_id: String,
+    recipient: String,
+    file_name: String,
+    file_size: u64,
+}
+```
+
+Emitted at `start()` for each outbound media transfer that was in flight when
+the previous process died. The app must re-supply the bytes via `send_media`
+(or `send_media_with`) with the same `file_id`; they are checksum-validated
+against the interrupted transfer.
 
 #### TransportSwitched
 
@@ -515,6 +705,21 @@ Answers (`ConnectionAccepted` / `ConnectionRejected`) correlate by peer
 id, not message id. Undeliverable is a status signal, not proof of
 permanent failure — the retried original may still arrive if the peer
 comes back online.
+
+#### GroupRichExtrasDropped
+
+```rust
+GroupRichExtrasDropped {
+    group_id: String,
+    unknown_members: Vec<String>,
+}
+```
+
+Rich media metadata was dropped from an outbound group message because the
+group is not fully rich-capable (or the local `rich_payload_enabled` kill
+switch is off — then `unknown_members` is empty). The text was still sent.
+The SDK probes the unknown members' capability automatically; apps can warn
+the sender and retry later, or pre-check with `group_rich_readiness`.
 
 #### GroupRoleChanged
 
