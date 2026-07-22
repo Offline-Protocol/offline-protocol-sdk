@@ -264,12 +264,16 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| **sendMessage** | `sendMessage(params: SendMessageParams): Promise<string>` | Sends a message; returns message ID. `params`: `recipient`, `content`, `priority?`, `replyToMsg?`. |
+| **sendMessage** | `sendMessage(params: SendMessageParams): Promise<string>` | Sends a message; returns message ID. `params`: `recipient`, `content`, `priority?`, `replyToMsg?`, plus rich params `contentType?`, `replyContext?`, `mediaMetadata?`, `forwardInfo?`. |
 | **receiveMessage** | `receiveMessage(): Promise<MessageReceivedEvent \| null>` | Polls for the next received message. |
 | **sendConnectionRequest** | `sendConnectionRequest(params: SendConnectionRequestParams): Promise<string>` | Sends a connection request; returns the message ID that correlates all outcome events. `params`: `recipient` (the target's canonical user id), `senderName`, `keyPackage?`, `initialMessage?`. |
 | **acceptConnectionRequest** | `acceptConnectionRequest(params): Promise<string>` | Accepts a received request. `params`: `recipient`, `accepterName`, `keyPackage?`. |
 | **rejectConnectionRequest** | `rejectConnectionRequest(params): Promise<string>` | Rejects a received request. `params`: `recipient`. |
 | **cancelConnectionRequest** | `cancelConnectionRequest(params): Promise<string>` | Cancels a request you sent. `params`: `recipient`. |
+
+Rich params (`replyContext`, `mediaMetadata`, `forwardInfo`, a non-default `contentType`) only ever travel sealed inside the MLS ciphertext, toward recipients whose SDK advertised rich-payload support; toward anyone else they are silently dropped — never sent cleartext — while `replyToMsg` threading survives. When any rich param is present the call routes to the native `sendMessageRich` method.
+
+> **Over-the-air JS updates (CodePush-style):** `sendMessageRich` is a native method. A JS-only update that starts passing rich params against an older native binary fails those calls (method not found); plain `sendMessage` calls are unaffected. Gate rich params on your native binary version.
 
 Connection-request failure contract: recipient offline emits `connection_request_undeliverable` (`reason` starts with `recipient_unreachable`); retry exhaustion emits it with `reason: 'max_retries_exceeded'` alongside the generic `message_failed`. Both carry the message ID returned by `sendConnectionRequest`. Answers arrive as `connection_accepted` / `connection_rejected`, correlated by peer id (`accepted_by` / `rejected_by`), not message ID.
 
@@ -354,6 +358,7 @@ Connection-request failure contract: recipient offline emits `connection_request
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | **sendFile** | `sendFile(params: SendFileParams): Promise<string>` | Sends a file; returns file ID. `params`: filePath, recipient, fileName?. |
+| **sendMedia** | `sendMedia(params: SendMediaParams): Promise<string>` | Sends media bytes; returns file ID. `params`: `recipient`, `fileData` (base64), `fileName`, `contentType`, `mediaMetadata?`, plus sealed-only rich params `caption?`, `replyToMsg?`, `replyContext?`, `forwardInfo?`, and `fileId?` (for answering `media_resend_required`). Rich params route to the native `sendMediaRich` method and travel sealed with chunk 0 — dropped, never cleartext, toward non-rich recipients. |
 | **getFileProgress** | `getFileProgress(fileId): Promise<FileProgress \| null>` | Progress for a file transfer. |
 | **cancelFileTransfer** | `cancelFileTransfer(fileId): Promise<boolean>` | Cancels a transfer. |
 | **processFileChunk** | `processFileChunk(fileId, chunkIndex, data: number[]): Promise<void>` | Processes a file chunk (custom handling). |
@@ -430,6 +435,7 @@ High-level group methods that handle MLS encryption and mesh fan-out automatical
 | **meshInviteToGroup** | `meshInviteToGroup(groupId, inviteeUserId): Promise<void>` | Invites user (admin only); sends Welcome + Commit. |
 | **meshSendGroupMessage** | `meshSendGroupMessage(groupId, content, priority?, replyToMsg?): Promise<string[]>` | Sends encrypted message to all members. |
 | **meshForwardMessageToGroup** | `meshForwardMessageToGroup(params): Promise<string[]>` | Forwards message to group with attribution. |
+| **meshGroupRichReadiness** | `meshGroupRichReadiness(groupId): Promise<GroupRichReadiness>` | Advisory pre-check: `{ ready, unknownMembers }` — whether a rich group send right now would seal its extras, and which members hold the gate closed. When a send's extras do drop, the `group_rich_extras_dropped` event fires (with `unknown_members`) and the SDK probes those members' capability automatically. |
 | **meshRemoveFromGroup** | `meshRemoveFromGroup(groupId, memberId): Promise<void>` | Removes member (admin only). |
 | **meshLeaveGroup** | `meshLeaveGroup(groupId): Promise<void>` | Leaves group with notification. |
 | **meshListGroups** | `meshListGroups(): Promise<string[]>` | Lists all group IDs (excluding 1:1 sessions). |
