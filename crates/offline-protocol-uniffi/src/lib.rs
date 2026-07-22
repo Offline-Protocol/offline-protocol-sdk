@@ -1676,6 +1676,24 @@ impl From<CoreGroupInfo> for MlsGroupInfo {
     }
 }
 
+/// Whether a rich group send right now would seal its extras, and which
+/// members are in the way. Point-in-time and advisory: the send path
+/// re-evaluates the gate itself.
+#[derive(Debug, Clone)]
+pub struct GroupRichReadiness {
+    pub ready: bool,
+    pub unknown_members: Vec<String>,
+}
+
+impl From<offline_protocol::GroupRichReadiness> for GroupRichReadiness {
+    fn from(r: offline_protocol::GroupRichReadiness) -> Self {
+        Self {
+            ready: r.ready,
+            unknown_members: r.unknown_members,
+        }
+    }
+}
+
 /// DORS configuration
 #[derive(Debug, Clone)]
 pub struct DorsConfig {
@@ -5203,6 +5221,19 @@ impl OfflineProtocol {
             .get_group_info(&group_id)
             .map_err(ProtocolError::from)?
             .map(MlsGroupInfo::from))
+    }
+
+    /// Whether a rich group send right now would seal its extras, and which
+    /// members hold the gate closed (point-in-time, advisory).
+    pub fn group_rich_readiness(
+        &self,
+        group_id: String,
+    ) -> Result<GroupRichReadiness, ProtocolError> {
+        let guard = self.lock_inner()?;
+        guard
+            .group_rich_readiness(&group_id)
+            .map(GroupRichReadiness::from)
+            .map_err(ProtocolError::from)
     }
 
     /// Set a member's role in a group (admin only).

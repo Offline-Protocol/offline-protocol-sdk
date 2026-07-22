@@ -80,6 +80,13 @@ dictionary MlsGroupInfo {
     u64 last_activity_ms;
 };
 
+// Whether a rich group send right now would seal its extras, and which
+// members are in the way (advisory pre-check; the send path re-evaluates)
+dictionary GroupRichReadiness {
+    boolean ready;
+    sequence<string> unknown_members;
+};
+
 // Establishment state for a peer (for SessionNotReady and get_establishment_state)
 enum EstablishmentState {
     "NoKeyPackage",
@@ -1287,6 +1294,11 @@ interface OfflineProtocol {
     // Get information about an MLS group
     [Throws=ProtocolError]
     MlsGroupInfo? get_group_info(string group_id);
+
+    // Whether a rich group send right now would seal its extras, and which
+    // members hold the gate closed (point-in-time, advisory)
+    [Throws=ProtocolError]
+    GroupRichReadiness group_rich_readiness(string group_id);
 
     // Set a member's role in a group (admin only, broadcasts to all members)
     [Throws=ProtocolError]

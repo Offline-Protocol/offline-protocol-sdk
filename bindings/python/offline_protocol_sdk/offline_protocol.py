@@ -623,6 +623,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 25216:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 53848:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 498:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 49895:
@@ -1603,6 +1605,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transpor
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2427,6 +2435,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_to
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.restype = ctypes.c_uint16
@@ -3652,6 +3663,65 @@ class _UniffiFfiConverterTypeGradientRoutingConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.write(value.route_ttl_secs, buf)
         _UniffiFfiConverterUInt32.write(value.max_routing_table_size, buf)
 
+class _UniffiFfiConverterSequenceString(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        for item in value:
+            _UniffiFfiConverterString.check_lower(item)
+
+    @classmethod
+    def write(cls, value, buf):
+        items = len(value)
+        buf.write_i32(items)
+        for item in value:
+            _UniffiFfiConverterString.write(item, buf)
+
+    @classmethod
+    def read(cls, buf):
+        count = buf.read_i32()
+        if count < 0:
+            raise InternalError("Unexpected negative sequence length")
+
+        return [
+            _UniffiFfiConverterString.read(buf) for i in range(count)
+        ]
+
+@dataclass
+class GroupRichReadiness:
+    def __init__(self, *, ready:bool, unknown_members:typing.List[str]):
+        self.ready = ready
+        self.unknown_members = unknown_members
+        
+        
+
+    
+    def __str__(self):
+        return "GroupRichReadiness(ready={}, unknown_members={})".format(self.ready, self.unknown_members)
+    def __eq__(self, other):
+        if self.ready != other.ready:
+            return False
+        if self.unknown_members != other.unknown_members:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeGroupRichReadiness(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return GroupRichReadiness(
+            ready=_UniffiFfiConverterBoolean.read(buf),
+            unknown_members=_UniffiFfiConverterSequenceString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterBoolean.check_lower(value.ready)
+        _UniffiFfiConverterSequenceString.check_lower(value.unknown_members)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterBoolean.write(value.ready, buf)
+        _UniffiFfiConverterSequenceString.write(value.unknown_members, buf)
+
 class _UniffiFfiConverterOptionalString(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -4865,29 +4935,6 @@ class _UniffiFfiConverterTypeMlsAddMemberResult(_UniffiConverterRustBuffer):
     def write(value, buf):
         _UniffiFfiConverterTypeMlsWelcomeMessage.write(value.welcome, buf)
         _UniffiFfiConverterTypeMlsEncryptedMessage.write(value.commit, buf)
-
-class _UniffiFfiConverterSequenceString(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        for item in value:
-            _UniffiFfiConverterString.check_lower(item)
-
-    @classmethod
-    def write(cls, value, buf):
-        items = len(value)
-        buf.write_i32(items)
-        for item in value:
-            _UniffiFfiConverterString.write(item, buf)
-
-    @classmethod
-    def read(cls, buf):
-        count = buf.read_i32()
-        if count < 0:
-            raise InternalError("Unexpected negative sequence length")
-
-        return [
-            _UniffiFfiConverterString.read(buf) for i in range(count)
-        ]
 
 @dataclass
 class MlsGroupInfo:
@@ -8601,6 +8648,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def get_transport_metrics(self, transport_type: TransportType) -> typing.Optional[TransportMetrics]:
         raise NotImplementedError
+    def group_rich_readiness(self, group_id: str) -> GroupRichReadiness:
+        raise NotImplementedError
     def has_pending_key_package(self, peer_id: str) -> bool:
         raise NotImplementedError
     def has_route(self, destination: str) -> bool:
@@ -9551,6 +9600,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def group_rich_readiness(self, group_id: str) -> GroupRichReadiness:
+        
+        _UniffiFfiConverterString.check_lower(group_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(group_id),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeGroupRichReadiness.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -11254,6 +11318,7 @@ __all__ = [
     "FileProgress",
     "ForwardInfo",
     "GradientRoutingConfig",
+    "GroupRichReadiness",
     "InternetMessage",
     "MediaMetadata",
     "ReplyContext",

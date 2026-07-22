@@ -876,6 +876,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getTransportMetrics(transportType: TransportType)  -> TransportMetrics?
     
+    func groupRichReadiness(groupId: String) throws  -> GroupRichReadiness
+    
     func hasPendingKeyPackage(peerId: String)  -> Bool
     
     func hasRoute(destination: String)  -> Bool
@@ -1559,6 +1561,15 @@ open func getTransportMetrics(transportType: TransportType) -> TransportMetrics?
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(
             self.uniffiCloneHandle(),
         FfiConverterTypeTransportType_lower(transportType),$0
+    )
+})
+}
+    
+open func groupRichReadiness(groupId: String)throws  -> GroupRichReadiness  {
+    return try  FfiConverterTypeGroupRichReadiness_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
     )
 })
 }
@@ -3199,6 +3210,58 @@ public func FfiConverterTypeGradientRoutingConfig_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeGradientRoutingConfig_lower(_ value: GradientRoutingConfig) -> RustBuffer {
     return FfiConverterTypeGradientRoutingConfig.lower(value)
+}
+
+
+public struct GroupRichReadiness: Equatable, Hashable {
+    public var ready: Bool
+    public var unknownMembers: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(ready: Bool, unknownMembers: [String]) {
+        self.ready = ready
+        self.unknownMembers = unknownMembers
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension GroupRichReadiness: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGroupRichReadiness: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GroupRichReadiness {
+        return
+            try GroupRichReadiness(
+                ready: FfiConverterBool.read(from: &buf), 
+                unknownMembers: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GroupRichReadiness, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.ready, into: &buf)
+        FfiConverterSequenceString.write(value.unknownMembers, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGroupRichReadiness_lift(_ buf: RustBuffer) throws -> GroupRichReadiness {
+    return try FfiConverterTypeGroupRichReadiness.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGroupRichReadiness_lower(_ value: GroupRichReadiness) -> RustBuffer {
+    return FfiConverterTypeGroupRichReadiness.lower(value)
 }
 
 
@@ -9250,6 +9313,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 760) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881) {
