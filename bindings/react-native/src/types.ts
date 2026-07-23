@@ -735,6 +735,32 @@ export interface MessageFailedEvent extends BaseEvent {
 }
 
 /**
+ * Machine-readable decryption failure codes. `PENDING_QUEUE_DROPPED` means the
+ * message was dropped from the pending-decryption queue (overflow or TTL
+ * expiry) before the sender's session became ready; it was ACKed on receipt,
+ * so the sender will not retransmit it.
+ */
+export type DecryptionFailureCode =
+  | 'INVALID_PAYLOAD'
+  | 'NOT_INITIALIZED'
+  | 'INVALID_CIPHERTEXT'
+  | 'IDENTITY_MISMATCH'
+  | 'CRYPTO_FAILURE'
+  | 'PENDING_QUEUE_DROPPED'
+  | 'UNKNOWN';
+
+/**
+ * Failed to decrypt an inbound encrypted message.
+ */
+export interface MessageDecryptionFailedEvent extends BaseEvent {
+  type: 'message_decryption_failed';
+  message_id: string;
+  sender: string;
+  code: DecryptionFailureCode;
+  reason: string;
+}
+
+/**
  * Transport switched event
  */
 export interface TransportSwitchedEvent extends BaseEvent {
@@ -759,6 +785,15 @@ export interface RelayPromotedEvent extends BaseEvent {
 export interface RelayDemotedEvent extends BaseEvent {
   type: 'relay_demoted';
   reason: string;
+}
+
+/**
+ * Relay role was demoted due to battery constraints.
+ */
+export interface RelayDemotedBatteryEvent extends BaseEvent {
+  type: 'relay_demoted_battery';
+  battery_level: number;
+  min_required: number;
 }
 
 /**
@@ -880,6 +915,27 @@ export interface MediaSendFailedEvent extends BaseEvent {
   type: 'media_send_failed';
   file_id: string;
   recipient: string;
+  reason: string;
+}
+
+/**
+ * A pending ACK was evicted due to capacity constraints.
+ */
+export interface AckEvictedEvent extends BaseEvent {
+  type: 'ack_evicted';
+  message_id: string;
+  priority: string;
+  reason: string;
+}
+
+/**
+ * A fragment assembly was evicted to make room for new fragments.
+ */
+export interface FragmentAssemblyEvictedEvent extends BaseEvent {
+  type: 'fragment_assembly_evicted';
+  message_id: string;
+  /** Completion percentage (0-100) when evicted. */
+  completion_percent: number;
   reason: string;
 }
 
@@ -1276,6 +1332,20 @@ export interface GroupRoleChangedEvent extends BaseEvent {
   changed_by: string;
 }
 
+/**
+ * Group renamed — emitted when a rename is performed or received via
+ * `meshRenameGroup`. Renames observed only as relay-native `GroupRenamed`
+ * frames surface through `internet_server_message` instead.
+ */
+export interface GroupRenamedEvent extends BaseEvent {
+  type: 'group_renamed';
+  group_id: string;
+  new_name: string;
+  /** Previous group name, if known. */
+  old_name: string | null;
+  renamed_by: string;
+}
+
 // ============================================================================
 // SERVICE DISCOVERY & REQUEST/RESPONSE EVENTS
 // ============================================================================
@@ -1576,6 +1646,22 @@ export interface TofuResetEvent extends BaseEvent {
 }
 
 /**
+ * A user was blocked. Emitted for local UI notification only.
+ */
+export interface UserBlockedEvent extends BaseEvent {
+  type: 'user_blocked';
+  user_id: string;
+}
+
+/**
+ * A user was unblocked. Emitted for local UI notification only.
+ */
+export interface UserUnblockedEvent extends BaseEvent {
+  type: 'user_unblocked';
+  user_id: string;
+}
+
+/**
  * A raw relay server frame that apps need outside or in addition to
  * SDK-owned processing — invite-link lifecycle responses (`GroupInviteLinkCreated`,
  * `GroupJoinedViaInvite`, `GroupInviteJoinPending`, …), `GroupRoleChanged`,
@@ -1623,9 +1709,11 @@ export type ProtocolEvent =
   | MessageReceivedEvent
   | MessageDeliveredEvent
   | MessageFailedEvent
+  | MessageDecryptionFailedEvent
   | TransportSwitchedEvent
   | RelayPromotedEvent
   | RelayDemotedEvent
+  | RelayDemotedBatteryEvent
   | NeighborDiscoveredEvent
   | NeighborLostEvent
   | NetworkMetricsEvent
@@ -1634,6 +1722,8 @@ export type ProtocolEvent =
   | FileReceiveFailedEvent
   | MediaSentEvent
   | MediaSendFailedEvent
+  | AckEvictedEvent
+  | FragmentAssemblyEvictedEvent
   | DiagnosticEvent
   | SecureSessionEstablishedEvent
   | SecureSessionFailedEvent
@@ -1661,6 +1751,7 @@ export type ProtocolEvent =
   | GroupEpochForkDetectedEvent
   | GroupEpochForkResolvedEvent
   | GroupRoleChangedEvent
+  | GroupRenamedEvent
   | DorsScoreUpdatedEvent
   | DorsTransportSelectedEvent
   | DorsTransportSwitchedEvent
@@ -1679,7 +1770,9 @@ export type ProtocolEvent =
   | MessageUndeliverableEvent
   | MediaResendRequiredEvent
   | SecurityWarningEvent
-  | TofuResetEvent;
+  | TofuResetEvent
+  | UserBlockedEvent
+  | UserUnblockedEvent;
 
 /**
  * Event listener type
