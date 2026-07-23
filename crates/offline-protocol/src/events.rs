@@ -3259,4 +3259,114 @@ mod tests {
             }
         }
     }
+
+    /// Mirrors serde's `rename_all = "snake_case"` rule.
+    fn serde_snake_case(name: &str) -> String {
+        let mut out = String::new();
+        for (i, ch) in name.chars().enumerate() {
+            if ch.is_ascii_uppercase() {
+                if i > 0 {
+                    out.push('_');
+                }
+                out.push(ch.to_ascii_lowercase());
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// Drift guard: every `Event` variant must have a typed declaration in the
+    /// React Native bindings. Events cross UniFFI as tagged JSON, so nothing
+    /// else fails when `types.ts` lags — the event just arrives untyped and
+    /// invisible to the `ProtocolEvent` union (7 variants had silently drifted
+    /// before this guard existed).
+    #[test]
+    fn react_native_types_cover_all_event_variants() {
+        use std::collections::BTreeSet;
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let events_rs = std::fs::read_to_string(manifest_dir.join("src/events.rs")).unwrap();
+        let types_ts_path = manifest_dir.join("../../bindings/react-native/src/types.ts");
+        let types_ts = std::fs::read_to_string(&types_ts_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", types_ts_path.display()));
+
+        // Collect each `Event` variant's serde tag by scanning the enum block:
+        // variant names sit at 4-space indent, brace depth 1.
+        let mut rust_tags = BTreeSet::new();
+        let mut in_enum = false;
+        let mut depth = 0usize;
+        for line in events_rs.lines() {
+            if !in_enum {
+                if line.starts_with("pub enum Event {") {
+                    in_enum = true;
+                    depth = 1;
+                }
+                continue;
+            }
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with("#[") {
+                continue;
+            }
+            if depth == 1
+                && line.starts_with("    ")
+                && !line.starts_with("     ")
+                && trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
+            {
+                let name: String = trimmed
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                rust_tags.insert(serde_snake_case(&name));
+            }
+            depth += line.matches('{').count();
+            depth = depth.saturating_sub(line.matches('}').count());
+            if depth == 0 {
+                break;
+            }
+        }
+        assert!(
+            rust_tags.len() >= 60,
+            "enum scan looks broken: only {} variants found",
+            rust_tags.len()
+        );
+
+        // Event interface discriminants in types.ts: `  type: '<tag>';` at
+        // exactly 2-space indent (nested object fields sit deeper).
+        let ts_tags: BTreeSet<String> = types_ts
+            .lines()
+            .filter_map(|l| l.strip_prefix("  type: '"))
+            .filter_map(|rest| rest.strip_suffix("';"))
+            .map(str::to_string)
+            .collect();
+
+        // Emitted by the native iOS/Android bridges, not the core enum.
+        let bridge_only: BTreeSet<String> = [
+            "diagnostic",
+            "internet_server_message",
+            "internet_status_changed",
+        ]
+        .map(str::to_string)
+        .into();
+
+        let missing: Vec<_> = rust_tags.difference(&ts_tags).collect();
+        assert!(
+            missing.is_empty(),
+            "Event variants missing a typed declaration in bindings/react-native/src/types.ts \
+             (add the interface AND its ProtocolEvent union entry): {missing:?}"
+        );
+
+        let stale: Vec<_> = ts_tags
+            .difference(&rust_tags)
+            .filter(|t| !bridge_only.contains(*t))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "types.ts declares event tags with no core Event variant \
+             (stale, or a new bridge-only event that needs allowlisting here): {stale:?}"
+        );
+    }
 }

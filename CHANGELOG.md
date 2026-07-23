@@ -48,6 +48,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **React Native `MessageReceivedEvent` type was missing `reply_to_msg`.** The Rust event has always carried the replied-to message id; the TypeScript mirror now declares it (alongside the new `reply_context`).
 
+- **React Native: seven runtime events had no TypeScript declaration.** `group_renamed`, `message_decryption_failed`, `ack_evicted`, `fragment_assembly_evicted`, `relay_demoted_battery`, `user_blocked`, and `user_unblocked` have always been emitted at runtime (events cross the FFI as tagged JSON, and the dispatcher applies no filter) but were absent from `types.ts` — outside the `ProtocolEvent` union, `.on('<type>')` didn't type-check and payloads were untyped. All seven interfaces are now declared (plus a `DecryptionFailureCode` string union), and a Rust drift-guard test pins every core `Event` variant to a `types.ts` declaration so an event can no longer ship without its TypeScript mirror. Purely a typing change — no runtime behavior differs.
+
 ### Removed
 
 - **React Native: `src/types-uniffi.ts` (and its compiled `lib/types-uniffi.*`) removed from the package.** A pre-UniFFI-migration relic that was never exported from the package root and whose declarations contradicted the shipped API (a 3-argument `sendMessage`, a `ProtocolError` class the SDK never throws). Anyone deep-importing it should switch to the package root exports: `EstablishmentState` is exported from the root, and error codes arrive at runtime as plain `err.code` strings on native promise rejections, mirroring the UDL `ProtocolError` variant names — no runtime behavior changes.
