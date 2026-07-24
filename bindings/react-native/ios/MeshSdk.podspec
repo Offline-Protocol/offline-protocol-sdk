@@ -29,6 +29,7 @@ Pod::Spec.new do |s|
     "PresenceWatchPolicy.swift",
     "RecipientInFlightTracker.swift",
     "RelayTimestamps.swift",
+    "SocketGenerationTracker.swift",
     "SupersededLatchPolicy.swift",
     "WifiDirectManager.swift",
     "NostrManager.swift",

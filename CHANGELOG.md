@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.16.4] — 2026-07-25
+
+### Fixed
+
+- **iOS: CocoaPods consumers of 0.16.3 failed to compile with `cannot find 'SocketGenerationTracker' in scope`.** The 0.16.3 latch-race fix added `ios/SocketGenerationTracker.swift` (referenced by `InternetManager.swift`) and registered it in `Package.swift` for SwiftPM, but `ios/MeshSdk.podspec` enumerates its Swift sources explicitly and the new file was never added to `source_files`. SwiftPM builds — including the SDK's own iOS CI (`swift test --package-path bindings/react-native/ios`), which is the only iOS build in CI since the pod can't build standalone outside an app workspace — resolved the type and stayed green, so the omission surfaced only in CocoaPods consumers, which compiled `InternetManager.swift` without the tracker. Added `SocketGenerationTracker.swift` to the podspec `source_files`. Packaging-only fix: no source change — only the podspec listing was missing. **0.16.3 has been unpublished from npm** (npm does not allow a retired version number to be reused), so 0.16.4 supersedes it, carrying the same 0.16.3 latch-race fix plus this packaging correction; there is no 0.16.3 on npm.
+
 ## [0.16.3] — 2026-07-25
 
 ### Fixed
