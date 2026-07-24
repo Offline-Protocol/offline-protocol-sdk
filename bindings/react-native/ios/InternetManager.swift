@@ -609,18 +609,14 @@ public class InternetManager: NSObject, TransportManager {
             emitDiagnostic("info", "Force reconnect requested")
 
             if let task = webSocketTask {
-                // Detach before cancel so the cancel-triggered delegate/receive
-                // callbacks see a stale task and no-op (see isStale), then run
-                // the full per-connection cleanup exactly once. With
-                // autoReconnect, handleConnectionClosed schedules the reconnect
-                // at the reset (initial) delay.
-                webSocketTask = nil
-                task.cancel(with: .goingAway, reason: nil)
-                handleConnectionClosed(error: NSError(
-                    domain: "OfflineProtocol.InternetManager",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Force reconnect"]
-                ))
+                // Reuse the shared teardown funnel: it detaches before cancel
+                // (so the cancel-triggered delegate/receive callbacks see a
+                // stale task and no-op, see isStale) then runs the full
+                // per-connection cleanup exactly once. With autoReconnect,
+                // handleConnectionClosed schedules the reconnect at the reset
+                // (initial) delay. The guard (task === webSocketTask) holds —
+                // we're on main and have not nilled it yet.
+                teardownSocket(ifCurrent: task, reason: "Force reconnect")
             } else {
                 // No live socket (e.g. mid-backoff, its pending reconnect just
                 // cancelled above): connect immediately.

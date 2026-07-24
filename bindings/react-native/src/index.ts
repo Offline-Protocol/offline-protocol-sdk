@@ -3004,8 +3004,11 @@ export class OfflineProtocol {
    * Emits a transient `internet_status_changed` down→up. No-op unless the
    * internet transport is running (respects the enable/disable lifecycle).
    *
-   * @returns true once the reconnect was issued; false when the internet
-   *          transport was never initialized (never throws)
+   * @returns true once the request reached a live internet transport — this
+   *          means "accepted", not "reconnected": it is also true when the
+   *          transport is initialized but not currently running/starting, in
+   *          which case the call is a deliberate no-op. false only when the
+   *          internet transport was never initialized. Never throws.
    */
   async forceInternetReconnect(): Promise<boolean> {
     return await OfflineProtocolNativeModule.internetForceReconnect();

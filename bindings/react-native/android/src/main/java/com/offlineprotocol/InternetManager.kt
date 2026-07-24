@@ -515,8 +515,20 @@ class InternetManager(
                 teardownSocket(ws, "Force reconnect")
             } else {
                 // No live socket (e.g. mid-backoff, its pending reconnect just
-                // cancelled above): connect immediately.
-                connect()
+                // cancelled above): connect immediately. connect() throws on a
+                // malformed server URL (reachable if configure() changed it
+                // mid-session); a throw here would escape to the RN bridge and
+                // reject the promise, so — like scheduleReconnect's posted
+                // runnable — a reconnect that cannot even build its request
+                // stops the transport instead of surfacing as a rejection.
+                try {
+                    connect()
+                } catch (e: Exception) {
+                    emitDiagnostic("error", "Force reconnect failed", mapOf(
+                        "error" to (e.message ?: "unknown")
+                    ))
+                    updateState(TransportState.STOPPED)
+                }
             }
         }
     }
