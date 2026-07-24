@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-07-24
+
 ### Changed
 
 - **Outbox lifetime default raised from 1 hour to 7 days (`outbox_max_lifetime_ms` = 604800000), matching the app-layer presence-flush window.** A recipient offline for more than an hour no longer costs the sender their queued messages: store-and-forward outbox entries (and, via the shared knob, restored media transfer descriptors awaiting `media_resend_required`) now survive up to 7 days before expiring. The knob remains configurable end-to-end (Rust `ProtocolConfig.reliability.retry.outbox_max_lifetime_ms` → UniFFI `update_retry_config` → RN `outboxMaxLifetimeMs`) for apps that want the old bound back. The default retry backoff ceiling (`max_delay_ms`) also rises 30s → 5 min: delivery latency rides on the flush paths (start, transport reconnect, peer rediscovery, session establishment), which bypass backoff timers entirely, so the shorter ceiling only multiplied futile send attempts — and per-failure `message_retrying` events — against a long-offline peer.
