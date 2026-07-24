@@ -84,7 +84,7 @@ pub struct OfflineProtocol {
     /// driving the escalating reachability-probe interval when a local mesh
     /// carrier is up (see `handle_recipient_unreachable_for_message` —
     /// mirrors `WelcomeLifecycleRecord::unreachable_parks`). Reset on every
-    /// reachability edge (`flush_outbox_for_peer` / `flush_outbox_all`) and
+    /// reachability edge (`flush_outbox_for_peer_via` / `flush_outbox_all`) and
     /// on delivery; pruned alongside `cleanup_outbox` so only peers that
     /// still hold outbox entries can retain a counter. While live, ACK
     /// exhaustion for the recipient's plain DMs re-parks instead of
@@ -868,6 +868,18 @@ impl OfflineProtocol {
     ///
     /// * `peer_id` - The ID of the discovered peer
     pub fn on_neighbor_discovered(&mut self, peer_id: &str) {
+        self.on_neighbor_discovered_via(peer_id, None);
+    }
+
+    /// [`Self::on_neighbor_discovered`] with an optional transport override
+    /// for the outbox flush (see [`Self::flush_outbox_for_peer_via`]).
+    /// `unpark_via` is `Some(Internet)` when the relay presence-online edge
+    /// re-enters discovery through its rescue branch: a message whose
+    /// forced-internet re-drive just failed sits in the retry queue with no
+    /// pending ACK, so this inner flush would pick it up again — and
+    /// without the override DORS could route it into the mesh void with the
+    /// park counter already cleared, past re-park's reach.
+    fn on_neighbor_discovered_via(&mut self, peer_id: &str, unpark_via: Option<TransportType>) {
         // Don't track ourselves
         if peer_id == self.config.user_id {
             return;
@@ -901,7 +913,7 @@ impl OfflineProtocol {
         }
 
         // Flush any pending outbox messages destined for this peer
-        self.flush_outbox_for_peer(peer_id);
+        self.flush_outbox_for_peer_via(peer_id, unpark_via);
 
         // A Welcome that stalled or expired while this peer was unreachable now
         // has a fresh delivery opportunity over the carrier that surfaced this
@@ -928,17 +940,15 @@ impl OfflineProtocol {
         }
     }
 
-    /// Immediately attempts to send all pending outbox messages destined for a specific peer.
+    /// Immediately attempts to send all pending outbox messages destined
+    /// for a specific peer, bypassing backoff timers. Called on per-peer
+    /// reachability edges (discovery, relay presence-online) to flush
+    /// messages that were queued while the peer was unreachable.
     ///
-    /// Called when a peer is discovered to flush messages that were queued while
-    /// the peer was unreachable, bypassing backoff timers.
-    fn flush_outbox_for_peer(&mut self, peer_id: &str) {
-        self.flush_outbox_for_peer_via(peer_id, None);
-    }
-
-    /// [`Self::flush_outbox_for_peer`] with an optional transport override
-    /// for the re-driven sends. `unpark_via` is `Some(Internet)` on the
-    /// relay presence-online edge (`on_peer_presence`): the reachability
+    /// `unpark_via` is an optional transport override for the re-driven
+    /// sends: `Some(Internet)` on the relay presence-online edge
+    /// (`on_peer_presence`, including its rescue branch's re-entry through
+    /// `on_neighbor_discovered_via`): the reachability
     /// proof is relay-scoped, so the re-drive must go out over the internet
     /// transport — DORS could otherwise route it back into the mesh, where
     /// the send locally succeeds against a peer that is not there,
@@ -982,16 +992,23 @@ impl OfflineProtocol {
         let count = to_send.len().min(crate::constants::FLUSH_BATCH_LIMIT);
         debug!(peer_id = %peer_id, count = count, "Flushing outbox for discovered peer");
 
-        // Only process up to FLUSH_BATCH_LIMIT messages. Overflow messages
-        // are not removed from the retry queue, so they retain their backoff
-        // timers and will be picked up on the next process() tick or flush.
-        for (message, attempt_count) in to_send
-            .into_iter()
-            .take(crate::constants::FLUSH_BATCH_LIMIT)
-        {
+        let mut iter = to_send.into_iter();
+
+        // Only process up to FLUSH_BATCH_LIMIT messages per edge.
+        for (message, attempt_count) in iter.by_ref().take(crate::constants::FLUSH_BATCH_LIMIT) {
             // Remove from retry queue since we're sending immediately
             self.retry_queue.remove(&message.id.as_str());
             self.try_flush_send_via(message, attempt_count, unpark_via);
+        }
+
+        // Re-enqueue the overflow (mirrors flush_outbox_all): the probe
+        // cancel above may have stripped a parked message's retry entry, so
+        // "still holds its backoff timer" cannot be assumed past the batch
+        // limit. Enqueue dedupes by id — entries still scheduled keep their
+        // existing timer, canceled ones get a fresh backoff slot instead of
+        // stranding edge-only with the park counter cleared.
+        for (message, attempt_count) in iter {
+            let _ = self.retry_queue.enqueue(message, attempt_count);
         }
     }
 
@@ -1074,7 +1091,7 @@ impl OfflineProtocol {
     /// outbox message not currently awaiting an ACK — which includes DMs
     /// parked on a relay `recipient_unreachable` verdict. The relay's
     /// presence-online answer lands in [`Self::on_peer_presence`], whose
-    /// `flush_outbox_for_peer` is what re-drives (un-parks) those messages,
+    /// `flush_outbox_for_peer_via` is what re-drives (un-parks) those messages,
     /// so the SDK — not the app — owns the "watch my DeliveryError
     /// recipients" duty. Bounded by the outbox cap (500 entries).
     pub fn presence_watch_peers(&self) -> Vec<String> {

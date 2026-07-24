@@ -2477,7 +2477,7 @@ impl OfflineProtocol {
     /// Parking drops the pending ACK and the retry-queue entry while the
     /// outbox entry stays put — exactly the "stranded" state every re-drive
     /// edge already flushes (`flush_outbox_all` on reconnect/start,
-    /// `flush_outbox_for_peer` on discovery and presence-online, the latter
+    /// `flush_outbox_for_peer_via` on discovery and presence-online, the latter
     /// fed by [`Self::presence_watch_peers`]). Without the park, the offline
     /// peer's missing ACK burns the full `max_retries` budget in minutes
     /// (`process_timed_out_acks`) and settles a 7-day outbox message

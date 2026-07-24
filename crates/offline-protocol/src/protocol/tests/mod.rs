@@ -5328,7 +5328,7 @@ fn test_unreachable_dm_mesh_probe_escalates_and_resets_on_edge() {
     assert!(second_delay <= chrono::Duration::seconds(30));
 
     // A per-peer reachability edge resets the escalation counter.
-    protocol.flush_outbox_for_peer("bob");
+    protocol.flush_outbox_for_peer_via("bob", None);
     assert_eq!(protocol.dm_unreachable_parks.get("bob"), None);
 }
 
@@ -5716,6 +5716,81 @@ fn test_probe_hostage_dm_redriven_on_flush_outbox_all() {
         pending.retry_count, 0,
         "The hostage probe ACK must be canceled and replaced by a fresh one"
     );
+}
+
+#[test]
+fn test_probe_hostage_redrive_internet_failure_does_not_leak_into_mesh() {
+    // The presence edge's rescue branch re-enters discovery, whose inner
+    // flush picks up any parked DM whose forced-internet re-drive just
+    // failed (no pending ACK, park counter already cleared). That inner
+    // flush must keep the internet override: a DORS re-drive could locally
+    // succeed into the mesh void, re-registering an unanswerable ACK that
+    // exhausts into terminal message_failed with no live counter left to
+    // re-park on. A fully failed edge instead resumes retry backoff.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let (message_id, internet_mock, ble_mock) = park_and_fire_probe(&mut protocol);
+    let ble_sent_before = ble_mock.sent_messages().len();
+
+    internet_mock.set_fail_next_sends(usize::MAX);
+    protocol.on_peer_presence("bob", true, None);
+
+    assert_eq!(
+        ble_mock.sent_messages().len(),
+        ble_sent_before,
+        "A failed forced-internet re-drive must not fall back into the mesh"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "No ACK may be pending after every re-drive attempt failed"
+    );
+    assert!(
+        protocol.retry_queue.contains(&message_id.as_str()),
+        "The failed re-drive resumes backoff instead of stranding"
+    );
+    assert!(protocol.outbox.contains_key(&message_id));
+}
+
+#[test]
+fn test_unpark_flush_overflow_reenqueues_instead_of_stranding() {
+    // More in-flight DMs to a parked peer than FLUSH_BATCH_LIMIT: the probe
+    // cancel strips the pending ACKs of all of them, but a flush re-drives
+    // only one batch. The overflow must land back in the retry queue (a
+    // fresh backoff slot) — not strand edge-only with no ACK, no retry
+    // entry, and the park counter cleared. Exercised via the discovery edge,
+    // which runs exactly one flush (the presence edge's rescue branch runs a
+    // second inner flush, draining another batch on the same tick).
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let (first_id, _internet_mock, _ble_mock) = park_and_fire_probe(&mut protocol);
+
+    let extra = 5;
+    let mut ids = vec![first_id];
+    for _ in 0..(crate::constants::FLUSH_BATCH_LIMIT - 1 + extra) {
+        // Each send succeeds over a mock and registers a pending ACK while
+        // bob's park counter is live — the same unanswerable-probe shape.
+        let id = protocol
+            .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert!(protocol.ack_manager.is_waiting_for_ack(&id));
+        ids.push(id);
+    }
+
+    protocol.on_neighbor_discovered("bob");
+
+    let (redriven, overflow): (Vec<_>, Vec<_>) = ids
+        .iter()
+        .partition(|id| protocol.ack_manager.is_waiting_for_ack(id));
+    assert_eq!(
+        redriven.len(),
+        crate::constants::FLUSH_BATCH_LIMIT,
+        "Exactly one batch is re-driven with fresh ACKs on the edge"
+    );
+    assert_eq!(overflow.len(), extra);
+    for id in overflow {
+        assert!(
+            protocol.retry_queue.contains(&id.as_str()),
+            "Overflow past the batch limit must re-enqueue, not strand"
+        );
+    }
 }
 
 #[test]
