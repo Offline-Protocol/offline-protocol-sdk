@@ -2652,7 +2652,7 @@ impl OfflineProtocol {
     /// terminal path), not an MLS welcome (own lifecycle), and still present
     /// in the outbox. Media chunks live in `media_outbox`, so they never
     /// pass the outbox check.
-    fn is_parkable_plain_dm(&self, message_id: &MessageId) -> bool {
+    pub(super) fn is_parkable_plain_dm(&self, message_id: &MessageId) -> bool {
         if self
             .pending_connection_requests
             .contains_key(&message_id.as_str())

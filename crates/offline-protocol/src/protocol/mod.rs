@@ -964,8 +964,9 @@ impl OfflineProtocol {
         self.cancel_probe_state_for_parked_peer(peer_id);
         // A per-peer reachability edge: the escalating unreachable-probe
         // interval starts over (mirrors rearm_welcome_for_peer resetting
-        // unreachable_parks).
-        self.dm_unreachable_parks.remove(peer_id);
+        // unreachable_parks). Snapshotted, not dropped: an edge whose
+        // re-drives all fail didn't actually take, and restores it below.
+        let prior_parks = self.dm_unreachable_parks.remove(peer_id);
 
         // Collect matching messages from outbox + media_outbox
         let mut to_send: Vec<(Message, u32)> = Vec::new();
@@ -993,12 +994,19 @@ impl OfflineProtocol {
         debug!(peer_id = %peer_id, count = count, "Flushing outbox for discovered peer");
 
         let mut iter = to_send.into_iter();
+        let mut parked_dm_seen = false;
+        let mut parked_dm_redriven = false;
 
         // Only process up to FLUSH_BATCH_LIMIT messages per edge.
         for (message, attempt_count) in iter.by_ref().take(crate::constants::FLUSH_BATCH_LIMIT) {
+            let parkable = self.is_parkable_plain_dm(&message.id);
             // Remove from retry queue since we're sending immediately
             self.retry_queue.remove(&message.id.as_str());
-            self.try_flush_send_via(message, attempt_count, unpark_via);
+            let sent = self.try_flush_send_via(message, attempt_count, unpark_via);
+            if parkable {
+                parked_dm_seen = true;
+                parked_dm_redriven |= sent;
+            }
         }
 
         // Re-enqueue the overflow (mirrors flush_outbox_all): the probe
@@ -1008,7 +1016,20 @@ impl OfflineProtocol {
         // existing timer, canceled ones get a fresh backoff slot instead of
         // stranding edge-only with the park counter cleared.
         for (message, attempt_count) in iter {
+            parked_dm_seen = parked_dm_seen || self.is_parkable_plain_dm(&message.id);
             let _ = self.retry_queue.enqueue(message, attempt_count);
+        }
+
+        // An edge that re-drove no parkable DM at all didn't actually take:
+        // the DMs now sit in the retry queue, whose later sends are
+        // DORS-routed (no transport override there), and a mesh-local
+        // success would re-register an unanswerable ACK. Restore the
+        // counter so exhaustion stays within `try_repark_exhausted_dm`'s
+        // reach instead of settling terminally with the counter cleared.
+        if let Some(parks) = prior_parks {
+            if parked_dm_seen && !parked_dm_redriven {
+                self.dm_unreachable_parks.insert(peer_id.to_string(), parks);
+            }
         }
     }
 
@@ -1027,8 +1048,10 @@ impl OfflineProtocol {
             self.cancel_probe_state_for_parked_peer(&peer_id);
         }
         // A carrier-level reachability edge (reconnect / start): every
-        // escalating unreachable-probe interval starts over.
-        self.dm_unreachable_parks.clear();
+        // escalating unreachable-probe interval starts over. Snapshotted,
+        // not dropped: a peer whose re-drives all fail gets its counter
+        // restored below (see `flush_outbox_for_peer_via`).
+        let prior_parks = std::mem::take(&mut self.dm_unreachable_parks);
 
         // Drain all entries from the retry queue (ignores timing)
         let retry_entries = self.retry_queue.drain_all();
@@ -1074,14 +1097,42 @@ impl OfflineProtocol {
         );
 
         let mut iter = all_messages.into_iter();
+        let mut parked_dm_seen: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut parked_dm_redriven: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for (message, attempt_count) in iter.by_ref().take(crate::constants::FLUSH_BATCH_LIMIT) {
-            self.try_flush_send(message, attempt_count);
+            let recipient = message.recipient.as_str().to_string();
+            let parkable =
+                prior_parks.contains_key(&recipient) && self.is_parkable_plain_dm(&message.id);
+            let sent = self.try_flush_send(message, attempt_count);
+            if parkable {
+                if sent {
+                    parked_dm_redriven.insert(recipient);
+                } else {
+                    parked_dm_seen.insert(recipient);
+                }
+            }
         }
 
         // Re-enqueue any messages beyond the batch limit so they aren't lost
         for (message, attempt_count) in iter {
+            let recipient = message.recipient.as_str();
+            if prior_parks.contains_key(recipient) && self.is_parkable_plain_dm(&message.id) {
+                parked_dm_seen.insert(recipient.to_string());
+            }
             let _ = self.retry_queue.enqueue(message, attempt_count);
+        }
+
+        // Restore the counter of every parked peer none of whose DMs were
+        // re-driven on this edge (see `flush_outbox_for_peer_via`): their
+        // retry-queue sends are DORS-routed, and a mesh-local success must
+        // leave exhaustion re-parkable rather than terminal.
+        for (peer_id, parks) in prior_parks {
+            if parked_dm_seen.contains(&peer_id) && !parked_dm_redriven.contains(&peer_id) {
+                self.dm_unreachable_parks.insert(peer_id, parks);
+            }
         }
     }
 
@@ -1115,9 +1166,9 @@ impl OfflineProtocol {
     /// by capacity limits while the message sat in the retry queue). On success,
     /// registers ACK tracking and updates the outbox entry. On failure,
     /// re-enqueues the message to the retry queue with its current attempt count
-    /// so backoff resumes.
-    fn try_flush_send(&mut self, message: Message, attempt_count: u32) {
-        self.try_flush_send_via(message, attempt_count, None);
+    /// so backoff resumes. Returns whether the send locally succeeded.
+    fn try_flush_send(&mut self, message: Message, attempt_count: u32) -> bool {
+        self.try_flush_send_via(message, attempt_count, None)
     }
 
     /// [`Self::try_flush_send`] with an optional transport override (see
@@ -1128,7 +1179,7 @@ impl OfflineProtocol {
         message: Message,
         attempt_count: u32,
         transport_override: Option<TransportType>,
-    ) {
+    ) -> bool {
         self.ensure_outbox_entry(&message);
         let forced_transport = self
             .pinned_media_transport_for_message(&message.id)
@@ -1153,10 +1204,12 @@ impl OfflineProtocol {
                     Some(attempt_count.saturating_add(1)),
                 );
                 debug!(message_id = %message.id, "Flush send succeeded");
+                true
             }
             Err(e) => {
                 let _ = self.retry_queue.enqueue(message.clone(), attempt_count);
                 debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
+                false
             }
         }
     }

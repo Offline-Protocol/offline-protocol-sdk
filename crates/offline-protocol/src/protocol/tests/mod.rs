@@ -5327,8 +5327,9 @@ fn test_unreachable_dm_mesh_probe_escalates_and_resets_on_edge() {
     assert!(second_delay > chrono::Duration::seconds(20));
     assert!(second_delay <= chrono::Duration::seconds(30));
 
-    // A per-peer reachability edge resets the escalation counter.
-    protocol.flush_outbox_for_peer_via("bob", None);
+    // A per-peer reachability edge resets the escalation counter (the BLE
+    // mock accepts the re-driven send, so the edge genuinely takes).
+    protocol.on_neighbor_discovered("bob");
     assert_eq!(protocol.dm_unreachable_parks.get("bob"), None);
 }
 
@@ -5748,6 +5749,72 @@ fn test_probe_hostage_redrive_internet_failure_does_not_leak_into_mesh() {
         "The failed re-drive resumes backoff instead of stranding"
     );
     assert!(protocol.outbox.contains_key(&message_id));
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&1),
+        "A totally failed edge must restore the park counter — the resumed \
+         retries are DORS-routed and exhaustion must stay re-parkable"
+    );
+}
+
+#[test]
+fn test_failed_unpark_redrive_keeps_exhaustion_reparkable() {
+    // Continuation of the failed-edge scenario above: the resumed
+    // retry-queue send is DORS-routed and can locally succeed into the mesh
+    // void, re-registering an unanswerable ACK. Because the failed edge
+    // restored the park counter, that ACK's exhaustion must re-park the DM
+    // (escalated counter, next probe scheduled) instead of settling
+    // terminally with message_failed.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let (message_id, internet_mock, _ble_mock) = park_and_fire_probe(&mut protocol);
+
+    internet_mock.set_fail_next_sends(usize::MAX);
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+
+    // The resumed DORS retry locally succeeds into the mesh — the same
+    // unanswerable shape park_and_fire_probe simulates: retry entry
+    // consumed, fresh pending ACK registered — and its budget burns out
+    // (0ms timeout stands in for the elapsed waits).
+    protocol.retry_queue.remove(&message_id.as_str());
+    let max_retries = protocol.config.reliability.retry.max_retries;
+    protocol
+        .ack_manager
+        .register_pending_ack(message_id.clone(), Some(0))
+        .unwrap();
+    for _ in 0..max_retries {
+        protocol.ack_manager.increment_retry_count(&message_id);
+    }
+    protocol.process().unwrap();
+
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "Exhaustion after a failed re-drive edge must not settle terminally"
+    );
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "Re-parked DM must stay in the outbox"
+    );
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "Re-park must drop the exhausted ACK"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&2),
+        "Re-park must escalate the restored counter"
+    );
 }
 
 #[test]
