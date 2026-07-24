@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.16.2] — 2026-07-24
+
+### Added
+
+- **React Native: relay session-superseded handling — `internet_session_superseded` event + `is_superseded` metric.** The relay displaces a stale connection by closing the WebSocket with code `4000` (optionally preceded by a `SessionSuperseded` notice) when a newer registration for the same identity takes over the relay slot. Neither native bridge reacted to the code before — both blind-auto-reconnected, so against an undamped displacement server a legacy dual-socket device became a self-sustaining ~1–2s eviction loop (presence flapping, routing lottery, JWT-verify churn) across the fleet. Both platforms now plumb the close code into `handleConnectionClosed` and, on close `4000` or a `SessionSuperseded` notice on the current socket, latch an `isSuperseded` flag, cancel any pending reconnect, stop the transport, and refuse auto-/force-reconnect until an explicit `start()` clears the latch. iOS marks superseded keyed on the close code (not task identity) so the decision survives the URLSession terminal-signal funnel race, but gates the pre-guard mark on `webSocketTask == nil || it's still us` so a late stale `4000` (queued on the delegate queue while `start()` already brought up a fresh socket) can't nuke the healthy successor. The displace decision + boolean is extracted into a pure, unit-tested `SupersededLatchPolicy` on each platform (8 paired tests per platform, iOS SPM + Android CI harness), sharing the exact rule while keeping the two bridges' deliberately opposite identity-guard orderings. A new `internet_session_superseded` event lets the app surface "connected elsewhere" and reconnect only on deliberate user action, and `getMetrics()` exposes `is_superseded`. Additive JSON event (bridge-only, allow-listed in the Rust↔TS drift guard); no Rust/core wire, schema, or send-path change.
+
 ## [0.16.1] — 2026-07-24
 
 ### Added
