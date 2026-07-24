@@ -5699,16 +5699,33 @@ fn test_unpark_cancel_spares_connection_request_ack() {
 fn test_probe_hostage_dm_redriven_on_flush_outbox_all() {
     // The carrier-level edge (reconnect / start) has the same hostage
     // window: a probe-ACK-waiting DM must be canceled and re-driven, not
-    // skipped by the awaiting-ACK guard with its counter cleared.
+    // skipped by the awaiting-ACK guard. This edge is DORS-routed with no
+    // per-peer reachability proof, and DORS ranks the mesh above the
+    // internet here — so the re-drive locally succeeds into the mesh and
+    // must NOT clear the park counter (only an internet-routed send, which
+    // can earn a relay verdict, counts as re-driven for counter-clearing).
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    let (message_id, _internet_mock, _ble_mock) = park_and_fire_probe(&mut protocol);
+    let (message_id, internet_mock, ble_mock) = park_and_fire_probe(&mut protocol);
+    let internet_sent_before = internet_mock.sent_messages().len();
+    let ble_sent_before = ble_mock.sent_messages().len();
 
     protocol.ack_manager.increment_retry_count(&message_id);
     protocol.ack_manager.increment_retry_count(&message_id);
 
     protocol.flush_outbox_all();
 
-    assert!(protocol.dm_unreachable_parks.is_empty());
+    assert_eq!(
+        ble_mock.sent_messages().len(),
+        ble_sent_before + 1,
+        "The DORS-routed re-drive goes over the mesh on this edge"
+    );
+    assert_eq!(internet_mock.sent_messages().len(), internet_sent_before);
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&1),
+        "A mesh-routed local success is not proof of reachability: the \
+         counter must be restored so exhaustion stays re-parkable"
+    );
     let pending = protocol
         .ack_manager
         .get_pending_ack(&message_id)
@@ -5716,6 +5733,158 @@ fn test_probe_hostage_dm_redriven_on_flush_outbox_all() {
     assert_eq!(
         pending.retry_count, 0,
         "The hostage probe ACK must be canceled and replaced by a fresh one"
+    );
+}
+
+#[test]
+fn test_flush_outbox_all_internet_redrive_clears_counter() {
+    // Counterpart of the mesh-routed case above: with the mesh carrier down,
+    // the carrier-level edge's DORS re-drive goes over the internet — a send
+    // that can earn a relay verdict — so the edge genuinely takes and the
+    // park counter clears.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let (message_id, internet_mock, ble_mock) = park_and_fire_probe(&mut protocol);
+    let internet_sent_before = internet_mock.sent_messages().len();
+
+    ble_mock.stop().unwrap();
+    protocol.flush_outbox_all();
+
+    assert_eq!(
+        internet_mock.sent_messages().len(),
+        internet_sent_before + 1,
+        "With the mesh down the re-drive must go over the internet"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        None,
+        "An internet-routed re-drive earns a relay verdict: the edge takes \
+         and the counter clears"
+    );
+    assert!(protocol.ack_manager.is_waiting_for_ack(&message_id));
+}
+
+#[test]
+fn test_flush_outbox_all_mesh_redrive_keeps_exhaustion_reparkable() {
+    // The mesh-void hole on the carrier-level edge: DM parked under dual
+    // carrier, internet drops, a mesh reconnect fires flush_outbox_all. The
+    // DORS re-drive locally succeeds into the mesh void and registers an
+    // unanswerable ACK. Because the mesh-routed "success" restored the park
+    // counter, that ACK's exhaustion must re-park the DM (escalated
+    // counter) instead of settling terminally with message_failed.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let (message_id, internet_mock, ble_mock) = park_and_fire_probe(&mut protocol);
+    let ble_sent_before = ble_mock.sent_messages().len();
+
+    internet_mock.stop().unwrap();
+    protocol.flush_outbox_all();
+
+    assert_eq!(
+        ble_mock.sent_messages().len(),
+        ble_sent_before + 1,
+        "The BLE-only re-drive locally succeeds into the mesh"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&1),
+        "The mesh-routed success must restore the counter"
+    );
+
+    // The re-driven send's ACK never arrives and its budget burns out
+    // (0ms timeout stands in for the elapsed waits).
+    let max_retries = protocol.config.reliability.retry.max_retries;
+    protocol.ack_manager.remove_ack(&message_id);
+    protocol
+        .ack_manager
+        .register_pending_ack(message_id.clone(), Some(0))
+        .unwrap();
+    for _ in 0..max_retries {
+        protocol.ack_manager.increment_retry_count(&message_id);
+    }
+    protocol.process().unwrap();
+
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "Mesh-void exhaustion after the carrier edge must not settle terminally"
+    );
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "Re-parked DM must stay in the outbox"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&2),
+        "Re-park must escalate the restored counter"
+    );
+}
+
+#[test]
+fn test_unpark_cancel_spares_welcome_ack() {
+    // Sibling of the connection-request exemption above: an in-flight MLS
+    // welcome to the same peer keeps its pending ACK (and its own delivery
+    // lifecycle) across a reachability edge's un-park cancel.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let (dm_id, _internet_mock, _ble_mock) = park_and_fire_probe(&mut protocol);
+
+    let welcome = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "__MLS_WELCOME__{}",
+    );
+    let welcome_id = welcome.id.clone();
+    protocol.outbox.insert(
+        welcome_id.clone(),
+        OutboxEntry {
+            message: welcome.clone(),
+            attempt_count: 1,
+            first_sent_at: chrono::Utc::now(),
+            last_sent_at: chrono::Utc::now(),
+            last_transport: Some(TransportType::Internet),
+        },
+    );
+    protocol
+        .ack_manager
+        .register_pending_ack(welcome_id.clone(), None)
+        .unwrap();
+    // Sent: wire-confirmed, awaiting session confirmation — the one state
+    // the discovery edge's welcome re-arm deliberately never touches.
+    protocol.welcome_lifecycles.insert(
+        "bob".to_string(),
+        WelcomeLifecycleRecord {
+            peer_id: "bob".to_string(),
+            group_id: "session:user123:bob".to_string(),
+            state: WelcomeDeliveryState::Sent,
+            attempt: 1,
+            unreachable_parks: 0,
+            welcome_message: welcome,
+            next_retry_at: None,
+            last_reason_code: None,
+            last_transport_error: None,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::seconds(600),
+        },
+    );
+
+    protocol.on_neighbor_discovered("bob");
+
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&welcome_id),
+        "Welcome ACK must survive the un-park cancel"
+    );
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&dm_id),
+        "The parked DM itself must be re-driven with a fresh ACK"
     );
 }
 

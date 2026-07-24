@@ -1005,7 +1005,7 @@ impl OfflineProtocol {
             let sent = self.try_flush_send_via(message, attempt_count, unpark_via);
             if parkable {
                 parked_dm_seen = true;
-                parked_dm_redriven |= sent;
+                parked_dm_redriven |= sent.is_some();
             }
         }
 
@@ -1026,6 +1026,12 @@ impl OfflineProtocol {
         // success would re-register an unanswerable ACK. Restore the
         // counter so exhaustion stays within `try_repark_exhausted_dm`'s
         // reach instead of settling terminally with the counter cleared.
+        //
+        // Restore granularity is per-peer, matching the counter: one
+        // successful re-drive clears it even when a sibling's send failed on
+        // the same edge, leaving that sibling on DORS-routed backoff exposed
+        // to terminal exhaustion. Accepted gap — it requires one transport
+        // to both succeed and fail within a single flush loop.
         if let Some(parks) = prior_parks {
             if parked_dm_seen && !parked_dm_redriven {
                 self.dm_unreachable_parks.insert(peer_id.to_string(), parks);
@@ -1106,9 +1112,18 @@ impl OfflineProtocol {
             let recipient = message.recipient.as_str().to_string();
             let parkable =
                 prior_parks.contains_key(&recipient) && self.is_parkable_plain_dm(&message.id);
-            let sent = self.try_flush_send(message, attempt_count);
+            let sent_via = self.try_flush_send(message, attempt_count);
             if parkable {
-                if sent {
+                // Unlike the per-peer edges (discovery carries mesh-scoped
+                // proof, presence-online forces the internet transport), this
+                // carrier-level edge re-drives via DORS with no per-peer
+                // reachability proof: a mesh-routed send "locally succeeds"
+                // into the mesh whether or not the peer is there, so only an
+                // internet-routed send — the one that can earn a relay
+                // verdict — counts as re-driven for counter-clearing. A
+                // mesh-routed success keeps the counter restore-eligible;
+                // if its ACK genuinely arrives, delivery prunes the counter.
+                if sent_via == Some(TransportType::Internet) {
                     parked_dm_redriven.insert(recipient);
                 } else {
                     parked_dm_seen.insert(recipient);
@@ -1166,8 +1181,11 @@ impl OfflineProtocol {
     /// by capacity limits while the message sat in the retry queue). On success,
     /// registers ACK tracking and updates the outbox entry. On failure,
     /// re-enqueues the message to the retry queue with its current attempt count
-    /// so backoff resumes. Returns whether the send locally succeeded.
-    fn try_flush_send(&mut self, message: Message, attempt_count: u32) -> bool {
+    /// so backoff resumes. Returns the transport the send went out over, or
+    /// `None` when it failed (or, defensively, when the transport could not
+    /// be attributed — the park restore logic treats both as not-redriven,
+    /// the safe direction; in practice a successful send always has one).
+    fn try_flush_send(&mut self, message: Message, attempt_count: u32) -> Option<TransportType> {
         self.try_flush_send_via(message, attempt_count, None)
     }
 
@@ -1179,7 +1197,7 @@ impl OfflineProtocol {
         message: Message,
         attempt_count: u32,
         transport_override: Option<TransportType>,
-    ) -> bool {
+    ) -> Option<TransportType> {
         self.ensure_outbox_entry(&message);
         let forced_transport = self
             .pinned_media_transport_for_message(&message.id)
@@ -1204,12 +1222,12 @@ impl OfflineProtocol {
                     Some(attempt_count.saturating_add(1)),
                 );
                 debug!(message_id = %message.id, "Flush send succeeded");
-                true
+                current_transport
             }
             Err(e) => {
                 let _ = self.retry_queue.enqueue(message.clone(), attempt_count);
                 debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
-                false
+                None
             }
         }
     }
