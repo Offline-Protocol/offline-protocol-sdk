@@ -2983,6 +2983,38 @@ export class OfflineProtocol {
   }
 
   /**
+   * Forces an immediate teardown + reconnect + re-authenticate of the SDK's
+   * internet socket, bypassing the exponential reconnect backoff.
+   *
+   * `isInternetReady()` is a point-in-time cached flag, not a liveness probe:
+   * an OS suspend can kill the TCP connection before a clean WebSocket close,
+   * so after a background→foreground transition the socket may be a zombie
+   * (dead but still reported ready) or alive-but-deregistered by the relay.
+   * Neither is detectable by a ping, and both are healed by the same action —
+   * a full reconnect that re-runs the relay authenticate/register handshake.
+   * Call this on foreground when a stale socket is suspected, instead of
+   * relying on `isInternetReady()` to gate a disable→enable toggle (which
+   * no-ops precisely when the flag is stale-true).
+   *
+   * Recovery lands in ~1s rather than waiting ~20-30s for zombie ping
+   * detection. Prefer to debounce and gate on background duration rather than
+   * calling this on every foreground — it drops a genuinely-healthy socket if
+   * called needlessly, forcing a group re-registration round-trip.
+   *
+   * Emits a transient `internet_status_changed` down→up. No-op unless the
+   * internet transport is running (respects the enable/disable lifecycle).
+   *
+   * @returns true once the request reached a live internet transport — this
+   *          means "accepted", not "reconnected": it is also true when the
+   *          transport is initialized but not currently running/starting, in
+   *          which case the call is a deliberate no-op. false only when the
+   *          internet transport was never initialized. Never throws.
+   */
+  async forceInternetReconnect(): Promise<boolean> {
+    return await OfflineProtocolNativeModule.internetForceReconnect();
+  }
+
+  /**
    * Sends a typing indicator to a peer.
    *
    * @param recipient - Recipient's user ID

@@ -3531,6 +3531,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * Forces an immediate teardown + reconnect + re-authenticate of the
+     * internet socket, bypassing the exponential backoff — the deterministic
+     * recovery for a foreground-after-background where the cached ready flags
+     * may be stale (see InternetManager.forceReconnect). Resolves true when
+     * the request reached a live internet transport ("accepted", not
+     * "reconnected" — also true when the transport is initialized but not
+     * running, where forceReconnect is a deliberate no-op); false (never
+     * rejects) only when the internet transport isn't initialized.
+     */
+    @ReactMethod
+    fun internetForceReconnect(promise: Promise) {
+        val manager = internetManager
+        if (manager == null) {
+            promise.resolve(false)
+            return
+        }
+        manager.forceReconnect()
+        promise.resolve(true)
+    }
+
+    /**
      * Wire event-driven transport callbacks using direct typed UniFFI calls.
      * Each callback fires when Rust enqueues outgoing data, replacing timer-based polling.
      * Falls back to polling if bindings are stale (logged as warning).
