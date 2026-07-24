@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-07-24
+
+### Added
+
+- **React Native: `forceInternetReconnect()` for deterministic foreground recovery.** `isInternetReady()` reflects a cached `(_isConnected && _isAuthenticated)` pair, not a liveness probe: an OS suspend that kills TCP before a clean WebSocket close leaves the flags stale-true, so an app's foreground "if not ready, toggle transport" gate no-ops precisely when it should act, and recovery instead waits ~20–30s on zombie-ping detection. A liveness probe can't heal this — the socket is either a zombie (dead, flag stale-true) or alive-but-deregistered by the relay, and a ping/pong reports the latter as "alive"; only a full teardown → reconnect → re-authenticate repairs both, since re-auth re-runs the relay's authenticate/register handshake. The new `forceInternetReconnect(): Promise<boolean>` cancels pending backoff, resets the delay to initial, and drives the existing `teardownSocket → handleConnectionClosed → scheduleReconnect` funnel (or `connect()` when no socket), landing recovery in ~1s. It is a no-op unless the transport is running, honors `autoReconnect`, and never rejects (a reconnect that can't even build its request stops the transport instead of surfacing as a rejection). The boolean resolves `true` when the request is *accepted* (a reconnect fired, or the transport exists but isn't running), not as a proof of reconnection. Purely additive — reuses the tested close funnel so all `isStale` guards and the `internet_status_changed` emission chokepoint are honored; no Rust/core, wire, schema, or event change.
+
 ## [0.16.0] — 2026-07-24
 
 ### Changed
