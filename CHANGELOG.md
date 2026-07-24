@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.16.3] — 2026-07-25
+
+### Fixed
+
+- **iOS: a late relay close-`4000` for a bygone socket no longer wedges the transport during a reconnect window.** The relay-superseded latch added in 0.16.2 keyed its "does this close-`4000` displace the transport?" decision on object identity against the current `webSocketTask`. During a reconnect backoff window `webSocketTask` is momentarily `nil`, and identity reads `nil` as "current generation → latch" — so a background-queued `4000` for an already-superseded socket, flushed into that window on foreground (the systematic trigger being `forceReconnect()`'s foreground recovery), would latch `isSuperseded` and stop a transport that had already moved on to a newer socket, refusing auto-/force-reconnect until an explicit `start()`. The decision is now keyed on a monotonic per-socket **generation** instead: `connect()` stamps each socket with the next generation (carried on `task.taskDescription`), and `didCloseWith` treats a close whose generation is strictly older than the newest minted as bygone and refuses to latch it, regardless of whether `webSocketTask` is currently `nil` or a live successor. A `4000` for the current (newest) generation still latches, so a genuine displacement of the live socket is unaffected. Object identity remains a belt-and-suspenders fallback for the (never-in-practice) case where the tag is absent. The generation logic is extracted into a pure, unit-tested `SocketGenerationTracker`. iOS-only: Android's close funnel runs its socket-identity guard before the supersede decision, so it drops a non-current socket's close before it can latch and is immune to this false-latch by construction (no generation tracking needed). Bridge-only; no Rust/core wire, schema, or send-path change.
+
 ## [0.16.2] — 2026-07-24
 
 ### Added
