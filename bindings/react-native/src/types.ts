@@ -1697,6 +1697,23 @@ export interface InternetStatusChangedEvent extends BaseEvent {
 }
 
 /**
+ * The relay displaced this device's internet connection: a newer
+ * registration for the same identity took over the relay slot, and the relay
+ * closed this socket with code 4000 (optionally preceded by a
+ * `SessionSuperseded` notice). The SDK does **not** auto-reconnect after this
+ * — a blind reconnect would just re-displace the other socket in a tight loop
+ * (the fleet-wide eviction storm the relay-displacement rollout guards
+ * against). The transport is left stopped; the app should surface a
+ * "connected elsewhere" state and reconnect only on explicit user action
+ * (re-enabling the internet transport), or on foreground with long jitter.
+ * `reason` is the relay-supplied close/notice reason when present.
+ */
+export interface InternetSessionSupersededEvent extends BaseEvent {
+  type: 'internet_session_superseded';
+  reason?: string;
+}
+
+/**
  * Relay-side registration state of a group (`groupRelaySyncState`).
  */
 export type RelaySyncState = 'synced' | 'pending' | 'unsynced';
@@ -1762,6 +1779,7 @@ export type ProtocolEvent =
   | PresenceUpdatedEvent
   | InternetServerMessageEvent
   | InternetStatusChangedEvent
+  | InternetSessionSupersededEvent
   | TypingIndicatorReceivedEvent
   | ReadReceiptReceivedEvent
   | MessageRelayedEvent

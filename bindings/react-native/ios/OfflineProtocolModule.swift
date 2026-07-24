@@ -374,6 +374,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                 internetManager?.connectionStatusEmitter = { [weak self] connected, authenticated in
                     self?.emitInternetStatusEvent(connected: connected, authenticated: authenticated)
                 }
+                internetManager?.supersededEmitter = { [weak self] reason in
+                    self?.emitInternetSupersededEvent(reason: reason)
+                }
                 print("[OfflineProtocolModule] Internet Manager initialized for user: \(config.userId)")
                 
                 // Extract and store internet config for use during start()
@@ -519,6 +522,23 @@ class OfflineProtocolModule: RCTEventEmitter {
             "connected": connected,
             "authenticated": authenticated
         ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+           let jsonString = String(data: data, encoding: .utf8) {
+            sendEventToJS(Events.onEvent, body: ["eventJson": jsonString])
+        }
+    }
+
+    /// Forwards a relay session displacement ("superseded") as the
+    /// `internet_session_superseded` event. The relay closed this socket with
+    /// code 4000 because a newer registration for the same identity took over;
+    /// the SDK will NOT auto-reconnect. The app surfaces "connected elsewhere"
+    /// and reconnects only on explicit user action (re-enabling the transport).
+    fileprivate func emitInternetSupersededEvent(reason: String?) {
+        guard hasListeners else { return }
+        var payload: [String: Any] = [
+            "type": "internet_session_superseded"
+        ]
+        if let reason = reason { payload["reason"] = reason }
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
            let jsonString = String(data: data, encoding: .utf8) {
             sendEventToJS(Events.onEvent, body: ["eventJson": jsonString])
@@ -1351,6 +1371,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                     }
                     newManager.connectionStatusEmitter = { [weak self] connected, authenticated in
                         self?.emitInternetStatusEvent(connected: connected, authenticated: authenticated)
+                    }
+                    newManager.supersededEmitter = { [weak self] reason in
+                        self?.emitInternetSupersededEvent(reason: reason)
                     }
                     internetManager = newManager
                     emitDiagnostic(level: "info", message: "Internet manager created on demand")

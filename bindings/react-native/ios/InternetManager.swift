@@ -35,6 +35,13 @@ public class InternetManager: NSObject, TransportManager {
     private let PING_INTERVAL: TimeInterval = 10.0  // Reduced from 30s for faster failure detection
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
     private let AUTH_RESPONSE_TIMEOUT: TimeInterval = 10.0
+    // WebSocket close code the relay uses to signal this connection was
+    // displaced by a newer registration for the same identity ("session
+    // superseded"). A blind reconnect would just re-displace the peer socket
+    // in a ~1s loop (the fleet-wide eviction storm the relay-displacement
+    // rollout guards against), so on this code we stop and let the app decide
+    // when to reconnect. Mirrors InternetManager.kt.
+    private static let SUPERSEDED_CLOSE_CODE = 4000
     // Tracker ids for app-authored raw SendMessage frames (sendRawCommand):
     // recorded to keep the per-recipient FIFO honest, never reported to the
     // core. Mirrors InternetManager.kt — keep in sync.
@@ -112,6 +119,15 @@ public class InternetManager: NSObject, TransportManager {
     private var authTimeoutWorkItem: DispatchWorkItem?
     private var maxReconnectAttempts: Int = 0 // 0 = infinite
     private var autoReconnect: Bool = true
+
+    // Set when the relay displaced this connection (close 4000, or a
+    // SessionSuperseded notice on the current socket). Suppresses auto- AND
+    // force-reconnect until an explicit start() — a blind reconnect just
+    // re-displaces the peer socket in a tight loop. Main-owned (touched only
+    // on main: the close funnel, the message-dispatch main hop, and the
+    // lifecycle entry points), like autoReconnect/currentReconnectDelay.
+    // Mirrors InternetManager.kt's isSuperseded.
+    private var isSuperseded = false
 
     // State tracking. Lock-guarded (stateLock) like the Kotlin bridge's
     // AtomicBoolean/@Volatile fields: written on main (open/close/lifecycle),
@@ -278,6 +294,14 @@ public class InternetManager: NSObject, TransportManager {
     /// InternetManager.kt.
     public var connectionStatusEmitter: ((Bool, Bool) -> Void)?
 
+    /// Fires once when the relay displaces this connection (close 4000 or a
+    /// SessionSuperseded notice) — the module forwards it as the
+    /// `internet_session_superseded` event. The SDK will not auto-reconnect; the
+    /// app surfaces "connected elsewhere" and reconnects only on explicit user
+    /// action (re-enabling the transport). Reason is the close/notice reason,
+    /// if any. Mirrors InternetManager.kt.
+    public var supersededEmitter: ((String?) -> Void)?
+
     /// Last (connected, authenticated) pair published, or nil before the
     /// first. Lock-guarded like the flags themselves: flips happen on main,
     /// but the guard keeps the read-compare-store atomic against any future
@@ -442,6 +466,11 @@ public class InternetManager: NSObject, TransportManager {
         // The reconnect backoff is likewise per-session state: a stale 30s
         // delay must not slow the first retry of a brand-new start.
         isPaused = false
+        // A fresh start() is the deliberate re-enable that clears a prior
+        // relay-superseded latch: the app has resolved the "connected
+        // elsewhere" condition (e.g. signed the other session out) and now
+        // wants this device connected again.
+        isSuperseded = false
         reconnectAttempts = 0
         currentReconnectDelay = RECONNECT_INITIAL_DELAY
 
@@ -633,7 +662,8 @@ public class InternetManager: NSObject, TransportManager {
             "messages_received": messagesReceived.get(),
             "is_connected": isConnected,
             "is_authenticated": isAuthenticated,
-            "reconnect_attempts": reconnectAttempts
+            "reconnect_attempts": reconnectAttempts,
+            "is_superseded": isSuperseded
         ]
     }
     
@@ -655,6 +685,9 @@ public class InternetManager: NSObject, TransportManager {
     private func connect() {
         runOnMainSync {
             guard let url = serverUrl else { return }
+            // A relay-superseded transport must not reconnect until an
+            // explicit start() clears the latch (see markSuperseded).
+            guard !isSuperseded else { return }
             guard !isConnecting && !isConnected else { return }
             // stop() may have run between a reconnect being scheduled and
             // firing. The session null-check must precede the isConnecting
@@ -897,7 +930,24 @@ public class InternetManager: NSObject, TransportManager {
         ])
     }
     
-    private func handleConnectionClosed(error: Error?) {
+    /// Marks the connection displaced by the relay and latches it stopped:
+    /// cancels any pending reconnect, sets [isSuperseded] so auto- and
+    /// force-reconnect refuse until the next start(), and fires the one-shot
+    /// superseded event. Idempotent — the relay emits both a SessionSuperseded
+    /// notice and close 4000, and the close itself fires 2-3 terminal signals,
+    /// so several paths reach here for one displacement. Main-thread only.
+    private func markSuperseded(reason: String?) {
+        guard !isSuperseded else { return }
+        isSuperseded = true
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+        emitDiagnostic("warning", "Relay superseded this session; not auto-reconnecting", context: [
+            "reason": reason ?? "none"
+        ])
+        supersededEmitter?(reason)
+    }
+
+    private func handleConnectionClosed(error: Error?, closeCode: Int? = nil, closeReason: String? = nil) {
         let wasConnected = isConnected
         let wasAuthenticated = isAuthenticated
         isConnected = false
@@ -943,6 +993,18 @@ public class InternetManager: NSObject, TransportManager {
             "wasAuthenticated": wasAuthenticated
         ])
         
+        // The relay displaced this connection (close 4000, or a
+        // SessionSuperseded notice already flipped the flag on the live
+        // socket). A blind reconnect would just re-displace the peer socket in
+        // a ~1s eviction loop, so stop for good and let the app decide when to
+        // reconnect (explicit user action / foreground with long jitter).
+        // Recovery is an explicit start(), which clears isSuperseded.
+        if isSuperseded || closeCode == Self.SUPERSEDED_CLOSE_CODE {
+            markSuperseded(reason: closeReason ?? error?.localizedDescription)
+            updateState(.stopped)
+            return
+        }
+
         // Attempt reconnection if enabled
         // Messages in outbox will be flushed on successful reconnection
         if autoReconnect && state != .stopping && state != .stopped {
@@ -951,9 +1013,12 @@ public class InternetManager: NSObject, TransportManager {
             updateState(.stopped)
         }
     }
-    
+
     private func scheduleReconnect() {
         guard autoReconnect else { return }
+        // Defense in depth: handleConnectionClosed already returns before here
+        // on a superseded connection, but never schedule a reconnect for one.
+        guard !isSuperseded else { return }
         // A close can race stop(): its scheduled reconnect must not revive a
         // transport the app already stopped (the delayed connect() would
         // find urlSession nilled and leave the transport wedged).
@@ -1105,7 +1170,23 @@ public class InternetManager: NSObject, TransportManager {
             // connection (the teardown detaches it first, so the
             // cancel-triggered callbacks are ignored as stale).
             teardownSocket(ifCurrent: task, reason: reason)
-            
+
+        case "SessionSuperseded":
+            // The relay is displacing this connection — a newer registration
+            // for the same identity took the slot. It also closes with code
+            // 4000, but honor the notice too so we never blind-reconnect even
+            // if the close code is lost to a funnel race. Current socket only.
+            guard !isStale(task) else { break }
+            let supersedeReason = json["reason"] as? String
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, task === self.webSocketTask else { return }
+                self.markSuperseded(reason: supersedeReason)
+                // Close the live socket through the shared funnel;
+                // handleConnectionClosed sees isSuperseded and stops without
+                // reconnecting (markSuperseded already emitted the event).
+                self.teardownSocket(ifCurrent: task, reason: supersedeReason ?? "Session superseded")
+            }
+
         case "MessageSent":
             // Handle MessageSent event from WebSocket server
             // This contains the server-generated message_id that we should use
@@ -2340,15 +2421,27 @@ extension InternetManager: URLSessionWebSocketDelegate {
         // funnel into the single task-scoped close: main hop, identity
         // check, detach FIRST, then handleConnectionClosed — whichever
         // signal lands first wins and the rest become stale no-ops.
+        let code = closeCode.rawValue
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, webSocketTask === self.webSocketTask else { return }
-            self.webSocketTask = nil
+            guard let self = self else { return }
             let reasonString = reason.flatMap { String(data: $0, encoding: .utf8) }
+            // Displacement is authoritative regardless of which terminal signal
+            // won the funnel race: the receive-loop failure / didCompleteWithError
+            // may already have detached this task and scheduled a reconnect, so
+            // key the decision on the code — not task identity — and mark before
+            // the identity guard below can early-return. markSuperseded cancels
+            // any reconnect the losing path scheduled.
+            if code == Self.SUPERSEDED_CLOSE_CODE {
+                self.markSuperseded(reason: reasonString)
+                if self.state != .stopped { self.updateState(.stopped) }
+            }
+            guard webSocketTask === self.webSocketTask else { return }
+            self.webSocketTask = nil
             self.emitDiagnostic("info", "WebSocket closed", context: [
-                "closeCode": closeCode.rawValue,
+                "closeCode": code,
                 "reason": reasonString ?? "none"
             ])
-            self.handleConnectionClosed(error: nil)
+            self.handleConnectionClosed(error: nil, closeCode: code, closeReason: reasonString)
         }
     }
 
