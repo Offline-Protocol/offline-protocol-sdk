@@ -2477,7 +2477,7 @@ impl OfflineProtocol {
     /// Parking drops the pending ACK and the retry-queue entry while the
     /// outbox entry stays put — exactly the "stranded" state every re-drive
     /// edge already flushes (`flush_outbox_all` on reconnect/start,
-    /// `flush_outbox_for_peer` on discovery and presence-online, the latter
+    /// `flush_outbox_for_peer_via` on discovery and presence-online, the latter
     /// fed by [`Self::presence_watch_peers`]). Without the park, the offline
     /// peer's missing ACK burns the full `max_retries` budget in minutes
     /// (`process_timed_out_acks`) and settles a 7-day outbox message
@@ -2626,16 +2626,7 @@ impl OfflineProtocol {
     /// (never in `outbox`, and never counted) keep retry exhaustion →
     /// transfer abort → `MediaResendRequired`.
     pub(super) fn try_repark_exhausted_dm(&mut self, message_id: &MessageId) -> bool {
-        if self
-            .pending_connection_requests
-            .contains_key(&message_id.as_str())
-        {
-            return false;
-        }
-        if self
-            .find_welcome_peer_by_message_id(&message_id.as_str())
-            .is_some()
-        {
+        if !self.is_parkable_plain_dm(message_id) {
             return false;
         }
         let Some(entry) = self.outbox.get(message_id) else {
@@ -2654,6 +2645,65 @@ impl OfflineProtocol {
         );
         self.park_unreachable_dm(message_id, &recipient, attempt_count);
         true
+    }
+
+    /// True when `message_id` is a plain DM eligible for the
+    /// unreachable-park machinery: not a pending connection request (typed
+    /// terminal path), not an MLS welcome (own lifecycle), and still present
+    /// in the outbox. Media chunks live in `media_outbox`, so they never
+    /// pass the outbox check.
+    pub(super) fn is_parkable_plain_dm(&self, message_id: &MessageId) -> bool {
+        if self
+            .pending_connection_requests
+            .contains_key(&message_id.as_str())
+        {
+            return false;
+        }
+        if self
+            .find_welcome_peer_by_message_id(&message_id.as_str())
+            .is_some()
+        {
+            return false;
+        }
+        self.outbox.contains_key(message_id)
+    }
+
+    /// Cancels the in-flight probe state (pending ACK + scheduled retry) of
+    /// every parkable plain DM addressed to `peer_id`, so a
+    /// reachability-edge flush can re-drive them.
+    ///
+    /// Only acts when the peer holds a live unreachable-park counter: a
+    /// live counter means the relay declared the peer offline and no edge
+    /// has fired since, so a pending ACK on the peer's DMs belongs to a
+    /// mesh reachability probe — a send that locally succeeded into the
+    /// mesh but can never be answered — not to a delivery in good standing.
+    /// Without this cancel, the flush edges' awaiting-ACK filters skip
+    /// exactly the probing messages while still clearing the counter,
+    /// stranding them on minutes-scale ACK backoff after the relay already
+    /// reported the peer online — and, with the counter gone, exposing them
+    /// to terminal settlement on exhaustion (`try_repark_exhausted_dm`
+    /// finds nothing). Canceling an ACK that was genuinely about to arrive
+    /// is safe: receivers dedupe and re-ACK duplicates.
+    ///
+    /// Does NOT clear the counter itself — the flush edge owns that reset,
+    /// after this runs.
+    pub(super) fn cancel_probe_state_for_parked_peer(&mut self, peer_id: &str) {
+        if !self.dm_unreachable_parks.contains_key(peer_id) {
+            return;
+        }
+        let probing: Vec<MessageId> = self
+            .outbox
+            .values()
+            .filter(|entry| entry.message.recipient.as_str() == peer_id)
+            .map(|entry| entry.message.id.clone())
+            .collect();
+        for message_id in probing {
+            if !self.is_parkable_plain_dm(&message_id) {
+                continue;
+            }
+            self.ack_manager.remove_ack(&message_id);
+            self.retry_queue.remove(&message_id.as_str());
+        }
     }
 
     /// Classifies an outbound internet frame as a server-plane control op the
