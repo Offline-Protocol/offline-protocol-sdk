@@ -35,13 +35,6 @@ public class InternetManager: NSObject, TransportManager {
     private let PING_INTERVAL: TimeInterval = 10.0  // Reduced from 30s for faster failure detection
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
     private let AUTH_RESPONSE_TIMEOUT: TimeInterval = 10.0
-    // WebSocket close code the relay uses to signal this connection was
-    // displaced by a newer registration for the same identity ("session
-    // superseded"). A blind reconnect would just re-displace the peer socket
-    // in a ~1s loop (the fleet-wide eviction storm the relay-displacement
-    // rollout guards against), so on this code we stop and let the app decide
-    // when to reconnect. Mirrors InternetManager.kt.
-    private static let SUPERSEDED_CLOSE_CODE = 4000
     // Tracker ids for app-authored raw SendMessage frames (sendRawCommand):
     // recorded to keep the per-recipient FIFO honest, never reported to the
     // core. Mirrors InternetManager.kt — keep in sync.
@@ -120,14 +113,15 @@ public class InternetManager: NSObject, TransportManager {
     private var maxReconnectAttempts: Int = 0 // 0 = infinite
     private var autoReconnect: Bool = true
 
-    // Set when the relay displaced this connection (close 4000, or a
-    // SessionSuperseded notice on the current socket). Suppresses auto- AND
-    // force-reconnect until an explicit start() — a blind reconnect just
-    // re-displaces the peer socket in a tight loop. Main-owned (touched only
-    // on main: the close funnel, the message-dispatch main hop, and the
-    // lifecycle entry points), like autoReconnect/currentReconnectDelay.
-    // Mirrors InternetManager.kt's isSuperseded.
-    private var isSuperseded = false
+    // The relay-displacement latch (close 4000, or a SessionSuperseded notice
+    // on the current socket). While latched, auto- AND force-reconnect refuse
+    // until an explicit start() — a blind reconnect just re-displaces the peer
+    // socket in a tight loop. Owns the boolean + decision; this manager owns
+    // the threading (touched only on main: the close funnel, the
+    // message-dispatch main hop, and the lifecycle entry points), like
+    // autoReconnect/currentReconnectDelay. Mirrors InternetManager.kt's
+    // supersedeLatch.
+    private let supersedeLatch = SupersededLatchPolicy()
 
     // State tracking. Lock-guarded (stateLock) like the Kotlin bridge's
     // AtomicBoolean/@Volatile fields: written on main (open/close/lifecycle),
@@ -470,7 +464,7 @@ public class InternetManager: NSObject, TransportManager {
         // relay-superseded latch: the app has resolved the "connected
         // elsewhere" condition (e.g. signed the other session out) and now
         // wants this device connected again.
-        isSuperseded = false
+        supersedeLatch.clear()
         reconnectAttempts = 0
         currentReconnectDelay = RECONNECT_INITIAL_DELAY
 
@@ -663,7 +657,7 @@ public class InternetManager: NSObject, TransportManager {
             "is_connected": isConnected,
             "is_authenticated": isAuthenticated,
             "reconnect_attempts": reconnectAttempts,
-            "is_superseded": isSuperseded
+            "is_superseded": supersedeLatch.isSuperseded
         ]
     }
     
@@ -687,7 +681,7 @@ public class InternetManager: NSObject, TransportManager {
             guard let url = serverUrl else { return }
             // A relay-superseded transport must not reconnect until an
             // explicit start() clears the latch (see markSuperseded).
-            guard !isSuperseded else { return }
+            guard !supersedeLatch.isSuperseded else { return }
             guard !isConnecting && !isConnected else { return }
             // stop() may have run between a reconnect being scheduled and
             // firing. The session null-check must precede the isConnecting
@@ -931,14 +925,14 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     /// Marks the connection displaced by the relay and latches it stopped:
-    /// cancels any pending reconnect, sets [isSuperseded] so auto- and
+    /// cancels any pending reconnect, latches `supersedeLatch` so auto- and
     /// force-reconnect refuse until the next start(), and fires the one-shot
-    /// superseded event. Idempotent — the relay emits both a SessionSuperseded
-    /// notice and close 4000, and the close itself fires 2-3 terminal signals,
-    /// so several paths reach here for one displacement. Main-thread only.
+    /// superseded event. Idempotent (via SupersededLatchPolicy.mark) — the
+    /// relay emits both a SessionSuperseded notice and close 4000, and the
+    /// close itself fires 2-3 terminal signals, so several paths reach here
+    /// for one displacement. Main-thread only.
     private func markSuperseded(reason: String?) {
-        guard !isSuperseded else { return }
-        isSuperseded = true
+        guard supersedeLatch.mark() else { return }
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
         emitDiagnostic("warning", "Relay superseded this session; not auto-reconnecting", context: [
@@ -998,10 +992,15 @@ public class InternetManager: NSObject, TransportManager {
         // socket). A blind reconnect would just re-displace the peer socket in
         // a ~1s eviction loop, so stop for good and let the app decide when to
         // reconnect (explicit user action / foreground with long jitter).
-        // Recovery is an explicit start(), which clears isSuperseded.
-        if isSuperseded || closeCode == Self.SUPERSEDED_CLOSE_CODE {
+        // Recovery is an explicit start(), which clears the latch.
+        //
+        // hasNewerSuccessor = false: this runs only after handleSocketTerminated
+        // / the didClose funnel detached the current task, so there is no live
+        // successor to guard against here (didCloseWith does that guarding
+        // itself, before it ever reaches this path).
+        if supersedeLatch.shouldMark(closeCode: closeCode, hasNewerSuccessor: false) {
             markSuperseded(reason: closeReason ?? error?.localizedDescription)
-            updateState(.stopped)
+            if state != .stopped { updateState(.stopped) }
             return
         }
 
@@ -1018,7 +1017,7 @@ public class InternetManager: NSObject, TransportManager {
         guard autoReconnect else { return }
         // Defense in depth: handleConnectionClosed already returns before here
         // on a superseded connection, but never schedule a reconnect for one.
-        guard !isSuperseded else { return }
+        guard !supersedeLatch.isSuperseded else { return }
         // A close can race stop(): its scheduled reconnect must not revive a
         // transport the app already stopped (the delayed connect() would
         // find urlSession nilled and leave the transport wedged).
@@ -2436,16 +2435,18 @@ extension InternetManager: URLSessionWebSocketDelegate {
             // But do NOT mark when a *newer* socket has already replaced this
             // one: a late 4000 for a bygone generation (old socket displaced →
             // app re-enabled via start() → new socket B up) must not re-latch
-            // isSuperseded and stop B. webSocketTask == nil is the sibling-race
-            // this fix targets (detached, no successor yet); a non-nil task that
-            // differs from `webSocketTask` is a live successor and the stale
-            // close is ignored. NOTE: the Android bridge guards this ordering
-            // differently — its identity check sits *before* the supersede
-            // decision (terminateSocket), so it cannot mark once detached and
-            // instead re-latches on the next 4000. The two funnels defend
-            // against opposite terminal-signal orderings; don't "unify" them.
-            if code == Self.SUPERSEDED_CLOSE_CODE,
-               self.webSocketTask == nil || webSocketTask === self.webSocketTask {
+            // and stop B. A live successor is a non-nil `self.webSocketTask`
+            // that differs from this close's task; webSocketTask == nil is the
+            // sibling-race this fix targets — detached with no successor yet, so
+            // this 4000 belongs to the current generation and must latch. NOTE:
+            // the Android bridge guards this ordering differently — its identity
+            // check sits *before* the supersede decision (terminateSocket), so
+            // it cannot mark once detached and instead re-latches on the next
+            // 4000. The two funnels defend against opposite terminal-signal
+            // orderings; don't "unify" them. The decision itself is shared
+            // (SupersededLatchPolicy) so both bridges agree on the rule.
+            let hasNewerSuccessor = self.webSocketTask != nil && webSocketTask !== self.webSocketTask
+            if self.supersedeLatch.shouldMark(closeCode: code, hasNewerSuccessor: hasNewerSuccessor) {
                 self.markSuperseded(reason: reasonString)
                 if self.state != .stopped { self.updateState(.stopped) }
             }

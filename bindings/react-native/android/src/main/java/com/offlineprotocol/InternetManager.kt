@@ -49,13 +49,6 @@ class InternetManager(
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val MAX_CONSECUTIVE_FAILURES = 2  // Trigger disconnect after 2 consecutive failures
         private const val AUTH_RESPONSE_TIMEOUT_MS = 10_000L
-        // WebSocket close code the relay uses to signal this connection was
-        // displaced by a newer registration for the same identity ("session
-        // superseded"). A blind reconnect would just re-displace the peer
-        // socket in a ~1s loop (the fleet-wide eviction storm the
-        // relay-displacement rollout guards against), so on this code we stop
-        // and let the app decide when to reconnect. Mirrors InternetManager.swift.
-        private const val SUPERSEDED_CLOSE_CODE = 4000
         // Forced presence checks: how long a checkPresence(force = true)
         // may park waiting for authenticated + rate-admitted, and how often
         // the parked queue re-attempts. Mirror the iOS bridge's
@@ -123,13 +116,13 @@ class InternetManager(
     // True between pause() and resume(): a background reconnect must not
     // restart the poll/ping/presence timers the app paused.
     @Volatile private var isPaused = false
-    // Set when the relay displaced this connection (close 4000, or a
-    // SessionSuperseded notice on the current socket). Suppresses auto- AND
-    // force-reconnect until an explicit start() — a blind reconnect just
-    // re-displaces the peer socket in a tight loop. Written/read on main like
-    // autoReconnect; @Volatile for the same defensive cross-thread safety.
-    // Mirrors InternetManager.swift's isSuperseded.
-    @Volatile private var isSuperseded = false
+    // The relay-displacement latch (close 4000, or a SessionSuperseded notice
+    // on the current socket). While latched, auto- AND force-reconnect refuse
+    // until an explicit start() — a blind reconnect just re-displaces the peer
+    // socket in a tight loop. Owns the boolean + decision; this manager owns
+    // the threading (every call on main, the single writer). Mirrors
+    // InternetManager.swift's supersedeLatch.
+    private val supersedeLatch = SupersededLatchPolicy()
     private var reconnectAttempts = AtomicInteger(0)
     // Atomic for cross-thread reads; written only on main (scheduleReconnect
     // grows it, handleAuthenticated's posted reaction resets it).
@@ -385,7 +378,7 @@ class InternetManager(
         // relay-superseded latch: the app has resolved the "connected
         // elsewhere" condition (e.g. signed the other session out) and now
         // wants this device connected again.
-        isSuperseded = false
+        supersedeLatch.clear()
         reconnectAttempts.set(0)
         currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
 
@@ -571,7 +564,7 @@ class InternetManager(
             "is_connected" to isConnected.get(),
             "is_authenticated" to isAuthenticated.get(),
             "reconnect_attempts" to reconnectAttempts.get(),
-            "is_superseded" to isSuperseded
+            "is_superseded" to supersedeLatch.isSuperseded
         )
     }
     
@@ -581,7 +574,7 @@ class InternetManager(
         val url = serverUrl ?: return
         // A relay-superseded transport must not reconnect until an explicit
         // start() clears the latch (see markSuperseded).
-        if (isSuperseded) return
+        if (supersedeLatch.isSuperseded) return
         if (isConnecting.get() || isConnected.get()) return
         // stop() may have run between a reconnect being scheduled and firing.
         // The client null-check must precede the isConnecting latch: with no
@@ -838,13 +831,21 @@ class InternetManager(
         // this supersede check sits *after* terminateSocket's identity guard,
         // so a 4000 that loses the terminal-signal race to a concurrent local
         // teardown (ping/auth/send-failure, code -1) arrives stale and does not
-        // latch this cycle — it self-heals because the reconnect gets displaced
-        // again and the next onClosed(4000) latches. iOS instead marks before
-        // its identity guard (so it can't miss the code) but must then exclude a
-        // newer successor socket. Opposite orderings, same end state.
-        if (isSuperseded || code == SUPERSEDED_CLOSE_CODE) {
+        // latch this cycle. It self-heals via the relay's *other* displacement
+        // signal: the relay always sends an application-level SessionSuperseded
+        // notice on the live socket BEFORE close 4000, and that notice (handled
+        // race-free while the socket is still current — see the message-dispatch
+        // path) latches first. Even absent the notice, the reconnect gets
+        // displaced again and the next onClosed(4000) latches. iOS instead marks
+        // before its identity guard (so it can't miss the code) but must then
+        // exclude a newer successor socket. Opposite orderings, same end state.
+        //
+        // hasNewerSuccessor = false: terminateSocket's identity guard already
+        // dropped any close whose socket isn't the current one, so a successor
+        // can never reach here (unlike the iOS didClose funnel).
+        if (supersedeLatch.shouldMark(code, hasNewerSuccessor = false)) {
             markSuperseded(reason)
-            updateState(TransportState.STOPPED)
+            if (state != TransportState.STOPPED) updateState(TransportState.STOPPED)
             return
         }
 
@@ -859,15 +860,14 @@ class InternetManager(
 
     /**
      * Marks the connection displaced by the relay and latches it stopped:
-     * cancels any pending reconnect, sets [isSuperseded] so auto- and
+     * cancels any pending reconnect, sets [supersedeLatch] so auto- and
      * force-reconnect refuse until the next start(), and fires the one-shot
-     * superseded event. Idempotent — the relay emits both a SessionSuperseded
-     * notice and close 4000, so several paths reach here for one displacement.
-     * Main-thread only.
+     * superseded event. Idempotent (via [SupersededLatchPolicy.mark]) — the
+     * relay emits both a SessionSuperseded notice and close 4000, so several
+     * paths reach here for one displacement. Main-thread only.
      */
     private fun markSuperseded(reason: String?) {
-        if (isSuperseded) return
-        isSuperseded = true
+        if (!supersedeLatch.mark()) return
         reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
         reconnectRunnable = null
         emitDiagnostic("warning", "Relay superseded this session; not auto-reconnecting", mapOf(
@@ -880,7 +880,7 @@ class InternetManager(
         if (!autoReconnect) return
         // Defense in depth: handleConnectionClosed already returns before here
         // on a superseded connection, but never schedule a reconnect for one.
-        if (isSuperseded) return
+        if (supersedeLatch.isSuperseded) return
         // A close can race stop(): its posted scheduleReconnect must not
         // revive a transport the app already stopped (the delayed connect()
         // would find okHttpClient nulled and leave the transport wedged).
