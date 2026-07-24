@@ -123,6 +123,17 @@ public class InternetManager: NSObject, TransportManager {
     // supersedeLatch.
     private let supersedeLatch = SupersededLatchPolicy()
 
+    // Monotonic socket-generation counter. Each socket minted in connect() is
+    // stamped with the next generation (carried on task.taskDescription) so the
+    // close funnel can tell a bygone socket's late close-4000 from the current
+    // one's — the disambiguation object identity can't make while webSocketTask
+    // is momentarily nil during a reconnect backoff window (see the didCloseWith
+    // ORDERING NOTE). Main-owned/single-writer like webSocketTask: minted only
+    // in connect(), read only on the didCloseWith main hop. No Kotlin mirror —
+    // the Android funnel drops non-current sockets before the supersede decision
+    // (see InternetManager.kt's ORDERING NOTE).
+    private var socketGeneration = SocketGenerationTracker()
+
     // State tracking. Lock-guarded (stateLock) like the Kotlin bridge's
     // AtomicBoolean/@Volatile fields: written on main (open/close/lifecycle),
     // read from messageQueue (poll ticks, drains), the URLSession delegate
@@ -699,6 +710,12 @@ public class InternetManager: NSObject, TransportManager {
             request.setValue(deviceId, forHTTPHeaderField: "X-Device-ID")
 
             let task = session.webSocketTask(with: request)
+            // Stamp this socket's generation (this is the sole task-creation
+            // site — start / auto-reconnect / forceReconnect all funnel here).
+            // Read back in didCloseWith to distinguish a bygone generation's
+            // late close-4000 from the current socket's during a nil reconnect
+            // window; the tag rides with the task and dies with it.
+            task.taskDescription = String(socketGeneration.mint())
             webSocketTask = task
             task.resume()
 
@@ -2432,20 +2449,38 @@ extension InternetManager: URLSessionWebSocketDelegate {
             // early-return. markSuperseded cancels any reconnect the losing path
             // scheduled.
             //
-            // But do NOT mark when a *newer* socket has already replaced this
-            // one: a late 4000 for a bygone generation (old socket displaced →
-            // app re-enabled via start() → new socket B up) must not re-latch
-            // and stop B. A live successor is a non-nil `self.webSocketTask`
-            // that differs from this close's task; webSocketTask == nil is the
-            // sibling-race this fix targets — detached with no successor yet, so
-            // this 4000 belongs to the current generation and must latch. NOTE:
-            // the Android bridge guards this ordering differently — its identity
-            // check sits *before* the supersede decision (terminateSocket), so
-            // it cannot mark once detached and instead re-latches on the next
-            // 4000. The two funnels defend against opposite terminal-signal
-            // orderings; don't "unify" them. The decision itself is shared
-            // (SupersededLatchPolicy) so both bridges agree on the rule.
-            let hasNewerSuccessor = self.webSocketTask != nil && webSocketTask !== self.webSocketTask
+            // But do NOT mark when this close belongs to a *bygone* generation:
+            // a late 4000 for an old socket that a newer one has already
+            // superseded (old socket displaced → app re-enabled via start(), or
+            // torn down by forceReconnect → a newer socket minted) must not
+            // re-latch and stop the current generation. We key this on socket
+            // GENERATION, not object identity: identity can only see a live,
+            // non-nil successor, but the systematic case is a nil reconnect
+            // window — forceReconnect (fernweh's foreground recovery) nils
+            // webSocketTask and schedules connect() at a backoff, and on
+            // foreground iOS flushes a background-queued 4000 for the old socket
+            // into that window. Object identity would read webSocketTask == nil
+            // as "current generation, must latch" and wedge the transport;
+            // generation reads the old socket as bygone and lets the reconnect
+            // live. A 4000 whose generation is still the newest (the current
+            // socket genuinely displaced, or detached by a sibling terminal
+            // signal with the reconnect not yet minted) is NOT bygone and still
+            // latches — cancelling any reconnect the losing path scheduled.
+            // (Fallback to object identity only if the generation tag is ever
+            // absent — connect() always sets it, so this is belt-and-suspenders.)
+            //
+            // NOTE: the Android bridge guards this ordering differently — its
+            // identity check sits *before* the supersede decision
+            // (terminateSocket), so a non-current socket's close is dropped
+            // before it can latch and it re-latches on the next 4000 instead.
+            // That makes Android immune to the bygone-generation false-latch by
+            // construction, so it needs no generation tracking. The two funnels
+            // defend against opposite terminal-signal orderings; don't "unify"
+            // them. The core decision is shared (SupersededLatchPolicy) so both
+            // bridges agree on the rule.
+            let closingGeneration = webSocketTask.taskDescription.flatMap { Int($0) }
+            let hasNewerSuccessor = closingGeneration.map { self.socketGeneration.isBygone($0) }
+                ?? (self.webSocketTask != nil && webSocketTask !== self.webSocketTask)
             if self.supersedeLatch.shouldMark(closeCode: code, hasNewerSuccessor: hasNewerSuccessor) {
                 self.markSuperseded(reason: reasonString)
                 if self.state != .stopped { self.updateState(.stopped) }

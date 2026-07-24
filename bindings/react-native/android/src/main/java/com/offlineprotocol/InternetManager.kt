@@ -838,11 +838,17 @@ class InternetManager(
         // path) latches first. Even absent the notice, the reconnect gets
         // displaced again and the next onClosed(4000) latches. iOS instead marks
         // before its identity guard (so it can't miss the code) but must then
-        // exclude a newer successor socket. Opposite orderings, same end state.
+        // exclude a bygone socket by SOCKET GENERATION (SocketGenerationTracker),
+        // because its pre-mark path also sees a nil reconnect window that object
+        // identity can't classify. Android needs no such generation tracking:
+        // dropping non-current sockets here, before the decision, already makes
+        // it immune to the bygone-generation false-latch iOS's generation guard
+        // fixes. Opposite orderings, same end state.
         //
         // hasNewerSuccessor = false: terminateSocket's identity guard already
         // dropped any close whose socket isn't the current one, so a successor
-        // can never reach here (unlike the iOS didClose funnel).
+        // (or any bygone socket) can never reach here (unlike the iOS didClose
+        // funnel).
         if (supersedeLatch.shouldMark(code, hasNewerSuccessor = false)) {
             markSuperseded(reason)
             if (state != TransportState.STOPPED) updateState(TransportState.STOPPED)
