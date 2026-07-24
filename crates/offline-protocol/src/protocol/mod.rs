@@ -933,6 +933,25 @@ impl OfflineProtocol {
     /// Called when a peer is discovered to flush messages that were queued while
     /// the peer was unreachable, bypassing backoff timers.
     fn flush_outbox_for_peer(&mut self, peer_id: &str) {
+        self.flush_outbox_for_peer_via(peer_id, None);
+    }
+
+    /// [`Self::flush_outbox_for_peer`] with an optional transport override
+    /// for the re-driven sends. `unpark_via` is `Some(Internet)` on the
+    /// relay presence-online edge (`on_peer_presence`): the reachability
+    /// proof is relay-scoped, so the re-drive must go out over the internet
+    /// transport — DORS could otherwise route it back into the mesh, where
+    /// the send locally succeeds against a peer that is not there,
+    /// re-registering an unanswerable ACK that re-strands the message (and,
+    /// with the platform bridge unwatching the peer on the online answer,
+    /// no further presence edge would arrive to save it). Pinned media
+    /// transports still win over the override.
+    fn flush_outbox_for_peer_via(&mut self, peer_id: &str, unpark_via: Option<TransportType>) {
+        // Probe ACKs first: with a live park counter, the peer's DMs may be
+        // mid-probe — awaiting a mesh ACK that can never arrive — and the
+        // awaiting-ACK filter below would skip exactly the messages this
+        // edge exists to re-drive.
+        self.cancel_probe_state_for_parked_peer(peer_id);
         // A per-peer reachability edge: the escalating unreachable-probe
         // interval starts over (mirrors rearm_welcome_for_peer resetting
         // unreachable_parks).
@@ -972,7 +991,7 @@ impl OfflineProtocol {
         {
             // Remove from retry queue since we're sending immediately
             self.retry_queue.remove(&message.id.as_str());
-            self.try_flush_send(message, attempt_count);
+            self.try_flush_send_via(message, attempt_count, unpark_via);
         }
     }
 
@@ -981,6 +1000,15 @@ impl OfflineProtocol {
     /// Called when a transport becomes available (e.g. internet reconnects) to
     /// flush all queued messages, bypassing backoff timers.
     pub fn flush_outbox_all(&mut self) {
+        // Probe ACKs first (see `flush_outbox_for_peer_via`): mid-probe DMs
+        // are awaiting unanswerable mesh ACKs, and the awaiting-ACK guard
+        // below would strand them past this edge with their counters
+        // cleared. Canceled entries surface through the stranded-outbox
+        // collection.
+        let parked_peers: Vec<String> = self.dm_unreachable_parks.keys().cloned().collect();
+        for peer_id in parked_peers {
+            self.cancel_probe_state_for_parked_peer(&peer_id);
+        }
         // A carrier-level reachability edge (reconnect / start): every
         // escalating unreachable-probe interval starts over.
         self.dm_unreachable_parks.clear();
@@ -1072,8 +1100,22 @@ impl OfflineProtocol {
     /// re-enqueues the message to the retry queue with its current attempt count
     /// so backoff resumes.
     fn try_flush_send(&mut self, message: Message, attempt_count: u32) {
+        self.try_flush_send_via(message, attempt_count, None);
+    }
+
+    /// [`Self::try_flush_send`] with an optional transport override (see
+    /// [`Self::flush_outbox_for_peer_via`]). A pinned media transport takes
+    /// precedence over the override; without either, DORS picks.
+    fn try_flush_send_via(
+        &mut self,
+        message: Message,
+        attempt_count: u32,
+        transport_override: Option<TransportType>,
+    ) {
         self.ensure_outbox_entry(&message);
-        let forced_transport = self.pinned_media_transport_for_message(&message.id);
+        let forced_transport = self
+            .pinned_media_transport_for_message(&message.id)
+            .or(transport_override);
         let send_result = if let Some(transport) = forced_transport {
             self.transport_manager
                 .send_via_transport(&message, transport)

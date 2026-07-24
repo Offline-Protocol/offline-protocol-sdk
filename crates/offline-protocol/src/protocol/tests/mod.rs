@@ -5510,6 +5510,214 @@ fn test_presence_watch_peers_includes_parked_dm_recipients() {
     );
 }
 
+/// Parks a DM to "bob" over a BLE+Internet dual-carrier setup, then puts it
+/// in the probe-hostage state: the mesh reachability probe has fired (send
+/// locally succeeded into the mesh, fresh pending ACK registered) and its
+/// retry-queue entry is consumed. Returns the message id plus both mock
+/// handles for send-capture assertions.
+fn park_and_fire_probe(
+    protocol: &mut OfflineProtocol,
+) -> (MessageId, MockTransport, MockTransport) {
+    let internet_mock = MockTransport::new(TransportType::Internet);
+    internet_mock.start().unwrap();
+    let ble_mock = MockTransport::new(TransportType::BLE);
+    ble_mock.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet_mock.clone()));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble_mock.clone()));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+
+    // The probe fired: its retry entry is consumed and the mesh send
+    // "succeeded" locally, re-registering a pending ACK no mesh peer will
+    // ever answer.
+    protocol.retry_queue.remove(&message_id.as_str());
+    protocol
+        .ack_manager
+        .register_pending_ack(message_id.clone(), None)
+        .unwrap();
+    assert!(protocol.ack_manager.is_waiting_for_ack(&message_id));
+
+    (message_id, internet_mock, ble_mock)
+}
+
+#[test]
+fn test_probe_hostage_dm_redriven_on_peer_presence_online() {
+    // The probe-hostage regression: a parked DM whose mesh probe is
+    // awaiting an unanswerable ACK must still be re-driven by the relay's
+    // presence-online answer — the awaiting-ACK flush filter must not hold
+    // it hostage through the edge — and the re-drive must go out over the
+    // internet transport (the reachability proof is relay-scoped; DORS
+    // could route it back into the mesh void).
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let (message_id, internet_mock, ble_mock) = park_and_fire_probe(&mut protocol);
+
+    // Burn some probe budget so the fresh-ACK assertion below is
+    // distinguishable from the hostage ACK surviving.
+    protocol.ack_manager.increment_retry_count(&message_id);
+    protocol.ack_manager.increment_retry_count(&message_id);
+    let internet_sent_before = internet_mock.sent_messages().len();
+    let ble_sent_before = ble_mock.sent_messages().len();
+
+    protocol.on_peer_presence("bob", true, None);
+
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        None,
+        "Presence-online is a reachability edge: the park counter resets"
+    );
+    let pending = protocol
+        .ack_manager
+        .get_pending_ack(&message_id)
+        .expect("re-driven DM must be ACK-tracked again");
+    assert_eq!(
+        pending.retry_count, 0,
+        "The hostage probe ACK must be canceled and replaced by a fresh one"
+    );
+    let internet_sent = internet_mock.sent_messages();
+    assert_eq!(
+        internet_sent.len(),
+        internet_sent_before + 1,
+        "The un-park re-drive must go out over the internet transport"
+    );
+    assert_eq!(internet_sent.last().unwrap().id, message_id);
+    assert_eq!(
+        ble_mock.sent_messages().len(),
+        ble_sent_before,
+        "The un-park re-drive must not be routed into the mesh"
+    );
+}
+
+#[test]
+fn test_probe_hostage_redrive_reparks_on_second_verdict() {
+    // Loop continuity: if the presence-online re-drive earns another
+    // unreachable verdict (stale presence answer), the DM re-parks with a
+    // fresh escalation instead of settling terminally.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let (message_id, _internet_mock, _ble_mock) = park_and_fire_probe(&mut protocol);
+    protocol.on_peer_presence("bob", true, None);
+    assert!(protocol.ack_manager.is_waiting_for_ack(&message_id));
+
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&message_id),
+        "Second verdict must re-park (drop the pending ACK)"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&1),
+        "Escalation restarts after the presence edge reset the counter"
+    );
+    assert!(protocol.outbox.contains_key(&message_id));
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "The park loop must stay non-terminal"
+    );
+}
+
+#[test]
+fn test_unpark_cancel_spares_connection_request_ack() {
+    // The un-park ACK cancel is scoped to parkable plain DMs: an in-flight
+    // connection request to the same peer keeps its pending ACK (and its
+    // typed terminal path) across the presence edge.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let (dm_id, _internet_mock, _ble_mock) = park_and_fire_probe(&mut protocol);
+
+    let conn_request = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "__CONN_REQ__:{}",
+    );
+    let conn_id = conn_request.id.clone();
+    protocol.outbox.insert(
+        conn_id.clone(),
+        OutboxEntry {
+            message: conn_request,
+            attempt_count: 1,
+            first_sent_at: chrono::Utc::now(),
+            last_sent_at: chrono::Utc::now(),
+            last_transport: Some(TransportType::Internet),
+        },
+    );
+    protocol
+        .ack_manager
+        .register_pending_ack(conn_id.clone(), None)
+        .unwrap();
+    protocol.pending_connection_requests.insert(
+        conn_id.as_str(),
+        PendingConnectionRequest {
+            recipient: "bob".to_string(),
+            sent_at: std::time::Instant::now(),
+        },
+    );
+
+    protocol.on_peer_presence("bob", true, None);
+
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&conn_id),
+        "Connection-request ACK must survive the un-park cancel"
+    );
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&dm_id),
+        "The parked DM itself must be re-driven with a fresh ACK"
+    );
+}
+
+#[test]
+fn test_probe_hostage_dm_redriven_on_flush_outbox_all() {
+    // The carrier-level edge (reconnect / start) has the same hostage
+    // window: a probe-ACK-waiting DM must be canceled and re-driven, not
+    // skipped by the awaiting-ACK guard with its counter cleared.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let (message_id, _internet_mock, _ble_mock) = park_and_fire_probe(&mut protocol);
+
+    protocol.ack_manager.increment_retry_count(&message_id);
+    protocol.ack_manager.increment_retry_count(&message_id);
+
+    protocol.flush_outbox_all();
+
+    assert!(protocol.dm_unreachable_parks.is_empty());
+    let pending = protocol
+        .ack_manager
+        .get_pending_ack(&message_id)
+        .expect("re-driven DM must be ACK-tracked again");
+    assert_eq!(
+        pending.retry_count, 0,
+        "The hostage probe ACK must be canceled and replaced by a fresh one"
+    );
+}
+
 #[test]
 fn test_cleanup_outbox_absolute_lifetime_cap_is_terminal_in_process() {
     // The carrier-relative window slides on every send, and a parked DM's

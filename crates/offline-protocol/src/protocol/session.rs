@@ -941,12 +941,18 @@ impl OfflineProtocol {
             return;
         }
         if online {
+            // Relay-scoped reachability proof: un-park and re-drive the
+            // peer's DMs over the internet transport before anything else
+            // (see `flush_outbox_for_peer_via` — this also cancels
+            // unanswerable mesh-probe ACKs that would otherwise hold the
+            // messages hostage past this edge). The rescue branch's inner
+            // flush (via `on_neighbor_discovered`) then finds these entries
+            // awaiting fresh ACKs and correctly leaves them alone.
+            self.flush_outbox_for_peer_via(peer_id, Some(TransportType::Internet));
             if self.welcome_rescue_permitted(peer_id) {
                 self.on_neighbor_discovered(peer_id);
                 self.resend_unconfirmed_sent_welcome(peer_id, "peer_presence_online");
                 self.note_welcome_rescue_attempt(peer_id);
-            } else {
-                self.flush_outbox_for_peer(peer_id);
             }
         } else {
             self.park_welcome_peer_unreachable(peer_id);
