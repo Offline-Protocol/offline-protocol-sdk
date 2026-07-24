@@ -579,6 +579,56 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
 
+    /// Forces an immediate teardown + reconnect + re-authenticate of the
+    /// internet socket, bypassing the exponential backoff. The app calls this
+    /// on foreground-after-background when the cached ready flags may be
+    /// stale: an iOS suspend can kill the TCP connection before a clean WS
+    /// close, leaving `isReady()` reporting true against a dead (or
+    /// relay-deregistered) socket. A liveness probe cannot distinguish either
+    /// case reliably — only a full reconnect, which re-runs the relay's
+    /// authenticate/register handshake, heals both — so this is the honest
+    /// recovery primitive.
+    ///
+    /// No-op unless the transport is running/starting (respects the app's
+    /// enable/disable lifecycle). The actual reconnect honors `autoReconnect`;
+    /// with it disabled this tears the socket down without rebuilding it.
+    /// Emits a transient `internet_status_changed` down→up.
+    public func forceReconnect() {
+        runOnMainSync {
+            guard state == .running || state == .starting else { return }
+
+            // A forced reconnect is a fresh attempt: cancel any pending
+            // backoff-scheduled reconnect and reset the backoff so this
+            // reconnect (and any that follow it) starts from the initial
+            // delay instead of a stale 30s ceiling.
+            reconnectWorkItem?.cancel()
+            reconnectWorkItem = nil
+            currentReconnectDelay = RECONNECT_INITIAL_DELAY
+            reconnectAttempts = 0
+
+            emitDiagnostic("info", "Force reconnect requested")
+
+            if let task = webSocketTask {
+                // Detach before cancel so the cancel-triggered delegate/receive
+                // callbacks see a stale task and no-op (see isStale), then run
+                // the full per-connection cleanup exactly once. With
+                // autoReconnect, handleConnectionClosed schedules the reconnect
+                // at the reset (initial) delay.
+                webSocketTask = nil
+                task.cancel(with: .goingAway, reason: nil)
+                handleConnectionClosed(error: NSError(
+                    domain: "OfflineProtocol.InternetManager",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Force reconnect"]
+                ))
+            } else {
+                // No live socket (e.g. mid-backoff, its pending reconnect just
+                // cancelled above): connect immediately.
+                connect()
+            }
+        }
+    }
+
     public func getMetrics() -> [String: Any] {
         return [
             "bytes_sent": bytesSent.get(),
