@@ -57,6 +57,7 @@ let package = Package(
                 "RelayGroupSnapshotBridge.swift",
                 "RelayRateLimiter.swift",
                 "RelayTimestamps.swift",
+                "SocketGenerationTracker.swift",
                 "SupersededLatchPolicy.swift"
             ]
         ),
@@ -82,6 +83,7 @@ let package = Package(
                 "RelayGroupSnapshotBridgeTests.swift",
                 "RelayRateLimiterTests.swift",
                 "RelayTimestampsTests.swift",
+                "SocketGenerationTrackerTests.swift",
                 "SupersededLatchPolicyTests.swift"
             ]
         )
