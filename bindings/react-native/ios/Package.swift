@@ -56,7 +56,8 @@ let package = Package(
                 "RelayControlOpTranslator.swift",
                 "RelayGroupSnapshotBridge.swift",
                 "RelayRateLimiter.swift",
-                "RelayTimestamps.swift"
+                "RelayTimestamps.swift",
+                "SupersededLatchPolicy.swift"
             ]
         ),
         .testTarget(
@@ -80,7 +81,8 @@ let package = Package(
                 "RelayControlOpTranslatorTests.swift",
                 "RelayGroupSnapshotBridgeTests.swift",
                 "RelayRateLimiterTests.swift",
-                "RelayTimestampsTests.swift"
+                "RelayTimestampsTests.swift",
+                "SupersededLatchPolicyTests.swift"
             ]
         )
     ]

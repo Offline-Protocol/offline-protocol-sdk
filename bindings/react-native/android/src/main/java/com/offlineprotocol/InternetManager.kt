@@ -116,6 +116,13 @@ class InternetManager(
     // True between pause() and resume(): a background reconnect must not
     // restart the poll/ping/presence timers the app paused.
     @Volatile private var isPaused = false
+    // The relay-displacement latch (close 4000, or a SessionSuperseded notice
+    // on the current socket). While latched, auto- AND force-reconnect refuse
+    // until an explicit start() — a blind reconnect just re-displaces the peer
+    // socket in a tight loop. Owns the boolean + decision; this manager owns
+    // the threading (every call on main, the single writer). Mirrors
+    // InternetManager.swift's supersedeLatch.
+    private val supersedeLatch = SupersededLatchPolicy()
     private var reconnectAttempts = AtomicInteger(0)
     // Atomic for cross-thread reads; written only on main (scheduleReconnect
     // grows it, handleAuthenticated's posted reaction resets it).
@@ -209,6 +216,16 @@ class InternetManager(
      * through it, so the pair is only ever published on actual change.
      */
     var connectionStatusEmitter: ((connected: Boolean, authenticated: Boolean) -> Unit)? = null
+
+    /**
+     * Fires once when the relay displaces this connection (close 4000 or a
+     * SessionSuperseded notice) — the module forwards it as the
+     * `internet_session_superseded` event. The SDK will not auto-reconnect;
+     * the app surfaces "connected elsewhere" and reconnects only on explicit
+     * user action (re-enabling the transport). Reason is the close/notice
+     * reason, if any. Mirrors InternetManager.swift.
+     */
+    var supersededEmitter: ((reason: String?) -> Unit)? = null
 
     /**
      * Last (connected, authenticated) pair published, or null before the
@@ -357,6 +374,11 @@ class InternetManager(
         // The reconnect backoff is likewise per-session state: a stale 30s
         // delay must not slow the first retry of a brand-new start.
         isPaused = false
+        // A fresh start() is the deliberate re-enable that clears a prior
+        // relay-superseded latch: the app has resolved the "connected
+        // elsewhere" condition (e.g. signed the other session out) and now
+        // wants this device connected again.
+        supersedeLatch.clear()
         reconnectAttempts.set(0)
         currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
 
@@ -541,7 +563,8 @@ class InternetManager(
             "messages_received" to messagesReceived.get(),
             "is_connected" to isConnected.get(),
             "is_authenticated" to isAuthenticated.get(),
-            "reconnect_attempts" to reconnectAttempts.get()
+            "reconnect_attempts" to reconnectAttempts.get(),
+            "is_superseded" to supersedeLatch.isSuperseded
         )
     }
     
@@ -549,6 +572,9 @@ class InternetManager(
     
     private fun connect() {
         val url = serverUrl ?: return
+        // A relay-superseded transport must not reconnect until an explicit
+        // start() clears the latch (see markSuperseded).
+        if (supersedeLatch.isSuperseded) return
         if (isConnecting.get() || isConnected.get()) return
         // stop() may have run between a reconnect being scheduled and firing.
         // The client null-check must precede the isConnecting latch: with no
@@ -794,6 +820,35 @@ class InternetManager(
             "wasAuthenticated" to wasAuthenticated
         ))
 
+        // The relay displaced this connection (close 4000, or a
+        // SessionSuperseded notice already flipped the flag on the live
+        // socket). A blind reconnect would just re-displace the peer socket in
+        // a ~1s eviction loop, so stop for good and let the app decide when to
+        // reconnect (explicit user action / foreground with long jitter).
+        // Recovery is an explicit start(), which clears isSuperseded.
+        //
+        // ORDERING NOTE (differs from InternetManager.swift — don't "unify"):
+        // this supersede check sits *after* terminateSocket's identity guard,
+        // so a 4000 that loses the terminal-signal race to a concurrent local
+        // teardown (ping/auth/send-failure, code -1) arrives stale and does not
+        // latch this cycle. It self-heals via the relay's *other* displacement
+        // signal: the relay always sends an application-level SessionSuperseded
+        // notice on the live socket BEFORE close 4000, and that notice (handled
+        // race-free while the socket is still current — see the message-dispatch
+        // path) latches first. Even absent the notice, the reconnect gets
+        // displaced again and the next onClosed(4000) latches. iOS instead marks
+        // before its identity guard (so it can't miss the code) but must then
+        // exclude a newer successor socket. Opposite orderings, same end state.
+        //
+        // hasNewerSuccessor = false: terminateSocket's identity guard already
+        // dropped any close whose socket isn't the current one, so a successor
+        // can never reach here (unlike the iOS didClose funnel).
+        if (supersedeLatch.shouldMark(code, hasNewerSuccessor = false)) {
+            markSuperseded(reason)
+            if (state != TransportState.STOPPED) updateState(TransportState.STOPPED)
+            return
+        }
+
         // Attempt reconnection if enabled
         // Messages in outbox will be flushed on successful reconnection
         if (autoReconnect && state != TransportState.STOPPING && state != TransportState.STOPPED) {
@@ -802,9 +857,30 @@ class InternetManager(
             updateState(TransportState.STOPPED)
         }
     }
-    
+
+    /**
+     * Marks the connection displaced by the relay and latches it stopped:
+     * cancels any pending reconnect, sets [supersedeLatch] so auto- and
+     * force-reconnect refuse until the next start(), and fires the one-shot
+     * superseded event. Idempotent (via [SupersededLatchPolicy.mark]) — the
+     * relay emits both a SessionSuperseded notice and close 4000, so several
+     * paths reach here for one displacement. Main-thread only.
+     */
+    private fun markSuperseded(reason: String?) {
+        if (!supersedeLatch.mark()) return
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
+        emitDiagnostic("warning", "Relay superseded this session; not auto-reconnecting", mapOf(
+            "reason" to (reason ?: "none")
+        ))
+        supersededEmitter?.invoke(reason)
+    }
+
     private fun scheduleReconnect() {
         if (!autoReconnect) return
+        // Defense in depth: handleConnectionClosed already returns before here
+        // on a superseded connection, but never schedule a reconnect for one.
+        if (supersedeLatch.isSuperseded) return
         // A close can race stop(): its posted scheduleReconnect must not
         // revive a transport the app already stopped (the delayed connect()
         // would find okHttpClient nulled and leave the transport wedged).
@@ -1008,7 +1084,25 @@ class InternetManager(
                 // cancel-triggered callbacks are ignored as stale).
                 teardownSocket(ws, reason)
             }
-            
+
+            "SessionSuperseded" -> {
+                // The relay is displacing this connection — a newer
+                // registration for the same identity took the slot. It also
+                // closes with code 4000, but honor the notice too so we never
+                // blind-reconnect even if the close code is lost. Run the mark
+                // + teardown on main like the other lifecycle funnels; the
+                // ws-identity re-check there scopes it to the current socket.
+                val supersedeReason = json.optNullableString("reason")
+                mainHandler.post {
+                    if (ws !== webSocket) return@post
+                    markSuperseded(supersedeReason)
+                    // Close the live socket through the shared funnel;
+                    // handleConnectionClosed sees isSuperseded and stops
+                    // without reconnecting (markSuperseded already emitted).
+                    teardownSocket(ws, supersedeReason ?: "Session superseded")
+                }
+            }
+
             "MessageSent" -> {
                 // Handle MessageSent event from WebSocket server
                 // This contains the server-generated message_id that we should use

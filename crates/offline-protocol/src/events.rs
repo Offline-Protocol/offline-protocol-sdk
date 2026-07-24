@@ -3348,6 +3348,7 @@ mod tests {
             "diagnostic",
             "internet_server_message",
             "internet_status_changed",
+            "internet_session_superseded",
         ]
         .map(str::to_string)
         .into();

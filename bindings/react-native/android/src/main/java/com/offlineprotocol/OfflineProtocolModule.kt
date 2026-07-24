@@ -302,6 +302,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     manager.connectionStatusEmitter = { connected, authenticated ->
                         emitInternetStatusEvent(connected, authenticated)
                     }
+                    manager.supersededEmitter = { reason -> emitInternetSupersededEvent(reason) }
                     manager.listener = object : TransportManagerListener {
                         override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
                             emitDiagnostic("info", "Internet transport state changed", mapOf(
@@ -449,6 +450,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             sendEvent(EVENT_NAME, params)
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Failed to emit internet status event", e)
+        }
+    }
+
+    /**
+     * Forwards a relay session displacement ("superseded") as the
+     * `internet_session_superseded` event. The relay closed this socket with
+     * code 4000 because a newer registration for the same identity took over;
+     * the SDK will NOT auto-reconnect. The app surfaces "connected elsewhere"
+     * and reconnects only on explicit user action (re-enabling the transport).
+     */
+    private fun emitInternetSupersededEvent(reason: String?) {
+        try {
+            val json = JSONObject()
+            json.put("type", "internet_session_superseded")
+            if (reason != null) json.put("reason", reason)
+            val params = Arguments.createMap().apply {
+                putString("eventJson", json.toString())
+            }
+            sendEvent(EVENT_NAME, params)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Failed to emit internet superseded event", e)
         }
     }
 
@@ -1409,6 +1431,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                             manager.connectionStatusEmitter = { connected, authenticated ->
                                 emitInternetStatusEvent(connected, authenticated)
                             }
+                            manager.supersededEmitter = { reason -> emitInternetSupersededEvent(reason) }
                         }
                         emitDiagnostic("info", "Internet manager created on demand")
                     }
