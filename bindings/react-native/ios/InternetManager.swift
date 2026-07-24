@@ -2427,11 +2427,25 @@ extension InternetManager: URLSessionWebSocketDelegate {
             let reasonString = reason.flatMap { String(data: $0, encoding: .utf8) }
             // Displacement is authoritative regardless of which terminal signal
             // won the funnel race: the receive-loop failure / didCompleteWithError
-            // may already have detached this task and scheduled a reconnect, so
-            // key the decision on the code — not task identity — and mark before
-            // the identity guard below can early-return. markSuperseded cancels
-            // any reconnect the losing path scheduled.
-            if code == Self.SUPERSEDED_CLOSE_CODE {
+            // may already have detached this task (nilling webSocketTask) and
+            // scheduled a reconnect, so key the decision on the code — not task
+            // identity — and mark before the identity guard below can
+            // early-return. markSuperseded cancels any reconnect the losing path
+            // scheduled.
+            //
+            // But do NOT mark when a *newer* socket has already replaced this
+            // one: a late 4000 for a bygone generation (old socket displaced →
+            // app re-enabled via start() → new socket B up) must not re-latch
+            // isSuperseded and stop B. webSocketTask == nil is the sibling-race
+            // this fix targets (detached, no successor yet); a non-nil task that
+            // differs from `webSocketTask` is a live successor and the stale
+            // close is ignored. NOTE: the Android bridge guards this ordering
+            // differently — its identity check sits *before* the supersede
+            // decision (terminateSocket), so it cannot mark once detached and
+            // instead re-latches on the next 4000. The two funnels defend
+            // against opposite terminal-signal orderings; don't "unify" them.
+            if code == Self.SUPERSEDED_CLOSE_CODE,
+               self.webSocketTask == nil || webSocketTask === self.webSocketTask {
                 self.markSuperseded(reason: reasonString)
                 if self.state != .stopped { self.updateState(.stopped) }
             }

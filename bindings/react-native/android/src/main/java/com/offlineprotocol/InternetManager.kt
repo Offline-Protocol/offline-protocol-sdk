@@ -833,6 +833,15 @@ class InternetManager(
         // a ~1s eviction loop, so stop for good and let the app decide when to
         // reconnect (explicit user action / foreground with long jitter).
         // Recovery is an explicit start(), which clears isSuperseded.
+        //
+        // ORDERING NOTE (differs from InternetManager.swift — don't "unify"):
+        // this supersede check sits *after* terminateSocket's identity guard,
+        // so a 4000 that loses the terminal-signal race to a concurrent local
+        // teardown (ping/auth/send-failure, code -1) arrives stale and does not
+        // latch this cycle — it self-heals because the reconnect gets displaced
+        // again and the next onClosed(4000) latches. iOS instead marks before
+        // its identity guard (so it can't miss the code) but must then exclude a
+        // newer successor socket. Opposite orderings, same end state.
         if (isSuperseded || code == SUPERSEDED_CLOSE_CODE) {
             markSuperseded(reason)
             updateState(TransportState.STOPPED)
