@@ -8934,6 +8934,149 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
     );
 }
 
+/// The deferred-ACK headline: an *evicted* pending entry (not merely a drained
+/// one) still recovers on the sender's next resend, precisely because the
+/// eviction never produced an ACK. With a 1-slot per-peer queue and `DropOldest`,
+/// a second early message evicts the first; the evicted message is provably gone
+/// (it does not surface when the queue later drains) and was never ACKed, so once
+/// the session is ready the sender's resend delivers it. This is the recovery
+/// path the queue-path silent-loss bug used to break.
+#[test]
+fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+    // One slot: the evictor deterministically displaces the evicted entry under
+    // the default `DropOldest` policy, no ACK-driven window pumping required.
+    bob_config.encryption.pending_queue.max_pending_per_peer = 1;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { content, .. } = event {
+            received_handle.lock().unwrap().push(content);
+        }
+    });
+    bob.start().unwrap();
+
+    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = alice_manager.create_session("bob").unwrap();
+
+    // Encrypt the evictor FIRST (lower MLS generation) so that after it drains
+    // it has been consumed in order, and the later-recovered evicted message
+    // (higher generation) decrypts forward — no reliance on the out-of-order
+    // ratchet window.
+    let encrypted_evictor = alice_manager
+        .encrypt_for_user("bob", b"evictor-msg")
+        .unwrap();
+    let encrypted_evicted = alice_manager
+        .encrypt_for_user("bob", b"evicted-msg")
+        .unwrap();
+
+    let wire = |encrypted: &_| {
+        Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &format!(
+                "{}{}",
+                internal_prefixes::ENCRYPTED,
+                serde_json::to_string(encrypted).unwrap()
+            ),
+        )
+    };
+    // The evicted message is received FIRST (so it is the oldest queued entry),
+    // then the evictor displaces it.
+    let evicted_wire = wire(&encrypted_evicted);
+    let evictor_wire = wire(&encrypted_evictor);
+    let evicted_id = evicted_wire.id.clone();
+    let evicted_id_str = evicted_id.as_str().to_string();
+    let acks_for_evicted = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&evicted_id_str))
+            .count()
+    };
+
+    // 1) Evicted message arrives, session not ready: queued, unmarked, not ACKed.
+    bob_handle.queue_message(evicted_wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+
+    // 2) Evictor arrives: displaces the evicted entry under DropOldest.
+    bob_handle.queue_message(evictor_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        bob.pending_queue.peer_queue_len("alice"),
+        1,
+        "the 1-slot queue holds only the evictor now"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&evicted_id),
+        "the evicted message's id must stay unmarked so a resend re-enters processing"
+    );
+    assert_eq!(
+        acks_for_evicted(&bob_handle),
+        0,
+        "the evicted message was never ACKed — that is what keeps recovery possible"
+    );
+
+    // 3) Welcome establishes the session and drains the queue. Only the evictor
+    //    surfaces; the evicted message is provably gone (never delivered).
+    let welcome_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    bob_handle.queue_message(welcome_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        received.lock().unwrap().as_slice(),
+        &["evictor-msg".to_string()],
+        "only the surviving (evictor) message surfaces on drain; the evicted one is gone"
+    );
+
+    // 4) The un-ACKed sender resends the evicted message. The session is now
+    //    ready, so it decrypts on the live path and is delivered + ACKed —
+    //    recovery of an evicted entry with no silent loss.
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(evicted_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        received.lock().unwrap().as_slice(),
+        &["evictor-msg".to_string(), "evicted-msg".to_string()],
+        "the evicted message is recovered exactly once by the sender's resend"
+    );
+    assert_eq!(
+        acks_for_evicted(&bob_handle),
+        1,
+        "the recovered message is ACKed so the sender can finally stop retrying"
+    );
+}
+
 /// change-6: `confirm_session_from_successful_decrypt` now drains the pending
 /// decryption queue. A 1:1 session OWNER confirms ONLY by decrypting the peer's
 /// first group-aware message (never a Welcome-receive), so before this change a
