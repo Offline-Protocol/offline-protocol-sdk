@@ -1602,7 +1602,9 @@ impl OfflineProtocol {
 
         // Handle encrypted messages
         if let Some(data) = content.strip_prefix(internal_prefixes::ENCRYPTED) {
-            if let Some(result) = self.handle_encrypted_message(sender, data, message) {
+            if let Some(result) =
+                self.handle_encrypted_message(sender, data, message, arrival_transport)
+            {
                 return Some(result);
             }
             return Some(InternalMessageResult::Consumed);

@@ -9316,6 +9316,169 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
     );
 }
 
+/// ACK-latency window closure: the drain now sends the deferred delivery ACK
+/// directly on the message's recorded arrival transport, so the sender learns of
+/// delivery WITHOUT having to resend. This pins the behavior that replaced the
+/// old "drain surfaces locally but never ACKs" semantic — a sender that had
+/// exhausted its retry budget before the session confirmed would otherwise mark
+/// a locally-delivered message undeliverable. No resend happens in this test:
+/// the single ACK is produced by the drain alone.
+#[test]
+fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = alice_manager.create_session("bob").unwrap();
+    let encrypted = alice_manager
+        .encrypt_for_user("bob", b"before-welcome")
+        .unwrap();
+
+    let encrypted_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(&encrypted).unwrap()
+        ),
+    );
+    let msg_id_str = encrypted_wire.id.as_str().to_string();
+    let acks_for_msg = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+            .count()
+    };
+
+    // Deferred before the session is ready: queued, not ACKed.
+    bob_handle.queue_message(encrypted_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(
+        acks_for_msg(&bob_handle),
+        0,
+        "a deferred message must not be ACKed on receipt"
+    );
+
+    // Welcome drains the queue. The drain must ACK the surfaced message on its
+    // recorded arrival transport — with NO resend from the sender.
+    let welcome_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    bob_handle.queue_message(welcome_wire);
+    while bob.receive_message().is_some() {}
+    assert!(!bob.pending_queue.contains_peer("alice"));
+    assert_eq!(
+        acks_for_msg(&bob_handle),
+        1,
+        "the drain must send the deferred ACK directly, without waiting for a resend"
+    );
+}
+
+/// Fix parity for the plaintext-media gate: an unencrypted media chunk received
+/// under `require_encryption` is rejected exactly like plaintext text — no
+/// delivery ACK (don't confirm processing to an injector) and the id is left
+/// unmarked (so a replay re-enters the gate instead of the duplicate re-ACK
+/// path). Previously such a chunk was ACKed and left dedup-marked.
+#[test]
+fn test_plaintext_media_chunk_rejected_withholds_ack_and_unmarks() {
+    use crate::file_transfer::FileChunk;
+
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+
+    let file_events: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let file_events_handle = Arc::clone(&file_events);
+    bob.on_event(move |event| {
+        if matches!(event, Event::FileReceived { .. }) {
+            *file_events_handle.lock().unwrap() += 1;
+        }
+    });
+    bob.start().unwrap();
+
+    let chunk = FileChunk {
+        file_id: "plain-file".to_string(),
+        file_name: "photo.jpg".to_string(),
+        file_size: 6,
+        total_chunks: 1,
+        chunk_index: 0,
+        chunk_data: vec![1u8; 6],
+        file_checksum: "abc".to_string(),
+    };
+    let chunk_wire = Message::builder(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(chunk.to_json().unwrap())
+    .content_type(ContentType::FileChunk)
+    .build();
+    let chunk_id = chunk_wire.id.clone();
+    let chunk_id_str = chunk_id.as_str().to_string();
+
+    bob_handle.queue_message(chunk_wire);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        *file_events.lock().unwrap(),
+        0,
+        "a policy-rejected plaintext chunk must not surface a file"
+    );
+    assert_eq!(
+        bob_handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&chunk_id_str))
+            .count(),
+        0,
+        "a policy-rejected plaintext chunk must not be ACKed"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&chunk_id),
+        "a policy-rejected plaintext chunk must be unmarked so a replay re-enters the gate"
+    );
+}
+
 #[test]
 fn test_welcome_duplicate_delivery_emits_single_established_event() {
     let mut bob_config = create_test_config_for_user("bob");

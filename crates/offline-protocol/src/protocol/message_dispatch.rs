@@ -617,6 +617,7 @@ impl OfflineProtocol {
         sender: &str,
         data: &str,
         message: &Message,
+        arrival_transport: Option<TransportType>,
     ) -> Option<InternalMessageResult> {
         if let Some(encrypted) = Self::parse_encrypted_payload(data) {
             // Track state to update after releasing MLS lock
@@ -794,13 +795,13 @@ impl OfflineProtocol {
                         MlsOperationContext::SessionLookup,
                         MlsErrorCategory::SessionStateMissing,
                     );
-                    self.enqueue_pending_decryption(&sender_owned, message);
+                    self.enqueue_pending_decryption_via(&sender_owned, message, arrival_transport);
                     // Deferred, NOT Consumed: the message is queued but not
                     // delivered, so the receive loop must skip the ACK and
                     // unmark the id — otherwise the sender counts it delivered
                     // and never retries, and a queue eviction becomes silent
-                    // loss. The queued copy (and the ACK, via the re-ACK on the
-                    // next resend) is restored when the session confirms and
+                    // loss. The queued copy is surfaced — and the ACK sent on the
+                    // recorded arrival transport — when the session confirms and
                     // `process_pending_decryption` drains it.
                     Some(InternalMessageResult::Deferred)
                 }

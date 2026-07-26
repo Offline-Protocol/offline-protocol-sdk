@@ -4,6 +4,7 @@
 
 use crate::config::{OverflowPolicy, PendingQueueConfig};
 use offline_protocol_core::Message;
+use offline_protocol_transport::TransportType;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, warn};
@@ -20,6 +21,13 @@ pub(crate) struct PendingDecryptMessage {
     pub(crate) received_at: Instant,
     pub(crate) sequence: u64,
     pub(crate) message: Message,
+    /// Transport the frame arrived on, when the caller knew it. Recorded so the
+    /// drain can send the deferred delivery ACK directly (see the deferred-ACK
+    /// design in CLAUDE.md) instead of waiting for the sender's next resend to
+    /// hit the duplicate re-ACK path. `None` when the message was enqueued from
+    /// a context with no transport (tests, defensive re-enqueue) — the drain
+    /// then falls back to the resend-driven ACK.
+    pub(crate) received_via: Option<TransportType>,
 }
 
 #[derive(Clone)]
@@ -624,16 +632,33 @@ impl PendingDecryptionQueue {
         evicted
     }
 
-    /// Enqueues an encrypted message that arrived before the MLS session was ready.
-    ///
-    /// Returns every message dropped in the process — TTL-expired entries,
-    /// entries evicted to make room, or the incoming message itself when it
-    /// could not be admitted — so the protocol layer can surface the loss.
+    /// Enqueues an encrypted message that arrived before the MLS session was
+    /// ready, without recording an arrival transport (the drain will fall back
+    /// to the resend-driven ACK). See [`Self::enqueue_via`]. Used only by tests;
+    /// production always routes through `enqueue_via`.
+    #[cfg(test)]
     pub(crate) fn enqueue(
         &mut self,
         config: &PendingQueueConfig,
         sender: &str,
         message: &Message,
+    ) -> Vec<DroppedPendingMessage> {
+        self.enqueue_via(config, sender, message, None)
+    }
+
+    /// Enqueues an encrypted message that arrived before the MLS session was
+    /// ready, recording the transport it arrived on so the drain can ACK it
+    /// directly.
+    ///
+    /// Returns every message dropped in the process — TTL-expired entries,
+    /// entries evicted to make room, or the incoming message itself when it
+    /// could not be admitted — so the protocol layer can surface the loss.
+    pub(crate) fn enqueue_via(
+        &mut self,
+        config: &PendingQueueConfig,
+        sender: &str,
+        message: &Message,
+        arrival_transport: Option<TransportType>,
     ) -> Vec<DroppedPendingMessage> {
         self.metrics.pending_messages_received_total = self
             .metrics
@@ -963,6 +988,7 @@ impl PendingDecryptionQueue {
             received_at: now,
             sequence,
             message: message.clone(),
+            received_via: arrival_transport,
         };
 
         self.queues
