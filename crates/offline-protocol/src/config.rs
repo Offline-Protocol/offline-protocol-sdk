@@ -59,7 +59,14 @@ impl Default for PendingQueueConfig {
             max_pending_global: 4096,
             max_pending_bytes_per_peer: default_max_pending_bytes_per_peer(),
             max_pending_bytes_global: default_max_pending_bytes_global(),
-            pending_ttl_ms: 120_000,
+            // 30 minutes. Under the deferred-ACK model an undecryptable message
+            // is no longer ACKed on receipt, so this queue is the primary
+            // recovery window before the session confirms — a 2-minute window
+            // was too short for a peer whose Welcome is slow to arrive/adopt.
+            // Memory stays bounded by the per-peer/global byte caps above plus
+            // the DropOldest overflow policy; a longer TTL only lets entries
+            // linger within those caps, it does not raise the ceiling.
+            pending_ttl_ms: 1_800_000,
             overflow_policy: OverflowPolicy::DropOldest,
         }
     }
@@ -788,7 +795,7 @@ mod tests {
         assert!(encryption.require_encryption);
         assert_eq!(encryption.pending_queue.max_pending_per_peer, 64);
         assert_eq!(encryption.pending_queue.max_pending_global, 4096);
-        assert_eq!(encryption.pending_queue.pending_ttl_ms, 120_000);
+        assert_eq!(encryption.pending_queue.pending_ttl_ms, 1_800_000);
         assert_eq!(
             encryption.pending_queue.overflow_policy,
             OverflowPolicy::DropOldest

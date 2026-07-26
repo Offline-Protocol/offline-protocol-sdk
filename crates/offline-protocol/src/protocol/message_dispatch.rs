@@ -795,7 +795,14 @@ impl OfflineProtocol {
                         MlsErrorCategory::SessionStateMissing,
                     );
                     self.enqueue_pending_decryption(&sender_owned, message);
-                    Some(InternalMessageResult::Consumed)
+                    // Deferred, NOT Consumed: the message is queued but not
+                    // delivered, so the receive loop must skip the ACK and
+                    // unmark the id — otherwise the sender counts it delivered
+                    // and never retries, and a queue eviction becomes silent
+                    // loss. The queued copy (and the ACK, via the re-ACK on the
+                    // next resend) is restored when the session confirms and
+                    // `process_pending_decryption` drains it.
+                    Some(InternalMessageResult::Deferred)
                 }
                 DecryptResult::Failed {
                     sender: sender_owned,
@@ -871,6 +878,15 @@ impl OfflineProtocol {
             Ok(true) => {
                 info!(sender = %sender, "Session confirmed via successful decryption");
                 let _ = self.flush_pending_messages(sender);
+                // Drain any messages that were queued while the session was not
+                // ready. Historically the pending-decryption queue was only
+                // drained on explicit session-confirmation events (Welcome,
+                // confirm probe/ack); a session that became usable purely via a
+                // live decrypt — the both-create owner, or an in-band
+                // `__MLS_ENC__` that decrypted first — left earlier queued
+                // messages stranded until TTL eviction. Draining here makes any
+                // successful decrypt a drain trigger.
+                self.process_pending_decryption(sender);
                 self.emit_mls_session_ready(sender, group_id, MlsOperationContext::Receive);
 
                 // Surface the app-facing established event for the

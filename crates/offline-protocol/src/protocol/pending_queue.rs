@@ -3,7 +3,7 @@
 //! decryption, lamport clock).
 
 use super::decryption_queue::DroppedPendingMessage;
-use super::{lock_shared_state, InternalMessageResult, OfflineProtocol};
+use super::{lock_shared_state, ChunkOutcome, InternalMessageResult, OfflineProtocol};
 use crate::events::{DecryptionFailureCode, Event};
 use chrono::Utc;
 use offline_protocol_core::ContentType;
@@ -114,7 +114,18 @@ impl OfflineProtocol {
             // route them back through the chunk handler now that the session
             // is ready.
             if msg.content_type == ContentType::FileChunk {
-                self.handle_incoming_file_chunk(&msg);
+                match self.handle_incoming_file_chunk(&msg) {
+                    // Delivered/assembled or terminally dropped: re-mark the id
+                    // (the deferred path unmarked it on receipt) so a later
+                    // resend is deduped rather than re-processed.
+                    ChunkOutcome::Handled => {
+                        self.deduplicator.mark_seen(msg.id.clone());
+                    }
+                    // Still not decryptable (unexpected post-confirmation): the
+                    // chunk was re-queued inside the handler and the id stays
+                    // unmarked so a resend can still recover it.
+                    ChunkOutcome::Deferred => {}
+                }
                 continue;
             }
 
@@ -167,10 +178,38 @@ impl OfflineProtocol {
                             state.emit_event(event);
                         }
 
+                        // Re-mark the id as seen now that it is delivered. On
+                        // first receipt the deferred path unmarked it (so the
+                        // sender's resends would re-enter processing); with the
+                        // message now surfaced, a subsequent resend must be
+                        // deduped + re-ACKed rather than re-surfaced (double
+                        // delivery) or re-decrypted (an MLS replay the ratchet
+                        // would reject). This is the counterpart to the unmark
+                        // in the receive loop's `Deferred` arm.
+                        self.deduplicator.mark_seen(msg.id.clone());
+
                         debug!(message_id = %msg.id, "Processed delayed encrypted message");
                     }
                     InternalMessageResult::Consumed => {
+                        // Internal control message (e.g. session-confirm) that
+                        // decrypted on drain. It was unmarked on the deferred
+                        // path; re-mark so a resend is deduped rather than
+                        // reprocessed.
+                        self.deduplicator.mark_seen(msg.id.clone());
                         debug!(message_id = %msg.id, "Delayed message was consumed internally");
+                    }
+                    InternalMessageResult::Deferred => {
+                        // Still undecryptable during a drain. Drains only run
+                        // after the session is confirmed, so this is not
+                        // expected — but re-enqueue defensively rather than drop
+                        // it (the id is already unmarked, so a resend still
+                        // recovers it too). `enqueue` is idempotent by id, so
+                        // this cannot stack.
+                        debug!(
+                            message_id = %msg.id,
+                            "Delayed message still undecryptable during drain; re-queuing"
+                        );
+                        self.enqueue_pending_decryption(msg.sender.as_str(), &msg);
                     }
                     InternalMessageResult::SecurityRejected => {
                         debug!(message_id = %msg.id, "Delayed message was rejected by security gate");

@@ -645,6 +645,21 @@ impl PendingDecryptionQueue {
         let mut dropped = self.prune_expired_for_peer(config, sender, now);
         dropped.extend(self.prune_expired_global_front(config, now, 64));
 
+        // Idempotent by message id: under the deferred-ACK model the sender
+        // resends an undecryptable message on its ACK-timeout, and each resend
+        // re-enters `enqueue`. Stacking duplicate copies would burn the per-peer
+        // budget (evicting *other* peers' recoverable messages) and surface the
+        // same message twice on drain. If this id is already queued for the
+        // peer, treat the resend as a no-op (the original copy is authoritative
+        // and its TTL is measured from first receipt).
+        if self.queues.get(sender).is_some_and(|queue| {
+            queue
+                .iter()
+                .any(|entry| entry.message_id == incoming_message_id)
+        }) {
+            return dropped;
+        }
+
         let per_peer_limit = config.max_pending_per_peer;
         let global_limit = config.max_pending_global;
         let per_peer_bytes_limit = config.max_pending_bytes_per_peer;

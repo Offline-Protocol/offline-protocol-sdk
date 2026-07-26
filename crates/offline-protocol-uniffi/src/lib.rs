@@ -1873,7 +1873,9 @@ impl Default for PendingQueueConfig {
         Self {
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            pending_ttl_ms: 120_000,
+            // Mirrors the core default (30 min); see PendingQueueConfig in
+            // offline-protocol/src/config.rs for the deferred-ACK rationale.
+            pending_ttl_ms: 1_800_000,
             overflow_policy: OverflowPolicy::DropOldest,
         }
     }
@@ -5689,7 +5691,7 @@ mod tests {
             require_encryption: false,
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            pending_ttl_ms: 120_000,
+            pending_ttl_ms: 1_800_000,
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
@@ -5717,7 +5719,7 @@ mod tests {
             require_encryption: false,
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            pending_ttl_ms: 120_000,
+            pending_ttl_ms: 1_800_000,
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
@@ -6053,7 +6055,7 @@ mod tests {
             require_encryption: false,
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            pending_ttl_ms: 120_000,
+            pending_ttl_ms: 1_800_000,
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
