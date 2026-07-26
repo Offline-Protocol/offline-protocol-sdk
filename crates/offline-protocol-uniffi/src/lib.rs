@@ -1916,6 +1916,9 @@ pub struct ProtocolConfig {
     /// dictionary and `EncryptionConfig::rich_payload_enabled` for
     /// semantics.
     pub rich_payload_enabled: bool,
+    /// Kill switch for 1:1 MLS crypto-failure recovery (default on). See the UDL
+    /// dictionary and `EncryptionConfig::crypto_recovery_enabled` for semantics.
+    pub crypto_recovery_enabled: bool,
 }
 
 /// Extended protocol configuration with all options
@@ -1942,6 +1945,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.transport.binary_wire_enabled = config.binary_wire_enabled;
         core_config.encryption.compact_envelope_enabled = config.compact_envelope_enabled;
         core_config.encryption.rich_payload_enabled = config.rich_payload_enabled;
+        core_config.encryption.crypto_recovery_enabled = config.crypto_recovery_enabled;
         core_config.dors.prefer_online = config.prefer_online;
         core_config.initial_ttl = config.initial_ttl;
         core_config.encryption.enabled = config.encryption_enabled;
@@ -5677,6 +5681,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: true,
@@ -5705,6 +5710,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: true,
@@ -6041,6 +6047,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: false,
@@ -6362,6 +6369,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "sender-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6389,6 +6397,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6417,6 +6426,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "sender-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6444,6 +6454,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_reticulum_config()
         };
@@ -6479,6 +6490,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             reticulum_enabled: false,
             ble_enabled: true,
             ..create_reticulum_config()
@@ -6530,6 +6542,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: sender_id.to_string(),
             ..create_test_config()
         })
@@ -6616,6 +6629,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6644,6 +6658,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6671,6 +6686,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6702,6 +6718,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6748,6 +6765,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6779,6 +6797,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6858,6 +6877,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_reticulum_config()
         })
@@ -6883,6 +6903,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             nostr_enabled: true,
             ..create_test_config()
@@ -6939,6 +6960,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -6971,6 +6993,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "receiver-user".to_string(),
             ..create_test_config()
         })
@@ -7021,6 +7044,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "owner-user".to_string(),
             ..create_test_config()
         })
@@ -7036,6 +7060,7 @@ mod tests {
             binary_wire_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
             user_id: "peer-user".to_string(),
             ..create_test_config()
         })

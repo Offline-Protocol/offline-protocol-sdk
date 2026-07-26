@@ -23,6 +23,7 @@ class ProtocolConfigParserTest {
         assertTrue(config.binaryWireEnabled)
         assertTrue(config.compactEnvelopeEnabled)
         assertTrue(config.richPayloadEnabled)
+        assertTrue(config.cryptoRecoveryEnabled)
     }
 
     @Test
@@ -89,6 +90,24 @@ class ProtocolConfigParserTest {
             """{"appId":"app","userId":"alice","encryption":{"rich_payload_enabled":false}}"""
         )
         assertFalse(snake.richPayloadEnabled)
+    }
+
+    @Test
+    fun cryptoRecoveryReadsItsNestedEncryptionHomeThenTopLevel() {
+        val nested = parse(
+            """{"appId":"app","userId":"alice","cryptoRecoveryEnabled":true,"encryption":{"cryptoRecoveryEnabled":false}}"""
+        )
+        assertFalse(nested.cryptoRecoveryEnabled)
+
+        val flat = parse(
+            """{"appId":"app","userId":"alice","cryptoRecoveryEnabled":false,"encryption":{"enabled":true}}"""
+        )
+        assertFalse(flat.cryptoRecoveryEnabled)
+
+        val snake = parse(
+            """{"appId":"app","userId":"alice","encryption":{"crypto_recovery_enabled":false}}"""
+        )
+        assertFalse(snake.cryptoRecoveryEnabled)
     }
 
     @Test

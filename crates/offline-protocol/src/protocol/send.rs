@@ -2200,18 +2200,27 @@ impl OfflineProtocol {
         self.pending_reseal.insert(id.clone(), reseal);
     }
 
-    /// Consumes any staged re-seal provenance for `message`, but only when a
-    /// (non-media) main-outbox entry is about to be created for the first time.
-    /// On later attempts the entry already exists and carries its `reseal`, so
-    /// this returns `None` and leaves the staged copy untouched. Media never
-    /// stages. Kept as one helper so the two outbox-entry creation sites
+    /// Consumes any staged re-seal provenance for `message`, attaching it to a
+    /// (non-media) main-outbox entry being created for the first time. On later
+    /// attempts the entry already exists and carries its `reseal`, so this
+    /// returns `None`. Media never stages.
+    ///
+    /// **Always removes the staged copy** (it does not leave it behind when it
+    /// returns `None`): the staging map is strictly transient and must never
+    /// outlive its message, or a message that stages but is then dropped before
+    /// an outbox entry is created (e.g. `dispatch_prepared_message` early-returns
+    /// on a duplicate id) would strand plaintext in `pending_reseal` for the
+    /// process lifetime. Removing unconditionally here — plus the belt-and-braces
+    /// clear in [`Self::remove_outbox_entry`] — bounds the map to genuinely
+    /// in-flight sends. Kept as one helper so the two outbox-entry creation sites
     /// ([`Self::ensure_outbox_entry`] and [`Self::mark_message_sent`]) stay in
     /// lockstep on the consume condition.
     fn take_staged_reseal(&mut self, message: &Message, is_media: bool) -> Option<OutboxReseal> {
+        let staged = self.pending_reseal.remove(&message.id);
         if is_media || self.outbox.contains_key(&message.id) {
             return None;
         }
-        self.pending_reseal.remove(&message.id)
+        staged
     }
 
     /// Re-seals an outbound encrypted DM against the recipient's *current* MLS
@@ -2278,6 +2287,11 @@ impl OfflineProtocol {
     }
 
     pub(super) fn remove_outbox_entry(&mut self, message_id: &MessageId) -> Option<OutboxEntry> {
+        // Belt-and-braces: drop any still-staged re-seal provenance for this id
+        // so it never outlives the message (see `take_staged_reseal`). Normally
+        // staging is consumed at entry creation; this covers the id being torn
+        // down before that ever happened.
+        self.pending_reseal.remove(message_id);
         if let Some(entry) = self.outbox.remove(message_id) {
             self.clear_outbox_entry_from_storage(message_id);
             return Some(entry);

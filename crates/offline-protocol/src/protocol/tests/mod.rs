@@ -8939,6 +8939,115 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
     );
 }
 
+/// Kill-switch fall-through: with `crypto_recovery_enabled = false`, a desync DM
+/// must take the *legacy* path — classified as a plain crypto failure that is
+/// dropped **and delivery-ACKed** (the old lying-ACK behavior), with **no**
+/// re-key triggered. This pins the disabled arm of the
+/// `SessionDesync if crypto_recovery_enabled` guard so the kill switch remains a
+/// true rollback lever.
+#[test]
+fn test_crypto_recovery_disabled_falls_back_to_drop_and_ack() {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+    // The rollback lever under test.
+    bob_config.encryption.crypto_recovery_enabled = false;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { content, .. } = event {
+            received_handle.lock().unwrap().push(content);
+        }
+    });
+    bob.start().unwrap();
+
+    // Establish bob's session with alice via a real Welcome.
+    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    bob_handle.queue_message(welcome_wire);
+    while bob.receive_message().is_some() {}
+
+    // Fork the session so alice's next message cannot decrypt (WrongEpoch).
+    alice_manager
+        .update_keys(&offline_protocol_mls::GroupId::new("session:alice:bob").unwrap())
+        .unwrap();
+    let encrypted = alice_manager
+        .encrypt_for_user("bob", b"after-fork")
+        .unwrap();
+    let encrypted_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(&encrypted).unwrap()
+        ),
+    );
+    let msg_id_str = encrypted_wire.id.as_str().to_string();
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(encrypted_wire);
+    while bob.receive_message().is_some() {}
+
+    let sent = bob_handle.sent_messages();
+
+    // Legacy behavior: the message IS delivery-ACKed (dropped-and-ACKed).
+    let acks = sent
+        .iter()
+        .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+        .count();
+    assert_eq!(
+        acks, 1,
+        "with recovery disabled, a desync DM falls back to drop-and-ACK"
+    );
+
+    // And NO re-key is triggered.
+    let rekeys = sent
+        .iter()
+        .filter(|m| {
+            m.content.starts_with(internal_prefixes::KEY_PACKAGE) && m.recipient.as_str() == "alice"
+        })
+        .count();
+    assert_eq!(
+        rekeys, 0,
+        "with recovery disabled, a desync must NOT trigger a re-key"
+    );
+
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "an undecryptable DM never surfaces to the app regardless of the kill switch"
+    );
+}
+
 /// Tier 1 crypto-failure recovery: an established 1:1 session that has forked
 /// (the peer advanced its epoch) yields an undecryptable DM. Instead of the old
 /// silent drop-and-ACK, the receiver must withhold the delivery ACK (so the

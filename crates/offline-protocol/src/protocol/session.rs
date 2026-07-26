@@ -491,6 +491,22 @@ impl OfflineProtocol {
     /// The interval is stamped before the send so a send error still counts
     /// against the limit. [`Self::clear_session_rekey_tracking`] resets it once a
     /// decrypt succeeds.
+    ///
+    /// **SECURITY — remotely-triggerable (rate-limited) re-key.** `peer_id` here
+    /// is the *wire-claimed* sender, not an MLS-authenticated one: the
+    /// `SenderIdentityMismatch` gate in `handle_encrypted_message` only runs on a
+    /// **successful** decrypt, whereas a desync is a `WrongEpoch`/`NoPastEpochData`
+    /// decrypt *failure* that never reaches the credential check. An outsider
+    /// still cannot forge a frame that produces this classification — only a
+    /// structurally-valid MLS message for our existing `session:<peer>:me` group
+    /// can — but a network attacker who **replays a genuine peer's captured
+    /// old-epoch ciphertext** (the outer message id is unauthenticated, so
+    /// transport dedup does not reliably stop a mutated-id replay) can force a
+    /// teardown + re-establishment of that one session. This is strictly better
+    /// than the old silent drop (delivery stays honest and the channel
+    /// self-heals), and the [`REKEY_INTERVAL_SECS`] rate limit is the mitigation
+    /// that bounds it to one re-key per peer per window rather than continuous
+    /// churn. Also see the CLAUDE.md "Crypto-failure recovery" note.
     pub(super) fn schedule_session_rekey(&mut self, peer_id: &str) {
         let now = Utc::now();
         if let Some(due_at) = self.rekey_due_at.get(peer_id) {

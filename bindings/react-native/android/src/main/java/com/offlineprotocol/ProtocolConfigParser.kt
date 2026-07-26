@@ -64,6 +64,10 @@ internal object ProtocolConfigParser {
             "richPayloadEnabled",
             "rich_payload_enabled"
         ) ?: json.optBooleanCompat("richPayloadEnabled", "rich_payload_enabled") ?: true
+        val cryptoRecoveryEnabled = encryptionJson?.optBooleanCompat(
+            "cryptoRecoveryEnabled",
+            "crypto_recovery_enabled"
+        ) ?: json.optBooleanCompat("cryptoRecoveryEnabled", "crypto_recovery_enabled") ?: true
         val pendingQueueJson = encryptionJson?.optJSONObject("pendingQueue")
             ?: encryptionJson?.optJSONObject("pending_queue")
         val maxPendingPerPeer = pendingQueueJson?.optLongCompat(
@@ -108,7 +112,8 @@ internal object ProtocolConfigParser {
             overflowPolicy = overflowPolicy,
             binaryWireEnabled = binaryWireEnabled,
             compactEnvelopeEnabled = compactEnvelopeEnabled,
-            richPayloadEnabled = richPayloadEnabled
+            richPayloadEnabled = richPayloadEnabled,
+            cryptoRecoveryEnabled = cryptoRecoveryEnabled
         )
 
         return ParsedConfig(config, json)
