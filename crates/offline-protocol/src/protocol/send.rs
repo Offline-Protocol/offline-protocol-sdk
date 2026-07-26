@@ -2932,6 +2932,47 @@ impl OfflineProtocol {
         self.transport_manager.send(&ack_message)
     }
 
+    /// Builds and sends a delivery ACK from the group-message drain, which
+    /// holds only the acked id and the original wire sender (not the full
+    /// inbound [`Message`]). Mirrors [`Self::send_delivery_ack`]; the hop count
+    /// is unknown at drain time and reported as 0 (sender-side metrics only).
+    pub(crate) fn send_group_delivery_ack(
+        &mut self,
+        ack_to: &str,
+        acked_message_id: &str,
+        inbound_transport: TransportType,
+    ) -> Result<()> {
+        let sender = UserId::new(&self.config.user_id)?;
+        let recipient = UserId::new(ack_to)?;
+        let app_id = AppId::new(&self.config.app_id)?;
+        let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
+
+        let ack_message = Message::builder(sender, recipient, app_id)
+            .content(String::new())
+            .priority(MessagePriority::Low)
+            .ttl(ttl)
+            .requires_ack(false)
+            .metadata(ACK_FOR_KEY, acked_message_id)
+            .metadata(ACK_HOP_COUNT_KEY, "0")
+            .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport))
+            .build();
+
+        // Prefer the transport the message arrived on; fall back to DORS.
+        if self
+            .transport_manager
+            .send_via_transport(&ack_message, inbound_transport)
+            .is_ok()
+        {
+            return Ok(());
+        }
+        debug!(
+            message_id = %acked_message_id,
+            inbound_transport = ?inbound_transport,
+            "Inbound transport unavailable for group ACK, falling back to DORS selection"
+        );
+        self.transport_manager.send(&ack_message)
+    }
+
     pub(super) fn handle_ack_message(&mut self, message: &Message) {
         if let Some(ack_for) = message.metadata.get(ACK_FOR_KEY) {
             if let Ok(message_id) = MessageId::from_str(ack_for) {

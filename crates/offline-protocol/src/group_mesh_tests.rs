@@ -7592,7 +7592,10 @@ fn test_group_message_before_welcome_buffered_then_delivered_on_join() {
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
     let wire = make_message("alice", "bob", "unused-envelope");
     let result = bob.handle_group_mls_msg(&wire, "alice", &msg_json);
-    assert!(matches!(result, InternalMessageResult::Consumed));
+    // Buffered, not delivered: the deferred-ACK atom returns Deferred so the
+    // receive loop skips the ACK and the sender keeps retransmitting until the
+    // drain surfaces it.
+    assert!(matches!(result, InternalMessageResult::Deferred));
 
     // Not delivered yet — buffered, not dropped.
     assert!(group_messages_received(&events).is_empty());
@@ -7648,6 +7651,214 @@ fn test_group_message_before_welcome_redelivery_not_duplicated() {
     let received = group_messages_received(&events);
     assert_eq!(received.len(), 1, "Exactly one delivery after the Welcome");
     assert_eq!(received[0].0, "hello race");
+}
+
+// ---------------------------------------------------------------------------
+// Deferred-ACK atom on the mesh-group path (PR #223 analog for groups)
+// ---------------------------------------------------------------------------
+
+/// Registers a started BLE `MockTransport` on `p` and returns its handle, so a
+/// test can observe the deferred delivery ACK the drain sends.
+fn attach_ble_mock(p: &mut OfflineProtocol) -> offline_protocol_transport::mock::MockTransport {
+    use offline_protocol_transport::mock::MockTransport;
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    let handle = ble.clone();
+    p.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    handle
+}
+
+/// Counts delivery ACKs for `msg_id` recorded on `transport`.
+fn ack_count(transport: &offline_protocol_transport::mock::MockTransport, msg_id: &str) -> usize {
+    transport
+        .sent_messages()
+        .iter()
+        .filter(|m| {
+            m.metadata
+                .get(crate::constants::ACK_FOR_KEY)
+                .map(String::as_str)
+                == Some(msg_id)
+        })
+        .count()
+}
+
+#[test]
+fn test_deferred_group_msg_defers_ack_then_recovers_without_loss_or_dup() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+    let ble = attach_ble_mock(&mut bob);
+
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    let msg_id = wire.id.as_str().to_string();
+
+    // Arrives before the Welcome: buffered and deferred — no delivery ACK yet,
+    // so the sender's ack_manager keeps the message live for retransmission.
+    let result = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    assert!(matches!(result, InternalMessageResult::Deferred));
+    assert!(group_messages_received(&events).is_empty());
+    assert_eq!(
+        ack_count(&ble, &msg_id),
+        0,
+        "a buffered-but-undecrypted message must not be ACKed"
+    );
+
+    // The Welcome arrives: the drain surfaces the message AND sends the
+    // deferred ACK on its arrival transport.
+    bob.handle_group_mls_welcome("welcome-defer-1", "alice", &welcome_json);
+
+    let received = group_messages_received(&events);
+    assert_eq!(received.len(), 1, "exactly one delivery — no loss, no dup");
+    assert_eq!(received[0].0, "hello race");
+    assert_eq!(
+        ack_count(&ble, &msg_id),
+        1,
+        "the delivered message is ACKed exactly once, on drain"
+    );
+    assert!(!bob
+        .group_mesh
+        .pending_group_messages
+        .contains_key(&group_id));
+}
+
+#[test]
+fn test_deferred_group_msg_is_acked_on_drain_without_a_resend() {
+    let (alice, mut bob, _events, group_id, welcome_json) = setup_race_alice_bob();
+    let ble = attach_ble_mock(&mut bob);
+
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "one and only");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    let msg_id = wire.id.as_str().to_string();
+
+    // Exactly one inbound receipt, then the Welcome — no sender resend at all.
+    bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    bob.handle_group_mls_welcome("welcome-defer-2", "alice", &welcome_json);
+
+    // The ACK is sent by the drain itself, back to the wire sender, closing the
+    // latency window without waiting for a duplicate to arrive.
+    let acks: Vec<_> = ble
+        .sent_messages()
+        .into_iter()
+        .filter(|m| {
+            m.metadata
+                .get(crate::constants::ACK_FOR_KEY)
+                .map(String::as_str)
+                == Some(msg_id.as_str())
+        })
+        .collect();
+    assert_eq!(acks.len(), 1, "delivered on drain, ACKed without a resend");
+    assert_eq!(acks[0].recipient.as_str(), "alice");
+}
+
+#[test]
+fn test_group_dup_while_pending_defers_not_reacks() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+    let ble = attach_ble_mock(&mut bob);
+
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    let msg_id = wire.id.as_str().to_string();
+
+    let r1 = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    assert!(matches!(r1, InternalMessageResult::Deferred));
+    // A retransmit of the still-pending message must also defer (no ACK), must
+    // not stack a second buffered copy, and must not re-run MLS decrypt (the
+    // dup branch returns before decrypt — replay-amplification defense intact).
+    let r2 = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    assert!(matches!(r2, InternalMessageResult::Deferred));
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(1),
+        "a duplicate of a pending message must not stack a second copy"
+    );
+    assert_eq!(
+        ack_count(&ble, &msg_id),
+        0,
+        "a duplicate of a pending message is never ACKed"
+    );
+
+    // Drain delivers exactly once and ACKs exactly once.
+    bob.handle_group_mls_welcome("welcome-defer-3", "alice", &welcome_json);
+    assert_eq!(group_messages_received(&events).len(), 1);
+    assert_eq!(ack_count(&ble, &msg_id), 1);
+}
+
+#[test]
+fn test_group_dup_after_delivery_reacks_and_not_redelivered() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+    let ble = attach_ble_mock(&mut bob);
+
+    let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
+    let wire = make_message("alice", "bob", "unused-envelope");
+    let msg_id = wire.id.as_str().to_string();
+
+    bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    bob.handle_group_mls_welcome("welcome-defer-4", "alice", &welcome_json);
+    assert_eq!(group_messages_received(&events).len(), 1);
+    assert_eq!(ack_count(&ble, &msg_id), 1);
+
+    // A late resend after delivery: the id is no longer buffered, so this is a
+    // plain duplicate — Consumed (the receive loop re-ACKs so the sender can
+    // stop) and it must NOT be surfaced a second time. The handler itself does
+    // not ACK on Consumed (that is the loop's job), so the drain ACK count is
+    // unchanged here.
+    let r = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    assert!(matches!(r, InternalMessageResult::Consumed));
+    assert_eq!(
+        group_messages_received(&events).len(),
+        1,
+        "a delivered message must not be redelivered on resend"
+    );
+    assert_eq!(ack_count(&ble, &msg_id), 1);
+}
+
+#[test]
+fn test_evicted_pending_group_msg_recovers_on_resend_after_state_ready() {
+    let (alice, mut bob, _events, group_id, _welcome_json) = setup_race_alice_bob();
+
+    // Fill the per-group buffer one past its cap so the oldest entry (m0) is
+    // displaced. Every message is future-epoch (Bob has no group state), so
+    // each buffers.
+    let cap = MAX_PENDING_GROUP_MESSAGES_PER_GROUP;
+    let first_json = make_group_mls_msg_json(&alice, &group_id, "m0");
+    let first_wire = make_message("alice", "bob", "unused-envelope");
+    let first_id = first_wire.id.as_str().to_string();
+    let r0 =
+        bob.handle_group_mls_msg_via(&first_wire, "alice", &first_json, Some(TransportType::BLE));
+    assert!(matches!(r0, InternalMessageResult::Deferred));
+    for i in 1..=cap {
+        let json = make_group_mls_msg_json(&alice, &group_id, &format!("m{i}"));
+        let wire = make_message("alice", "bob", "unused-envelope");
+        let r = bob.handle_group_mls_msg_via(&wire, "alice", &json, Some(TransportType::BLE));
+        assert!(matches!(r, InternalMessageResult::Deferred));
+    }
+
+    // m0 was displaced: the buffer holds `cap`, and m0's replay protection was
+    // released so a redelivery is accepted fresh instead of swallowed.
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(cap),
+    );
+    assert!(
+        !bob.group_mesh.message_dedup.contains_key(&first_id),
+        "the evicted message's dedup entry must be released"
+    );
+
+    // m0 was never ACKed (deferred), so the sender resends it — and it
+    // re-enters the buffer instead of being rejected as a duplicate.
+    let r =
+        bob.handle_group_mls_msg_via(&first_wire, "alice", &first_json, Some(TransportType::BLE));
+    assert!(
+        matches!(r, InternalMessageResult::Deferred),
+        "a released message must re-buffer on resend, not be swallowed"
+    );
+    assert!(bob.group_mesh.message_dedup.contains_key(&first_id));
 }
 
 #[test]
@@ -7903,6 +8114,7 @@ fn test_pending_group_message_buffer_cap() {
                 reply_to: None,
                 forward_info: None,
                 buffered_at: Instant::now(),
+                received_via: None,
             },
         );
     }
@@ -7928,6 +8140,7 @@ fn test_pending_group_message_expired_entries_cleaned_up() {
         reply_to: None,
         forward_info: None,
         buffered_at: Instant::now() - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+        received_via: None,
     };
     let recent = PendingGroupMessage {
         sender: "bob".to_string(),
@@ -7937,6 +8150,7 @@ fn test_pending_group_message_expired_entries_cleaned_up() {
         reply_to: None,
         forward_info: None,
         buffered_at: Instant::now(),
+        received_via: None,
     };
     protocol
         .group_mesh
@@ -7972,6 +8186,7 @@ fn test_drain_pending_group_messages_drops_expired() {
         reply_to: None,
         forward_info: None,
         buffered_at: Instant::now() - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+        received_via: None,
     };
     protocol
         .group_mesh
@@ -8092,6 +8307,7 @@ fn test_pending_group_message_spread_flood_bounded_by_group_cap() {
                 forward_info: None,
                 // Stagger so eviction order is deterministic (earlier i = older).
                 buffered_at: Instant::now() - StdDuration::from_millis((total - i) as u64),
+                received_via: None,
             },
         );
     }
@@ -8142,6 +8358,7 @@ fn test_evicted_pending_group_message_releases_dedup_entry() {
                 reply_to: None,
                 forward_info: None,
                 buffered_at: Instant::now(),
+                received_via: None,
             },
         );
     }
@@ -8183,6 +8400,7 @@ fn test_drain_expired_pending_group_message_releases_dedup_entry() {
             forward_info: None,
             buffered_at: Instant::now()
                 - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+            received_via: None,
         });
 
     protocol.drain_pending_group_messages("dedup-ttl-group");
@@ -8303,6 +8521,7 @@ fn test_group_cap_eviction_evicts_single_group_wholesale() {
                         - StdDuration::from_millis(
                             ((MAX_PENDING_GROUP_MESSAGE_GROUPS - g) * 100 + (per_group - j)) as u64,
                         ),
+                    received_via: None,
                 },
             );
         }
@@ -8322,6 +8541,7 @@ fn test_group_cap_eviction_evicts_single_group_wholesale() {
             reply_to: None,
             forward_info: None,
             buffered_at: Instant::now(),
+            received_via: None,
         },
     );
 
@@ -8457,6 +8677,7 @@ fn test_pending_group_message_global_byte_cap() {
                 reply_to: None,
                 forward_info: None,
                 buffered_at: Instant::now() - StdDuration::from_millis((n - i) as u64),
+                received_via: None,
             },
         );
     }
@@ -8583,6 +8804,7 @@ fn test_global_eviction_prefers_largest_buffer_over_older_honest_entry() {
             reply_to: None,
             forward_info: None,
             buffered_at: Instant::now() - StdDuration::from_secs(60),
+            received_via: None,
         },
     );
 
@@ -8602,6 +8824,7 @@ fn test_global_eviction_prefers_largest_buffer_over_older_honest_entry() {
                     reply_to: None,
                     forward_info: None,
                     buffered_at: Instant::now(),
+                    received_via: None,
                 },
             );
         }
@@ -8679,6 +8902,7 @@ fn test_leave_group_clears_pending_buffers() {
             reply_to: None,
             forward_info: None,
             buffered_at: Instant::now(),
+            received_via: None,
         },
     );
 
@@ -8866,6 +9090,7 @@ fn test_evicted_pending_group_message_releases_transport_dedup() {
                 reply_to: None,
                 forward_info: None,
                 buffered_at: Instant::now(),
+                received_via: None,
             },
         );
     }
@@ -8907,6 +9132,7 @@ fn test_drain_expired_pending_entries_release_transport_dedup() {
             forward_info: None,
             buffered_at: Instant::now()
                 - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+            received_via: None,
         });
     protocol
         .group_mesh
@@ -8969,6 +9195,7 @@ fn test_cleanup_sweep_releases_transport_dedup_for_expired_entries() {
             forward_info: None,
             buffered_at: Instant::now()
                 - StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS + 10),
+            received_via: None,
         });
 
     protocol.cleanup_group_message_dedup();
@@ -9505,6 +9732,7 @@ fn group_buffered_drain_restores_sealed_media() {
             reply_to: None,
             forward_info: None,
             buffered_at: Instant::now(),
+            received_via: None,
         },
     );
     bob.drain_pending_group_messages(&group_id);
