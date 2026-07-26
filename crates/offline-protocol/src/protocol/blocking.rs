@@ -788,7 +788,7 @@ mod tests {
             chunk_data: vec![1u8; 6],
             file_checksum: "abc".to_string(),
         };
-        proto.handle_incoming_file_chunk(&chunk_message(&good));
+        let _ = proto.handle_incoming_file_chunk(&chunk_message(&good));
         assert!(proto.pending_media_metadata.contains_key("good-file"));
         assert_eq!(proto.file_transfer_manager.active_transfer_count(), 1);
 
@@ -803,7 +803,7 @@ mod tests {
             chunk_data: vec![0u8; 16],
             file_checksum: "def".to_string(),
         };
-        proto.handle_incoming_file_chunk(&chunk_message(&evil));
+        let _ = proto.handle_incoming_file_chunk(&chunk_message(&evil));
         assert!(!proto.pending_media_metadata.contains_key("evil-file"));
         assert_eq!(proto.file_transfer_manager.active_transfer_count(), 1);
     }
@@ -850,13 +850,13 @@ mod tests {
         };
 
         // First transfer occupies the single assembly slot.
-        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-1")));
+        let _ = proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-1")));
         assert!(failed_events.lock().unwrap().is_empty());
 
         // The second transfer hits the cap: the app must be told the
         // transfer is lost (the chunk was already ACKed — it will not be
         // retransmitted).
-        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-2")));
+        let _ = proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-2")));
         let events = failed_events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -917,13 +917,13 @@ mod tests {
         };
 
         // First transfer occupies the single assembly slot.
-        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-1", 0)));
+        let _ = proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-1", 0)));
 
         // Every chunk of the second transfer was already ACKed and keeps
         // streaming in after the rejection. The app must be told the
         // transfer is lost exactly once — not once per remaining chunk.
         for index in 0..6u32 {
-            proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-2", index)));
+            let _ = proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("file-2", index)));
         }
 
         let events = failed_events.lock().unwrap();
@@ -989,18 +989,19 @@ mod tests {
 
         // f1 and f2 fill most of the budget; f1's next chunk busts it and
         // drops f1 with a buffer_budget_exhausted event.
-        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk(
+        let _ = proto.handle_incoming_file_chunk(&chunk_message(&make_chunk(
             "f1", 1_000_000, 3, 0, 600_000,
         )));
-        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk("f2", 400_000, 2, 0, 300_000)));
-        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk(
+        let _ = proto
+            .handle_incoming_file_chunk(&chunk_message(&make_chunk("f2", 400_000, 2, 0, 300_000)));
+        let _ = proto.handle_incoming_file_chunk(&chunk_message(&make_chunk(
             "f1", 1_000_000, 3, 1, 300_000,
         )));
         assert_eq!(failed_events.lock().unwrap().len(), 1);
 
         // f1's last in-flight chunk must not resurrect it as a
         // never-completable assembly.
-        proto.handle_incoming_file_chunk(&chunk_message(&make_chunk(
+        let _ = proto.handle_incoming_file_chunk(&chunk_message(&make_chunk(
             "f1", 1_000_000, 3, 2, 100_000,
         )));
         assert_eq!(proto.file_transfer_manager.active_transfer_count(), 1);
@@ -1072,7 +1073,7 @@ mod tests {
             AppId::new("test-app").unwrap(),
             chunk.to_json().unwrap(),
         );
-        proto.handle_incoming_file_chunk(&message);
+        let _ = proto.handle_incoming_file_chunk(&message);
 
         assert!(failed_events.lock().unwrap().is_empty());
         assert_eq!(proto.file_transfer_manager.active_transfer_count(), 0);
@@ -1117,7 +1118,7 @@ mod tests {
             AppId::new("test-app").unwrap(),
             chunk.to_json().unwrap(),
         );
-        proto.handle_incoming_file_chunk(&message);
+        let _ = proto.handle_incoming_file_chunk(&message);
 
         // The failed transfer leaves no assembly and no pending metadata.
         assert_eq!(proto.file_transfer_manager.active_transfer_count(), 0);
@@ -1171,7 +1172,7 @@ mod tests {
             AppId::new("test-app").unwrap(),
             chunk.to_json().unwrap(),
         );
-        proto.handle_incoming_file_chunk(&message);
+        let _ = proto.handle_incoming_file_chunk(&message);
         assert_eq!(proto.file_transfer_manager.active_transfer_count(), 1);
         assert!(proto.pending_media_metadata.contains_key("stale-file"));
 

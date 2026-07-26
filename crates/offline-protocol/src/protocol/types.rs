@@ -761,8 +761,54 @@ pub(crate) enum InternalMessageResult {
     /// be sent back, to avoid confirming to the attacker that the target is
     /// online and processing messages.
     SecurityRejected,
+    /// Message could not be decrypted *yet* because the MLS session/group is
+    /// not established, so it was queued for delayed decryption
+    /// (`enqueue_pending_decryption`). Unlike `Consumed`, a delivery ACK must
+    /// NOT be sent and the id must NOT stay dedup-marked: the message is
+    /// provably not delivered, so the receiver must leave the sender's retry
+    /// lever intact. The receive loop responds by unmarking the id (so a
+    /// resend re-enters processing instead of hitting the duplicate re-ACK
+    /// path) and skipping the ACK. The queued copy is surfaced — and the id
+    /// re-marked — once the session confirms and the queue drains
+    /// (`process_pending_decryption`), which also sends the deferred delivery
+    /// ACK directly on the recorded arrival transport (so a sender that gave up
+    /// before the session confirmed still learns of delivery). See the
+    /// deferred-ACK design in CLAUDE.md's MLS envelope notes.
+    Deferred,
     /// Message was decrypted, here's the plaintext.
     Decrypted(String),
+}
+
+/// Outcome of routing an inbound file-chunk message through
+/// [`OfflineProtocol::handle_incoming_file_chunk`]. Distinguishes chunks that
+/// were dealt with terminally (decrypted/assembled, or dropped for a permanent
+/// reason) from chunks queued for delayed decryption — so the receive loop can
+/// defer the ACK for the latter, exactly like the text `Deferred` path.
+///
+/// [`OfflineProtocol::handle_incoming_file_chunk`]: crate::OfflineProtocol
+///
+/// `#[must_use]`: the ACK/defer decision hinges on this outcome. Dropping it on
+/// the floor silently reverts to the pre-deferred-ACK behavior (always ACK,
+/// leave dedup-marked), reintroducing the queue-path silent-loss bug — so every
+/// caller must branch on it.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChunkOutcome {
+    /// The chunk was decrypted/assembled or dropped for a terminal reason
+    /// (parse failure, resource limit, crypto failure). The sender should stop
+    /// retrying either way, so the caller ACKs as before.
+    Handled,
+    /// The chunk could not be decrypted yet (session not ready) and was queued
+    /// for delayed decryption. The caller must NOT ACK and must unmark the id,
+    /// so the sender keeps retrying and the resend re-enters processing.
+    Deferred,
+    /// The chunk was unencrypted and rejected by the encryption policy. Like
+    /// [`InternalMessageResult::SecurityRejected`] for text, the caller must NOT
+    /// ACK (don't confirm to an injector that the target processes their
+    /// messages) and must unmark the id (so a replay re-enters this gate instead
+    /// of the duplicate re-ACK path), matching the plaintext-text rejection in
+    /// the receive loop.
+    Rejected,
 }
 
 /// Pending message waiting for session establishment.

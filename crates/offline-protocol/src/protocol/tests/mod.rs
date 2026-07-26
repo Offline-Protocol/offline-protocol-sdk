@@ -8759,7 +8759,7 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
     let encrypted_result = bob.process_internal_message(&encrypted_wire);
     assert!(matches!(
         encrypted_result,
-        Some(InternalMessageResult::Consumed)
+        Some(InternalMessageResult::Deferred)
     ));
     assert!(bob.pending_queue.contains_peer("alice"));
     assert!(!bob.confirmed_sessions.contains("alice"));
@@ -8789,6 +8789,694 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
         event,
         Event::SecureSessionEstablished { peer_id, .. } if peer_id == "alice"
     )));
+}
+
+/// Keystone of the deferred-ACK atom (test a + c): an encrypted DM that arrives
+/// before the receiver's MLS session is ready is queued but NOT delivery-ACKed
+/// and NOT left dedup-marked, so the sender's resend re-enters processing
+/// instead of being swallowed by the duplicate re-ACK path. Repeated resends do
+/// not stack queue entries (idempotent enqueue). Once the Welcome drains the
+/// queue, the message surfaces exactly once and the id is re-marked, so a later
+/// resend is deduped + re-ACKed rather than delivered twice.
+#[test]
+fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { content, .. } = event {
+            received_handle.lock().unwrap().push(content);
+        }
+    });
+    bob.start().unwrap();
+
+    // Alice builds a real session to bob plus one encrypted message and the
+    // matching Welcome, all at the MLS-manager level.
+    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = alice_manager.create_session("bob").unwrap();
+    let encrypted = alice_manager
+        .encrypt_for_user("bob", b"before-welcome")
+        .unwrap();
+
+    // One encrypted wire message, cloned for every resend so the id is stable.
+    let encrypted_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(&encrypted).unwrap()
+        ),
+    );
+    assert!(encrypted_wire.requires_ack, "delivery ACK must be in play");
+    let msg_id = encrypted_wire.id.clone();
+    let msg_id_str = msg_id.as_str().to_string();
+
+    let acks_for_msg = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+            .count()
+    };
+
+    // 1) First delivery, session not ready: queued, unmarked, NOT ACKed, not surfaced.
+    bob_handle.queue_message(encrypted_wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert!(
+        !bob.deduplicator.is_duplicate(&msg_id),
+        "a deferred message must be unmarked so a resend can re-enter processing"
+    );
+    assert_eq!(
+        acks_for_msg(&bob_handle),
+        0,
+        "a deferred message must not be ACKed"
+    );
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "must not surface before decrypt"
+    );
+
+    // 2) Resend before the session is ready: reprocessed (not swallowed),
+    //    still queued exactly once (idempotent enqueue), still not ACKed.
+    bob_handle.queue_message(encrypted_wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        bob.pending_queue.peer_queue_len("alice"),
+        1,
+        "resends of the same id must not stack queue entries"
+    );
+    assert_eq!(acks_for_msg(&bob_handle), 0);
+    assert!(received.lock().unwrap().is_empty());
+
+    // 3) Welcome arrives: session confirmed, queue drains, message surfaces once.
+    let welcome_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    bob_handle.queue_message(welcome_wire);
+    while bob.receive_message().is_some() {}
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "queue must drain on Welcome"
+    );
+    assert_eq!(
+        received.lock().unwrap().as_slice(),
+        &["before-welcome".to_string()],
+        "the queued message must surface exactly once"
+    );
+    assert!(
+        bob.deduplicator.is_duplicate(&msg_id),
+        "the drained message must be re-marked so a later resend is deduped"
+    );
+
+    // 4) A resend arriving after the drain is deduped + re-ACKed, never delivered twice.
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(encrypted_wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        received.lock().unwrap().len(),
+        1,
+        "a post-drain resend must not double-deliver"
+    );
+    assert_eq!(
+        acks_for_msg(&bob_handle),
+        1,
+        "a post-drain resend must be re-ACKed so the sender stops retrying"
+    );
+}
+
+/// The deferred-ACK headline: an *evicted* pending entry (not merely a drained
+/// one) still recovers on the sender's next resend, precisely because the
+/// eviction never produced an ACK. With a 1-slot per-peer queue and `DropOldest`,
+/// a second early message evicts the first; the evicted message is provably gone
+/// (it does not surface when the queue later drains) and was never ACKed, so once
+/// the session is ready the sender's resend delivers it. This is the recovery
+/// path the queue-path silent-loss bug used to break.
+#[test]
+fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+    // One slot: the evictor deterministically displaces the evicted entry under
+    // the default `DropOldest` policy, no ACK-driven window pumping required.
+    bob_config.encryption.pending_queue.max_pending_per_peer = 1;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { content, .. } = event {
+            received_handle.lock().unwrap().push(content);
+        }
+    });
+    bob.start().unwrap();
+
+    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = alice_manager.create_session("bob").unwrap();
+
+    // Encrypt the evictor FIRST (lower MLS generation) so that after it drains
+    // it has been consumed in order, and the later-recovered evicted message
+    // (higher generation) decrypts forward — no reliance on the out-of-order
+    // ratchet window.
+    let encrypted_evictor = alice_manager
+        .encrypt_for_user("bob", b"evictor-msg")
+        .unwrap();
+    let encrypted_evicted = alice_manager
+        .encrypt_for_user("bob", b"evicted-msg")
+        .unwrap();
+
+    let wire = |encrypted: &_| {
+        Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &format!(
+                "{}{}",
+                internal_prefixes::ENCRYPTED,
+                serde_json::to_string(encrypted).unwrap()
+            ),
+        )
+    };
+    // The evicted message is received FIRST (so it is the oldest queued entry),
+    // then the evictor displaces it.
+    let evicted_wire = wire(&encrypted_evicted);
+    let evictor_wire = wire(&encrypted_evictor);
+    let evicted_id = evicted_wire.id.clone();
+    let evicted_id_str = evicted_id.as_str().to_string();
+    let acks_for_evicted = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&evicted_id_str))
+            .count()
+    };
+
+    // 1) Evicted message arrives, session not ready: queued, unmarked, not ACKed.
+    bob_handle.queue_message(evicted_wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+
+    // 2) Evictor arrives: displaces the evicted entry under DropOldest.
+    bob_handle.queue_message(evictor_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        bob.pending_queue.peer_queue_len("alice"),
+        1,
+        "the 1-slot queue holds only the evictor now"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&evicted_id),
+        "the evicted message's id must stay unmarked so a resend re-enters processing"
+    );
+    assert_eq!(
+        acks_for_evicted(&bob_handle),
+        0,
+        "the evicted message was never ACKed — that is what keeps recovery possible"
+    );
+
+    // 3) Welcome establishes the session and drains the queue. Only the evictor
+    //    surfaces; the evicted message is provably gone (never delivered).
+    let welcome_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    bob_handle.queue_message(welcome_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        received.lock().unwrap().as_slice(),
+        &["evictor-msg".to_string()],
+        "only the surviving (evictor) message surfaces on drain; the evicted one is gone"
+    );
+
+    // 4) The un-ACKed sender resends the evicted message. The session is now
+    //    ready, so it decrypts on the live path and is delivered + ACKed —
+    //    recovery of an evicted entry with no silent loss.
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(evicted_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        received.lock().unwrap().as_slice(),
+        &["evictor-msg".to_string(), "evicted-msg".to_string()],
+        "the evicted message is recovered exactly once by the sender's resend"
+    );
+    assert_eq!(
+        acks_for_evicted(&bob_handle),
+        1,
+        "the recovered message is ACKed so the sender can finally stop retrying"
+    );
+}
+
+/// change-6: `confirm_session_from_successful_decrypt` now drains the pending
+/// decryption queue. A 1:1 session OWNER confirms ONLY by decrypting the peer's
+/// first group-aware message (never a Welcome-receive), so before this change a
+/// message queued on the owner side was stranded until TTL eviction. Here alice
+/// (owner) never receives a Welcome — the sole confirmation, and therefore the
+/// sole possible drain trigger, is the decrypt of bob's message.
+#[test]
+fn test_pending_queue_drains_on_decrypt_confirmation_owner_path() {
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.encryption.enabled = true;
+    alice_config.encryption.store_pending = true;
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    alice
+        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let alice_transport = MockTransport::new(TransportType::BLE);
+    alice_transport.start().unwrap();
+    let alice_handle = alice_transport.clone();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(alice_transport));
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    alice.on_event(move |event| {
+        if let Event::MessageReceived { content, .. } = event {
+            received_handle.lock().unwrap().push(content);
+        }
+    });
+    alice.start().unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    // Alice (owner) creates the group + Welcome from bob's key package.
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+    alice
+        .send_message("bob", "bootstrap", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Bob adopts alice's group from the Welcome.
+    let welcome_wire = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|msg| msg.content.starts_with(internal_prefixes::WELCOME))
+        .expect("owner should have sent a Welcome");
+    let _ = bob.process_internal_message(&welcome_wire);
+    assert!(
+        !alice.confirmed_sessions.contains("bob"),
+        "owner stays Pending until it decrypts a group-aware message"
+    );
+
+    // Bob sends two encrypted messages; capture their wires.
+    bob.send_message(
+        "alice",
+        "queued-earlier",
+        None::<MessagePriority>,
+        None::<String>,
+    )
+    .unwrap();
+    bob.send_message(
+        "alice",
+        "confirming",
+        None::<MessagePriority>,
+        None::<String>,
+    )
+    .unwrap();
+    let mut encrypted: Vec<Message> = bob_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|msg| msg.content.starts_with(internal_prefixes::ENCRYPTED))
+        .collect();
+    assert!(
+        encrypted.len() >= 2,
+        "bob should have sent two encrypted messages"
+    );
+    let m2 = encrypted.pop().unwrap();
+    let m1 = encrypted.pop().unwrap();
+
+    // Simulate m1 having been queued on the owner before the group existed.
+    alice.enqueue_pending_decryption("bob", &m1);
+    assert!(alice.pending_queue.contains_peer("bob"));
+
+    // Confirming decrypt of m2: this is the ONLY drain trigger available to the
+    // owner (no Welcome/probe/ack is ever received here).
+    let _ = alice.process_internal_message(&m2);
+    assert!(
+        alice.confirmed_sessions.contains("bob"),
+        "owner must confirm via decrypt_success"
+    );
+    assert!(
+        !alice.pending_queue.contains_peer("bob"),
+        "the decrypt-confirmation must drain the pending queue (change-6)"
+    );
+    assert!(
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "queued-earlier"),
+        "the queued message must surface once the session confirms via decrypt"
+    );
+}
+
+/// Media-chunk parity for the deferred-ACK keystone (test d): an encrypted media
+/// chunk that arrives before the session is ready is queued but NOT ACKed, its
+/// id is unmarked so resends re-enter (and do not stack), and it drains and is
+/// deduped once the Welcome establishes the session.
+#[test]
+fn test_deferred_media_chunk_defers_ack_then_recovers() {
+    // Bob has no session; alice has an alice-side confirmed session.
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let bob_kp = {
+        let mls = bob.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager.generate_key_package().unwrap()
+    };
+    let welcome = {
+        let mls = alice.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap()
+    };
+    alice.confirm_session_state("bob", "test_setup").unwrap();
+
+    let file_events: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let file_events_handle = Arc::clone(&file_events);
+    bob.on_event(move |event| {
+        if matches!(event, Event::FileReceived { .. }) {
+            *file_events_handle.lock().unwrap() += 1;
+        }
+    });
+
+    // Single small chunk so the transfer completes in one message.
+    alice
+        .send_media("bob", vec![7u8; 512], "s.bin", ContentType::File, None)
+        .unwrap();
+    let chunk_wire = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| m.content_type == ContentType::FileChunk)
+        .expect("alice should have sent a media chunk");
+    let chunk_id = chunk_wire.id.clone();
+    let chunk_id_str = chunk_id.as_str().to_string();
+    let acks_for_chunk = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&chunk_id_str))
+            .count()
+    };
+
+    // 1) Chunk arrives before session ready: queued, unmarked, not ACKed.
+    bob_handle.queue_message(chunk_wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert!(!bob.deduplicator.is_duplicate(&chunk_id));
+    assert_eq!(
+        acks_for_chunk(&bob_handle),
+        0,
+        "a deferred chunk must not be ACKed"
+    );
+    assert_eq!(*file_events.lock().unwrap(), 0);
+
+    // 2) Resend before ready: reprocessed, still one queue entry, still no ACK.
+    bob_handle.queue_message(chunk_wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(acks_for_chunk(&bob_handle), 0);
+
+    // 3) Welcome establishes the session and drains the chunk to completion.
+    let welcome_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    bob_handle.queue_message(welcome_wire);
+    while bob.receive_message().is_some() {}
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "chunk queue must drain on Welcome"
+    );
+    assert_eq!(
+        *file_events.lock().unwrap(),
+        1,
+        "the file must complete after drain"
+    );
+    assert!(
+        bob.deduplicator.is_duplicate(&chunk_id),
+        "a drained chunk must be re-marked so a resend is deduped"
+    );
+
+    // 4) A post-drain resend is deduped + re-ACKed, not reprocessed.
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(chunk_wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        *file_events.lock().unwrap(),
+        1,
+        "post-drain resend must not re-deliver"
+    );
+    assert_eq!(
+        acks_for_chunk(&bob_handle),
+        1,
+        "post-drain resend must be re-ACKed"
+    );
+}
+
+/// ACK-latency window closure: the drain now sends the deferred delivery ACK
+/// directly on the message's recorded arrival transport, so the sender learns of
+/// delivery WITHOUT having to resend. This pins the behavior that replaced the
+/// old "drain surfaces locally but never ACKs" semantic — a sender that had
+/// exhausted its retry budget before the session confirmed would otherwise mark
+/// a locally-delivered message undeliverable. No resend happens in this test:
+/// the single ACK is produced by the drain alone.
+#[test]
+fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = alice_manager.create_session("bob").unwrap();
+    let encrypted = alice_manager
+        .encrypt_for_user("bob", b"before-welcome")
+        .unwrap();
+
+    let encrypted_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(&encrypted).unwrap()
+        ),
+    );
+    let msg_id_str = encrypted_wire.id.as_str().to_string();
+    let acks_for_msg = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+            .count()
+    };
+
+    // Deferred before the session is ready: queued, not ACKed.
+    bob_handle.queue_message(encrypted_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(
+        acks_for_msg(&bob_handle),
+        0,
+        "a deferred message must not be ACKed on receipt"
+    );
+
+    // Welcome drains the queue. The drain must ACK the surfaced message on its
+    // recorded arrival transport — with NO resend from the sender.
+    let welcome_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    bob_handle.queue_message(welcome_wire);
+    while bob.receive_message().is_some() {}
+    assert!(!bob.pending_queue.contains_peer("alice"));
+    assert_eq!(
+        acks_for_msg(&bob_handle),
+        1,
+        "the drain must send the deferred ACK directly, without waiting for a resend"
+    );
+}
+
+/// Fix parity for the plaintext-media gate: an unencrypted media chunk received
+/// under `require_encryption` is rejected exactly like plaintext text — no
+/// delivery ACK (don't confirm processing to an injector) and the id is left
+/// unmarked (so a replay re-enters the gate instead of the duplicate re-ACK
+/// path). Previously such a chunk was ACKed and left dedup-marked.
+#[test]
+fn test_plaintext_media_chunk_rejected_withholds_ack_and_unmarks() {
+    use crate::file_transfer::FileChunk;
+
+    let mut config = create_test_config_for_user("bob");
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+
+    let mut bob = OfflineProtocol::new(config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+
+    let file_events: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let file_events_handle = Arc::clone(&file_events);
+    bob.on_event(move |event| {
+        if matches!(event, Event::FileReceived { .. }) {
+            *file_events_handle.lock().unwrap() += 1;
+        }
+    });
+    bob.start().unwrap();
+
+    let chunk = FileChunk {
+        file_id: "plain-file".to_string(),
+        file_name: "photo.jpg".to_string(),
+        file_size: 6,
+        total_chunks: 1,
+        chunk_index: 0,
+        chunk_data: vec![1u8; 6],
+        file_checksum: "abc".to_string(),
+    };
+    let chunk_wire = Message::builder(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(chunk.to_json().unwrap())
+    .content_type(ContentType::FileChunk)
+    .build();
+    let chunk_id = chunk_wire.id.clone();
+    let chunk_id_str = chunk_id.as_str().to_string();
+
+    bob_handle.queue_message(chunk_wire);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        *file_events.lock().unwrap(),
+        0,
+        "a policy-rejected plaintext chunk must not surface a file"
+    );
+    assert_eq!(
+        bob_handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&chunk_id_str))
+            .count(),
+        0,
+        "a policy-rejected plaintext chunk must not be ACKed"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&chunk_id),
+        "a policy-rejected plaintext chunk must be unmarked so a replay re-enters the gate"
+    );
 }
 
 #[test]
@@ -10039,11 +10727,11 @@ fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
 
     assert!(matches!(
         first_result,
-        Some(InternalMessageResult::Consumed)
+        Some(InternalMessageResult::Deferred)
     ));
     assert!(matches!(
         second_result,
-        Some(InternalMessageResult::Consumed)
+        Some(InternalMessageResult::Deferred)
     ));
     assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
     assert_eq!(
@@ -10276,7 +10964,7 @@ fn test_encrypted_message_group_not_found_is_queued_with_typed_classification() 
 
     let result = protocol.process_internal_message(&message);
 
-    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    assert!(matches!(result, Some(InternalMessageResult::Deferred)));
     assert!(protocol.pending_queue.contains_peer("sender123"));
     assert_eq!(protocol.pending_queue.peer_queue_len("sender123"), 1);
 }
@@ -10343,7 +11031,8 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
     let mut early_count: u64 = 0;
     let mut invalid_count: u64 = 0;
     for idx in 0..10_000 {
-        let content = if idx % 5 == 0 {
+        let is_invalid = idx % 5 == 0;
+        let content = if is_invalid {
             invalid_count += 1;
             malformed_variants[(idx % malformed_variants.len()) as usize].as_str()
         } else {
@@ -10358,7 +11047,13 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
             content,
         );
         let result = protocol.process_internal_message(&message);
-        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+        // Malformed payloads are consumed (nothing to queue or retry); a
+        // valid-but-early encrypted message is deferred (queued, not ACKed).
+        if is_invalid {
+            assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+        } else {
+            assert!(matches!(result, Some(InternalMessageResult::Deferred)));
+        }
     }
 
     let per_peer_limit = protocol
@@ -10540,7 +11235,7 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
     );
 
     let result = bob.process_internal_message(&incoming);
-    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    assert!(matches!(result, Some(InternalMessageResult::Deferred)));
     assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
 
     {
@@ -19994,14 +20689,19 @@ fn test_send_media_caps_concurrent_transfers_per_peer() {
 fn test_dropped_pending_media_chunk_fails_loudly() {
     use crate::events::DecryptionFailureCode;
 
-    // Bob's per-peer pending queue holds only 2 messages, and his session
-    // with alice is not ready (Welcome never processed). Alice's windowed
-    // transfer outruns the queue: the third chunk evicts the first, which was
-    // already ACKed and dedup-marked — the transfer can never complete and
-    // MUST fail loudly rather than stall silently.
+    // Bob's per-peer pending queue holds only 1 message, and his session with
+    // alice is not ready (Welcome never processed). Alice's initial transfer
+    // window (2 chunks) already outruns the queue: the second chunk evicts the
+    // first under DropOldest. A dropped encrypted media chunk MUST surface a
+    // loud, machine-readable PendingQueueDropped failure rather than vanish
+    // silently, so the app can react instead of watching the transfer stall.
+    //
+    // (Under the deferred-ACK model bob no longer ACKs a queued chunk, so the
+    // sender's window does not advance on its own — the cap of 1 is what makes
+    // the overflow deterministic without relying on ACK-driven pumping.)
     let mut config = create_test_config_for_user("bob");
     config.encryption.enabled = true;
-    config.encryption.pending_queue.max_pending_per_peer = 2;
+    config.encryption.pending_queue.max_pending_per_peer = 1;
     let mut bob = OfflineProtocol::new(config).unwrap();
     bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
@@ -20039,8 +20739,8 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
         }
     });
 
-    // 3 chunks over 4 KB BLE chunks (window 2): the initial window fills the
-    // queue; the pumped third chunk overflows it.
+    // 3 chunks over 4 KB BLE chunks (window 2): the initial 2-chunk window
+    // alone overflows bob's 1-slot queue, evicting the first chunk.
     let file_data = vec![0x5Au8; 9 * 1024];
     alice
         .send_media("bob", file_data, "big.bin", ContentType::File, None)
@@ -20059,7 +20759,8 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
             "pending queue overflow never surfaced a PendingQueueDropped failure"
         );
 
-        // Ferry alice -> bob (bob queues, but still ACKs).
+        // Ferry alice -> bob (bob queues without ACKing; overflow drops the
+        // oldest queued chunk and emits PendingQueueDropped).
         let outbound = alice_handle.sent_messages();
         alice_handle.clear_sent_messages();
         for msg in outbound {
