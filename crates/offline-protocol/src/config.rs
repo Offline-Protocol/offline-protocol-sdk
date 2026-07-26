@@ -151,6 +151,21 @@ pub struct EncryptionConfig {
     /// [`EncryptionConfig::compact_envelope_enabled`] — the two degrade
     /// separately.
     pub rich_payload_enabled: bool,
+
+    /// Whether to recover a 1:1 MLS session that has fallen out of epoch sync
+    /// with the peer (the two sides disagree on the MLS epoch — e.g. after a
+    /// fork), rather than silently dropping the undecryptable message.
+    ///
+    /// Defaults to `true`. When enabled, an inbound encrypted DM (or media
+    /// chunk) that fails to decrypt *specifically* because of an epoch
+    /// mismatch is not delivery-ACKed — so the sender keeps retrying instead of
+    /// marking it delivered — and a rate-limited session re-key (the
+    /// `session_reset` key-package exchange) is triggered to rebuild the
+    /// channel. Genuine decrypt failures (corrupt/forged ciphertext, discarded
+    /// ratchet generations) are unaffected and still fail closed as before, so
+    /// this never re-keys on injected garbage. When disabled, an epoch-mismatch
+    /// failure falls back to the legacy drop-and-ACK behavior.
+    pub crypto_recovery_enabled: bool,
 }
 
 impl Default for EncryptionConfig {
@@ -165,6 +180,7 @@ impl Default for EncryptionConfig {
             pending_queue: PendingQueueConfig::default(),
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
+            crypto_recovery_enabled: true,
         }
     }
 }
@@ -180,6 +196,7 @@ impl EncryptionConfig {
             pending_queue: PendingQueueConfig::default(),
             compact_envelope_enabled: false,
             rich_payload_enabled: false,
+            crypto_recovery_enabled: false,
         }
     }
 }

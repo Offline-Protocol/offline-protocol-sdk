@@ -183,6 +183,15 @@ pub struct OfflineProtocol {
     /// Probe schedule for pending sessions to guarantee post-restart convergence.
     confirmation_probe_due_at: HashMap<String, DateTime<Utc>>,
 
+    /// Rate-limit schedule for 1:1 session re-keys triggered by an epoch-desync
+    /// decrypt failure. Bounds the re-key to at most one per peer per
+    /// `REKEY_INTERVAL_SECS` so a peer replaying stale-epoch ciphertext (or an
+    /// injected wrong-epoch frame) cannot drive a re-key storm. Cleared for a
+    /// peer once a decrypt succeeds (the channel healed), so a later desync can
+    /// re-key promptly. In-memory only: a re-key is a live-connectivity action,
+    /// and a fresh desync after restart simply re-arms it.
+    rekey_due_at: HashMap<String, DateTime<Utc>>,
+
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
@@ -411,6 +420,7 @@ impl OfflineProtocol {
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
+            rekey_due_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
             pending_connection_requests: HashMap::new(),
             welcome_presence_rescue: HashMap::new(),

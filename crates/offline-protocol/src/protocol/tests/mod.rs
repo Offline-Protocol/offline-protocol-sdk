@@ -8934,6 +8934,155 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
     );
 }
 
+/// Tier 1 crypto-failure recovery: an established 1:1 session that has forked
+/// (the peer advanced its epoch) yields an undecryptable DM. Instead of the old
+/// silent drop-and-ACK, the receiver must withhold the delivery ACK (so the
+/// sender is not told "delivered") and trigger a `session_reset` re-key to heal
+/// the channel — without enqueueing the ciphertext (it is sealed to the dead
+/// epoch and can never drain).
+#[test]
+fn test_desync_dm_withholds_ack_and_triggers_rekey() {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { content, .. } = event {
+            received_handle.lock().unwrap().push(content);
+        }
+    });
+    bob.start().unwrap();
+
+    // Establish bob's session with alice via a real Welcome.
+    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice_manager
+        .import_key_package("bob", &bob_key_package.key_package_data)
+        .unwrap();
+    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    bob_handle.queue_message(welcome_wire);
+    while bob.receive_message().is_some() {}
+
+    // Fork the session: alice advances her epoch (self-update) without bob
+    // seeing the commit, then encrypts at the new epoch. Bob is now one epoch
+    // behind → the message cannot decrypt (WrongEpoch → SessionDesync).
+    alice_manager
+        .update_keys(&offline_protocol_mls::GroupId::new("session:alice:bob").unwrap())
+        .unwrap();
+    let encrypted = alice_manager
+        .encrypt_for_user("bob", b"after-fork")
+        .unwrap();
+    let encrypted_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(&encrypted).unwrap()
+        ),
+    );
+    assert!(encrypted_wire.requires_ack, "delivery ACK must be in play");
+    let msg_id_str = encrypted_wire.id.as_str().to_string();
+
+    // Only look at side-effects caused by the forked message.
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(encrypted_wire);
+    while bob.receive_message().is_some() {}
+
+    let sent = bob_handle.sent_messages();
+    let acks = sent
+        .iter()
+        .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+        .count();
+    assert_eq!(acks, 0, "a desync DM must NOT be delivery-ACKed");
+
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "an undecryptable desync DM must not surface to the app"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "a desync DM must NOT be enqueued (its ciphertext can never drain)"
+    );
+
+    let rekeys = sent
+        .iter()
+        .filter(|m| {
+            m.content.starts_with(internal_prefixes::KEY_PACKAGE) && m.recipient.as_str() == "alice"
+        })
+        .count();
+    assert_eq!(
+        rekeys, 1,
+        "a desync must trigger exactly one session_reset re-key to alice"
+    );
+}
+
+/// The re-key DoS guard: a peer replaying stale-epoch ciphertext (or an injected
+/// wrong-epoch frame) must not be able to drive a re-key storm. Repeated
+/// same-peer re-key triggers within the rate-limit window collapse to a single
+/// key-package send.
+#[test]
+fn test_desync_rekey_is_rate_limited() {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    bob_handle.clear_sent_messages();
+
+    // Five rapid triggers for the same peer, well inside REKEY_INTERVAL_SECS.
+    for _ in 0..5 {
+        bob.schedule_session_rekey("alice");
+    }
+
+    let rekeys = bob_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| {
+            m.content.starts_with(internal_prefixes::KEY_PACKAGE) && m.recipient.as_str() == "alice"
+        })
+        .count();
+    assert_eq!(
+        rekeys, 1,
+        "repeated desync triggers within the window must collapse to one re-key"
+    );
+}
+
 /// The deferred-ACK headline: an *evicted* pending entry (not merely a drained
 /// one) still recovers on the sender's next resend, precisely because the
 /// eviction never produced an ACK. With a 1-slot per-peer queue and `DropOldest`,

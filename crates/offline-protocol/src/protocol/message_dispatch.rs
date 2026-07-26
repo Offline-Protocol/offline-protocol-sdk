@@ -632,6 +632,9 @@ impl OfflineProtocol {
                 SessionNotReady {
                     sender: String,
                 },
+                SessionDesync {
+                    sender: String,
+                },
                 Failed {
                     sender: String,
                     group_id: String,
@@ -706,7 +709,23 @@ impl OfflineProtocol {
                                     );
                                     DecryptResult::MlsNotInitialized
                                 }
-                                SessionStateError::TransportFailure
+                                SessionStateError::SessionDesync
+                                    if self.config.encryption.crypto_recovery_enabled =>
+                                {
+                                    info!(
+                                        sender = %sender,
+                                        error_code = session_state_error.code(),
+                                        "Encrypted message failed to decrypt due to epoch desync, re-keying"
+                                    );
+                                    DecryptResult::SessionDesync {
+                                        sender: sender.to_string(),
+                                    }
+                                }
+                                // Epoch desync with recovery disabled, or any
+                                // genuine crypto/transport failure: fall through
+                                // to the legacy drop-and-ACK behavior.
+                                SessionStateError::SessionDesync
+                                | SessionStateError::TransportFailure
                                 | SessionStateError::CryptoFailure
                                 | SessionStateError::Unknown => {
                                     let kind = DecryptionFailureKind::from_mls_error(&e);
@@ -805,6 +824,26 @@ impl OfflineProtocol {
                     // `process_pending_decryption` drains it.
                     Some(InternalMessageResult::Deferred)
                 }
+                DecryptResult::SessionDesync {
+                    sender: sender_owned,
+                } => {
+                    // The session exists but is out of epoch sync (the two sides
+                    // diverged). Trigger a rate-limited re-key to heal the channel
+                    // for future traffic, and return Deferred so the receive loop
+                    // withholds the ACK and unmarks the id — the sender's ACK was
+                    // a lie before (message dropped, sender told "delivered").
+                    //
+                    // We deliberately do NOT enqueue: unlike the not-yet-ready
+                    // case, this ciphertext is sealed to the now-dead epoch and
+                    // can never decrypt after the re-key, so queuing it would only
+                    // waste memory until TTL. Recovery of *this* message depends
+                    // on the sender re-sending it re-sealed against the rebuilt
+                    // session (a sender-side change); until then the sender's
+                    // retries surface an honest undeliverable instead of silent
+                    // loss, which is strictly better than the lying ACK.
+                    self.schedule_session_rekey(&sender_owned);
+                    Some(InternalMessageResult::Deferred)
+                }
                 DecryptResult::Failed {
                     sender: sender_owned,
                     group_id,
@@ -878,6 +917,9 @@ impl OfflineProtocol {
         match self.confirm_session_state(sender, "decrypt_success") {
             Ok(true) => {
                 info!(sender = %sender, "Session confirmed via successful decryption");
+                // The channel is healthy again — reset the re-key rate limit so a
+                // future desync can re-key promptly.
+                self.clear_session_rekey_tracking(sender);
                 let _ = self.flush_pending_messages(sender);
                 // Drain any messages that were queued while the session was not
                 // ready. Historically the pending-decryption queue was only

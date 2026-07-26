@@ -18,6 +18,13 @@ use tracing::warn;
 pub(crate) const CONFIRMATION_RETRY_INTERVAL_SECS: i64 = 5;
 /// Probe interval for reconciling pending sessions after restart.
 pub(crate) const CONFIRMATION_PROBE_INTERVAL_SECS: i64 = 5;
+/// Minimum interval between 1:1 session re-keys for the same peer, triggered by
+/// an epoch-desync decrypt failure. A re-key is a full teardown + key-package
+/// re-exchange, so it is rate-limited well above the confirmation-probe cadence:
+/// one legit desync heals in a single round-trip, and this bounds a peer
+/// replaying stale-epoch ciphertext (or an injected wrong-epoch frame) to at
+/// most one re-key per this window rather than a storm.
+pub(crate) const REKEY_INTERVAL_SECS: i64 = 30;
 /// Number of welcome retry records processed per tick.
 pub(crate) const WELCOME_RETRY_BATCH_SIZE: usize = 20;
 /// Hard TTL for outbound welcome lifecycle records.

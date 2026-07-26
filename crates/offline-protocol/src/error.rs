@@ -49,6 +49,11 @@ pub enum SessionStateError {
     TransportFailure,
     /// Cryptographic operation failure.
     CryptoFailure,
+    /// Session exists but is out of sync with the sender's epoch (the two sides
+    /// disagree on the MLS epoch). Unlike [`Self::CryptoFailure`] this is
+    /// recoverable by re-establishing the 1:1 session, so the receive path
+    /// withholds the delivery ACK and triggers a re-key rather than dropping.
+    SessionDesync,
     /// Error that does not match a known class.
     Unknown,
 }
@@ -62,6 +67,7 @@ impl SessionStateError {
             Self::NotInitialized => "NOT_INITIALIZED",
             Self::TransportFailure => "TRANSPORT_FAILURE",
             Self::CryptoFailure => "CRYPTO_FAILURE",
+            Self::SessionDesync => "SESSION_DESYNC",
             Self::Unknown => "UNKNOWN",
         }
     }
@@ -87,6 +93,7 @@ impl SessionStateError {
             | Self::GroupNotFound
             | Self::NotInitialized
             | Self::CryptoFailure
+            | Self::SessionDesync
             | Self::Unknown => crate::events::WelcomeReasonCode::InternalError,
         }
     }
@@ -98,6 +105,7 @@ impl From<&offline_protocol_mls::MlsError> for SessionStateError {
             offline_protocol_mls::MlsError::GroupNotFound(_)
             | offline_protocol_mls::MlsError::SessionNotFound(_) => Self::GroupNotFound,
             offline_protocol_mls::MlsError::NotInitialized => Self::NotInitialized,
+            offline_protocol_mls::MlsError::SessionDesync(_) => Self::SessionDesync,
             offline_protocol_mls::MlsError::Storage(_)
             | offline_protocol_mls::MlsError::OpenMls(_)
             | offline_protocol_mls::MlsError::Deserialization(_)
@@ -226,6 +234,7 @@ mod tests {
             "TRANSPORT_FAILURE"
         );
         assert_eq!(SessionStateError::CryptoFailure.code(), "CRYPTO_FAILURE");
+        assert_eq!(SessionStateError::SessionDesync.code(), "SESSION_DESYNC");
         assert_eq!(SessionStateError::Unknown.code(), "UNKNOWN");
     }
 
@@ -253,6 +262,18 @@ mod tests {
     fn classify_maps_crypto_failures() {
         let classified = SessionStateError::from(&MlsError::Decryption("failed".to_string()));
         assert_eq!(classified, SessionStateError::CryptoFailure);
+    }
+
+    #[test]
+    fn classify_maps_session_desync_distinct_from_crypto_failure() {
+        // An epoch desync is recoverable and must land in its own class, NOT
+        // CryptoFailure — otherwise the receive path would drop-and-ACK it as a
+        // permanent failure instead of re-keying.
+        let desync = SessionStateError::from(&MlsError::SessionDesync("wrong epoch".to_string()));
+        assert_eq!(desync, SessionStateError::SessionDesync);
+        // The genuine-failure sibling stays CryptoFailure.
+        let crypto = SessionStateError::from(&MlsError::Decryption("aead".to_string()));
+        assert_eq!(crypto, SessionStateError::CryptoFailure);
     }
 
     #[test]

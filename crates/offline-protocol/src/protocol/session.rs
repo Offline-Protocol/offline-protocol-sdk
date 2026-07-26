@@ -3,7 +3,7 @@
 use super::{
     internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle, SessionState,
     WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
-    CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS,
+    CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS,
     WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
     WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
@@ -458,6 +458,59 @@ impl OfflineProtocol {
                 now + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS),
             );
         }
+    }
+
+    /// Triggers a rate-limited re-key of the 1:1 session with `peer_id` after an
+    /// epoch-desync decrypt failure.
+    ///
+    /// Tearing down the local session alone deadlocks — the peer's key package
+    /// was consumed at first establishment, so nothing could rebuild it, and the
+    /// peer (still believing its session is healthy) would never re-advertise
+    /// one. Sending a `session_reset` key package is the self-healing primitive:
+    /// the peer drops its stale session, re-advertises its own key package, and
+    /// both sides rebuild symmetrically.
+    ///
+    /// Rate-limited via `rekey_due_at` to at most one re-key per
+    /// [`REKEY_INTERVAL_SECS`] per peer, so a peer replaying stale-epoch
+    /// ciphertext (or an injected wrong-epoch frame) cannot drive a re-key storm.
+    /// The interval is stamped before the send so a send error still counts
+    /// against the limit. [`Self::clear_session_rekey_tracking`] resets it once a
+    /// decrypt succeeds.
+    pub(super) fn schedule_session_rekey(&mut self, peer_id: &str) {
+        let now = Utc::now();
+        if let Some(due_at) = self.rekey_due_at.get(peer_id) {
+            if *due_at > now {
+                return;
+            }
+        }
+        self.rekey_due_at.insert(
+            peer_id.to_string(),
+            now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
+        );
+        match self.send_key_package_to(peer_id, true) {
+            Ok(()) => {
+                info!(
+                    event = "session_rekey_triggered",
+                    peer_id = %peer_id,
+                    "Triggered 1:1 session re-key after epoch desync"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    event = "session_rekey_send_failed",
+                    peer_id = %peer_id,
+                    error = %err,
+                    "session_rekey_send_failed"
+                );
+            }
+        }
+    }
+
+    /// Clears the re-key rate-limit for `peer_id`, called when its session is
+    /// healthy again (a decrypt succeeded) so a later desync can re-key promptly
+    /// instead of waiting out the previous interval.
+    pub(super) fn clear_session_rekey_tracking(&mut self, peer_id: &str) {
+        self.rekey_due_at.remove(peer_id);
     }
 
     pub(super) fn retry_pending_session_confirmations(&mut self) {

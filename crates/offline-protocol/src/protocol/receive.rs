@@ -803,6 +803,22 @@ impl OfflineProtocol {
                         self.enqueue_pending_decryption_via(sender, message, arrival_transport);
                         MediaChunkDecrypt::Deferred
                     }
+                    SessionStateError::SessionDesync
+                        if self.config.encryption.crypto_recovery_enabled =>
+                    {
+                        // Epoch desync (see the text path in `handle_encrypted_message`):
+                        // heal the channel with a rate-limited re-key and return
+                        // Deferred so the chunk is not ACKed and its id is
+                        // unmarked. We do NOT enqueue — the chunk is sealed to the
+                        // dead epoch and can never decrypt after the re-key.
+                        info!(
+                            sender = %sender,
+                            error_code = classification.code(),
+                            "Encrypted media chunk failed to decrypt due to epoch desync, re-keying"
+                        );
+                        self.schedule_session_rekey(sender);
+                        MediaChunkDecrypt::Deferred
+                    }
                     _ => {
                         warn!(
                             sender = %sender,
