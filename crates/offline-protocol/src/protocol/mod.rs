@@ -1660,7 +1660,7 @@ impl OfflineProtocol {
         // --- Group (mesh/MLS) messages ---
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_MSG) {
-            return Some(self.handle_group_mls_msg(message, sender, data));
+            return Some(self.handle_group_mls_msg_via(message, sender, data, arrival_transport));
         }
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_WELCOME) {

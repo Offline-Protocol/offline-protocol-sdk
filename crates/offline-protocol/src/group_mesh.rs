@@ -491,6 +491,12 @@ pub(crate) struct PendingGroupMessage {
     pub(crate) forward_info: Option<offline_protocol_core::ForwardInfo>,
     /// When this message was first buffered.
     pub(crate) buffered_at: Instant,
+    /// Transport the frame arrived on, recorded so the drain can send the
+    /// deferred delivery ACK directly on it once the message finally decrypts
+    /// (see the deferred-ACK atom in CLAUDE.md). `None` for the relay path
+    /// (the relay sender is not ACK-gated) and for transport-less test enqueue
+    /// — in both cases the drain ACK is a correct no-op.
+    pub(crate) received_via: Option<TransportType>,
 }
 
 /// Tracks a leave election where we're waiting for the elected remover to
@@ -652,17 +658,45 @@ fn enforce_global_buffer_bound<T>(
 }
 
 impl OfflineProtocol {
-    /// Handles an incoming MLS-encrypted group message.
-    ///
-    /// Returns [`InternalMessageResult::SecurityRejected`] when the wire
-    /// sender does not match the MLS-authenticated sender (SEC-M1), so the
-    /// caller suppresses the delivery ACK exactly like the `__MLS_ENC__`
-    /// path; all other outcomes consume the message.
+    /// Transport-less convenience wrapper over [`Self::handle_group_mls_msg_via`],
+    /// used only by tests; production always knows the arrival transport.
+    #[cfg(test)]
     pub(crate) fn handle_group_mls_msg(
         &mut self,
         message: &Message,
         sender: &str,
         data: &str,
+    ) -> InternalMessageResult {
+        self.handle_group_mls_msg_via(message, sender, data, None)
+    }
+
+    /// Handles an incoming MLS-encrypted group message, with the transport the
+    /// frame arrived on.
+    ///
+    /// Returns [`InternalMessageResult::SecurityRejected`] when the wire
+    /// sender does not match the MLS-authenticated sender (SEC-M1), so the
+    /// caller suppresses the delivery ACK exactly like the `__MLS_ENC__`
+    /// path; a genuine crypto/parse failure consumes the message.
+    ///
+    /// Deferred-ACK atom (mesh-group analog of the DM/media fix, PR #223): a
+    /// message buffered because local group state is not ready yet returns
+    /// [`InternalMessageResult::Deferred`], so the receive loop skips the
+    /// delivery ACK and unmarks the transport-level dedup — keeping the
+    /// sender's per-member `ack_manager` retransmitting until the message is
+    /// actually delivered on drain (`drain_pending_group_messages` sends the
+    /// deferred ACK on `received_via`). Without this the buffered-but-ACKed
+    /// copy could be evicted/expired before a commit drained it and be lost,
+    /// even though the group-level `release_replay_protection` already clears
+    /// dedup on drop. The group-level `message_dedup` stays marked across the
+    /// pending lifetime (replay-amplification defense + authoritative
+    /// double-delivery guard), so — unlike the DM path — the drain does not
+    /// re-mark the transport dedup.
+    pub(crate) fn handle_group_mls_msg_via(
+        &mut self,
+        message: &Message,
+        sender: &str,
+        data: &str,
+        arrival_transport: Option<TransportType>,
     ) -> InternalMessageResult {
         let payload = match serde_json::from_str::<GroupMlsMessagePayload>(data) {
             Ok(p) => p,
@@ -675,6 +709,22 @@ impl OfflineProtocol {
         // Dedup check using the unique message ID
         let dedup_key = message.id.as_str().to_string();
         if self.group_mesh.message_dedup.contains_key(&dedup_key) {
+            // Already seen. If the buffered copy is still awaiting decryption,
+            // this is a sender retransmit of an undelivered message: defer (no
+            // ACK) so the sender keeps retrying until we actually deliver on
+            // drain. Returning before decrypt also preserves the
+            // replay-amplification defense (one MLS crypto op per id). If the
+            // id is not buffered, it was already delivered (a dropped-and-
+            // released id would not be in the dedup table at all), so treat it
+            // as a normal duplicate and re-ACK to let the sender stop.
+            if self.is_group_message_pending(&payload.group_id, &dedup_key) {
+                debug!(
+                    group_id = %payload.group_id,
+                    msg_id = %dedup_key,
+                    "Duplicate of a still-pending group message, deferring ACK"
+                );
+                return InternalMessageResult::Deferred;
+            }
             debug!(
                 group_id = %payload.group_id,
                 msg_id = %dedup_key,
@@ -742,9 +792,13 @@ impl OfflineProtocol {
                         reply_to: payload.reply_to,
                         forward_info: payload.forward_info,
                         buffered_at: Instant::now(),
+                        received_via: arrival_transport,
                     },
                 );
-                InternalMessageResult::Consumed
+                // Buffered, not delivered: defer the ACK so the sender keeps
+                // retransmitting until the drain surfaces it. The drain then
+                // ACKs directly on `arrival_transport`.
+                InternalMessageResult::Deferred
             }
             GroupDecryptOutcome::NonApplication => {
                 // MLS consumed a commit or proposal riding the application
@@ -1573,6 +1627,46 @@ impl OfflineProtocol {
         }
     }
 
+    /// Whether a message id is currently buffered awaiting decryption for the
+    /// given group. Drives the deferred-ACK decision in
+    /// [`Self::handle_group_mls_msg_via`]'s duplicate branch: a retransmit of a
+    /// still-pending message must be deferred (no ACK), while a duplicate of an
+    /// already-delivered one is re-ACKed so the sender can stop.
+    fn is_group_message_pending(&self, group_id: &str, message_id: &str) -> bool {
+        self.group_mesh
+            .pending_group_messages
+            .get(group_id)
+            .is_some_and(|buf| buf.iter().any(|m| m.message_id == message_id))
+    }
+
+    /// Sends the deferred delivery ACK for a group message surfaced by the
+    /// drain, on the transport it originally arrived on.
+    ///
+    /// Mirrors the DM `ack_drained_message`: it closes the ACK-latency window
+    /// so a sender that exhausts its retry budget before local group state
+    /// catches up still learns of delivery, instead of marking a
+    /// locally-delivered message undeliverable. `received_via` is `None` for
+    /// relay-path entries (the relay sender is not ACK-gated) and transport-less
+    /// test enqueue, in which case this is a correct no-op and recovery falls
+    /// back to the sender's next resend hitting the duplicate re-ACK path.
+    fn ack_drained_group_message(
+        &mut self,
+        ack_to: &str,
+        acked_message_id: &str,
+        received_via: Option<TransportType>,
+    ) {
+        let Some(transport) = received_via else {
+            return;
+        };
+        if let Err(err) = self.send_group_delivery_ack(ack_to, acked_message_id, transport) {
+            error!(
+                msg_id = %acked_message_id,
+                error = %err,
+                "Failed to send deferred delivery ACK for drained group message"
+            );
+        }
+    }
+
     /// Drains buffered group application messages after local MLS state for
     /// the group advanced (successful Welcome join or commit). Messages are
     /// retried in arrival order; entries that still fail retriably are
@@ -1627,6 +1721,14 @@ impl OfflineProtocol {
                             msg_id = %entry.message_id,
                             "Delivered buffered group message after group state caught up"
                         );
+                        // Capture the ACK targets before the fields move into
+                        // the event: the message is delivered now, so the drain
+                        // sends the deferred delivery ACK directly on the
+                        // recorded arrival transport instead of waiting for the
+                        // sender's next resend.
+                        let received_via = entry.received_via;
+                        let ack_sender = entry.sender.clone();
+                        let ack_message_id = entry.message_id.clone();
                         let (content, media_metadata, content_type, forward_info_event) =
                             Self::restore_group_rich(text, entry.forward_info, &entry.sender);
                         let timestamp = entry
@@ -1643,6 +1745,7 @@ impl OfflineProtocol {
                             media_metadata,
                             content_type,
                         ));
+                        self.ack_drained_group_message(&ack_sender, &ack_message_id, received_via);
                     }
                     GroupDecryptOutcome::Retriable => {
                         still_pending.push_back(entry);
@@ -4184,6 +4287,10 @@ impl OfflineProtocol {
                         reply_to: reply_to_msg,
                         forward_info,
                         buffered_at: Instant::now(),
+                        // Relay path: the relay sender is not ACK-gated (it uses
+                        // try_relay_broadcast, not per-member ensure_ack_registration),
+                        // so there is no deferred ACK to send on drain.
+                        received_via: None,
                     },
                 );
             }
