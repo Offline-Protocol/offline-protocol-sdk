@@ -35,16 +35,20 @@ impl OfflineProtocol {
         count
     }
 
-    /// Surfaces pending-queue drops of encrypted media chunks. A dropped
-    /// chunk is unrecoverable: it was ACKed and dedup-marked on receipt, so
-    /// the sender will not retransmit it and already counts it delivered —
-    /// the file transfer it belongs to can never complete. Emit a loud,
-    /// machine-readable failure instead of stalling silently. (The chunk is
-    /// still encrypted at this point, so the file_id cannot be named here.)
+    /// Surfaces pending-queue evictions of encrypted media chunks so an app
+    /// can react to a stalled transfer instead of watching it hang silently.
+    /// (The chunk is still encrypted at this point, so the file_id cannot be
+    /// named here.)
+    ///
+    /// Under the deferred-ACK model this is **advisory, not terminal**: an
+    /// evicted chunk was never ACKed, so the sender keeps retransmitting and a
+    /// later resend re-enters the queue and can still complete the transfer
+    /// once the session confirms. The event says the transfer is *stalled*, not
+    /// that it has failed — the terminal media signal is `FileReceiveFailed`.
     ///
     /// Dropped text messages keep their existing metrics-only handling: the
-    /// pending message queue was sized for them, and their loss is already
-    /// tracked via `PendingQueueMetrics`.
+    /// pending message queue was sized for them, they recover on the sender's
+    /// next resend, and their loss is already tracked via `PendingQueueMetrics`.
     fn report_dropped_pending_media(&mut self, dropped: Vec<DroppedPendingMessage>) {
         for entry in dropped {
             if entry.message.content_type != ContentType::FileChunk {
@@ -54,7 +58,7 @@ impl OfflineProtocol {
                 sender = %entry.message.sender,
                 message_id = %entry.message.id,
                 reason = entry.reason,
-                "Encrypted media chunk dropped from pending queue; its file transfer cannot complete"
+                "Encrypted media chunk evicted from pending queue; its file transfer is stalled until the sender resends"
             );
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::message_decryption_failed(
@@ -62,7 +66,7 @@ impl OfflineProtocol {
                     entry.message.sender.as_str().to_string(),
                     DecryptionFailureCode::PendingQueueDropped,
                     format!(
-                        "encrypted media chunk dropped from pending queue ({}); its file transfer cannot complete",
+                        "encrypted media chunk evicted from pending queue ({}); its file transfer is stalled until the sender resends",
                         entry.reason
                     ),
                 ));

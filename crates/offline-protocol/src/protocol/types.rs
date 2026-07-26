@@ -784,6 +784,12 @@ pub(crate) enum InternalMessageResult {
 /// defer the ACK for the latter, exactly like the text `Deferred` path.
 ///
 /// [`OfflineProtocol::handle_incoming_file_chunk`]: crate::OfflineProtocol
+///
+/// `#[must_use]`: the ACK/defer decision hinges on this outcome. Dropping it on
+/// the floor silently reverts to the pre-deferred-ACK behavior (always ACK,
+/// leave dedup-marked), reintroducing the queue-path silent-loss bug — so every
+/// caller must branch on it.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChunkOutcome {
     /// The chunk was decrypted/assembled or dropped for a terminal reason

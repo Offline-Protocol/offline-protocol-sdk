@@ -18,6 +18,7 @@ use offline_protocol::{
     RoutingReasonCode as CoreRoutingReasonCode, SendMessageOptions as CoreSendMessageOptions,
     TelemetryConfig as CoreTelemetryConfig, TelemetryRecord as CoreTelemetryRecord,
     TelemetrySink as CoreTelemetrySink, TransportStateEvent as CoreTransportStateEvent,
+    DEFAULT_PENDING_TTL_MS,
 };
 use offline_protocol_core::{
     ContentType as CoreContentType, ForwardInfo as CoreForwardInfo,
@@ -1873,9 +1874,9 @@ impl Default for PendingQueueConfig {
         Self {
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            // Mirrors the core default (30 min); see PendingQueueConfig in
+            // Mirrors the core default (30 min); see DEFAULT_PENDING_TTL_MS in
             // offline-protocol/src/config.rs for the deferred-ACK rationale.
-            pending_ttl_ms: 1_800_000,
+            pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,
         }
     }
@@ -5691,7 +5692,7 @@ mod tests {
             require_encryption: false,
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            pending_ttl_ms: 1_800_000,
+            pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
@@ -5719,7 +5720,7 @@ mod tests {
             require_encryption: false,
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            pending_ttl_ms: 1_800_000,
+            pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
@@ -6055,7 +6056,7 @@ mod tests {
             require_encryption: false,
             max_pending_per_peer: 64,
             max_pending_global: 4096,
-            pending_ttl_ms: 1_800_000,
+            pending_ttl_ms: DEFAULT_PENDING_TTL_MS,
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,

@@ -243,10 +243,18 @@ pub enum DecryptionFailureCode {
     IdentityMismatch,
     /// Cryptographic operation failed.
     CryptoFailure,
-    /// The message was dropped from the pending-decryption queue (overflow or
-    /// TTL expiry) before the sender's session became ready. It was ACKed on
-    /// receipt, so the sender will not retransmit it; for a media chunk this
-    /// means the file transfer it belongs to can no longer complete.
+    /// A media chunk was evicted from the pending-decryption queue (overflow or
+    /// TTL expiry) before the sender's session became ready, so the file
+    /// transfer it belongs to is currently stalled.
+    ///
+    /// Under the deferred-ACK model this is **advisory, not terminal**: the
+    /// evicted chunk was never ACKed, so the sender keeps retransmitting and a
+    /// later resend re-enters the queue and can still complete the transfer once
+    /// the session confirms. Treat this as "the transfer is stalled and may need
+    /// a resend", not "the transfer has permanently failed" — the terminal
+    /// failure signal for media is `FileReceiveFailed`. (A genuinely
+    /// unrecoverable decrypt — e.g. a hard crypto failure — surfaces under a
+    /// different `DecryptionFailureCode`, not this one.)
     PendingQueueDropped,
     /// Failure class is unknown.
     Unknown,
