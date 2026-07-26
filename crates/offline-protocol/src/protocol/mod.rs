@@ -76,6 +76,13 @@ pub struct OfflineProtocol {
     /// Messages awaiting delivery/acknowledgment (store-and-forward outbox).
     outbox: HashMap<MessageId, OutboxEntry>,
 
+    /// Transient staging for outbox re-seal provenance, keyed by message id.
+    /// Populated at send time (where the plaintext is in scope) and consumed
+    /// when the outbox entry is first created (which happens deep in the send/
+    /// retry machinery, from the already-sealed `Message`). Once consumed it
+    /// lives on the `OutboxEntry` itself. See [`OutboxReseal`].
+    pending_reseal: HashMap<MessageId, OutboxReseal>,
+
     /// Dedicated outbox for file chunk messages, separate from the main outbox
     /// to prevent large file transfers from evicting regular messages.
     media_outbox: HashMap<MessageId, OutboxEntry>,
@@ -402,6 +409,7 @@ impl OfflineProtocol {
             deduplicator: Deduplicator::with_config(config.reliability.dedup.clone()),
             shared_state: Arc::new(Mutex::new(SharedState::new())),
             outbox: HashMap::new(),
+            pending_reseal: HashMap::new(),
             media_outbox: HashMap::new(),
             dm_unreachable_parks: HashMap::new(),
             mls_manager: None,
@@ -1204,11 +1212,15 @@ impl OfflineProtocol {
     /// precedence over the override; without either, DORS picks.
     fn try_flush_send_via(
         &mut self,
-        message: Message,
+        mut message: Message,
         attempt_count: u32,
         transport_override: Option<TransportType>,
     ) -> Option<TransportType> {
         self.ensure_outbox_entry(&message);
+        // Tier 2: re-seal against the peer's current session before flushing, so
+        // a post-re-key epoch change no longer leaves the bytes undecryptable.
+        // No-op for media/plaintext/unconfirmed sessions.
+        self.reseal_for_resend_in_place(&mut message);
         let forced_transport = self
             .pinned_media_transport_for_message(&message.id)
             .or(transport_override);
@@ -1933,7 +1945,7 @@ impl OfflineProtocol {
         let mut processed = 0;
 
         while processed < max_batch_size {
-            let entry = match self.retry_queue.dequeue_ready() {
+            let mut entry = match self.retry_queue.dequeue_ready() {
                 Some(e) => e,
                 None => break,
             };
@@ -1941,6 +1953,11 @@ impl OfflineProtocol {
             processed += 1;
             let previous_transport = self.transport_manager.current_transport();
             self.ensure_outbox_entry(&entry.message);
+
+            // Tier 2: re-seal against the peer's current session before this
+            // resend, so a post-re-key epoch change no longer leaves the bytes
+            // undecryptable. No-op for media/plaintext/unconfirmed sessions.
+            self.reseal_for_resend_in_place(&mut entry.message);
 
             let forced_transport = self.pinned_media_transport_for_message(&entry.message.id);
             let send_result = if let Some(transport) = forced_transport {

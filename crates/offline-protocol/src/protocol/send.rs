@@ -3,7 +3,7 @@
 use super::{
     base64_encode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
     ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions, MediaTransferDescriptor,
-    OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation, OutboxEntry,
+    OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation, OutboxEntry, OutboxReseal,
     PendingConnectionRequest, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
     RichPayloadV1, RichSendExtras, SendMessageOptions, TypingIndicatorPayload,
     WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO,
@@ -175,6 +175,7 @@ impl OfflineProtocol {
         // deliberately NOT copied onto the outer message — they are either
         // inside the sealed body by now or dropped; only the coarse
         // content_type rendering hint rides outer.
+        let reseal_reply_to = reply_to_msg_id.clone();
         let mut message = self.create_message(
             &recipient_str,
             final_content,
@@ -183,6 +184,24 @@ impl OfflineProtocol {
         )?;
         if let Some(content_type) = options.content_type {
             message.content_type = content_type;
+        }
+
+        // Tier 2: if the send was encrypted, keep the plaintext provenance so
+        // each resend re-seals against the peer's current session instead of
+        // replaying dead-epoch ciphertext (see `OutboxReseal`).
+        if message.content.starts_with(internal_prefixes::ENCRYPTED) {
+            self.stage_outbox_reseal(
+                &message.id,
+                OutboxReseal {
+                    content: content_str,
+                    priority,
+                    reply_to_msg: reseal_reply_to,
+                    forwarded_from: None,
+                    content_type: message.content_type,
+                    media_metadata: None,
+                    rich: Some(rich).filter(|r| r.is_any()),
+                },
+            );
         }
 
         match options.via_transport {
@@ -303,6 +322,23 @@ impl OfflineProtocol {
         message.forwarded_from = Some(forward_info);
         message.content_type = original_message.content_type;
         message.media_metadata = original_message.media_metadata.clone();
+
+        // Tier 2 provenance (see `send_message_with`): re-seal forwarded encrypted
+        // DMs against the peer's current session on resend.
+        if message.content.starts_with(internal_prefixes::ENCRYPTED) {
+            self.stage_outbox_reseal(
+                &message.id,
+                OutboxReseal {
+                    content: original_message.content.clone(),
+                    priority,
+                    reply_to_msg: None,
+                    forwarded_from: message.forwarded_from.clone(),
+                    content_type: message.content_type,
+                    media_metadata: message.media_metadata.clone(),
+                    rich: Some(rich).filter(|r| r.is_any()),
+                },
+            );
+        }
 
         self.dispatch_prepared_message(message)
     }
@@ -1392,6 +1428,24 @@ impl OfflineProtocol {
                     }
                 };
 
+                // Tier 2 provenance: a flushed pending message that sealed
+                // carries its plaintext forward so later resends re-seal against
+                // the peer's current session (see `send_message_with`).
+                if message.content.starts_with(internal_prefixes::ENCRYPTED) {
+                    self.stage_outbox_reseal(
+                        &message.id,
+                        OutboxReseal {
+                            content: msg.content.clone(),
+                            priority: msg.priority,
+                            reply_to_msg: msg.reply_to_msg.clone(),
+                            forwarded_from: msg.forwarded_from.clone(),
+                            content_type: msg.content_type,
+                            media_metadata: msg.media_metadata.clone(),
+                            rich: msg.rich.clone(),
+                        },
+                    );
+                }
+
                 match self.dispatch_prepared_message(message) {
                     Ok(id) => {
                         debug!(message_id = %id, "Sent pending message");
@@ -2054,6 +2108,14 @@ impl OfflineProtocol {
             }
         }
 
+        // Consume staged re-seal provenance only when first creating a
+        // (non-media) entry here (the failure/retry path); later calls find the
+        // entry already present and leave its `reseal` intact.
+        let staged_reseal = if !is_media && !self.outbox.contains_key(&message.id) {
+            self.pending_reseal.remove(&message.id)
+        } else {
+            None
+        };
         let outbox = if is_media {
             &mut self.media_outbox
         } else {
@@ -2068,6 +2130,7 @@ impl OfflineProtocol {
                 first_sent_at: Utc::now(),
                 last_sent_at: Utc::now(),
                 last_transport: None,
+                reseal: staged_reseal,
             });
         // Persist newly-created main-outbox entries so they survive a restart.
         // media entries are intentionally not persisted.
@@ -2090,6 +2153,14 @@ impl OfflineProtocol {
 
         let now = Utc::now();
         let is_media = Self::is_media_outbox_message(message);
+        // Consume the staged re-seal provenance only when first creating a
+        // (non-media) outbox entry; on later attempts the entry already carries
+        // it. Staging for media is never populated.
+        let staged_reseal = if !is_media && !self.outbox.contains_key(&message.id) {
+            self.pending_reseal.remove(&message.id)
+        } else {
+            None
+        };
         let outbox = if is_media {
             &mut self.media_outbox
         } else {
@@ -2104,6 +2175,7 @@ impl OfflineProtocol {
                 first_sent_at: now,
                 last_sent_at: now,
                 last_transport: transport,
+                reseal: staged_reseal,
             });
 
         entry.message = message.clone();
@@ -2125,6 +2197,67 @@ impl OfflineProtocol {
             if let Some(entry) = self.outbox.get(&message.id) {
                 self.persist_outbox_entry(entry);
             }
+        }
+    }
+
+    /// Stages re-seal provenance for a message about to be dispatched, so the
+    /// outbox entry created during dispatch carries it. Callers gate on the
+    /// content being a sealed encrypted DM (`__MLS_ENC__`); media and plaintext
+    /// never stage and thus always replay verbatim.
+    pub(super) fn stage_outbox_reseal(&mut self, id: &MessageId, reseal: OutboxReseal) {
+        self.pending_reseal.insert(id.clone(), reseal);
+    }
+
+    /// Re-seals an outbound encrypted DM against the recipient's *current* MLS
+    /// session for a resend, returning fresh sealed content, or `None` to replay
+    /// verbatim. Returns `None` when it is not a re-sealable encrypted DM, when
+    /// there is no stored provenance (plaintext, media, or a pre-upgrade
+    /// persisted entry), when the session is not currently confirmed, or when
+    /// the re-seal produced identical bytes.
+    ///
+    /// This is the Tier 2 core: after a desync + re-key the recipient's session
+    /// is rebuilt at a new epoch, so replaying the ciphertext sealed at the old
+    /// epoch is undecryptable forever. Re-sealing here rebuilds only the
+    /// ciphertext `content`; the outer `Message.id` is preserved so the
+    /// receiver's dedup and ACK correlation are unaffected. Gating on a
+    /// confirmed session guarantees `prepare_outbound_content` takes the
+    /// encrypt-now path and never the `store_pending` queueing path.
+    fn reseal_resend_content(&mut self, message: &Message) -> Option<String> {
+        if !message.content.starts_with(internal_prefixes::ENCRYPTED) {
+            return None;
+        }
+        let recipient = message.recipient.as_str().to_string();
+        if !self.confirmed_sessions.contains(&recipient) {
+            return None;
+        }
+        let reseal = self.outbox.get(&message.id)?.reseal.as_ref()?.clone();
+        match self.prepare_outbound_content(
+            &recipient,
+            &reseal.content,
+            reseal.priority,
+            reseal.reply_to_msg.clone(),
+            reseal.forwarded_from.clone(),
+            reseal.content_type,
+            reseal.media_metadata.clone(),
+            reseal.rich.as_ref(),
+            Some(message.id.clone()),
+            "resend_reseal",
+        ) {
+            Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => Some(sealed),
+            // Identical bytes, a queued/not-ready outcome (shouldn't happen
+            // given the confirmed gate), or an error: replay verbatim this
+            // round. Tier 1 keeps the sender retrying until the session heals.
+            _ => None,
+        }
+    }
+
+    /// Re-seals `message` in place against the current session if it is a
+    /// re-sealable encrypted DM (see [`Self::reseal_resend_content`]). Used at
+    /// the resend transmit points so the bytes that go out — and the outbox copy
+    /// `mark_message_sent` then stores — are freshly sealed.
+    pub(super) fn reseal_for_resend_in_place(&mut self, message: &mut Message) {
+        if let Some(fresh) = self.reseal_resend_content(message) {
+            message.content = fresh;
         }
     }
 

@@ -324,7 +324,7 @@ pub(crate) const MAX_RICH_EXTRAS_BYTES: usize = 32 * 1024;
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
 /// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,
 /// never sent cleartext.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct RichSendExtras {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reply_context: Option<ReplyContext>,
@@ -1057,6 +1057,39 @@ pub(crate) fn lock_shared_state(
         .map_err(|_| Error::Other("Shared state mutex poisoned".to_string()))
 }
 
+/// Provenance kept on an outbox entry so an encrypted DM can be *re-sealed*
+/// against the peer's current MLS session on each resend, instead of replaying
+/// the ciphertext bytes sealed at first send (which become permanently
+/// undecryptable once the peer re-keys to a new epoch). Mirrors the fields the
+/// pre-send [`PendingMessage`] carries, so both re-seal through the same
+/// `prepare_outbound_content` chokepoint. Only populated for main-outbox
+/// (non-media) encrypted DMs; absent (`None`) means verbatim replay — the
+/// fallback for plaintext sends, media chunks, and entries persisted by a build
+/// that predates re-seal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct OutboxReseal {
+    /// Original plaintext content.
+    pub(crate) content: String,
+    /// Message priority.
+    pub(crate) priority: MessagePriority,
+    /// Reply-to message ID if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reply_to_msg: Option<MessageId>,
+    /// Forwarding attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forwarded_from: Option<ForwardInfo>,
+    /// Content type of the original message.
+    #[serde(default)]
+    pub(crate) content_type: ContentType,
+    /// Media metadata (cleartext-outer fallback provenance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) media_metadata: Option<MediaMetadata>,
+    /// Sealed-only rich extras (reply context, rich media metadata, forward
+    /// info) — re-evaluated against current capability at re-seal time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rich: Option<RichSendExtras>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct OutboxEntry {
     pub(crate) message: Message,
@@ -1064,6 +1097,11 @@ pub(crate) struct OutboxEntry {
     pub(crate) first_sent_at: DateTime<Utc>,
     pub(crate) last_sent_at: DateTime<Utc>,
     pub(crate) last_transport: Option<TransportType>,
+    /// Re-seal provenance; `None` for verbatim-replay entries (plaintext,
+    /// media, or pre-upgrade persisted entries). `#[serde(default)]` so entries
+    /// persisted by an older build still deserialize (as `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reseal: Option<OutboxReseal>,
 }
 
 #[derive(Clone)]

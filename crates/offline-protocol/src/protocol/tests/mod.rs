@@ -5196,6 +5196,7 @@ fn test_unreachable_media_chunk_resolves_file_id() {
             first_sent_at: chrono::Utc::now(),
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::BLE),
+            reseal: None,
         },
     );
     protocol
@@ -5363,6 +5364,7 @@ fn test_unreachable_media_chunk_is_not_parked() {
             first_sent_at: chrono::Utc::now(),
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::Internet),
+            reseal: None,
         },
     );
     protocol
@@ -5669,6 +5671,7 @@ fn test_unpark_cancel_spares_connection_request_ack() {
             first_sent_at: chrono::Utc::now(),
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::Internet),
+            reseal: None,
         },
     );
     protocol
@@ -5851,6 +5854,7 @@ fn test_unpark_cancel_spares_welcome_ack() {
             first_sent_at: chrono::Utc::now(),
             last_sent_at: chrono::Utc::now(),
             last_transport: Some(TransportType::Internet),
+            reseal: None,
         },
     );
     protocol
@@ -6065,6 +6069,7 @@ fn test_cleanup_outbox_absolute_lifetime_cap_is_terminal_in_process() {
                 first_sent_at,
                 last_sent_at: chrono::Utc::now(), // fresh: probe just sent
                 last_transport: None,
+                reseal: None,
             },
         )
     };
@@ -9080,6 +9085,114 @@ fn test_desync_rekey_is_rate_limited() {
     assert_eq!(
         rekeys, 1,
         "repeated desync triggers within the window must collapse to one re-key"
+    );
+}
+
+/// Tier 2: an encrypted DM keeps re-seal provenance on its outbox entry, and a
+/// resend re-seals against the peer's CURRENT session — producing fresh
+/// ciphertext (a new ratchet generation) that still decrypts to the same
+/// plaintext, with the message id preserved. This is what lets a resend land
+/// after the recipient re-keys to a new epoch, instead of replaying dead bytes.
+#[test]
+fn test_reseal_on_resend_produces_fresh_decryptable_ciphertext() {
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.encryption.enabled = true;
+    alice_config.encryption.store_pending = true;
+    // Force the JSON envelope for a deterministic decode below.
+    alice_config.encryption.compact_envelope_enabled = false;
+
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    alice
+        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let alice_transport = MockTransport::new(TransportType::BLE);
+    alice_transport.start().unwrap();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(alice_transport));
+    alice.start().unwrap();
+
+    // Bob as a bare manager; establish a real 1:1 session alice -> bob.
+    let bob_manager = MlsManager::new("bob", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_kp = bob_manager.get_or_create_key_package().unwrap();
+    {
+        let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        mgr.import_key_package("bob", &bob_kp.key_package_data)
+            .unwrap();
+    }
+    let welcome = {
+        let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        mgr.create_session("bob").unwrap()
+    };
+    bob_manager.join_session(&welcome).unwrap();
+    // Force the session confirmed so the send encrypts now instead of queueing.
+    alice.confirmed_sessions.insert("bob".to_string());
+
+    let msg_id = alice
+        .send_message("bob", "hello", None, None::<String>)
+        .unwrap();
+
+    let entry = alice
+        .outbox
+        .get(&msg_id)
+        .expect("encrypted DM must enter the outbox")
+        .clone();
+    assert!(
+        entry.reseal.is_some(),
+        "an encrypted DM must store re-seal provenance"
+    );
+    assert!(entry
+        .message
+        .content
+        .starts_with(internal_prefixes::ENCRYPTED));
+    let c1 = entry.message.content.clone();
+
+    // Re-seal for a resend against the current session.
+    let mut resend = entry.message.clone();
+    alice.reseal_for_resend_in_place(&mut resend);
+    assert_ne!(
+        resend.content, c1,
+        "re-seal must produce fresh ciphertext (new ratchet generation)"
+    );
+    assert_eq!(
+        resend.id, msg_id,
+        "re-seal must preserve the message id for dedup/ACK correlation"
+    );
+
+    // The re-sealed ciphertext decrypts on the recipient's current session.
+    let json = resend
+        .content
+        .strip_prefix(internal_prefixes::ENCRYPTED)
+        .unwrap();
+    let enc: offline_protocol_mls::EncryptedMessage = serde_json::from_str(json).unwrap();
+    let pt = bob_manager.decrypt_from_user(&enc, "alice").unwrap();
+    assert_eq!(
+        pt.as_deref(),
+        Some(&b"hello"[..]),
+        "re-sealed ciphertext must decrypt to the original plaintext"
+    );
+}
+
+/// A message with no re-seal provenance (plaintext, media, or a pre-upgrade
+/// outbox entry) is replayed byte-for-byte — the safe verbatim fallback.
+#[test]
+fn test_reseal_is_noop_without_provenance() {
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    alice
+        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let mut plain = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "not encrypted",
+    );
+    let before = plain.content.clone();
+    alice.reseal_for_resend_in_place(&mut plain);
+    assert_eq!(
+        plain.content, before,
+        "a non-encrypted message must be replayed verbatim"
     );
 }
 
@@ -15996,6 +16109,7 @@ fn test_restore_outbox_skips_corrupted_entries() {
             first_sent_at: chrono::Utc::now(),
             last_sent_at: chrono::Utc::now(),
             last_transport: None,
+            reseal: None,
         },
     );
     storage
@@ -16042,6 +16156,7 @@ fn test_restore_outbox_prunes_overflow() {
             first_sent_at: base,
             last_sent_at: base + ChronoDuration::seconds(i as i64),
             last_transport: None,
+            reseal: None,
         };
         if i == 0 {
             oldest_id = Some(entry.message.id.as_str());
@@ -16085,6 +16200,7 @@ fn test_restore_outbox_refreshes_expired_ttl_carrier_relative() {
             first_sent_at: old,
             last_sent_at: old,
             last_transport: None,
+            reseal: None,
         },
     );
 
@@ -16234,6 +16350,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
                 first_sent_at: now,
                 last_sent_at: now - ChronoDuration::seconds((i + 1) as i64),
                 last_transport: None,
+                reseal: None,
             },
         );
     }
@@ -16246,6 +16363,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
             first_sent_at: now - ChronoDuration::hours(2),
             last_sent_at: now - ChronoDuration::hours(2),
             last_transport: None,
+            reseal: None,
         };
         lapsed_ids.push(entry.message.id.as_str().to_string());
         store_outbox_entry(&storage, &entry);
@@ -16808,6 +16926,7 @@ fn test_cleanup_outbox_media_expiry_does_not_emit_message_failed() {
             first_sent_at: chrono::Utc::now() - ChronoDuration::seconds(1),
             last_sent_at: chrono::Utc::now() - ChronoDuration::seconds(1),
             last_transport: None,
+            reseal: None,
         },
     );
 
@@ -16843,6 +16962,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             first_sent_at: now - ChronoDuration::seconds(10),
             last_sent_at: now - ChronoDuration::seconds(5),
             last_transport: None,
+            reseal: None,
         },
     );
 
@@ -16856,6 +16976,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             first_sent_at: now - ChronoDuration::seconds(3),
             last_sent_at: now - ChronoDuration::seconds(2),
             last_transport: None,
+            reseal: None,
         },
     );
 
@@ -16948,6 +17069,7 @@ fn test_flush_outbox_for_peer_includes_media_outbox() {
             first_sent_at: chrono::Utc::now(),
             last_sent_at: chrono::Utc::now(),
             last_transport: None,
+            reseal: None,
         },
     );
 
@@ -17012,6 +17134,7 @@ fn test_flush_outbox_all_includes_media_outbox() {
             first_sent_at: chrono::Utc::now(),
             last_sent_at: chrono::Utc::now(),
             last_transport: None,
+            reseal: None,
         },
     );
 
