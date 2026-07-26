@@ -2111,11 +2111,7 @@ impl OfflineProtocol {
         // Consume staged re-seal provenance only when first creating a
         // (non-media) entry here (the failure/retry path); later calls find the
         // entry already present and leave its `reseal` intact.
-        let staged_reseal = if !is_media && !self.outbox.contains_key(&message.id) {
-            self.pending_reseal.remove(&message.id)
-        } else {
-            None
-        };
+        let staged_reseal = self.take_staged_reseal(message, is_media);
         let outbox = if is_media {
             &mut self.media_outbox
         } else {
@@ -2156,11 +2152,7 @@ impl OfflineProtocol {
         // Consume the staged re-seal provenance only when first creating a
         // (non-media) outbox entry; on later attempts the entry already carries
         // it. Staging for media is never populated.
-        let staged_reseal = if !is_media && !self.outbox.contains_key(&message.id) {
-            self.pending_reseal.remove(&message.id)
-        } else {
-            None
-        };
+        let staged_reseal = self.take_staged_reseal(message, is_media);
         let outbox = if is_media {
             &mut self.media_outbox
         } else {
@@ -2208,6 +2200,20 @@ impl OfflineProtocol {
         self.pending_reseal.insert(id.clone(), reseal);
     }
 
+    /// Consumes any staged re-seal provenance for `message`, but only when a
+    /// (non-media) main-outbox entry is about to be created for the first time.
+    /// On later attempts the entry already exists and carries its `reseal`, so
+    /// this returns `None` and leaves the staged copy untouched. Media never
+    /// stages. Kept as one helper so the two outbox-entry creation sites
+    /// ([`Self::ensure_outbox_entry`] and [`Self::mark_message_sent`]) stay in
+    /// lockstep on the consume condition.
+    fn take_staged_reseal(&mut self, message: &Message, is_media: bool) -> Option<OutboxReseal> {
+        if is_media || self.outbox.contains_key(&message.id) {
+            return None;
+        }
+        self.pending_reseal.remove(&message.id)
+    }
+
     /// Re-seals an outbound encrypted DM against the recipient's *current* MLS
     /// session for a resend, returning fresh sealed content, or `None` to replay
     /// verbatim. Returns `None` when it is not a re-sealable encrypted DM, when
@@ -2244,9 +2250,19 @@ impl OfflineProtocol {
             "resend_reseal",
         ) {
             Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => Some(sealed),
-            // Identical bytes, a queued/not-ready outcome (shouldn't happen
-            // given the confirmed gate), or an error: replay verbatim this
-            // round. Tier 1 keeps the sender retrying until the session heals.
+            // Identical bytes, or an error: replay verbatim this round. Tier 1
+            // keeps the sender retrying until the session heals.
+            //
+            // The `Queued` arm is all but unreachable — the `confirmed_sessions`
+            // gate above runs synchronously with no yield before the encrypt, so
+            // the session cannot flip to not-ready in between. If it ever does
+            // (e.g. `confirmed_sessions` outlived an externally-deleted MLS
+            // session), `prepare_outbound_content` has enqueued a pending message
+            // as a side effect, keyed by our SAME `existing_id`. That is benign:
+            // this round still replays the verbatim outbox bytes, and when the
+            // pending copy later flushes, the sender's own `dispatch_prepared_message`
+            // dedup drops it as a duplicate id. So no double-delivery, just a
+            // transient pending entry that self-clears on flush.
             _ => None,
         }
     }

@@ -9088,13 +9088,13 @@ fn test_desync_rekey_is_rate_limited() {
     );
 }
 
-/// Tier 2: an encrypted DM keeps re-seal provenance on its outbox entry, and a
-/// resend re-seals against the peer's CURRENT session — producing fresh
-/// ciphertext (a new ratchet generation) that still decrypts to the same
-/// plaintext, with the message id preserved. This is what lets a resend land
-/// after the recipient re-keys to a new epoch, instead of replaying dead bytes.
+/// Tier 2 headline: after the recipient re-keys to a NEW epoch, the ciphertext
+/// sealed at the original epoch is permanently dead — but a resend re-seals
+/// against the peer's *current* session and decrypts on the new epoch, with the
+/// message id preserved. This is the whole point of keeping re-seal provenance:
+/// replaying the old bytes would be silent loss forever; re-sealing recovers.
 #[test]
-fn test_reseal_on_resend_produces_fresh_decryptable_ciphertext() {
+fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
     let mut alice_config = create_test_config_for_user("alice");
     alice_config.encryption.enabled = true;
     alice_config.encryption.store_pending = true;
@@ -9113,7 +9113,8 @@ fn test_reseal_on_resend_produces_fresh_decryptable_ciphertext() {
     alice.start().unwrap();
 
     // Bob as a bare manager; establish a real 1:1 session alice -> bob.
-    let bob_manager = MlsManager::new("bob", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
     let bob_kp = bob_manager.get_or_create_key_package().unwrap();
     {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
@@ -9145,21 +9146,50 @@ fn test_reseal_on_resend_produces_fresh_decryptable_ciphertext() {
         .message
         .content
         .starts_with(internal_prefixes::ENCRYPTED));
+    // The original ciphertext, sealed at the first epoch.
     let c1 = entry.message.content.clone();
+    let c1_enc: offline_protocol_mls::EncryptedMessage =
+        serde_json::from_str(c1.strip_prefix(internal_prefixes::ENCRYPTED).unwrap()).unwrap();
 
-    // Re-seal for a resend against the current session.
+    // Re-key: tear down both sessions and rebuild a fresh one at a new epoch,
+    // exactly as the desync heal does. The outbox entry (and its in-memory
+    // re-seal provenance) survives the teardown.
+    alice.manual_mls_delete_session("bob").unwrap();
+    bob_manager.delete_session("alice").unwrap();
+    let bob_kp2 = bob_manager.get_or_create_key_package().unwrap();
+    {
+        let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        mgr.import_key_package("bob", &bob_kp2.key_package_data)
+            .unwrap();
+    }
+    let welcome2 = {
+        let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        mgr.create_session("bob").unwrap()
+    };
+    bob_manager.join_session(&welcome2).unwrap();
+    alice.confirmed_sessions.insert("bob".to_string());
+
+    // The original bytes are now permanently undecryptable on the new session —
+    // proving a verbatim replay would be silent loss.
+    assert!(
+        bob_manager.decrypt_from_user(&c1_enc, "alice").is_err(),
+        "the pre-rekey ciphertext must be dead on the rebuilt session"
+    );
+
+    // Re-seal for a resend against the rebuilt session.
     let mut resend = entry.message.clone();
     alice.reseal_for_resend_in_place(&mut resend);
     assert_ne!(
         resend.content, c1,
-        "re-seal must produce fresh ciphertext (new ratchet generation)"
+        "re-seal must produce fresh ciphertext for the new epoch"
     );
     assert_eq!(
         resend.id, msg_id,
         "re-seal must preserve the message id for dedup/ACK correlation"
     );
 
-    // The re-sealed ciphertext decrypts on the recipient's current session.
+    // The re-sealed ciphertext decrypts on the recipient's rebuilt session,
+    // recovering the message that the dead bytes could never have delivered.
     let json = resend
         .content
         .strip_prefix(internal_prefixes::ENCRYPTED)
@@ -9193,6 +9223,211 @@ fn test_reseal_is_noop_without_provenance() {
     assert_eq!(
         plain.content, before,
         "a non-encrypted message must be replayed verbatim"
+    );
+}
+
+/// Creates an MLS-enabled, unstarted protocol paired with a handle to its mock
+/// transport. Left unstarted so the caller can register event handlers first.
+fn make_encrypted_protocol(user_id: &str) -> (OfflineProtocol, MockTransport) {
+    let mut config = create_test_config_for_user(user_id);
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol
+        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    let handle = transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    (protocol, handle)
+}
+
+/// Wires a confirmed 1:1 MLS session between two full protocol instances by
+/// exchanging a key package + Welcome directly through their managers, then
+/// marking both sides confirmed. Mirrors what a real handshake converges to
+/// without depending on handshake pump timing. `b` owns the created group.
+fn establish_confirmed_session(
+    a: &mut OfflineProtocol,
+    a_id: &str,
+    b: &mut OfflineProtocol,
+    b_id: &str,
+) {
+    let a_kp = {
+        let m = a.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let m = b.mls_manager.as_ref().unwrap().read().unwrap();
+        m.import_key_package(a_id, &a_kp.key_package_data).unwrap();
+        m.create_session(a_id).unwrap()
+    };
+    {
+        let m = a.mls_manager.as_ref().unwrap().read().unwrap();
+        m.join_session(&welcome).unwrap();
+    }
+    a.confirmed_sessions.insert(b_id.to_string());
+    b.confirmed_sessions.insert(a_id.to_string());
+}
+
+/// Advances one side's 1:1 epoch without the peer merging the commit, forking
+/// the shared `session:alice:bob` group so the peer can no longer decrypt.
+fn fork_session_epoch(ahead: &mut OfflineProtocol) {
+    let gid = offline_protocol_mls::GroupId::new("session:alice:bob").unwrap();
+    let m = ahead.mls_manager.as_ref().unwrap().read().unwrap();
+    m.update_keys(&gid).unwrap();
+}
+
+/// Delivers messages back and forth between two protocols over their mock
+/// transports until nothing more moves (or `max_rounds` elapse). Each round
+/// drains both inboxes, then hands every message each side *sent* to the other
+/// side's inbox (tagged with the sender's id as the transport-verified peer).
+fn pump_between(
+    a: &mut OfflineProtocol,
+    a_h: &MockTransport,
+    b: &mut OfflineProtocol,
+    b_h: &MockTransport,
+    max_rounds: usize,
+) {
+    for _ in 0..max_rounds {
+        while a.receive_message().is_some() {}
+        while b.receive_message().is_some() {}
+        let a_sent = a_h.sent_messages();
+        a_h.clear_sent_messages();
+        let b_sent = b_h.sent_messages();
+        b_h.clear_sent_messages();
+        if a_sent.is_empty() && b_sent.is_empty() {
+            return;
+        }
+        for m in a_sent {
+            let peer = m.sender.as_str().to_string();
+            b_h.queue_message_from(m, peer);
+        }
+        for m in b_sent {
+            let peer = m.sender.as_str().to_string();
+            a_h.queue_message_from(m, peer);
+        }
+    }
+}
+
+/// End-to-end heal, detector id > peer id (single-round convergence). Alice
+/// (the peer) forks ahead; Bob (the detector, "bob" > "alice") fails to decrypt,
+/// re-keys, and — being the greater id — adopts Alice's returning Welcome in one
+/// round. A fresh message each way then flows, proving the channel healed.
+#[test]
+fn test_desync_dm_heals_end_to_end_when_detector_id_is_greater() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+
+    let alice_rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&alice_rx);
+        alice.on_event(move |e| {
+            if let Event::MessageReceived { content, .. } = e {
+                h.lock().unwrap().push(content);
+            }
+        });
+        let h = Arc::clone(&bob_rx);
+        bob.on_event(move |e| {
+            if let Event::MessageReceived { content, .. } = e {
+                h.lock().unwrap().push(content);
+            }
+        });
+    }
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    establish_confirmed_session(&mut alice, "alice", &mut bob, "bob");
+
+    // Fork: Alice advances her epoch; Bob is now behind and can't decrypt her.
+    fork_session_epoch(&mut alice);
+    alice
+        .send_message("bob", "trigger-fork", None, None::<String>)
+        .unwrap();
+
+    // Pump the heal to convergence.
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    // The channel is healed: a fresh message each way is delivered.
+    alice
+        .send_message("bob", "healed-a2b", None, None::<String>)
+        .unwrap();
+    bob.send_message("alice", "healed-b2a", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    assert!(
+        bob_rx.lock().unwrap().iter().any(|c| c == "healed-a2b"),
+        "bob must receive a fresh DM after the channel heals (got {:?})",
+        bob_rx.lock().unwrap()
+    );
+    assert!(
+        alice_rx.lock().unwrap().iter().any(|c| c == "healed-b2a"),
+        "alice must receive a fresh DM after the channel heals (got {:?})",
+        alice_rx.lock().unwrap()
+    );
+}
+
+/// End-to-end heal, detector id < peer id (the fragile two-round path). Bob
+/// (the peer) forks ahead; Alice (the detector, "alice" < "bob") fails to
+/// decrypt and re-keys, but — being the smaller id — keeps her stale session on
+/// Bob's returning Welcome. Her old-epoch traffic then makes Bob detect a desync
+/// in turn and re-key back, forcing Alice to reset; the both-create tiebreaker
+/// converges on the second round. A fresh message each way proves it heals.
+#[test]
+fn test_desync_dm_heals_end_to_end_when_detector_id_is_smaller() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+
+    let alice_rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&alice_rx);
+        alice.on_event(move |e| {
+            if let Event::MessageReceived { content, .. } = e {
+                h.lock().unwrap().push(content);
+            }
+        });
+        let h = Arc::clone(&bob_rx);
+        bob.on_event(move |e| {
+            if let Event::MessageReceived { content, .. } = e {
+                h.lock().unwrap().push(content);
+            }
+        });
+    }
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    establish_confirmed_session(&mut alice, "alice", &mut bob, "bob");
+
+    // Fork: Bob advances his epoch; Alice is now behind and can't decrypt him.
+    fork_session_epoch(&mut bob);
+    bob.send_message("alice", "trigger-fork", None, None::<String>)
+        .unwrap();
+
+    // Pump the heal to convergence (may take the extra round for alice < bob).
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 60);
+
+    // The channel is healed: a fresh message each way is delivered.
+    alice
+        .send_message("bob", "healed-a2b", None, None::<String>)
+        .unwrap();
+    bob.send_message("alice", "healed-b2a", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 60);
+
+    assert!(
+        bob_rx.lock().unwrap().iter().any(|c| c == "healed-a2b"),
+        "bob must receive a fresh DM after the channel heals (got {:?})",
+        bob_rx.lock().unwrap()
+    );
+    assert!(
+        alice_rx.lock().unwrap().iter().any(|c| c == "healed-b2a"),
+        "alice must receive a fresh DM after the channel heals (got {:?})",
+        alice_rx.lock().unwrap()
     );
 }
 

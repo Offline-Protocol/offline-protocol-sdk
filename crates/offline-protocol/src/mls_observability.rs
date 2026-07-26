@@ -72,7 +72,11 @@ impl DecryptionFailureKind {
             | MlsError::OpenMls(_)
             | MlsError::Signing(_)
             | MlsError::Storage(_)
-            | MlsError::CryptoGeneration(_) => Self::CryptoFailure,
+            | MlsError::CryptoGeneration(_)
+            // An epoch desync only reaches here on the recovery-disabled
+            // fall-through (recovery-enabled desyncs never take the drop path);
+            // classify it as a crypto failure rather than the opaque `Unknown`.
+            | MlsError::SessionDesync(_) => Self::CryptoFailure,
             _ => Self::Unknown,
         }
     }

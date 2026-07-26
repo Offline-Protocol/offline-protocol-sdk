@@ -463,12 +463,27 @@ impl OfflineProtocol {
     /// Triggers a rate-limited re-key of the 1:1 session with `peer_id` after an
     /// epoch-desync decrypt failure.
     ///
-    /// Tearing down the local session alone deadlocks — the peer's key package
-    /// was consumed at first establishment, so nothing could rebuild it, and the
-    /// peer (still believing its session is healthy) would never re-advertise
-    /// one. Sending a `session_reset` key package is the self-healing primitive:
-    /// the peer drops its stale session, re-advertises its own key package, and
-    /// both sides rebuild symmetrically.
+    /// The self-healing primitive is a two-part move, matching the unblock
+    /// `session_reset` flow: tear down our *own* stale session **and** advertise
+    /// a `session_reset` key package. The peer, on receiving it, drops its stale
+    /// session, auto-establishes a fresh one from our enclosed key package, and
+    /// Welcomes us back — which we, now session-less, simply *join*.
+    ///
+    /// Tearing down our session alone (without the reset key package) would
+    /// deadlock: the peer's original key package was consumed at first
+    /// establishment, so nothing could rebuild the channel, and the peer (still
+    /// believing its session is healthy) would never re-advertise one. Sending
+    /// the reset key package is what breaks that deadlock.
+    ///
+    /// Deleting the local session is also what makes convergence **symmetric and
+    /// single-round regardless of user-id ordering**. Because we keep no local
+    /// session, the peer's returning Welcome is joined via the fresh-session
+    /// path rather than the greater-id-adopts tiebreaker in
+    /// `handle_welcome_message` — so the lexicographically-smaller detector is no
+    /// longer stranded (the failure mode when the stale session was kept). Both
+    /// orderings are covered end-to-end by
+    /// `test_desync_dm_heals_end_to_end_when_detector_id_is_greater` and
+    /// `test_desync_dm_heals_end_to_end_when_detector_id_is_smaller`.
     ///
     /// Rate-limited via `rekey_due_at` to at most one re-key per
     /// [`REKEY_INTERVAL_SECS`] per peer, so a peer replaying stale-epoch
@@ -487,6 +502,25 @@ impl OfflineProtocol {
             peer_id.to_string(),
             now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
         );
+        // Tear down our own stale session before advertising the reset key
+        // package, mirroring the unblock `session_reset` flow. This is what makes
+        // convergence symmetric regardless of user-id ordering: with no local
+        // session left, the peer's returning Welcome is *joined* (not gated by
+        // the greater-id-adopts tiebreaker in `handle_welcome_message`), so both
+        // sides rebuild from scratch and converge in a single round. Keeping the
+        // stale session instead strands the smaller-id detector, which the
+        // tiebreaker forbids from adopting. Best-effort: a missing session is a
+        // no-op, and a failed delete still sends the reset (the peer rebuild plus
+        // the auto key-package exchange re-arm establishment either way).
+        if self.has_mls_session(peer_id).unwrap_or(false) {
+            if let Err(err) = self.manual_mls_delete_session(peer_id) {
+                debug!(
+                    peer_id = %peer_id,
+                    error = %err,
+                    "rekey: failed to delete local stale session; sending reset anyway"
+                );
+            }
+        }
         match self.send_key_package_to(peer_id, true) {
             Ok(()) => {
                 info!(

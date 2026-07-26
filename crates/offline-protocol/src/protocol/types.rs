@@ -1064,29 +1064,31 @@ pub(crate) fn lock_shared_state(
 /// pre-send [`PendingMessage`] carries, so both re-seal through the same
 /// `prepare_outbound_content` chokepoint. Only populated for main-outbox
 /// (non-media) encrypted DMs; absent (`None`) means verbatim replay — the
-/// fallback for plaintext sends, media chunks, and entries persisted by a build
-/// that predates re-seal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// fallback for plaintext sends and media chunks.
+///
+/// **Memory-only by design.** This holds the message *plaintext*, so it is never
+/// persisted (see the `#[serde(skip)]` on [`OutboxEntry::reseal`]): persisting it
+/// would broaden plaintext-at-rest to every sent-but-unACKed encrypted DM for the
+/// full outbox lifetime, weakening forward secrecy in exchange for only a narrow
+/// cross-restart reseal benefit. After a restart the restored entry replays
+/// verbatim; if that resend hits a desync, Tier 1 (un-ACK + re-key) still keeps
+/// delivery honest rather than silently losing the message.
+#[derive(Debug, Clone)]
 pub(crate) struct OutboxReseal {
     /// Original plaintext content.
     pub(crate) content: String,
     /// Message priority.
     pub(crate) priority: MessagePriority,
     /// Reply-to message ID if applicable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reply_to_msg: Option<MessageId>,
     /// Forwarding attribution.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) forwarded_from: Option<ForwardInfo>,
     /// Content type of the original message.
-    #[serde(default)]
     pub(crate) content_type: ContentType,
     /// Media metadata (cleartext-outer fallback provenance).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) media_metadata: Option<MediaMetadata>,
     /// Sealed-only rich extras (reply context, rich media metadata, forward
     /// info) — re-evaluated against current capability at re-seal time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) rich: Option<RichSendExtras>,
 }
 
@@ -1097,10 +1099,12 @@ pub(crate) struct OutboxEntry {
     pub(crate) first_sent_at: DateTime<Utc>,
     pub(crate) last_sent_at: DateTime<Utc>,
     pub(crate) last_transport: Option<TransportType>,
-    /// Re-seal provenance; `None` for verbatim-replay entries (plaintext,
-    /// media, or pre-upgrade persisted entries). `#[serde(default)]` so entries
-    /// persisted by an older build still deserialize (as `None`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Re-seal provenance; `None` for verbatim-replay entries (plaintext or
+    /// media). **Memory-only** (`#[serde(skip)]`): it carries the message
+    /// plaintext, which must never be persisted (see [`OutboxReseal`]). A
+    /// restored entry deserializes with `reseal: None` and therefore replays
+    /// verbatim.
+    #[serde(skip)]
     pub(crate) reseal: Option<OutboxReseal>,
 }
 

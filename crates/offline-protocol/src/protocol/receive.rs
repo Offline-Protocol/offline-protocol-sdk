@@ -811,6 +811,17 @@ impl OfflineProtocol {
                         // Deferred so the chunk is not ACKed and its id is
                         // unmarked. We do NOT enqueue — the chunk is sealed to the
                         // dead epoch and can never decrypt after the re-key.
+                        //
+                        // Unlike a DM, an in-flight media chunk cannot be
+                        // re-sealed for recovery: Tier 2 reseal is a deliberate
+                        // no-op for media (the media outbox is not persisted and
+                        // chunks are re-encoded, not replayed). Withholding the
+                        // ACK here is what drives recovery: the sender's media
+                        // outbox keeps retrying and, once its retry/ACK-timeout
+                        // budget lapses, surfaces `MediaResendRequired`, and the
+                        // app re-supplies the bytes via `send_media_with` — which
+                        // re-encodes fresh chunks against the now-healed session.
+                        // So media recovers via descriptor-based resend, not reseal.
                         info!(
                             sender = %sender,
                             error_code = classification.code(),
