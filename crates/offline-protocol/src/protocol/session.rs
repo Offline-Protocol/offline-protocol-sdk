@@ -1176,13 +1176,21 @@ impl OfflineProtocol {
 
     /// Parks a welcome pending a peer-reachability edge: reason
     /// `PeerUnreachable`, **no timed retry**. The carrier (relay socket) is
-    /// healthy — only this peer is unreachable on it — so a timer would just
-    /// re-send the welcome into another `DeliveryError` every interval,
-    /// forever. Recovery is edge-driven instead: `on_peer_presence(online)`
-    /// and `on_neighbor_discovered` re-arm via `rearm_welcome_for_peer`, and
-    /// the peer stays on the presence watchlist (`welcome_pending_peers`) so
-    /// the platform keeps polling for that edge. The TTL is pushed like a
-    /// no-carrier park: an unreachable peer must not age the welcome out.
+    /// healthy — only this peer is unreachable on it — so the *data-plane*
+    /// retry this cancels would re-send the welcome into another
+    /// `DeliveryError` while burning the real-delivery budget that a
+    /// carrier-backed failure already charged. Recovery is edge-driven
+    /// instead: `on_peer_presence(online)` and `on_neighbor_discovered` re-arm
+    /// via `rearm_welcome_for_peer`, and the peer stays on the presence
+    /// watchlist (`welcome_pending_peers`) so the platform keeps polling for
+    /// that edge. The TTL is pushed like a no-carrier park: an unreachable
+    /// peer must not age the welcome out.
+    ///
+    /// Its caller is responsible for not applying this to a record already
+    /// holding an escalating unreachable probe — see
+    /// [`Self::park_welcome_peer_unreachable`], which is what distinguishes
+    /// the budget-burning data-plane retry cancelled here from the
+    /// budget-refunded probe that must survive.
     fn park_welcome_awaiting_peer(&mut self, peer_id: &str) -> Result<()> {
         let snapshot = {
             let Some(record) = self.welcome_lifecycles.get_mut(peer_id) else {
@@ -1209,6 +1217,17 @@ impl OfflineProtocol {
     /// a mesh carrier is also available — relay presence is only
     /// authoritative for the internet path, and the data-plane retry track
     /// may still deliver over BLE / WiFi-Direct.
+    ///
+    /// Never cancels an escalating unreachable probe: a record that already
+    /// holds one (`unreachable_parks > 0` with a scheduled retry) was parked
+    /// by [`Self::apply_recipient_unreachable_failure`], which already set the
+    /// same reason code and pushed the same TTL — so this adds nothing and
+    /// would only downgrade the probe to edge-only. That matters because on an
+    /// internet-only device this runs once per presence rotation for as long
+    /// as the peer is down, which would otherwise re-strand the welcome after
+    /// every single verdict. The distinction is budget: the data-plane retry
+    /// this *does* cancel was charged an attempt by a carrier-backed failure,
+    /// while the probe refunds its attempt on every verdict.
     fn park_welcome_peer_unreachable(&mut self, peer_id: &str) {
         if self.confirmed_sessions.contains(peer_id) {
             return;
@@ -1220,6 +1239,9 @@ impl OfflineProtocol {
             record.state,
             WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed
         ) {
+            return;
+        }
+        if record.unreachable_parks > 0 && record.next_retry_at.is_some() {
             return;
         }
         // Local mesh carriers only (BLE / WiFi-Direct): Nostr and Reticulum
@@ -1251,11 +1273,22 @@ impl OfflineProtocol {
     /// the same treatment; `Created`/`Failed` records just park. Terminal
     /// `Expired` records are left to the online edge, which rebuilds them.
     ///
-    /// Relay presence is only authoritative for the internet path: when a
-    /// mesh carrier is also live the peer may still be reachable over BLE /
-    /// WiFi-Direct (DORS can pick internet even with mesh present), so the
-    /// record keeps a timed retry instead of parking edge-only — mirroring
-    /// the carrier guard in [`Self::park_welcome_peer_unreachable`].
+    /// The record always keeps a timed retry whose interval escalates per
+    /// consecutive park. Relay presence is authoritative only for the
+    /// internet path — with a mesh carrier live the peer may still be
+    /// reachable over BLE / WiFi-Direct (DORS can pick internet even with
+    /// mesh present) — but an internet-only device needs the timed track just
+    /// as much: parking it edge-only left the welcome dependent solely on a
+    /// presence-online answer, i.e. on the platform's presence-polling
+    /// cadence, which is the same dead end that stalled parked DMs (see
+    /// [`Self::park_unreachable_dm`]). The escalation (15s → 600s cap) is
+    /// what bounds the retry: DORS may keep routing to the internet path,
+    /// where each round trips another budget-refunded `DeliveryError`, and
+    /// without escalation that would be an unbounded resend loop into the
+    /// relay. Every verdict refunds the attempt and pushes the TTL, so the
+    /// probes never age the welcome out or burn its real-delivery budget, and
+    /// the counter resets on any reachability edge
+    /// (`rearm_welcome_for_peer`).
     pub(super) fn apply_recipient_unreachable_failure(
         &mut self,
         peer_id: &str,
@@ -1292,45 +1325,25 @@ impl OfflineProtocol {
             }
             WelcomeDeliveryState::Expired => return Ok(()),
         }
-        // Only a *local* mesh carrier (BLE / WiFi-Direct) justifies keeping
-        // a timed retry: the peer may genuinely be a room away even though
-        // the relay reports it offline. Nostr and Reticulum are excluded —
-        // they are internet-dependent relay transports, so their adapter
-        // being "available" says nothing about local peer reachability and
-        // would keep the timed track alive on every internet-connected
-        // device. And adapter availability still is not peer reachability,
-        // so the interval escalates per consecutive unreachable park
-        // (15s → 600s cap): DORS may keep routing the retry to the internet
-        // path, where each round trips another budget-refunded
-        // DeliveryError — without escalation that is an unbounded resend
-        // loop into the relay. The counter resets on any reachability edge
-        // (`rearm_welcome_for_peer`).
-        let mesh_carrier_available = self
-            .transport_manager
-            .get_available_transports()
-            .keys()
-            .any(|transport| matches!(transport, TransportType::BLE | TransportType::WiFiDirect));
-        if mesh_carrier_available {
-            let parks = {
-                let Some(record) = self.welcome_lifecycles.get_mut(peer_id) else {
-                    return Ok(());
-                };
-                record.unreachable_parks = record.unreachable_parks.saturating_add(1);
-                record.unreachable_parks
+        // Escalating timed retry on every carrier (see the doc comment): the
+        // ladder, not a carrier guard, is what bounds resends into the relay.
+        let parks = {
+            let Some(record) = self.welcome_lifecycles.get_mut(peer_id) else {
+                return Ok(());
             };
-            // parks >= 1 here; shift clamped so 15 << 6 = 960 is the largest
-            // pre-cap value — no overflow risk.
-            let retry_in_secs = (WELCOME_NO_CARRIER_RETRY_SECS << (parks - 1).min(6))
-                .min(WELCOME_UNREACHABLE_RETRY_CAP_SECS);
-            self.park_welcome_no_carrier(
-                peer_id,
-                crate::events::WelcomeReasonCode::PeerUnreachable,
-                transport_error,
-                retry_in_secs,
-            )?;
-        } else {
-            self.park_welcome_awaiting_peer(peer_id)?;
-        }
+            record.unreachable_parks = record.unreachable_parks.saturating_add(1);
+            record.unreachable_parks
+        };
+        // parks >= 1 here; shift clamped so 15 << 6 = 960 is the largest
+        // pre-cap value — no overflow risk.
+        let retry_in_secs = (WELCOME_NO_CARRIER_RETRY_SECS << (parks - 1).min(6))
+            .min(WELCOME_UNREACHABLE_RETRY_CAP_SECS);
+        self.park_welcome_no_carrier(
+            peer_id,
+            crate::events::WelcomeReasonCode::PeerUnreachable,
+            transport_error,
+            retry_in_secs,
+        )?;
 
         let Some(snapshot) = self.welcome_lifecycles.get(peer_id).cloned() else {
             return Ok(());
@@ -1343,9 +1356,10 @@ impl OfflineProtocol {
                 snapshot.attempt,
                 crate::events::WelcomeReasonCode::PeerUnreachable,
                 snapshot.last_transport_error.clone(),
-                // Retryable. A scheduled time exists only when a mesh
-                // carrier keeps the timed track alive; otherwise recovery
-                // is edge-driven (presence online / peer discovery).
+                // Retryable, and now always with a scheduled time: the park
+                // keeps an escalating timed probe on every carrier. The
+                // reachability edges (presence online / peer discovery) still
+                // re-arm it sooner when they fire.
                 true,
                 snapshot.next_retry_at.map(|at| at.timestamp_millis()),
             ));
