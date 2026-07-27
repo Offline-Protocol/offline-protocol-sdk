@@ -81,14 +81,41 @@ class OfflineProtocolModule: RCTEventEmitter {
         NotificationCenter.default.removeObserver(self, name: UIApplication.willEnterForegroundNotification, object: nil)
     }
     
+    /// Gates the foreground relay reconnect on how long the app actually stayed
+    /// in the background, fed the shared `MonotonicClock` (monotonic AND
+    /// sleep-inclusive: it counts real time away — including device sleep —
+    /// while staying immune to wall-clock steps from an NTP correction or manual
+    /// change). Android has a paired `ForegroundReconnectPolicy` driving the
+    /// same rule from its lifecycle callbacks, so both platforms heal on
+    /// foreground automatically and identically. Main-thread confined: the
+    /// lifecycle notifications that drive it are delivered on main.
+    private let foregroundReconnectPolicy = ForegroundReconnectPolicy()
+
     @objc private func applicationDidEnterBackground() {
         Self.testLastWifiStatusChangeForTesting = false
+        foregroundReconnectPolicy.didEnterBackground(nowMs: MonotonicClock.nowMs())
         guard let proto = protocolInstance else { return }
         try? proto.wifiDirectStatusChanged(isConnected: false)
     }
 
     @objc private func applicationWillEnterForeground() {
         Self.testLastWifiStatusChangeForTesting = true
+
+        // Proactively heal a socket the OS likely killed during suspension.
+        // `isInternetReady()` cannot tell a healthy socket from a zombie (both
+        // report connected+authenticated), so gate on background duration
+        // instead (see ForegroundReconnectPolicy): a stay long enough that the
+        // socket is untrustworthy forces a reconnect. forceReconnect() no-ops
+        // unless the transport is running/starting and resets the reconnect
+        // backoff, so this is safe to call unconditionally within the gate.
+        // Belt-and-braces with the in-transport write-stall watchdog, which
+        // catches a zombie that survives (or first appears) without a
+        // background→foreground edge. Apps no longer need to call
+        // forceInternetReconnect() on foreground themselves.
+        if foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs: MonotonicClock.nowMs()) {
+            internetManager?.forceReconnect()
+        }
+
         guard let proto = protocolInstance else { return }
         try? proto.wifiDirectStatusChanged(isConnected: true)
     }

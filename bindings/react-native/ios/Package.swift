@@ -50,7 +50,9 @@ let package = Package(
             sources: [
                 "EncryptionConfigReader.swift",
                 "ForcedPresenceCheckQueue.swift",
+                "ForegroundReconnectPolicy.swift",
                 "LegacyRelayMessage.swift",
+                "MonotonicClock.swift",
                 "PresenceWatchPolicy.swift",
                 "RecipientInFlightTracker.swift",
                 "RelayControlOpTranslator.swift",
@@ -58,7 +60,8 @@ let package = Package(
                 "RelayRateLimiter.swift",
                 "RelayTimestamps.swift",
                 "SocketGenerationTracker.swift",
-                "SupersededLatchPolicy.swift"
+                "SupersededLatchPolicy.swift",
+                "WriteStallWatchdog.swift"
             ]
         ),
         .testTarget(
@@ -76,6 +79,7 @@ let package = Package(
             sources: [
                 "EncryptionConfigReaderTests.swift",
                 "ForcedPresenceCheckQueueTests.swift",
+                "ForegroundReconnectPolicyTests.swift",
                 "LegacyRelayMessageTests.swift",
                 "PresenceWatchPolicyTests.swift",
                 "RecipientInFlightTrackerTests.swift",
@@ -84,7 +88,8 @@ let package = Package(
                 "RelayRateLimiterTests.swift",
                 "RelayTimestampsTests.swift",
                 "SocketGenerationTrackerTests.swift",
-                "SupersededLatchPolicyTests.swift"
+                "SupersededLatchPolicyTests.swift",
+                "WriteStallWatchdogTests.swift"
             ]
         )
     ]

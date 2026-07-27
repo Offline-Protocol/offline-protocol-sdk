@@ -211,32 +211,56 @@ public class InternetManager: NSObject, TransportManager {
     static let forcedCheckDeadlineMs: Int64 = 8_000
     static let forcedCheckRetryInterval: TimeInterval = 0.5
 
-    /// Cached mach timebase for monotonicNowMs (constant for the process).
-    private static let machTimebase: mach_timebase_info_data_t = {
-        var info = mach_timebase_info_data_t()
-        mach_timebase_info(&info)
-        return info
-    }()
-
-    /// Time source for the rate limiter, the in-flight tracker, and the
-    /// presence watch policy: monotonic AND sleep-inclusive
+    /// Time source for the rate limiter, the in-flight tracker, the presence
+    /// watch policy, and the write-stall watchdog: monotonic AND sleep-inclusive
     /// (mach_continuous_time — the true analogue of the Kotlin bridge's
     /// SystemClock.elapsedRealtime), so a wall-clock step (NTP correction,
     /// manual change) can never freeze or over-mint token refill,
     /// mass-expire in-flight sends, or evict the whole watch set, and a
     /// device-sleep interval still refills the bucket instead of pausing it
     /// (mach_absolute_time-based clocks stop ticking during sleep). Every
-    /// call into those three must use this — mixing time sources per call
-    /// site would look like clock jumps to their TTLs.
+    /// call into those must use this — mixing time sources per call site would
+    /// look like clock jumps to their TTLs. Delegates to the shared
+    /// `MonotonicClock` so this and OfflineProtocolModule's background-duration
+    /// gate read one implementation and can never drift apart.
     private func monotonicNowMs() -> Int64 {
-        let timebase = Self.machTimebase
-        let ticks = mach_continuous_time()
-        // Split multiply-then-divide so ticks * numer can't overflow UInt64;
-        // the sub-tick truncation is nanoseconds-scale, irrelevant at ms.
-        let numer = UInt64(timebase.numer)
-        let denom = UInt64(timebase.denom)
-        let nanos = (ticks / denom) * numer + (ticks % denom) * numer / denom
-        return Int64(nanos / 1_000_000)
+        MonotonicClock.nowMs()
+    }
+
+    /// The socket generation stamped on `task` at creation (see
+    /// SocketGenerationTracker / connect). Used to tag each watched write so a
+    /// stale completion can only ever retire its own generation's slot. 0 is an
+    /// unreachable sentinel (mint() starts at 1) for a task that somehow lost
+    /// its stamp — harmless, since arm and disarm read it from the same task.
+    private static func generation(of task: URLSessionWebSocketTask) -> Int {
+        task.taskDescription.flatMap { Int($0) } ?? 0
+    }
+
+    /// Sends `text` on `task` under write-stall-watchdog coverage: arms the
+    /// watchdog immediately before the send (the ONLY correct place — the slot
+    /// must exist the instant the write is outstanding) and forwards `completion`
+    /// unchanged to `task.send`. Every poll-path write that can pin the control
+    /// gate MUST go through here rather than calling `task.send` directly, so a
+    /// future send site cannot silently drop watchdog coverage. Disarm stays the
+    /// caller's job from inside `completion` (the completions differ too much to
+    /// centralize) — call `disarmWriteWatchdog(for:)` first, before any stale
+    /// guard. messageQueue only.
+    private func sendWatched(
+        _ task: URLSessionWebSocketTask,
+        _ text: String,
+        completion: @escaping @Sendable (Error?) -> Void
+    ) {
+        writeStallWatchdog.arm(nowMs: monotonicNowMs(), generation: Self.generation(of: task))
+        task.send(.string(text), completionHandler: completion)
+    }
+
+    /// Retires the oldest outstanding write for `task`'s generation from the
+    /// stall watchdog. Call from the send completion, before the stale-task
+    /// guard, so a cancelled (post-teardown) completion still frees its slot;
+    /// keying on the completing task's own generation means it can never pop a
+    /// live successor's freshly-armed write. messageQueue only.
+    private func disarmWriteWatchdog(for task: URLSessionWebSocketTask) {
+        writeStallWatchdog.disarm(generation: Self.generation(of: task))
     }
 
     /// Control-op frames deferred by the rate limiter, drained (oldest
@@ -273,7 +297,25 @@ public class InternetManager: NSObject, TransportManager {
     /// never touch it, and URLSession always fires the completion (even for
     /// a cancelled task), so it can never wedge — a stale completion cannot
     /// falsely release a newer primary's hold. messageQueue-confined.
+    ///
+    /// The "always fires the completion" self-heal is only *prompt* because a
+    /// stalled primary is torn down by the write-stall watchdog (see
+    /// `writeStallWatchdog`): on a zombie socket the completion would
+    /// otherwise not fire until the ~1min OS TCP timeout, holding this counter
+    /// >0 and freezing the whole data-plane poll behind the control gate for
+    /// that entire window. The watchdog's `teardownSocket` cancels the task,
+    /// which fires the completion (cancelled) within the threshold.
     private var inFlightControlPrimaries = 0
+
+    /// Bounds how long a poll-path socket write may stay outstanding, tearing
+    /// the socket down as a suspected zombie when a `.send` completion hangs
+    /// (the iOS analogue of OkHttp's `writeTimeout`; see `WriteStallWatchdog`).
+    /// Armed immediately before each watched `task.send`, disarmed from its
+    /// completion, checked in `pollAndSendMessages`, reset on teardown — all on
+    /// messageQueue, which is the confinement this unsynchronized policy relies
+    /// on (same contract as `pendingControlFrames`). `lazy` only so it can read
+    /// no instance state at init; first touch is always on messageQueue.
+    private lazy var writeStallWatchdog = WriteStallWatchdog()
 
     /// Armed by pause()'s final drain when a control-frame chain is still
     /// settling: the poll timer is stopped, so no tick will retry — instead
@@ -531,6 +573,10 @@ public class InternetManager: NSObject, TransportManager {
         controlOpTranslator.reset()
         messageQueue.async { [weak self] in
             self?.pendingControlFrames.removeAll()
+            // Outstanding writes are abandoned with this socket; reset the
+            // watchdog so the next connection starts fresh (late cancelled
+            // completions disarm to empty, a no-op).
+            self?.writeStallWatchdog.reset()
             // An armed pause-drain dies with the session (a disconnect
             // reset deliberately keeps it — the drain guarantee survives
             // background reconnects while paused).
@@ -718,6 +764,19 @@ public class InternetManager: NSObject, TransportManager {
             task.taskDescription = String(socketGeneration.mint())
             webSocketTask = task
             task.resume()
+
+            // Make "a fresh generation starts with an empty watchdog" a LOCAL
+            // guarantee rather than one that depends on every teardown path
+            // having reset() first. stalledAgeMs reads the FIFO head regardless
+            // of generation, so a stray abandoned entry surviving into this new
+            // generation could false-stall and tear the healthy socket down;
+            // resetting here (on messageQueue, before the post-auth poll arms
+            // any g-current write) closes that window independently. Late
+            // cancelled completions from the prior socket disarm to empty — a
+            // no-op — exactly as they do after the teardown-path reset.
+            messageQueue.async { [weak self] in
+                self?.writeStallWatchdog.reset()
+            }
 
             emitDiagnostic("info", "Connecting to WebSocket", context: [
                 "url": url.absoluteString
@@ -985,6 +1044,10 @@ public class InternetManager: NSObject, TransportManager {
         // generation-dead after the reset above.
         messageQueue.async { [weak self] in
             self?.pendingControlFrames.removeAll()
+            // Outstanding writes are abandoned with this socket; reset the
+            // watchdog so the next connection starts fresh (late cancelled
+            // completions disarm to empty, a no-op).
+            self?.writeStallWatchdog.reset()
         }
 
         // Always notify protocol of disconnection so DORS excludes Internet from
@@ -1607,6 +1670,28 @@ public class InternetManager: NSObject, TransportManager {
         // in-flight sends or evict the watch set.
         inFlightTracker.prune(nowMs: monotonicNowMs())
 
+        // Write-stall watchdog (iOS analogue of OkHttp's writeTimeout). A
+        // URLSession `.send` never times out on a socket the OS killed during
+        // suspension — the completion just never fires (no error, no delegate
+        // callback) until the ~1min OS TCP timeout. That would black-hole all
+        // egress and, if the stalled write is a control primary, pin
+        // `inFlightControlPrimaries` so the gate below freezes the entire data
+        // plane for that whole window. Checked BEFORE the gate so it still runs
+        // while the gate is holding the poll early-return: if the oldest
+        // outstanding write has aged past the threshold, tear the zombie down.
+        // teardownSocket's cancel fires the hung completions (failing their
+        // messages, refunding tokens, clearing the primary counter / drain
+        // flag), then autoReconnect + flush_outbox re-drive the backlog.
+        if let stalledMs = writeStallWatchdog.stalledAgeMs(nowMs: monotonicNowMs()),
+           let task = webSocketTask {
+            emitDiagnostic("warning", "Relay write stalled — tearing down suspected zombie socket", context: [
+                "stalledMs": stalledMs,
+                "outstandingWrites": writeStallWatchdog.outstandingCount
+            ])
+            teardownSocket(ifCurrent: task, reason: "Write stall watchdog")
+            return
+        }
+
         // Deferred control frames first: they are older than anything the
         // queue will hand us and their commits are still pending.
         drainPendingControlFrames()
@@ -1778,8 +1863,13 @@ public class InternetManager: NSObject, TransportManager {
             nowMs: monotonicNowMs()
         )
 
-        task.send(.string(jsonString)) { [weak self] error in
+        sendWatched(task, jsonString) { [weak self] error in
             guard let self = self else { return }
+            // Retire this write from the stall watchdog first. This completion
+            // runs on URLSession's delegate queue, not messageQueue, so hop —
+            // the FIFO is messageQueue-confined. Before the stale-task guard so
+            // a cancelled (post-teardown) completion still frees its slot.
+            self.messageQueue.async { self.disarmWriteWatchdog(for: task) }
             // A stale task's send outcome must not increment the failure
             // counter, report internetSendFailed for the message (the
             // disconnect path's fail_all_pending already owned it), or
@@ -1908,12 +1998,15 @@ public class InternetManager: NSObject, TransportManager {
             // extra frames and the commit are handed off only from the
             // SUCCESS completion below.
             inFlightControlPrimaries += 1
-            task.send(.string(primaryJson)) { [weak self] error in
+            sendWatched(task, primaryJson) { [weak self] error in
                 guard let self = self else { return }
                 // Hop to messageQueue: the primary counter, the spill queue,
                 // and enqueueControlFrames are messageQueue-confined.
                 self.messageQueue.async {
                     self.inFlightControlPrimaries -= 1
+                    // Retire this write from the stall watchdog alongside the
+                    // primary counter, before the stale guard.
+                    self.disarmWriteWatchdog(for: task)
                     // A stale task's send outcome must not touch failure
                     // counters, fail the message id (fail_all_pending owned
                     // it), or trigger teardown (see isStale); its deltas and
@@ -2020,10 +2113,13 @@ public class InternetManager: NSObject, TransportManager {
             return
         }
         isDrainingControlFrames = true
-        task.send(.string(frameJson)) { [weak self] error in
+        sendWatched(task, frameJson) { [weak self] error in
             guard let self = self else { return }
             self.messageQueue.async {
                 self.isDrainingControlFrames = false
+                // Retire this write from the stall watchdog alongside the
+                // drain flag, before the stale guard.
+                self.disarmWriteWatchdog(for: task)
                 // Stale task: the disconnect path already cleared the queue
                 // and generation-killed the commits.
                 guard !self.isStale(task) else { return }
