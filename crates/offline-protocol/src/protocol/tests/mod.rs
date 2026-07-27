@@ -5222,11 +5222,15 @@ fn test_unreachable_media_chunk_resolves_file_id() {
 }
 
 #[test]
-fn test_unreachable_dm_parks_edge_only_without_mesh_carrier() {
-    // Internet-only carrier: the relay's unreachable verdict parks the DM
-    // fully edge-driven — pending ACK dropped, nothing on a retry timer —
-    // so the ACK timeout loop can never burn max_retries into a terminal
-    // message_failed against a peer that is provably offline.
+fn test_unreachable_dm_internet_only_parks_with_probe() {
+    // Internet-only carrier (the default configuration for app users): the
+    // relay's unreachable verdict parks the DM — pending ACK dropped so the
+    // timeout loop can never burn max_retries into a terminal message_failed
+    // against a provably offline peer — but the park still schedules an
+    // escalating reachability probe. Without it the message would have NO
+    // self-recovery at all, leaving delivery hostage to an external edge
+    // (presence rotation / reconnect), which is what produced minutes-long
+    // delivery delays in the field.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -5263,12 +5267,18 @@ fn test_unreachable_dm_parks_edge_only_without_mesh_carrier() {
         "Park must drop the pending ACK"
     );
     assert!(
-        !protocol.retry_queue.contains(&message_id.as_str()),
-        "No mesh carrier: park must be edge-only, nothing on a timer"
+        protocol.retry_queue.contains(&message_id.as_str()),
+        "Internet-only park must still schedule a reachability probe"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&1),
+        "The park counter must be armed on every carrier — it is what makes \
+         probe exhaustion re-parkable instead of terminal"
     );
 
-    // With neither a pending ACK nor a retry entry, the tick loop has
-    // nothing to settle terminally.
+    // The probe is scheduled, not immediate: the tick loop has nothing to
+    // settle terminally in the meantime.
     protocol.process().unwrap();
     assert!(
         !events
@@ -5279,6 +5289,174 @@ fn test_unreachable_dm_parks_edge_only_without_mesh_carrier() {
         "A parked DM must not settle as message_failed"
     );
     assert!(protocol.outbox.contains_key(&message_id));
+}
+
+#[test]
+fn test_unreachable_dm_internet_only_probe_escalates_and_resets_on_edge() {
+    // The internet-only probe shares the mesh ladder: each consecutive
+    // verdict doubles the interval (15s -> 30s, 600s cap) so a peer that
+    // stays offline cannot become an unbounded resend loop into the relay,
+    // and any reachability edge resets the escalation.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+    let first_delay = protocol
+        .retry_queue
+        .time_until_next_retry()
+        .expect("first park must schedule a probe");
+    assert!(first_delay > chrono::Duration::seconds(10));
+    assert!(first_delay <= chrono::Duration::seconds(15));
+
+    // Second consecutive verdict doubles the interval (15s -> 30s).
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&2));
+    let second_delay = protocol
+        .retry_queue
+        .time_until_next_retry()
+        .expect("second park must re-schedule the probe");
+    assert!(second_delay > chrono::Duration::seconds(20));
+    assert!(second_delay <= chrono::Duration::seconds(30));
+
+    // A relay presence-online answer is the internet-only reachability edge
+    // (the mesh path uses on_neighbor_discovered): it re-drives the parked DM
+    // and resets the escalation counter.
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        None,
+        "A presence-online edge must reset the escalation"
+    );
+}
+
+#[test]
+fn test_unreachable_dm_internet_only_reemits_undeliverable_per_verdict() {
+    // Deliberate contract: unlike a mesh probe (which can never earn a relay
+    // verdict), an internet probe re-earns a DeliveryError while the peer
+    // stays offline, so MessageUndeliverable repeats — once per verdict. It
+    // is a repeatable status signal, never a terminal one; the terminal
+    // signal remains MessageFailed, which must NOT fire here.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    for _ in 0..2 {
+        protocol
+            .on_transport_send_failed(
+                &message_id.as_str(),
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
+    }
+
+    let events = events.lock().unwrap();
+    let undeliverable = events
+        .iter()
+        .filter(|e| matches!(e, Event::MessageUndeliverable { .. }))
+        .count();
+    assert_eq!(
+        undeliverable, 2,
+        "Each verdict must re-emit the non-terminal undeliverable signal"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "Repeated verdicts must never settle the message terminally"
+    );
+}
+
+#[test]
+fn test_internet_only_probe_exhaustion_reparks_not_terminal() {
+    // The hoisted counter is what arms try_repark_exhausted_dm on this
+    // branch. A probe that succeeds locally but is never answered burns the
+    // ACK budget; with a live counter that exhaustion must re-park (keeping
+    // the outbox entry) rather than settle terminally — otherwise unifying
+    // the branches would have traded a stalled message for a failed one.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+
+    // Drive the exhaustion path directly: the probe's ACK budget ran out.
+    protocol
+        .handle_max_retries_exceeded(&message_id, 10)
+        .unwrap();
+
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "Exhaustion with a live park counter must re-park, not evict"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "Re-parked exhaustion must not surface a terminal message_failed"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&2),
+        "The re-park escalates the interval like any other park"
+    );
 }
 
 #[test]

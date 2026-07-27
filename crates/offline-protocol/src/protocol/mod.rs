@@ -978,9 +978,9 @@ impl OfflineProtocol {
     /// transports still win over the override.
     fn flush_outbox_for_peer_via(&mut self, peer_id: &str, unpark_via: Option<TransportType>) {
         // Probe ACKs first: with a live park counter, the peer's DMs may be
-        // mid-probe — awaiting a mesh ACK that can never arrive — and the
-        // awaiting-ACK filter below would skip exactly the messages this
-        // edge exists to re-drive.
+        // mid-probe — awaiting a probe ACK that may never arrive (never, over
+        // a mesh carrier) — and the awaiting-ACK filter below would skip
+        // exactly the messages this edge exists to re-drive.
         self.cancel_probe_state_for_parked_peer(peer_id);
         // A per-peer reachability edge: the escalating unreachable-probe
         // interval starts over (mirrors rearm_welcome_for_peer resetting
@@ -1042,10 +1042,11 @@ impl OfflineProtocol {
 
         // An edge that re-drove no parkable DM at all didn't actually take:
         // the DMs now sit in the retry queue, whose later sends are
-        // DORS-routed (no transport override there), and a mesh-local
-        // success would re-register an unanswerable ACK. Restore the
-        // counter so exhaustion stays within `try_repark_exhausted_dm`'s
-        // reach instead of settling terminally with the counter cleared.
+        // DORS-routed (no transport override there), and a send that succeeds
+        // locally without reaching the peer would re-register an ACK nothing
+        // will answer. Restore the counter so exhaustion stays within
+        // `try_repark_exhausted_dm`'s reach instead of settling terminally
+        // with the counter cleared.
         //
         // Restore granularity is per-peer, matching the counter: one
         // successful re-drive clears it even when a sibling's send failed on
@@ -1162,8 +1163,9 @@ impl OfflineProtocol {
 
         // Restore the counter of every parked peer none of whose DMs were
         // re-driven on this edge (see `flush_outbox_for_peer_via`): their
-        // retry-queue sends are DORS-routed, and a mesh-local success must
-        // leave exhaustion re-parkable rather than terminal.
+        // retry-queue sends are DORS-routed, and a send that succeeds locally
+        // without reaching the peer must leave exhaustion re-parkable rather
+        // than terminal.
         for (peer_id, parks) in prior_parks {
             if parked_dm_seen.contains(&peer_id) && !parked_dm_redriven.contains(&peer_id) {
                 self.dm_unreachable_parks.insert(peer_id, parks);

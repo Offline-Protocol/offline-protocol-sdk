@@ -68,7 +68,9 @@ pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
 /// state matches the presence-rescue cadence (one send per 10 min), which is
 /// cheap and self-resolving. Shared by the plain-DM unreachable probe
 /// (`handle_recipient_unreachable_for_message`, per-peer
-/// `dm_unreachable_parks` counter) for the same reason.
+/// `dm_unreachable_parks` counter) for the same reason — and there the
+/// escalation carries the whole bound, since that probe runs on every carrier
+/// (see `park_unreachable_dm`), including internet-only devices.
 pub(crate) const WELCOME_UNREACHABLE_RETRY_CAP_SECS: i64 = 600;
 /// Age limit for a welcome lifecycle to keep its peer on the presence
 /// watchlist (`welcome_pending_peers`). Without it the watch set only ever

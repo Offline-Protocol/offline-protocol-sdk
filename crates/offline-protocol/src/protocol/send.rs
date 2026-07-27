@@ -2646,19 +2646,21 @@ impl OfflineProtocol {
     /// (`process_timed_out_acks`) and settles a 7-day outbox message
     /// terminally; a re-driven send re-registers a fresh ACK, so the budget
     /// normally burns only against a peer believed reachable. The exception
-    /// is the mesh reachability probe below: its send re-enters the ACK
-    /// machinery but can never earn a relay verdict over a mesh carrier, so
-    /// exhaustion with a live park counter *re-parks* instead of settling
-    /// ([`Self::try_repark_exhausted_dm`]). Settlement is reserved for
-    /// delivery or outbox-lifetime expiry.
+    /// is the reachability probe below: its send re-enters the ACK machinery
+    /// but may never earn a relay verdict (a mesh carrier cannot produce one
+    /// at all), so exhaustion with a live park counter *re-parks* instead of
+    /// settling ([`Self::try_repark_exhausted_dm`]). Settlement is reserved
+    /// for delivery or outbox-lifetime expiry.
     ///
-    /// Carrier guard, mirroring `apply_recipient_unreachable_failure`: with
-    /// a local mesh carrier (BLE / WiFi-Direct) up, the peer may be a room
-    /// away — and possibly already a discovered neighbor, so no future edge
-    /// will fire for it. The message then keeps a timed reachability probe
-    /// whose interval escalates per consecutive park (15s → 600s cap,
-    /// per-peer counter reset on any reachability edge) instead of parking
-    /// edge-only.
+    /// The park always keeps a timed reachability probe whose interval
+    /// escalates per consecutive park (15s → 600s cap, per-peer counter reset
+    /// on any reachability edge). It is deliberately carrier-agnostic: with a
+    /// local mesh carrier the peer may be a room away — possibly already a
+    /// discovered neighbor, so no future edge would fire for it — and on an
+    /// internet-only device the external edges (presence rotation, reconnect)
+    /// are the *only* other recovery, which leaves delivery hostage to a
+    /// bridge's polling cadence. See [`Self::park_unreachable_dm`] for why
+    /// probing over the relay is self-limiting.
     ///
     /// Media chunks are never parked: their offline story is retry
     /// exhaustion → transfer abort → persisted descriptor →
@@ -2719,54 +2721,71 @@ impl OfflineProtocol {
     /// ([`Self::handle_recipient_unreachable_for_message`]) and the
     /// exhausted-probe path ([`Self::try_repark_exhausted_dm`]): drops the
     /// pending ACK and any scheduled retry so nothing burns budget against
-    /// the offline peer, then — only with a local mesh carrier up —
-    /// schedules the escalating reachability probe. The message is cloned
-    /// from the outbox only on that probe branch.
+    /// the offline peer, then schedules the escalating reachability probe.
+    ///
+    /// The probe is carrier-agnostic — DORS picks its transport like any
+    /// other send — because an internet-only device is the common
+    /// configuration, not an exotic one, and parking it edge-only leaves the
+    /// message with *no* self-recovery at all: no pending ACK to time out, no
+    /// retry entry, nothing on a timer. Recovery then depends entirely on an
+    /// external reachability edge (`flush_outbox_all` on reconnect/start, or
+    /// a presence-online answer), i.e. on a bridge's presence-polling cadence
+    /// — tens of seconds to minutes, and nothing at all for a headless
+    /// consumer that never polls presence.
+    ///
+    /// Probing over the relay is self-limiting in every outcome, which is why
+    /// no carrier guard is needed:
+    /// - the peer is still offline and the relay's push fallback fails → a
+    ///   fresh `DeliveryError` re-enters this park, escalating the interval
+    ///   (15s → 600s cap) and re-emitting the non-terminal
+    ///   [`Event::MessageUndeliverable`];
+    /// - the relay's push fallback succeeds → no verdict is returned at all
+    ///   and the probe becomes an ordinary in-flight send on the ACK ladder;
+    /// - the peer is back → the probe *is* the delivery, which beats waiting
+    ///   for any presence edge.
+    ///
+    /// The escalation is what bounds relay traffic (steady state: one frame
+    /// per 600s per parked peer), and the outbox lifetime bounds the entry
+    /// itself. Note that a probe can also be routed onto the relay when a
+    /// mesh carrier is up — DORS has always been free to choose it — so this
+    /// path is not new behavior for the relay, only newly reachable on
+    /// internet-only devices.
+    ///
+    /// The counter increment is unconditional for the same reason: it is what
+    /// arms [`Self::try_repark_exhausted_dm`], so a probe that exhausts its
+    /// ACK budget re-parks instead of settling terminally.
     fn park_unreachable_dm(&mut self, message_id: &MessageId, recipient: &str, attempt_count: u32) {
         // Park: no pending ACK to time out, no backoff-scheduled resend.
         self.ack_manager.remove_ack(message_id);
         self.retry_queue.remove(&message_id.as_str());
 
-        let mesh_carrier_available = self
-            .transport_manager
-            .get_available_transports()
-            .keys()
-            .any(|transport| matches!(transport, TransportType::BLE | TransportType::WiFiDirect));
-        if mesh_carrier_available {
-            let parks = {
-                let count = self
-                    .dm_unreachable_parks
-                    .entry(recipient.to_string())
-                    .or_insert(0);
-                *count = count.saturating_add(1);
-                *count
-            };
-            // parks >= 1 here; shift clamped so 15 << 6 = 960 is the largest
-            // pre-cap value — no overflow risk.
-            let retry_in_secs = (WELCOME_NO_CARRIER_RETRY_SECS << (parks - 1).min(6))
-                .min(WELCOME_UNREACHABLE_RETRY_CAP_SECS);
-            if let Some(entry) = self.outbox.get(message_id) {
-                let message = entry.message.clone();
-                let _ = self.retry_queue.enqueue_with_delay(
-                    message,
-                    attempt_count,
-                    (retry_in_secs * 1000) as u64,
-                );
-            }
-            debug!(
-                message_id = %message_id,
-                recipient = %recipient,
-                retry_in_secs = retry_in_secs,
-                parks = parks,
-                "Parked unreachable DM with escalating mesh reachability probe"
-            );
-        } else {
-            debug!(
-                message_id = %message_id,
-                recipient = %recipient,
-                "Parked unreachable DM edge-only (no local mesh carrier)"
+        let parks = {
+            let count = self
+                .dm_unreachable_parks
+                .entry(recipient.to_string())
+                .or_insert(0);
+            *count = count.saturating_add(1);
+            *count
+        };
+        // parks >= 1 here; shift clamped so 15 << 6 = 960 is the largest
+        // pre-cap value — no overflow risk.
+        let retry_in_secs = (WELCOME_NO_CARRIER_RETRY_SECS << (parks - 1).min(6))
+            .min(WELCOME_UNREACHABLE_RETRY_CAP_SECS);
+        if let Some(entry) = self.outbox.get(message_id) {
+            let message = entry.message.clone();
+            let _ = self.retry_queue.enqueue_with_delay(
+                message,
+                attempt_count,
+                (retry_in_secs * 1000) as u64,
             );
         }
+        debug!(
+            message_id = %message_id,
+            recipient = %recipient,
+            retry_in_secs = retry_in_secs,
+            parks = parks,
+            "Parked unreachable DM with escalating reachability probe"
+        );
     }
 
     /// Re-parks a plain DM whose ACK retry budget just exhausted while its
@@ -2776,9 +2795,13 @@ impl OfflineProtocol {
     ///
     /// A live counter means the relay declared the peer offline and no
     /// reachability edge has fired since (every edge clears it), so the
-    /// exhausted budget was burnt by mesh reachability probes — sends that
-    /// locally succeed into the mesh but can never earn a relay verdict —
-    /// not by a peer believed reachable. Settling terminally here would
+    /// exhausted budget was burnt by reachability probes — sends that succeed
+    /// locally without proving the peer is back — not by a peer believed
+    /// reachable. Over a mesh carrier such a probe can never earn a relay
+    /// verdict at all; over the relay a verdict normally re-parks the message
+    /// (resetting its ACK budget) well before exhaustion, so reaching here on
+    /// an internet-only device means the probes were accepted for delivery
+    /// but never answered. Settling terminally here would
     /// reintroduce the ~15-minute `message_failed` the park exists to
     /// prevent; re-parking keeps settlement reserved for delivery or
     /// outbox-lifetime expiry (the escalation cap bounds probe traffic, the
@@ -2838,8 +2861,8 @@ impl OfflineProtocol {
     /// Only acts when the peer holds a live unreachable-park counter: a
     /// live counter means the relay declared the peer offline and no edge
     /// has fired since, so a pending ACK on the peer's DMs belongs to a
-    /// mesh reachability probe — a send that locally succeeded into the
-    /// mesh but can never be answered — not to a delivery in good standing.
+    /// reachability probe — a send that locally succeeded but has not been
+    /// answered — not to a delivery in good standing.
     /// Without this cancel, the flush edges' awaiting-ACK filters skip
     /// exactly the probing messages while still clearing the counter,
     /// stranding them on minutes-scale ACK backoff after the relay already
