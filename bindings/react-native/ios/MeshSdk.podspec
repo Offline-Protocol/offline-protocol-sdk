@@ -26,6 +26,7 @@ Pod::Spec.new do |s|
     "RelayGroupSnapshotBridge.swift",
     "RelayRateLimiter.swift",
     "LegacyRelayMessage.swift",
+    "MonotonicClock.swift",
     "PresenceWatchPolicy.swift",
     "RecipientInFlightTracker.swift",
     "RelayTimestamps.swift",

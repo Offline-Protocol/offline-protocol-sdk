@@ -51,6 +51,7 @@ let package = Package(
                 "EncryptionConfigReader.swift",
                 "ForcedPresenceCheckQueue.swift",
                 "LegacyRelayMessage.swift",
+                "MonotonicClock.swift",
                 "PresenceWatchPolicy.swift",
                 "RecipientInFlightTracker.swift",
                 "RelayControlOpTranslator.swift",

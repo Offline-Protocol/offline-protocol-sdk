@@ -81,33 +81,14 @@ class OfflineProtocolModule: RCTEventEmitter {
         NotificationCenter.default.removeObserver(self, name: UIApplication.willEnterForegroundNotification, object: nil)
     }
     
-    /// `mach_continuous_time` reading (ms) at the last background transition,
-    /// used to gate the foreground relay reconnect below. This clock is both
+    /// `MonotonicClock.nowMs()` reading at the last background transition, used
+    /// to gate the foreground relay reconnect below. That clock is both
     /// monotonic AND sleep-inclusive: we want elapsed REAL time away (the device
     /// may have been asleep in the background), which it counts, while being
     /// immune to the wall-clock steps an NTP correction or manual change would
-    /// introduce — same clock discipline as InternetManager.monotonicNowMs().
+    /// introduce — the same shared clock InternetManager's write-stall watchdog
+    /// uses, so the two mechanisms measure identical real elapsed time.
     private var backgroundEnteredAtMs: Int64?
-
-    /// Cached mach timebase (constant for the process), for monotonicNowMs.
-    private static let machTimebase: mach_timebase_info_data_t = {
-        var info = mach_timebase_info_data_t()
-        mach_timebase_info(&info)
-        return info
-    }()
-
-    /// Monotonic, sleep-inclusive milliseconds (mach_continuous_time). Mirrors
-    /// InternetManager.monotonicNowMs so the background-duration gate measures
-    /// the same real elapsed time the write-stall watchdog uses.
-    private static func monotonicNowMs() -> Int64 {
-        let timebase = machTimebase
-        let ticks = mach_continuous_time()
-        // Split multiply-then-divide so ticks * numer can't overflow UInt64.
-        let numer = UInt64(timebase.numer)
-        let denom = UInt64(timebase.denom)
-        let nanos = (ticks / denom) * numer + (ticks % denom) * numer / denom
-        return Int64(nanos / 1_000_000)
-    }
 
     /// Minimum background stay before a foreground transition force-reconnects
     /// the relay socket. iOS suspends a backgrounded app within a few seconds,
@@ -121,7 +102,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
     @objc private func applicationDidEnterBackground() {
         Self.testLastWifiStatusChangeForTesting = false
-        backgroundEnteredAtMs = Self.monotonicNowMs()
+        backgroundEnteredAtMs = MonotonicClock.nowMs()
         guard let proto = protocolInstance else { return }
         try? proto.wifiDirectStatusChanged(isConnected: false)
     }
@@ -139,7 +120,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         // in-transport write-stall watchdog, which catches a zombie that
         // survives (or first appears) without a background→foreground edge.
         if let enteredAtMs = backgroundEnteredAtMs,
-           Self.monotonicNowMs() - enteredAtMs >= Self.foregroundReconnectMinBackgroundIntervalMs {
+           MonotonicClock.nowMs() - enteredAtMs >= Self.foregroundReconnectMinBackgroundIntervalMs {
             internetManager?.forceReconnect()
         }
         backgroundEnteredAtMs = nil

@@ -41,6 +41,19 @@
 // `stalledAgeMs` looks at the head regardless of generation); the generation tag
 // is the belt to that braces.
 //
+// SCOPE — this watches only poll-path data and control writes (the ones that
+// can pin `inFlightControlPrimaries` and freeze the data plane). Ping, presence
+// checks, raw commands, and auth writes are deliberately NOT watched: their
+// stalling does not freeze the data plane, so they need no gate-unfreeze bound.
+// The consequence is that a zombie appearing while the app is foreground-active
+// with an EMPTY outbox arms nothing here and is not detected by this watchdog
+// until the next data/control send — but an idle socket with nothing queued has
+// no user-visible stall, and the suspension case (the common one) is already
+// healed proactively by OfflineProtocolModule's foreground forceReconnect. So
+// the uncovered case is "idle zombie, foreground, no traffic", which self-heals
+// the instant traffic resumes. Widen coverage to those other send sites only if
+// that case ever proves to matter.
+//
 // This is not internally synchronized; the caller confines it to a single serial
 // queue (the bridge's messageQueue), exactly as it does for `pendingControlFrames`.
 //

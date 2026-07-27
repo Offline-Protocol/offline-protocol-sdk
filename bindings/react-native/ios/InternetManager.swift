@@ -211,32 +211,20 @@ public class InternetManager: NSObject, TransportManager {
     static let forcedCheckDeadlineMs: Int64 = 8_000
     static let forcedCheckRetryInterval: TimeInterval = 0.5
 
-    /// Cached mach timebase for monotonicNowMs (constant for the process).
-    private static let machTimebase: mach_timebase_info_data_t = {
-        var info = mach_timebase_info_data_t()
-        mach_timebase_info(&info)
-        return info
-    }()
-
-    /// Time source for the rate limiter, the in-flight tracker, and the
-    /// presence watch policy: monotonic AND sleep-inclusive
+    /// Time source for the rate limiter, the in-flight tracker, the presence
+    /// watch policy, and the write-stall watchdog: monotonic AND sleep-inclusive
     /// (mach_continuous_time — the true analogue of the Kotlin bridge's
     /// SystemClock.elapsedRealtime), so a wall-clock step (NTP correction,
     /// manual change) can never freeze or over-mint token refill,
     /// mass-expire in-flight sends, or evict the whole watch set, and a
     /// device-sleep interval still refills the bucket instead of pausing it
     /// (mach_absolute_time-based clocks stop ticking during sleep). Every
-    /// call into those three must use this — mixing time sources per call
-    /// site would look like clock jumps to their TTLs.
+    /// call into those must use this — mixing time sources per call site would
+    /// look like clock jumps to their TTLs. Delegates to the shared
+    /// `MonotonicClock` so this and OfflineProtocolModule's background-duration
+    /// gate read one implementation and can never drift apart.
     private func monotonicNowMs() -> Int64 {
-        let timebase = Self.machTimebase
-        let ticks = mach_continuous_time()
-        // Split multiply-then-divide so ticks * numer can't overflow UInt64;
-        // the sub-tick truncation is nanoseconds-scale, irrelevant at ms.
-        let numer = UInt64(timebase.numer)
-        let denom = UInt64(timebase.denom)
-        let nanos = (ticks / denom) * numer + (ticks % denom) * numer / denom
-        return Int64(nanos / 1_000_000)
+        MonotonicClock.nowMs()
     }
 
     /// The socket generation stamped on `task` at creation (see
@@ -776,6 +764,19 @@ public class InternetManager: NSObject, TransportManager {
             task.taskDescription = String(socketGeneration.mint())
             webSocketTask = task
             task.resume()
+
+            // Make "a fresh generation starts with an empty watchdog" a LOCAL
+            // guarantee rather than one that depends on every teardown path
+            // having reset() first. stalledAgeMs reads the FIFO head regardless
+            // of generation, so a stray abandoned entry surviving into this new
+            // generation could false-stall and tear the healthy socket down;
+            // resetting here (on messageQueue, before the post-auth poll arms
+            // any g-current write) closes that window independently. Late
+            // cancelled completions from the prior socket disarm to empty — a
+            // no-op — exactly as they do after the teardown-path reset.
+            messageQueue.async { [weak self] in
+                self?.writeStallWatchdog.reset()
+            }
 
             emitDiagnostic("info", "Connecting to WebSocket", context: [
                 "url": url.absoluteString
