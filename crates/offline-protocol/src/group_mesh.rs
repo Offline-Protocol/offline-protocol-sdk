@@ -896,9 +896,16 @@ impl OfflineProtocol {
                     GroupDecryptOutcome::NotMlsCiphertext
                 }
             }
-            Err(e @ offline_protocol_mls::MlsError::Decryption(_)) => {
+            Err(
+                e @ (offline_protocol_mls::MlsError::Decryption(_)
+                | offline_protocol_mls::MlsError::SessionDesync(_)),
+            ) => {
                 // Epoch-lagged ciphertext — may decrypt once a commit
-                // advances local group state.
+                // advances local group state. `SessionDesync` is the same
+                // epoch-mismatch condition surfaced with a distinct variant for
+                // the 1:1 re-key path; on the group path it buffers exactly as
+                // `Decryption` always has (the group's own recovery is the
+                // commit-driven drain, not a re-key).
                 warn!(
                     group_id = %group_id,
                     error = %e,

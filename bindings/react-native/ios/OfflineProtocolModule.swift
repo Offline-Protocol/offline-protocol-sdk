@@ -167,7 +167,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             overflowPolicy: overflowPolicy,
             binaryWireEnabled: binaryWireEnabled,
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
-            richPayloadEnabled: encryption.richPayloadEnabled
+            richPayloadEnabled: encryption.richPayloadEnabled,
+            cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled
         )
 
         return (config, raw)

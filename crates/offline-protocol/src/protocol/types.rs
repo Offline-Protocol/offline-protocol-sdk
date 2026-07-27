@@ -18,6 +18,16 @@ use tracing::warn;
 pub(crate) const CONFIRMATION_RETRY_INTERVAL_SECS: i64 = 5;
 /// Probe interval for reconciling pending sessions after restart.
 pub(crate) const CONFIRMATION_PROBE_INTERVAL_SECS: i64 = 5;
+/// Minimum interval between 1:1 session re-keys for the same peer, triggered by
+/// an epoch-desync decrypt failure. A re-key is a full teardown + key-package
+/// re-exchange, so it is rate-limited well above the confirmation-probe cadence:
+/// one legit desync heals in a single round-trip, and this bounds a peer
+/// replaying stale-epoch ciphertext (or an injected wrong-epoch frame) to at
+/// most one re-key per this window rather than a storm. The floor is enforced
+/// unconditionally — a successful decrypt on the healed session does NOT reset
+/// it — so an attacker cannot defeat it by interleaving replays with legit
+/// traffic (see `schedule_session_rekey`).
+pub(crate) const REKEY_INTERVAL_SECS: i64 = 30;
 /// Number of welcome retry records processed per tick.
 pub(crate) const WELCOME_RETRY_BATCH_SIZE: usize = 20;
 /// Hard TTL for outbound welcome lifecycle records.
@@ -317,7 +327,7 @@ pub(crate) const MAX_RICH_EXTRAS_BYTES: usize = 32 * 1024;
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
 /// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,
 /// never sent cleartext.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct RichSendExtras {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reply_context: Option<ReplyContext>,
@@ -1050,6 +1060,41 @@ pub(crate) fn lock_shared_state(
         .map_err(|_| Error::Other("Shared state mutex poisoned".to_string()))
 }
 
+/// Provenance kept on an outbox entry so an encrypted DM can be *re-sealed*
+/// against the peer's current MLS session on each resend, instead of replaying
+/// the ciphertext bytes sealed at first send (which become permanently
+/// undecryptable once the peer re-keys to a new epoch). Mirrors the fields the
+/// pre-send [`PendingMessage`] carries, so both re-seal through the same
+/// `prepare_outbound_content` chokepoint. Only populated for main-outbox
+/// (non-media) encrypted DMs; absent (`None`) means verbatim replay — the
+/// fallback for plaintext sends and media chunks.
+///
+/// **Memory-only by design.** This holds the message *plaintext*, so it is never
+/// persisted (see the `#[serde(skip)]` on [`OutboxEntry::reseal`]): persisting it
+/// would broaden plaintext-at-rest to every sent-but-unACKed encrypted DM for the
+/// full outbox lifetime, weakening forward secrecy in exchange for only a narrow
+/// cross-restart reseal benefit. After a restart the restored entry replays
+/// verbatim; if that resend hits a desync, Tier 1 (un-ACK + re-key) still keeps
+/// delivery honest rather than silently losing the message.
+#[derive(Debug, Clone)]
+pub(crate) struct OutboxReseal {
+    /// Original plaintext content.
+    pub(crate) content: String,
+    /// Message priority.
+    pub(crate) priority: MessagePriority,
+    /// Reply-to message ID if applicable.
+    pub(crate) reply_to_msg: Option<MessageId>,
+    /// Forwarding attribution.
+    pub(crate) forwarded_from: Option<ForwardInfo>,
+    /// Content type of the original message.
+    pub(crate) content_type: ContentType,
+    /// Media metadata (cleartext-outer fallback provenance).
+    pub(crate) media_metadata: Option<MediaMetadata>,
+    /// Sealed-only rich extras (reply context, rich media metadata, forward
+    /// info) — re-evaluated against current capability at re-seal time.
+    pub(crate) rich: Option<RichSendExtras>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct OutboxEntry {
     pub(crate) message: Message,
@@ -1057,6 +1102,13 @@ pub(crate) struct OutboxEntry {
     pub(crate) first_sent_at: DateTime<Utc>,
     pub(crate) last_sent_at: DateTime<Utc>,
     pub(crate) last_transport: Option<TransportType>,
+    /// Re-seal provenance; `None` for verbatim-replay entries (plaintext or
+    /// media). **Memory-only** (`#[serde(skip)]`): it carries the message
+    /// plaintext, which must never be persisted (see [`OutboxReseal`]). A
+    /// restored entry deserializes with `reseal: None` and therefore replays
+    /// verbatim.
+    #[serde(skip)]
+    pub(crate) reseal: Option<OutboxReseal>,
 }
 
 #[derive(Clone)]

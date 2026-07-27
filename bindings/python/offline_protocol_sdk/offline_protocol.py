@@ -5413,7 +5413,7 @@ class _UniffiFfiConverterTypePeerDevice(_UniffiConverterRustBuffer):
 
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, user_id:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, require_transport_identity:bool = False, binary_wire_enabled:bool = True, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True):
+    def __init__(self, *, app_id:str, user_id:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, require_transport_identity:bool = False, binary_wire_enabled:bool = True, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True):
         self.app_id = app_id
         self.user_id = user_id
         self.ble_enabled = ble_enabled
@@ -5437,12 +5437,13 @@ class ProtocolConfig:
         self.binary_wire_enabled = binary_wire_enabled
         self.compact_envelope_enabled = compact_envelope_enabled
         self.rich_payload_enabled = rich_payload_enabled
+        self.crypto_recovery_enabled = crypto_recovery_enabled
         
         
 
     
     def __str__(self):
-        return "ProtocolConfig(app_id={}, user_id={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, require_transport_identity={}, binary_wire_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={})".format(self.app_id, self.user_id, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.require_transport_identity, self.binary_wire_enabled, self.compact_envelope_enabled, self.rich_payload_enabled)
+        return "ProtocolConfig(app_id={}, user_id={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, require_transport_identity={}, binary_wire_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={})".format(self.app_id, self.user_id, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.require_transport_identity, self.binary_wire_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled)
     def __eq__(self, other):
         if self.app_id != other.app_id:
             return False
@@ -5490,6 +5491,8 @@ class ProtocolConfig:
             return False
         if self.rich_payload_enabled != other.rich_payload_enabled:
             return False
+        if self.crypto_recovery_enabled != other.crypto_recovery_enabled:
+            return False
         return True
 
 class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
@@ -5519,6 +5522,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
             binary_wire_enabled=_UniffiFfiConverterBoolean.read(buf),
             compact_envelope_enabled=_UniffiFfiConverterBoolean.read(buf),
             rich_payload_enabled=_UniffiFfiConverterBoolean.read(buf),
+            crypto_recovery_enabled=_UniffiFfiConverterBoolean.read(buf),
         )
 
     @staticmethod
@@ -5546,6 +5550,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.check_lower(value.binary_wire_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.compact_envelope_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.rich_payload_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.crypto_recovery_enabled)
 
     @staticmethod
     def write(value, buf):
@@ -5572,6 +5577,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.binary_wire_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.compact_envelope_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.rich_payload_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.crypto_recovery_enabled, buf)
 
 @dataclass
 class TransportConfig:

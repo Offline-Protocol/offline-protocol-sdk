@@ -1345,6 +1345,50 @@ mod tests {
     }
 
     #[test]
+    fn test_epoch_fork_classifies_as_session_desync() {
+        // An established session that forks (one side advances its epoch without
+        // the other merging the commit) must surface as the *recoverable*
+        // `SessionDesync`, not an opaque `Decryption` — that is what lets the
+        // protocol layer re-key instead of silently dropping.
+        let (alice, bob) = create_test_session();
+
+        // Alice self-updates and merges locally, advancing only her epoch; bob
+        // never sees the commit, so the two sides are now one epoch apart.
+        let group_id = GroupId::new("session:alice:bob").unwrap();
+        alice.update_keys(&group_id).unwrap();
+
+        // A message alice encrypts at her new epoch cannot decrypt at bob's old
+        // epoch → OpenMLS `WrongEpoch` → `MlsError::SessionDesync`.
+        let ct = alice.encrypt_for_user("bob", b"after-fork").unwrap();
+        let err = bob.decrypt_from_user(&ct, "alice").unwrap_err();
+        assert!(
+            matches!(err, MlsError::SessionDesync(_)),
+            "epoch fork must classify as SessionDesync, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_corrupt_ciphertext_is_not_classified_as_session_desync() {
+        // Safety property behind the re-key DoS guard: a corrupt or forged
+        // ciphertext must NEVER be classified `SessionDesync`, or an attacker
+        // could drive session re-keys by injecting garbage. It stays a plain
+        // decrypt failure (AEAD/parse), which the protocol layer fails closed.
+        let (alice, bob) = create_test_session();
+        let mut ct = alice.encrypt_for_user("bob", b"hello").unwrap();
+        // Corrupt the AEAD-protected body.
+        for b in ct.ciphertext.iter_mut() {
+            *b ^= 0xFF;
+        }
+        let err = bob.decrypt_from_user(&ct, "alice").unwrap_err();
+        assert!(
+            !matches!(err, MlsError::SessionDesync(_)),
+            "corrupt ciphertext must not be treated as a recoverable desync, got {:?}",
+            err
+        );
+    }
+
+    #[test]
     fn test_join_session_binds_slot_to_inviter() {
         // Regression (session-hijack): a Welcome from an authenticated inviter
         // may only install the 1:1 session slot for (self, inviter). An inviter

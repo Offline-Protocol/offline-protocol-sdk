@@ -52,6 +52,18 @@ pub enum MlsError {
     #[error("Decryption failed: {0}")]
     Decryption(String),
 
+    /// Decryption failed because the local session is out of sync with the
+    /// sender's epoch (the two sides disagree on the MLS epoch), as opposed to
+    /// a corrupt or forged ciphertext. This is a *recoverable* failure: tearing
+    /// down and re-establishing the 1:1 session restores the channel. It is
+    /// deliberately distinct from [`MlsError::Decryption`] so the protocol layer
+    /// can withhold the delivery ACK and trigger a re-key instead of silently
+    /// dropping the message. Message-specific ratchet failures (a discarded past
+    /// generation) and AEAD/corrupt failures are NOT classified here — re-keying
+    /// would not help and, for forged ciphertext, would be a re-key-storm vector.
+    #[error("Session out of sync: {0}")]
+    SessionDesync(String),
+
     /// Failed to process Welcome message.
     #[error("Welcome processing failed: {0}")]
     WelcomeProcessing(String),

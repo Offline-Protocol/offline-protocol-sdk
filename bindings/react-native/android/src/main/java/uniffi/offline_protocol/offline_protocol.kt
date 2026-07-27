@@ -7101,6 +7101,8 @@ data class ProtocolConfig (
     var `compactEnvelopeEnabled`: kotlin.Boolean = true 
     , 
     var `richPayloadEnabled`: kotlin.Boolean = true 
+    , 
+    var `cryptoRecoveryEnabled`: kotlin.Boolean = true 
     
 ){
     
@@ -7138,6 +7140,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -7164,7 +7167,8 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`requireTransportIdentity`) +
             FfiConverterBoolean.allocationSize(value.`binaryWireEnabled`) +
             FfiConverterBoolean.allocationSize(value.`compactEnvelopeEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`richPayloadEnabled`)
+            FfiConverterBoolean.allocationSize(value.`richPayloadEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`cryptoRecoveryEnabled`)
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
@@ -7191,6 +7195,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`binaryWireEnabled`, buf)
             FfiConverterBoolean.write(value.`compactEnvelopeEnabled`, buf)
             FfiConverterBoolean.write(value.`richPayloadEnabled`, buf)
+            FfiConverterBoolean.write(value.`cryptoRecoveryEnabled`, buf)
     }
 }
 

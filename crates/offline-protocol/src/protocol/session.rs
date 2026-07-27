@@ -3,7 +3,7 @@
 use super::{
     internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle, SessionState,
     WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
-    CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS,
+    CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS,
     WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
     WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
@@ -457,6 +457,111 @@ impl OfflineProtocol {
                 peer_id,
                 now + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS),
             );
+        }
+    }
+
+    /// Triggers a rate-limited re-key of the 1:1 session with `peer_id` after an
+    /// epoch-desync decrypt failure.
+    ///
+    /// The self-healing primitive is a two-part move, matching the unblock
+    /// `session_reset` flow: tear down our *own* stale session **and** advertise
+    /// a `session_reset` key package. The peer, on receiving it, drops its stale
+    /// session, auto-establishes a fresh one from our enclosed key package, and
+    /// Welcomes us back — which we, now session-less, simply *join*.
+    ///
+    /// Tearing down our session alone (without the reset key package) would
+    /// deadlock: the peer's original key package was consumed at first
+    /// establishment, so nothing could rebuild the channel, and the peer (still
+    /// believing its session is healthy) would never re-advertise one. Sending
+    /// the reset key package is what breaks that deadlock.
+    ///
+    /// Deleting the local session is also what makes convergence **symmetric and
+    /// single-round regardless of user-id ordering**. Because we keep no local
+    /// session, the peer's returning Welcome is joined via the fresh-session
+    /// path rather than the greater-id-adopts tiebreaker in
+    /// `handle_welcome_message` — so the lexicographically-smaller detector is no
+    /// longer stranded (the failure mode when the stale session was kept). Both
+    /// orderings are covered end-to-end by
+    /// `test_desync_dm_heals_end_to_end_when_detector_id_is_greater` and
+    /// `test_desync_dm_heals_end_to_end_when_detector_id_is_smaller`.
+    ///
+    /// Rate-limited via `rekey_due_at` to at most one re-key per
+    /// [`REKEY_INTERVAL_SECS`] per peer, so a peer replaying stale-epoch
+    /// ciphertext (or an injected wrong-epoch frame) cannot drive a re-key storm.
+    /// The interval is stamped before the send so a send error still counts
+    /// against the limit, and it is **never reset early** — not even by a
+    /// successful decrypt on the healed session. That is deliberate: a genuine
+    /// re-fork and a replayed old-epoch frame are indistinguishable at this layer
+    /// (both surface as `WrongEpoch`), so clearing the floor on heal would let an
+    /// attacker who lands one legit decrypt between replays defeat the limit and
+    /// force ~one teardown per inbound message. The floor lapses naturally after
+    /// [`REKEY_INTERVAL_SECS`]; during that window Tier 1 (un-ACK + sender
+    /// retries) keeps delivery honest, so the only cost of not resetting is that a
+    /// genuine second desync within the window heals up to one interval later —
+    /// an acceptable trade for a rare event against a bounded-churn guarantee.
+    ///
+    /// **SECURITY — remotely-triggerable (rate-limited) re-key.** `peer_id` here
+    /// is the *wire-claimed* sender, not an MLS-authenticated one: the
+    /// `SenderIdentityMismatch` gate in `handle_encrypted_message` only runs on a
+    /// **successful** decrypt, whereas a desync is a `WrongEpoch`/`NoPastEpochData`
+    /// decrypt *failure* that never reaches the credential check. An outsider
+    /// still cannot forge a frame that produces this classification — only a
+    /// structurally-valid MLS message for our existing `session:<peer>:me` group
+    /// can — but a network attacker who **replays a genuine peer's captured
+    /// old-epoch ciphertext** (the outer message id is unauthenticated, so
+    /// transport dedup does not reliably stop a mutated-id replay) can force a
+    /// teardown + re-establishment of that one session. This is strictly better
+    /// than the old silent drop (delivery stays honest and the channel
+    /// self-heals), and the unconditional [`REKEY_INTERVAL_SECS`] rate limit is
+    /// the mitigation that hard-bounds it to one re-key per peer per window
+    /// rather than continuous churn. Also see the CLAUDE.md "Crypto-failure
+    /// recovery" note.
+    pub(super) fn schedule_session_rekey(&mut self, peer_id: &str) {
+        let now = Utc::now();
+        if let Some(due_at) = self.rekey_due_at.get(peer_id) {
+            if *due_at > now {
+                return;
+            }
+        }
+        self.rekey_due_at.insert(
+            peer_id.to_string(),
+            now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
+        );
+        // Tear down our own stale session before advertising the reset key
+        // package, mirroring the unblock `session_reset` flow. This is what makes
+        // convergence symmetric regardless of user-id ordering: with no local
+        // session left, the peer's returning Welcome is *joined* (not gated by
+        // the greater-id-adopts tiebreaker in `handle_welcome_message`), so both
+        // sides rebuild from scratch and converge in a single round. Keeping the
+        // stale session instead strands the smaller-id detector, which the
+        // tiebreaker forbids from adopting. Best-effort: a missing session is a
+        // no-op, and a failed delete still sends the reset (the peer rebuild plus
+        // the auto key-package exchange re-arm establishment either way).
+        if self.has_mls_session(peer_id).unwrap_or(false) {
+            if let Err(err) = self.manual_mls_delete_session(peer_id) {
+                debug!(
+                    peer_id = %peer_id,
+                    error = %err,
+                    "rekey: failed to delete local stale session; sending reset anyway"
+                );
+            }
+        }
+        match self.send_key_package_to(peer_id, true) {
+            Ok(()) => {
+                info!(
+                    event = "session_rekey_triggered",
+                    peer_id = %peer_id,
+                    "Triggered 1:1 session re-key after epoch desync"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    event = "session_rekey_send_failed",
+                    peer_id = %peer_id,
+                    error = %err,
+                    "session_rekey_send_failed"
+                );
+            }
         }
     }
 

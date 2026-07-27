@@ -335,6 +335,15 @@ export interface EncryptionConfig {
    */
   richPayloadEnabled?: boolean;
   /**
+   * Kill switch for 1:1 MLS crypto-failure recovery (default: true). When a
+   * 1:1 session falls out of epoch sync with the peer, an undecryptable DM is
+   * not delivery-ACKed and a rate-limited session re-key heals the channel,
+   * instead of silently dropping it. Genuine decrypt failures (corrupt/forged
+   * ciphertext, discarded ratchet generations) are unaffected and still fail
+   * closed. Disabling reverts to the legacy drop-and-ACK behavior.
+   */
+  cryptoRecoveryEnabled?: boolean;
+  /**
    * Bounds and policy for encrypted messages received before session readiness.
    */
   pendingQueue?: PendingQueueConfig;

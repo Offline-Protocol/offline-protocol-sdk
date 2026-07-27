@@ -261,7 +261,24 @@ impl GroupManager {
 
         let processed = group
             .process_message(&self.provider, protocol_message)
-            .map_err(|e| MlsError::Decryption(e.to_string()))?;
+            .map_err(|e| {
+                // Distinguish a *recoverable* epoch desync (the two sides
+                // disagree on the MLS epoch — e.g. after a fork) from a genuine
+                // decrypt failure. Only the epoch-mismatch family is signalled
+                // as `SessionDesync` so the protocol layer can re-key rather
+                // than silently drop. AEAD/corrupt failures, ratchet-generation
+                // failures (a discarded past generation — the session is
+                // healthy, so re-keying would not help), and everything else
+                // stay `Decryption`; classifying forged ciphertext as
+                // recoverable would open a re-key-storm vector.
+                match &e {
+                    ProcessMessageError::ValidationError(ValidationError::WrongEpoch)
+                    | ProcessMessageError::ValidationError(ValidationError::NoPastEpochData) => {
+                        MlsError::SessionDesync(e.to_string())
+                    }
+                    _ => MlsError::Decryption(e.to_string()),
+                }
+            })?;
 
         // Credentials in this SDK are basic credentials carrying the user id
         // as raw bytes (see `MlsManager::create_identity`).
