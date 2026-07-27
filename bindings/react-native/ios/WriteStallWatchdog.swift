@@ -14,32 +14,36 @@
 // write in seconds.
 //
 // This watchdog gives iOS the same bound. The bridge arms it immediately before
-// each watched poll-path `task.send` (via `sendWatched`, the single funnel that
-// couples arm+send so a new send site cannot silently escape coverage) and
-// disarms it from that send's completion; the poll checks `stalledAgeMs` every
-// tick and tears the socket down when the oldest outstanding write has aged past
-// the timeout. teardownSocket's cancel then fires the hung completions promptly,
-// and autoReconnect + flush_outbox re-drive the backlog.
+// each watched poll-path `task.send` and disarms it from that send's completion
+// — both inside `sendWatched`, the single funnel that owns the whole arm/send/
+// disarm triple, so a new send site cannot silently escape coverage on either
+// end. The poll checks `stalledAgeMs` every tick and tears the socket down when
+// the oldest outstanding write has aged past the timeout. teardownSocket's
+// cancel then fires the hung completions promptly, and autoReconnect +
+// flush_outbox re-drive the backlog.
 //
 // It tracks only send-START timestamps, never message identity: it answers one
 // question — "has the oldest still-outstanding write exceeded the timeout?" —
-// which is all socket-liveness needs. Popping the oldest entry of the completing
-// write's generation is correct even if completions arrive slightly out of send
-// order: each completion retires exactly one write, so the count stays honest and
-// the head stays monotonic.
+// which is all socket-liveness needs.
 //
-// Each entry is tagged with the caller's socket generation (the same monotonic
-// counter InternetManager stamps on `task.taskDescription`, see
-// SocketGenerationTracker). `disarm` retires the oldest entry OF THAT GENERATION,
-// and a disarm for a generation with no tracked entries is a deliberate no-op.
-// That closes the one otherwise-possible cross-connection hazard: a cancelled
-// completion from a torn-down socket, arriving after `reset` has cleared the FIFO
-// and a fresh socket has already armed new writes, disarms its own (absent)
-// generation and can never pop the live successor's freshly-armed slot. `reset`
-// on teardown remains the primary guard (it stops abandoned writes from aging
-// into a false stall that would tear down the *current* socket, since
-// `stalledAgeMs` looks at the head regardless of generation); the generation tag
-// is the belt to that braces.
+// Each armed write gets an opaque `WriteToken`, and its own completion hands
+// that token back to `disarm`, which retires exactly that entry. Retiring the
+// write's OWN slot (rather than the oldest one around) is what keeps the head
+// honest when completions arrive out of send order: popping oldest-first would
+// let a fast write's completion discard a still-hung older write's timestamp
+// and re-key the stall off a younger one, delaying the teardown by the gap
+// between their send times. The count stays honest either way — the timestamp
+// does not.
+//
+// Tokens are minted from a monotonic counter and never reused, which also
+// closes the cross-connection hazard without any separate generation tag: a
+// cancelled completion from a torn-down socket, arriving after `reset` has
+// cleared the FIFO and a fresh socket has already armed new writes, carries a
+// token that names no live entry, so its disarm is a no-op and can never pop
+// the live successor's freshly-armed slot. `reset` on teardown remains the
+// primary guard (it stops abandoned writes from aging into a false stall that
+// would tear down the *current* socket, since `stalledAgeMs` looks at the head
+// regardless of origin); token identity is the belt to that braces.
 //
 // SCOPE — this watches only poll-path data and control writes (the ones that
 // can pin `inFlightControlPrimaries` and freeze the data plane). Ping, presence
@@ -70,39 +74,53 @@ final class WriteStallWatchdog {
     /// in milliseconds, so this only ever fires on a genuinely dead socket.
     static let defaultTimeoutMs: Int64 = 10_000
 
+    /// Identity for one armed write: minted by `arm`, handed back by that
+    /// write's own send completion to `disarm`. Opaque and never reused, so a
+    /// completion can only ever retire the slot it created — a late completion
+    /// whose slot `reset` already dropped names nothing and disarms nothing.
+    struct WriteToken: Equatable {
+        fileprivate let id: UInt64
+    }
+
     private let timeoutMs: Int64
 
-    /// One still-outstanding write: its send-start timestamp (monotonic,
-    /// sleep-inclusive time supplied by the caller) and the socket generation
-    /// it was issued on. Ordered oldest first.
+    /// One still-outstanding write: its identity and its send-start timestamp
+    /// (monotonic, sleep-inclusive time supplied by the caller). Ordered oldest
+    /// first — appends are in send order and removals never reorder.
     private struct Outstanding {
+        let token: WriteToken
         let startMs: Int64
-        let generation: Int
     }
 
     private var outstanding: [Outstanding] = []
+
+    /// Monotonic token source. Never reset (not even by `reset`) — reuse across
+    /// connections is exactly what token identity exists to prevent.
+    private var nextTokenId: UInt64 = 0
 
     init(timeoutMs: Int64 = WriteStallWatchdog.defaultTimeoutMs) {
         self.timeoutMs = timeoutMs
     }
 
-    /// Records that a watched write was just handed to the socket on
-    /// `generation`. Call immediately before `task.send`, after every
-    /// early-return guard, so the watchdog never holds a slot for a write that
-    /// was not actually issued.
-    func arm(nowMs: Int64, generation: Int) {
-        outstanding.append(Outstanding(startMs: nowMs, generation: generation))
+    /// Records that a watched write was just handed to the socket, returning
+    /// the token its completion must disarm with. Call immediately before
+    /// `task.send`, after every early-return guard, so the watchdog never holds
+    /// a slot for a write that was not actually issued.
+    func arm(nowMs: Int64) -> WriteToken {
+        nextTokenId += 1
+        let token = WriteToken(id: nextTokenId)
+        outstanding.append(Outstanding(token: token, startMs: nowMs))
+        return token
     }
 
-    /// Retires the oldest outstanding write belonging to `generation`. Call from
-    /// the send completion, before any stale-task guard, so a cancelled
-    /// (post-teardown) completion still frees its slot. A disarm for a
-    /// generation with no tracked entries is a deliberate no-op: `reset` may have
-    /// cleared the queue before a late cancelled completion runs, or a newer
-    /// socket generation may already own every live entry — either way this must
-    /// not pop a live successor's freshly-armed write.
-    func disarm(generation: Int) {
-        if let idx = outstanding.firstIndex(where: { $0.generation == generation }) {
+    /// Retires the write `token` was minted for. Call from that write's send
+    /// completion, before any stale-task guard, so a cancelled (post-teardown)
+    /// completion still frees its slot. A token with no tracked entry is a
+    /// deliberate no-op: `reset` may have cleared the queue before a late
+    /// cancelled completion runs — either way this must never disturb another
+    /// write's slot, least of all a live successor connection's.
+    func disarm(_ token: WriteToken) {
+        if let idx = outstanding.firstIndex(where: { $0.token == token }) {
             outstanding.remove(at: idx)
         }
     }
