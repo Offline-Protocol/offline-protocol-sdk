@@ -23,7 +23,10 @@ pub(crate) const CONFIRMATION_PROBE_INTERVAL_SECS: i64 = 5;
 /// re-exchange, so it is rate-limited well above the confirmation-probe cadence:
 /// one legit desync heals in a single round-trip, and this bounds a peer
 /// replaying stale-epoch ciphertext (or an injected wrong-epoch frame) to at
-/// most one re-key per this window rather than a storm.
+/// most one re-key per this window rather than a storm. The floor is enforced
+/// unconditionally — a successful decrypt on the healed session does NOT reset
+/// it — so an attacker cannot defeat it by interleaving replays with legit
+/// traffic (see `schedule_session_rekey`).
 pub(crate) const REKEY_INTERVAL_SECS: i64 = 30;
 /// Number of welcome retry records processed per tick.
 pub(crate) const WELCOME_RETRY_BATCH_SIZE: usize = 20;

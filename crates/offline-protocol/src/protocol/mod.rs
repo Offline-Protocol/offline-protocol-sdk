@@ -193,10 +193,12 @@ pub struct OfflineProtocol {
     /// Rate-limit schedule for 1:1 session re-keys triggered by an epoch-desync
     /// decrypt failure. Bounds the re-key to at most one per peer per
     /// `REKEY_INTERVAL_SECS` so a peer replaying stale-epoch ciphertext (or an
-    /// injected wrong-epoch frame) cannot drive a re-key storm. Cleared for a
-    /// peer once a decrypt succeeds (the channel healed), so a later desync can
-    /// re-key promptly. In-memory only: a re-key is a live-connectivity action,
-    /// and a fresh desync after restart simply re-arms it.
+    /// injected wrong-epoch frame) cannot drive a re-key storm. The floor is
+    /// **never reset early** — not even by a successful decrypt on the healed
+    /// session — because a genuine re-fork and a replay are indistinguishable
+    /// here; it lapses only by the interval elapsing (see
+    /// `schedule_session_rekey`). In-memory only: a re-key is a live-connectivity
+    /// action, and a fresh desync after restart simply re-arms it.
     rekey_due_at: HashMap<String, DateTime<Utc>>,
 
     /// Outbound welcome lifecycle records keyed by peer id.

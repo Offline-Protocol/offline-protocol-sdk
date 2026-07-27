@@ -489,8 +489,16 @@ impl OfflineProtocol {
     /// [`REKEY_INTERVAL_SECS`] per peer, so a peer replaying stale-epoch
     /// ciphertext (or an injected wrong-epoch frame) cannot drive a re-key storm.
     /// The interval is stamped before the send so a send error still counts
-    /// against the limit. [`Self::clear_session_rekey_tracking`] resets it once a
-    /// decrypt succeeds.
+    /// against the limit, and it is **never reset early** — not even by a
+    /// successful decrypt on the healed session. That is deliberate: a genuine
+    /// re-fork and a replayed old-epoch frame are indistinguishable at this layer
+    /// (both surface as `WrongEpoch`), so clearing the floor on heal would let an
+    /// attacker who lands one legit decrypt between replays defeat the limit and
+    /// force ~one teardown per inbound message. The floor lapses naturally after
+    /// [`REKEY_INTERVAL_SECS`]; during that window Tier 1 (un-ACK + sender
+    /// retries) keeps delivery honest, so the only cost of not resetting is that a
+    /// genuine second desync within the window heals up to one interval later —
+    /// an acceptable trade for a rare event against a bounded-churn guarantee.
     ///
     /// **SECURITY — remotely-triggerable (rate-limited) re-key.** `peer_id` here
     /// is the *wire-claimed* sender, not an MLS-authenticated one: the
@@ -504,9 +512,10 @@ impl OfflineProtocol {
     /// transport dedup does not reliably stop a mutated-id replay) can force a
     /// teardown + re-establishment of that one session. This is strictly better
     /// than the old silent drop (delivery stays honest and the channel
-    /// self-heals), and the [`REKEY_INTERVAL_SECS`] rate limit is the mitigation
-    /// that bounds it to one re-key per peer per window rather than continuous
-    /// churn. Also see the CLAUDE.md "Crypto-failure recovery" note.
+    /// self-heals), and the unconditional [`REKEY_INTERVAL_SECS`] rate limit is
+    /// the mitigation that hard-bounds it to one re-key per peer per window
+    /// rather than continuous churn. Also see the CLAUDE.md "Crypto-failure
+    /// recovery" note.
     pub(super) fn schedule_session_rekey(&mut self, peer_id: &str) {
         let now = Utc::now();
         if let Some(due_at) = self.rekey_due_at.get(peer_id) {
@@ -554,13 +563,6 @@ impl OfflineProtocol {
                 );
             }
         }
-    }
-
-    /// Clears the re-key rate-limit for `peer_id`, called when its session is
-    /// healthy again (a decrypt succeeded) so a later desync can re-key promptly
-    /// instead of waiting out the previous interval.
-    pub(super) fn clear_session_rekey_tracking(&mut self, peer_id: &str) {
-        self.rekey_due_at.remove(peer_id);
     }
 
     pub(super) fn retry_pending_session_confirmations(&mut self) {

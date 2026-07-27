@@ -9197,6 +9197,62 @@ fn test_desync_rekey_is_rate_limited() {
     );
 }
 
+/// Regression: the re-key floor must NOT be reset by a successful decrypt on the
+/// healed session. A genuine re-fork and a replayed old-epoch frame are
+/// indistinguishable at this layer, so if the successful-decrypt confirmation
+/// path cleared the limiter (as an earlier revision did), an attacker landing
+/// one legit decrypt between replays could defeat the rate limit and force
+/// ~one session teardown per inbound message. This locks the floor across a heal.
+#[test]
+fn test_desync_rekey_floor_not_reset_by_successful_decrypt() {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    bob_handle.clear_sent_messages();
+
+    // First desync → one re-key, floor armed.
+    bob.schedule_session_rekey("alice");
+    assert!(
+        bob.rekey_due_at.contains_key("alice"),
+        "re-key must arm the rate-limit floor"
+    );
+
+    // Simulate the channel healing and a real message decrypting on the rebuilt
+    // session — the successful-decrypt confirmation path. Historically this
+    // cleared the floor; it must no longer, even for a now-confirmed peer.
+    bob.confirm_session_from_successful_decrypt("alice", "session:alice:bob");
+    assert!(
+        bob.rekey_due_at.contains_key("alice"),
+        "a successful decrypt on the healed session must NOT reset the re-key floor"
+    );
+
+    // A second desync trigger inside the window (the replay) must still be
+    // suppressed — exactly one re-key total across the heal.
+    bob.schedule_session_rekey("alice");
+    let rekeys = bob_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| {
+            m.content.starts_with(internal_prefixes::KEY_PACKAGE) && m.recipient.as_str() == "alice"
+        })
+        .count();
+    assert_eq!(
+        rekeys, 1,
+        "a replay after a heal must not defeat the re-key floor"
+    );
+}
+
 /// Tier 2 headline: after the recipient re-keys to a NEW epoch, the ciphertext
 /// sealed at the original epoch is permanently dead — but a resend re-seals
 /// against the peer's *current* session and decrypts on the new epoch, with the

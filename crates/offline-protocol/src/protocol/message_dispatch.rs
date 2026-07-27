@@ -917,9 +917,13 @@ impl OfflineProtocol {
         match self.confirm_session_state(sender, "decrypt_success") {
             Ok(true) => {
                 info!(sender = %sender, "Session confirmed via successful decryption");
-                // The channel is healthy again — reset the re-key rate limit so a
-                // future desync can re-key promptly.
-                self.clear_session_rekey_tracking(sender);
+                // NOTE: we deliberately do NOT clear the re-key rate limit here.
+                // A genuine re-fork and a replayed old-epoch frame are
+                // indistinguishable at this layer, so resetting the floor on a
+                // healed decrypt would let an attacker landing one legit decrypt
+                // between replays force ~one teardown per inbound message. The
+                // floor lapses on its own after REKEY_INTERVAL_SECS; see
+                // `schedule_session_rekey`.
                 let _ = self.flush_pending_messages(sender);
                 // Drain any messages that were queued while the session was not
                 // ready. Historically the pending-decryption queue was only
