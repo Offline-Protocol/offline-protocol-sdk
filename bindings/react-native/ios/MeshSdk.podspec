@@ -31,6 +31,7 @@ Pod::Spec.new do |s|
     "RelayTimestamps.swift",
     "SocketGenerationTracker.swift",
     "SupersededLatchPolicy.swift",
+    "WriteStallWatchdog.swift",
     "WifiDirectManager.swift",
     "NostrManager.swift",
     "ReticulumManager.swift",
