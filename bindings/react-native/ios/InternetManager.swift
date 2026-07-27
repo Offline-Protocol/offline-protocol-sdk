@@ -239,19 +239,40 @@ public class InternetManager: NSObject, TransportManager {
         return Int64(nanos / 1_000_000)
     }
 
-    /// Records that a watched poll-path write was just handed to the socket.
-    /// Call immediately before `task.send`, after every early-return guard, so
-    /// the watchdog never holds a slot for a write that was not actually
-    /// issued. messageQueue only.
-    private func armWriteWatchdog() {
-        writeStallWatchdog.arm(nowMs: monotonicNowMs())
+    /// The socket generation stamped on `task` at creation (see
+    /// SocketGenerationTracker / connect). Used to tag each watched write so a
+    /// stale completion can only ever retire its own generation's slot. 0 is an
+    /// unreachable sentinel (mint() starts at 1) for a task that somehow lost
+    /// its stamp — harmless, since arm and disarm read it from the same task.
+    private static func generation(of task: URLSessionWebSocketTask) -> Int {
+        task.taskDescription.flatMap { Int($0) } ?? 0
     }
 
-    /// Retires the oldest outstanding write from the stall watchdog. Call from
-    /// the send completion, before the stale-task guard, so a cancelled
-    /// (post-teardown) completion still frees its slot. messageQueue only.
-    private func disarmWriteWatchdog() {
-        writeStallWatchdog.disarm()
+    /// Sends `text` on `task` under write-stall-watchdog coverage: arms the
+    /// watchdog immediately before the send (the ONLY correct place — the slot
+    /// must exist the instant the write is outstanding) and forwards `completion`
+    /// unchanged to `task.send`. Every poll-path write that can pin the control
+    /// gate MUST go through here rather than calling `task.send` directly, so a
+    /// future send site cannot silently drop watchdog coverage. Disarm stays the
+    /// caller's job from inside `completion` (the completions differ too much to
+    /// centralize) — call `disarmWriteWatchdog(for:)` first, before any stale
+    /// guard. messageQueue only.
+    private func sendWatched(
+        _ task: URLSessionWebSocketTask,
+        _ text: String,
+        completion: @escaping @Sendable (Error?) -> Void
+    ) {
+        writeStallWatchdog.arm(nowMs: monotonicNowMs(), generation: Self.generation(of: task))
+        task.send(.string(text), completionHandler: completion)
+    }
+
+    /// Retires the oldest outstanding write for `task`'s generation from the
+    /// stall watchdog. Call from the send completion, before the stale-task
+    /// guard, so a cancelled (post-teardown) completion still frees its slot;
+    /// keying on the completing task's own generation means it can never pop a
+    /// live successor's freshly-armed write. messageQueue only.
+    private func disarmWriteWatchdog(for task: URLSessionWebSocketTask) {
+        writeStallWatchdog.disarm(generation: Self.generation(of: task))
     }
 
     /// Control-op frames deferred by the rate limiter, drained (oldest
@@ -1841,14 +1862,13 @@ public class InternetManager: NSObject, TransportManager {
             nowMs: monotonicNowMs()
         )
 
-        armWriteWatchdog()
-        task.send(.string(jsonString)) { [weak self] error in
+        sendWatched(task, jsonString) { [weak self] error in
             guard let self = self else { return }
             // Retire this write from the stall watchdog first. This completion
             // runs on URLSession's delegate queue, not messageQueue, so hop —
             // the FIFO is messageQueue-confined. Before the stale-task guard so
             // a cancelled (post-teardown) completion still frees its slot.
-            self.messageQueue.async { self.disarmWriteWatchdog() }
+            self.messageQueue.async { self.disarmWriteWatchdog(for: task) }
             // A stale task's send outcome must not increment the failure
             // counter, report internetSendFailed for the message (the
             // disconnect path's fail_all_pending already owned it), or
@@ -1977,8 +1997,7 @@ public class InternetManager: NSObject, TransportManager {
             // extra frames and the commit are handed off only from the
             // SUCCESS completion below.
             inFlightControlPrimaries += 1
-            armWriteWatchdog()
-            task.send(.string(primaryJson)) { [weak self] error in
+            sendWatched(task, primaryJson) { [weak self] error in
                 guard let self = self else { return }
                 // Hop to messageQueue: the primary counter, the spill queue,
                 // and enqueueControlFrames are messageQueue-confined.
@@ -1986,7 +2005,7 @@ public class InternetManager: NSObject, TransportManager {
                     self.inFlightControlPrimaries -= 1
                     // Retire this write from the stall watchdog alongside the
                     // primary counter, before the stale guard.
-                    self.disarmWriteWatchdog()
+                    self.disarmWriteWatchdog(for: task)
                     // A stale task's send outcome must not touch failure
                     // counters, fail the message id (fail_all_pending owned
                     // it), or trigger teardown (see isStale); its deltas and
@@ -2093,14 +2112,13 @@ public class InternetManager: NSObject, TransportManager {
             return
         }
         isDrainingControlFrames = true
-        armWriteWatchdog()
-        task.send(.string(frameJson)) { [weak self] error in
+        sendWatched(task, frameJson) { [weak self] error in
             guard let self = self else { return }
             self.messageQueue.async {
                 self.isDrainingControlFrames = false
                 // Retire this write from the stall watchdog alongside the
                 // drain flag, before the stale guard.
-                self.disarmWriteWatchdog()
+                self.disarmWriteWatchdog(for: task)
                 // Stale task: the disconnect path already cleared the queue
                 // and generation-killed the commits.
                 guard !self.isStale(task) else { return }
