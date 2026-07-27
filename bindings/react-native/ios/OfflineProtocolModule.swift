@@ -81,14 +81,50 @@ class OfflineProtocolModule: RCTEventEmitter {
         NotificationCenter.default.removeObserver(self, name: UIApplication.willEnterForegroundNotification, object: nil)
     }
     
+    /// Wall clock (sleep-inclusive) at the last background transition, used to
+    /// gate the foreground relay reconnect below. Wall clock, not a monotonic
+    /// uptime, is deliberate: we want elapsed REAL time away (the device may
+    /// have been asleep in the background), and the gate is coarse enough that
+    /// an NTP correction is harmless (a backward jump just skips the reconnect
+    /// and falls back to the write-stall watchdog; a forward jump costs at most
+    /// one redundant reconnect).
+    private var backgroundEnteredAt: Date?
+
+    /// Minimum background stay before a foreground transition force-reconnects
+    /// the relay socket. iOS suspends a backgrounded app within a few seconds,
+    /// killing its TCP without a clean close (a "zombie" socket whose stale
+    /// flags report ready). Below this window a quick app-switch keeps the live
+    /// socket; at or above it we can no longer trust the socket, so reconnect
+    /// proactively rather than waiting for the first post-foreground send to
+    /// hit the write-stall watchdog. Aligned with fernweh's iOS 4s
+    /// background-disconnect window.
+    private static let foregroundReconnectMinBackgroundInterval: TimeInterval = 4.0
+
     @objc private func applicationDidEnterBackground() {
         Self.testLastWifiStatusChangeForTesting = false
+        backgroundEnteredAt = Date()
         guard let proto = protocolInstance else { return }
         try? proto.wifiDirectStatusChanged(isConnected: false)
     }
 
     @objc private func applicationWillEnterForeground() {
         Self.testLastWifiStatusChangeForTesting = true
+
+        // Proactively heal a socket the OS likely killed during suspension.
+        // `isInternetReady()` cannot tell a healthy socket from a zombie (both
+        // report connected+authenticated), so gate on background duration
+        // instead: a stay long enough that the socket is untrustworthy forces a
+        // reconnect. forceReconnect() no-ops unless the transport is
+        // running/starting and resets the reconnect backoff, so this is safe to
+        // call unconditionally within the gate. Belt-and-braces with the
+        // in-transport write-stall watchdog, which catches a zombie that
+        // survives (or first appears) without a background→foreground edge.
+        if let enteredAt = backgroundEnteredAt,
+           Date().timeIntervalSince(enteredAt) >= Self.foregroundReconnectMinBackgroundInterval {
+            internetManager?.forceReconnect()
+        }
+        backgroundEnteredAt = nil
+
         guard let proto = protocolInstance else { return }
         try? proto.wifiDirectStatusChanged(isConnected: true)
     }
