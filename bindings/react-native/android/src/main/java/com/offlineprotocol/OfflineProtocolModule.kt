@@ -22,7 +22,26 @@ import uniffi.offline_protocol.*
  * UniFFI-based React Native module
  */
 class OfflineProtocolModule(reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext) {
+    ReactContextBaseJavaModule(reactContext), LifecycleEventListener {
+
+    /**
+     * Gates the foreground relay reconnect on how long the app actually stayed
+     * backgrounded, fed [android.os.SystemClock.elapsedRealtime] (monotonic AND
+     * sleep-inclusive). Paired with iOS's ForegroundReconnectPolicy so both
+     * platforms heal on foreground automatically and identically. Main-thread
+     * confined: React Native delivers the host lifecycle callbacks there.
+     */
+    private val foregroundReconnectPolicy = ForegroundReconnectPolicy()
+
+    init {
+        // Drive the foreground relay-heal from the host activity's lifecycle so
+        // Android matches iOS: both platforms reconnect automatically on
+        // foreground after a background stay long enough to have killed the
+        // socket. See onHostPause/onHostResume and ForegroundReconnectPolicy.
+        // Registered after foregroundReconnectPolicy is initialized above so an
+        // (in practice never synchronous) callback can't race its init.
+        reactContext.addLifecycleEventListener(this)
+    }
 
     private var protocol: OfflineProtocol? = null
     private var meshServices: MeshServices? = null
@@ -67,6 +86,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     override fun invalidate() {
         super.invalidate()
+        reactApplicationContext.removeLifecycleEventListener(this)
         stopProcessScheduler()
         bleTransport?.stop()
         bleTransport = null
@@ -80,6 +100,39 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         nostrManager = null
         protocol = null
         stopForegroundService()
+    }
+
+    // MARK: - Host lifecycle (foreground relay heal)
+
+    /**
+     * App went to background. Record the moment so [onHostResume] can measure
+     * the stay. A background long enough to have killed the relay TCP (Doze, OS
+     * freeze, network handoff) leaves the cached ready flags stale-true against
+     * a dead socket, which only a full reconnect heals.
+     */
+    override fun onHostPause() {
+        foregroundReconnectPolicy.didEnterBackground(nowMs = android.os.SystemClock.elapsedRealtime())
+    }
+
+    /**
+     * App returned to foreground. Proactively heal a socket the OS likely killed
+     * while backgrounded: `isReady()` cannot tell a healthy socket from a zombie
+     * (both report connected+authenticated), so gate on background duration
+     * instead (see ForegroundReconnectPolicy). forceReconnect() no-ops unless
+     * the transport is running/starting and resets the reconnect backoff, so it
+     * is safe to call unconditionally within the gate. Mirrors iOS's
+     * applicationWillEnterForeground — apps no longer need to call
+     * forceInternetReconnect() on foreground themselves.
+     */
+    override fun onHostResume() {
+        if (foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs = android.os.SystemClock.elapsedRealtime())) {
+            internetManager?.forceReconnect()
+        }
+    }
+
+    override fun onHostDestroy() {
+        // No-op: teardown is handled by invalidate(); nothing lifecycle-specific
+        // to release here.
     }
 
     @ReactMethod

@@ -2996,14 +2996,23 @@ export class OfflineProtocol {
    * (dead but still reported ready) or alive-but-deregistered by the relay.
    * Neither is detectable by a ping, and both are healed by the same action —
    * a full reconnect that re-runs the relay authenticate/register handshake.
-   * Call this on foreground when a stale socket is suspected, instead of
-   * relying on `isInternetReady()` to gate a disable→enable toggle (which
-   * no-ops precisely when the flag is stale-true).
    *
-   * Recovery lands in ~1s rather than waiting ~20-30s for zombie ping
-   * detection. Prefer to debounce and gate on background duration rather than
-   * calling this on every foreground — it drops a genuinely-healthy socket if
-   * called needlessly, forcing a group re-registration round-trip.
+   * You normally do NOT need to call this on foreground: as of the automatic
+   * foreground-heal, both native bridges (iOS `applicationWillEnterForeground`,
+   * Android `onHostResume`) already force a reconnect themselves after a
+   * background stay long enough to have killed the socket (~4s), gated on
+   * monotonic background duration — and iOS additionally tears down a zombie on
+   * the first stalled write via the write-stall watchdog. Calling this method
+   * in addition, on every foreground, would double-reconnect and drop a
+   * genuinely-healthy socket, forcing a wasted group re-registration round-trip.
+   *
+   * Keep it for the cases the automatic heal does not cover: a deliberate
+   * user-initiated "reconnect now", or a stale socket you detect while already
+   * foregrounded (e.g. a long idle period with no background transition). If you
+   * do drive foreground recovery yourself, debounce and gate on background
+   * duration rather than calling on every foreground.
+   *
+   * Recovery lands in ~1s rather than waiting ~20-30s for zombie ping detection.
    *
    * Emits a transient `internet_status_changed` down→up. No-op unless the
    * internet transport is running (respects the enable/disable lifecycle).
