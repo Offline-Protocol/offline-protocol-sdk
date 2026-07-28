@@ -35,7 +35,14 @@ final class StorageNamespaceTests: XCTestCase {
             "account-" + String(repeating: "a", count: 63),
             "account-" + String(repeating: "a", count: 65),
             "account-" + String(repeating: "A", count: 64),
-            "account-" + String(repeating: "g", count: 64)
+            "account-" + String(repeating: "g", count: 64),
+            // Fullwidth forms: `Character.isHexDigit` accepts these and
+            // `String.count` measures them as one each, so the natural Swift
+            // spelling of this check would let them through — while the Android
+            // and Python validators, which match a literal `[0-9a-f]`, would
+            // not. All three have to refuse the same set.
+            "account-" + String(repeating: "\u{FF41}", count: 64),
+            "account-" + String(repeating: "\u{FF10}", count: 64)
         ] {
             XCTAssertThrowsError(
                 try StorageNamespace.requireAccount(value),

@@ -153,7 +153,11 @@ class AppContainerProtocolStateStorage(
         File(context.noBackupFilesDir, SCHEMA_DIRECTORY),
         StorageNamespace.requireAccount(accountNamespace)
     ).also {
-        if (!it.exists() && !it.mkdirs()) {
+        // Check `isDirectory` rather than `mkdirs()`'s return value: it reports
+        // false when a concurrent creator won the race, which is success, not
+        // failure.
+        it.mkdirs()
+        if (!it.isDirectory) {
             throw MlsStorageException.StoreFailed(
                 "Failed to create protocol-state directory: ${it.absolutePath}"
             )
@@ -169,7 +173,8 @@ class AppContainerProtocolStateStorage(
 
         synchronized(LOCK) {
             val directory = typeDirectory(keyType)
-            if (!directory.exists() && !directory.mkdirs()) {
+            directory.mkdirs()
+            if (!directory.isDirectory) {
                 throw MlsStorageException.StoreFailed(
                     "Failed to create protocol-state type directory"
                 )
