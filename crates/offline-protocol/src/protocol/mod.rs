@@ -88,8 +88,8 @@ pub struct OfflineProtocol {
     media_outbox: HashMap<MessageId, OutboxEntry>,
 
     /// Consecutive unreachable-park counter per recipient for plain DMs,
-    /// driving the escalating reachability-probe interval when a local mesh
-    /// carrier is up (see `handle_recipient_unreachable_for_message` —
+    /// driving the escalating reachability-probe interval on every carrier
+    /// (see `handle_recipient_unreachable_for_message` —
     /// mirrors `WelcomeLifecycleRecord::unreachable_parks`). Reset on every
     /// reachability edge (`flush_outbox_for_peer_via` / `flush_outbox_all`) and
     /// on delivery; pruned alongside `cleanup_outbox` so only peers that

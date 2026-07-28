@@ -2744,11 +2744,23 @@ impl OfflineProtocol {
     /// - the peer is back → the probe *is* the delivery, which beats waiting
     ///   for any presence edge.
     ///
-    /// The escalation is what bounds relay traffic (steady state: one frame
-    /// per 600s per parked peer), and the outbox lifetime bounds the entry
-    /// itself. Note that a probe can also be routed onto the relay when a
-    /// mesh carrier is up — DORS has always been free to choose it — so this
-    /// path is not new behavior for the relay, only newly reachable on
+    /// Relay traffic is bounded differently in each of those branches, and
+    /// the difference matters for capacity planning now that the whole
+    /// internet-only fleet is on this path:
+    /// - verdict branch: the escalation is the bound — one frame per interval
+    ///   per parked *message*, settling at one per 600s;
+    /// - accepted branch: the probe registers a fresh ACK at `retry_count` 0,
+    ///   so it rides the ordinary ACK ladder (up to `max_retries` sends,
+    ///   1s → 300s backoff, ~800s cumulative on the defaults) before
+    ///   `try_repark_exhausted_dm` re-parks it at the escalated interval.
+    ///
+    /// The outbox lifetime bounds the entry itself — and note the probe
+    /// refreshes `last_sent_at` on every send, so the sliding 7-day window
+    /// stops binding and settlement moves out to the absolute cap
+    /// ([`crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR`] × the lifetime).
+    /// Note also that a probe can be routed onto the relay when a mesh
+    /// carrier is up — DORS has always been free to choose it — so this path
+    /// is not new behavior for the relay, only newly reachable on
     /// internet-only devices.
     ///
     /// The counter increment is unconditional for the same reason: it is what
