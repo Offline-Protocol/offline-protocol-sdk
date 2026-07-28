@@ -1248,14 +1248,14 @@ impl OfflineProtocol {
     /// `last_reason_code` — not `unreachable_parks` alone — is what encodes
     /// that distinction. The counter is sticky (only `rearm_welcome_for_peer`
     /// clears it), so gating on it by itself would keep shielding the record
-    /// long after the probe resolved: a probe that earns no verdict (the
-    /// relay's push fallback accepted the frame) ends at the confirm timeout
-    /// instead, which charges an attempt and arms a plain data-plane retry —
-    /// precisely the budget-burner this park exists to cancel, and left
-    /// running it expires the welcome at `max_retries`. Only
-    /// `park_welcome_no_carrier` stamps `PeerUnreachable`; a carrier-backed
-    /// failure stamps `Timeout`/`SendFailed` and a successful send clears the
-    /// code entirely.
+    /// after the probe track has stopped protecting it: past
+    /// [`WELCOME_WATCHLIST_MAX_AGE_SECS`] a confirm timeout no longer re-parks
+    /// (see [`Self::welcome_probe_repark_permitted`]) and instead charges an
+    /// attempt and arms a plain data-plane retry — precisely the budget-burner
+    /// this park exists to cancel, and left running it expires the welcome at
+    /// `max_retries`. Only `park_welcome_no_carrier` stamps `PeerUnreachable`;
+    /// a carrier-backed failure stamps `Timeout`/`SendFailed` and a successful
+    /// send clears the code entirely.
     fn park_welcome_peer_unreachable(&mut self, peer_id: &str) {
         if self.confirmed_sessions.contains(peer_id) {
             return;
@@ -1290,9 +1290,56 @@ impl OfflineProtocol {
         let _ = self.park_welcome_awaiting_peer(peer_id);
     }
 
+    /// True when an unconfirmed welcome send should resolve as another
+    /// unreachable verdict ([`Self::apply_recipient_unreachable_failure`])
+    /// rather than as a carrier-backed failure that ages the record.
+    ///
+    /// A live `unreachable_parks` counter means the relay declared the peer
+    /// offline and no reachability edge has fired since (every edge clears it
+    /// via `rearm_welcome_for_peer`), so the send that just went unconfirmed
+    /// was the escalating probe, not a delivery attempt. Without this the
+    /// probe destroys the very welcome it exists to recover: the relay
+    /// accepts the frame whenever its push fallback succeeds, which returns
+    /// *no* `DeliveryError` at all, so the probe resolves at the 10s confirm
+    /// timeout instead. Treated as carrier-backed that charges the attempt
+    /// and arms a plain data-plane retry, and since nothing in that ladder
+    /// pushes `expires_at`, the record walks into `should_expire` within one
+    /// TTL window — terminal `welcome_send_expired` + `secure_session_failed`
+    /// for a peer that is merely offline. Re-parking instead refunds the
+    /// attempt, escalates the interval and pushes the TTL, mirroring the DM
+    /// path's [`Self::try_repark_exhausted_dm`]: settlement stays reserved
+    /// for delivery or the record genuinely ageing out below.
+    ///
+    /// Only the *presence-offline* answer cancelled that retry before, which
+    /// is not a defense at all for the case this whole probe exists to serve
+    /// — a headless consumer that never polls presence.
+    ///
+    /// Bounded by [`WELCOME_WATCHLIST_MAX_AGE_SECS`] measured from
+    /// `created_at`, the same threshold that stops watching a peer as
+    /// permanently dead: past it the counter no longer shields the record and
+    /// normal ageing expires it. This is the welcome's twin of the DM probe's
+    /// absolute bound (`first_sent_at` vs the outbox absolute lifetime) —
+    /// without it a peer that never returns keeps a welcome probing at the
+    /// 600s cap forever.
+    ///
+    /// Deliberately narrow to `Timeout`: a `SendFailed`/`TransportUnavailable`
+    /// failure is evidence about the *carrier*, not about this peer, and
+    /// keeps ageing the record normally.
+    fn welcome_probe_repark_permitted(&self, peer_id: &str) -> bool {
+        let Some(record) = self.welcome_lifecycles.get(peer_id) else {
+            return false;
+        };
+        record.unreachable_parks > 0
+            && record.created_at
+                > Utc::now() - ChronoDuration::seconds(WELCOME_WATCHLIST_MAX_AGE_SECS)
+    }
+
     /// Applies the relay's authoritative "recipient offline" verdict
     /// (a `recipient_unreachable`-tagged transport failure) to a welcome
-    /// lifecycle.
+    /// lifecycle. Also reached *without* a relay verdict when a probe's
+    /// confirm timeout resolves while the park counter is still live — the
+    /// same conclusion inferred rather than relayed, see
+    /// [`Self::welcome_probe_repark_permitted`].
     ///
     /// The bridge wire-confirms on socket-write success, so by the time the
     /// relay's `DeliveryError` arrives the record is normally already `Sent`
@@ -1427,6 +1474,18 @@ impl OfflineProtocol {
             WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired
         ) {
             return Ok(matches!(updated.state, WelcomeDeliveryState::Sent));
+        }
+
+        // A confirm timeout on a welcome that still holds a live
+        // unreachable-park counter is a *probe* resolving, not a delivery
+        // failing — re-park it as another unreachable verdict instead of
+        // ageing it (see [`Self::welcome_probe_repark_permitted`]).
+        if !no_carrier
+            && matches!(reason, crate::events::WelcomeReasonCode::Timeout)
+            && self.welcome_probe_repark_permitted(peer_id)
+        {
+            self.apply_recipient_unreachable_failure(peer_id, transport_error)?;
+            return Ok(false);
         }
 
         let max_attempts = self.config.reliability.retry.max_retries.max(1);
