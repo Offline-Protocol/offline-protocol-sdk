@@ -294,28 +294,28 @@ typedef void (*UniffiCallbackInterfaceNostrTransportCallbackMethod0)(uint64_t, v
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0
-typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull,
+typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1
-typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod1)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull,
+typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod1)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2
-typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod2)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull,
+typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod2)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3
-typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod3)(uint64_t, RustBuffer, RustBuffer* _Nonnull,
+typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod3)(uint64_t, RustBuffer, RustBuffer* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -2625,25 +2625,25 @@ uint16_t uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_o
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_STORE
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_STORE
 uint16_t uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_LOAD
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_LOAD
 uint16_t uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_DELETE
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_DELETE
 uint16_t uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_LIST_KEYS
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_LIST_KEYS
 uint16_t uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_list_keys(void
-
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_RETICULUMTRANSPORTCALLBACK_ON_MESSAGES_AVAILABLE
@@ -2706,3 +2706,4 @@ uint32_t ffi_offline_protocol_uniffi_uniffi_contract_version(void
     
 );
 #endif
+

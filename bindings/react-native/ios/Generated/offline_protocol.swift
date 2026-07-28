@@ -884,7 +884,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func hasRoute(destination: String)  -> Bool
     
-    func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage: ProtocolStateStorageProvider) throws
+    func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage: ProtocolStateStorageProvider) throws 
     
     func installTelemetrySink(sink: TelemetrySink, config: TelemetryConfig) throws 
     
@@ -1062,13 +1062,13 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func uninstallTelemetrySink() throws 
     
-    func updateAckConfig(config: AckConfig) throws
+    func updateAckConfig(config: AckConfig) throws 
     
     func updateDedupConfig(config: DedupConfig) 
     
     func updateDorsConfig(config: DorsConfig) throws 
     
-    func updateRetryConfig(config: RetryConfig) throws
+    func updateRetryConfig(config: RetryConfig) throws 
     
     func updateRoutingConfig(config: GradientRoutingConfig) 
     
@@ -4889,7 +4889,7 @@ public struct FfiConverterTypeRetryConfig: FfiConverterRustBuffer {
                 initialDelayMs: FfiConverterUInt64.read(from: &buf), 
                 maxDelayMs: FfiConverterUInt64.read(from: &buf), 
                 backoffMultiplier: FfiConverterFloat.read(from: &buf), 
-                outboxMaxLifetimeMs: FfiConverterUInt64.read(from: &buf),
+                outboxMaxLifetimeMs: FfiConverterUInt64.read(from: &buf), 
                 pendingMessageMaxLifetimeMs: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -7793,15 +7793,15 @@ public func FfiConverterCallbackInterfaceNostrTransportCallback_lower(_ v: Nostr
 
 
 public protocol ProtocolStateStorageProvider: AnyObject, Sendable {
-
-    func store(keyType: String, keyId: String, data: [UInt8]) throws
-
+    
+    func store(keyType: String, keyId: String, data: [UInt8]) throws 
+    
     func load(keyType: String, keyId: String) throws  -> [UInt8]?
-
-    func delete(keyType: String, keyId: String) throws
-
+    
+    func delete(keyType: String, keyId: String) throws 
+    
     func listKeys(keyType: String) throws  -> [String]
-
+    
 }
 
 
@@ -7848,7 +7848,7 @@ fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
                 )
             }
 
-
+            
             let writeReturn = { () }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
@@ -7875,7 +7875,7 @@ fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
                 )
             }
 
-
+            
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionSequenceUInt8.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
@@ -7902,7 +7902,7 @@ fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
                 )
             }
 
-
+            
             let writeReturn = { () }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
@@ -7927,7 +7927,7 @@ fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
                 )
             }
 
-
+            
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceString.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,

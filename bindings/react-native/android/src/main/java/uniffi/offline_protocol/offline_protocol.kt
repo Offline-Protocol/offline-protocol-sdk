@@ -1404,7 +1404,7 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pendin
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route(`ptr`: Long,`destination`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink(`ptr`: Long,`sink`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1729,7 +1729,7 @@ external fun ffi_offline_protocol_uniffi_rust_future_free_void(`handle`: Long,
 external fun ffi_offline_protocol_uniffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 
-
+    
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -2819,7 +2819,7 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 
 //
 public interface MeshServicesInterface {
-
+    
     fun `discoverServices`(`serviceId`: kotlin.String?): kotlin.String
     
     fun `registerService`(`serviceId`: kotlin.String, `version`: kotlin.String, `capabilities`: Map<kotlin.String, kotlin.String>)
@@ -5442,7 +5442,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
-
+    
     @Throws(ProtocolException::class)override fun `updateAckConfig`(`config`: AckConfig)
         = 
     callWithHandle {
@@ -5480,7 +5480,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
-
+    
     @Throws(ProtocolException::class)override fun `updateRetryConfig`(`config`: RetryConfig)
         = 
     callWithHandle {
@@ -5653,7 +5653,7 @@ public object FfiConverterTypeOfflineProtocol: FfiConverter<OfflineProtocol, Lon
 
 data class AckConfig (
     var `defaultTimeoutMs`: kotlin.ULong
-    ,
+    , 
     var `maxPendingAcks`: kotlin.ULong
     
 ){
@@ -7526,7 +7526,7 @@ data class RetryConfig (
     var `backoffMultiplier`: kotlin.Float
     , 
     var `outboxMaxLifetimeMs`: kotlin.ULong
-    ,
+    , 
     var `pendingMessageMaxLifetimeMs`: kotlin.ULong
     
 ){
@@ -9248,15 +9248,15 @@ public object FfiConverterTypeNostrTransportCallback: FfiConverterCallbackInterf
 
 
 public interface ProtocolStateStorageProvider {
-
+    
     fun `store`(`keyType`: kotlin.String, `keyId`: kotlin.String, `data`: List<kotlin.UByte>)
-
+    
     fun `load`(`keyType`: kotlin.String, `keyId`: kotlin.String): List<kotlin.UByte>?
-
+    
     fun `delete`(`keyType`: kotlin.String, `keyId`: kotlin.String)
-
+    
     fun `listKeys`(`keyType`: kotlin.String): List<kotlin.String>
-
+    
     companion object
 }
 
@@ -10827,3 +10827,4 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
         }
     }
 }
+

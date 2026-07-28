@@ -8103,7 +8103,7 @@ _UniffiFfiConverterTypeMlsStorageProvider = _UniffiCallbackInterfaceFfiConverter
 
 
 class ProtocolStateStorageProvider(typing.Protocol):
-
+    
     def store(self, key_type: str,key_id: str,data: typing.List[int]) -> None:
         raise NotImplementedError
     def load(self, key_type: str,key_id: str) -> typing.Optional[typing.List[int]]:
@@ -9911,7 +9911,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
     def initialize_mls(self, secure_storage: MlsStorageProvider,protocol_state_storage: ProtocolStateStorageProvider) -> None:
-
+        
         _UniffiFfiConverterTypeMlsStorageProvider.check_lower(secure_storage)
         
         _UniffiFfiConverterTypeProtocolStateStorageProvider.check_lower(protocol_state_storage)
