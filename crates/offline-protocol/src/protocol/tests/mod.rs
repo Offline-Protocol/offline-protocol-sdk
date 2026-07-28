@@ -22469,6 +22469,162 @@ fn test_presence_offline_does_not_cancel_welcome_unreachable_probe() {
 }
 
 #[test]
+fn test_welcome_unreachable_probe_survives_its_own_escalated_interval() {
+    // The ladder outgrows WELCOME_LIFECYCLE_TTL_SECS (300s): 480s at six
+    // consecutive parks, 600s at the cap. try_send_welcome checks expires_at
+    // BEFORE running a due retry, so a park whose TTL does not cover the probe
+    // it just scheduled gets expired terminally by that very probe —
+    // welcome_send_expired + secure_session_failed, i.e. the self-recovery this
+    // branch adds turning into a dead session for any peer offline ~8 minutes.
+    // Every rung must keep expires_at strictly past next_retry_at.
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    for parks in 1..=7 {
+        protocol
+            .on_transport_send_failed(
+                &welcome_id,
+                Some("recipient_unreachable: Recipient is offline".to_string()),
+            )
+            .unwrap();
+        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(lifecycle.unreachable_parks, parks);
+        let next_retry = lifecycle
+            .next_retry_at
+            .expect("every park must schedule a probe");
+        assert!(
+            lifecycle.expires_at > next_retry,
+            "park {} scheduled a probe at {} but let the TTL lapse at {}",
+            parks,
+            next_retry,
+            lifecycle.expires_at
+        );
+    }
+
+    // Past the point where the old fixed 300s TTL would have lapsed first.
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert!(
+        lifecycle.next_retry_at.unwrap() > Utc::now() + ChronoDuration::seconds(300),
+        "the ladder must have escalated beyond the base TTL for this to bite"
+    );
+
+    // Run the probe when it comes due: it must send, not expire.
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
+    }
+    protocol.process_welcome_retry_queue().unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.state,
+        WelcomeDeliveryState::SendAttempted,
+        "a due probe must re-send the welcome, not settle it terminally"
+    );
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::WelcomeSendExpired { .. })),
+        "probing must never age the welcome out"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::SecureSessionFailed { .. })),
+        "probing must never abort the pending session"
+    );
+    drop(events);
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_presence_offline_still_parks_carrier_backed_retry_after_a_verdict() {
+    // The probe guard keys on the reason code, not on the sticky park counter.
+    // unreachable_parks is cleared only by rearm_welcome_for_peer, so a
+    // counter-only guard would shield the record for its whole life after one
+    // verdict — including the case here: a probe that earns NO relay verdict
+    // (the relay's push fallback accepted the frame) resolves at the confirm
+    // timeout instead, which charges an attempt and arms a plain data-plane
+    // retry. That retry is exactly what this park exists to cancel; left
+    // running it burns the welcome's budget to terminal expiry.
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    // One verdict arms the probe and the sticky counter.
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .unreachable_parks,
+        1
+    );
+
+    // The probe fires and is accepted by the relay, so no verdict comes back.
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
+    }
+    protocol.process_welcome_retry_queue().unwrap();
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::SendAttempted
+    );
+
+    // The confirm timeout resolves it: a carrier-backed failure that charges
+    // the attempt and schedules a data-plane retry.
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
+    }
+    protocol.process_welcome_retry_queue().unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::Timeout),
+        "the confirm timeout is a carrier-backed failure, not a relay verdict"
+    );
+    assert_eq!(lifecycle.attempt, 1, "and it charges the attempt");
+    assert!(lifecycle.next_retry_at.is_some());
+    assert_eq!(
+        lifecycle.unreachable_parks, 1,
+        "the park counter is still live — a counter-only guard would stop here"
+    );
+
+    // The presence-offline answer must park THIS retry.
+    protocol.on_peer_presence("bob", false, Some(1_000));
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert!(
+        lifecycle.next_retry_at.is_none(),
+        "a carrier-backed data-plane retry must still be cancelled by the park"
+    );
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert_eq!(
+        lifecycle.attempt, 1,
+        "parking never touches the burnt budget"
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
 fn test_peer_presence_online_resends_unconfirmed_sent_welcome() {
     let (mut protocol, internet_handle, welcome_id) =
         setup_internet_protocol_with_pending_welcome();

@@ -770,6 +770,19 @@ impl OfflineProtocol {
     /// re-polls it on [`WELCOME_NO_CARRIER_RETRY_SECS`]; `on_neighbor_discovered`
     /// re-arms it immediately when a carrier surfaces the peer. Returns
     /// `Ok(false)` (not sent).
+    ///
+    /// **Invariant: the refreshed TTL always outlives the retry being
+    /// scheduled.** [`Self::try_send_welcome`] checks `expires_at` *before*
+    /// running a due retry, so a record whose TTL lapsed while it waited gets
+    /// expired terminally (`welcome_send_expired` + `secure_session_failed`) by
+    /// the very timer meant to recover it. That is not hypothetical at the far
+    /// end of the unreachable ladder in
+    /// [`Self::apply_recipient_unreachable_failure`]: it reaches 480s at six
+    /// consecutive parks and [`WELCOME_UNREACHABLE_RETRY_CAP_SECS`] (600s)
+    /// beyond that, both above the 300s [`WELCOME_LIFECYCLE_TTL_SECS`]. A full
+    /// extra interval of slack keeps the probe's own outcome — a verdict
+    /// re-park or a confirm timeout — inside the window too. No-op for the 15s
+    /// no-carrier park, whose interval is far below the TTL.
     fn park_welcome_no_carrier(
         &mut self,
         peer_id: &str,
@@ -783,7 +796,10 @@ impl OfflineProtocol {
             };
             let now = Utc::now();
             record.next_retry_at = Some(now + ChronoDuration::seconds(retry_in_secs));
-            record.expires_at = now + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
+            record.expires_at = now
+                + ChronoDuration::seconds(
+                    WELCOME_LIFECYCLE_TTL_SECS.max(retry_in_secs.saturating_mul(2)),
+                );
             record.last_reason_code = Some(reason);
             record.last_transport_error = transport_error;
             record.clone()
@@ -1219,15 +1235,27 @@ impl OfflineProtocol {
     /// may still deliver over BLE / WiFi-Direct.
     ///
     /// Never cancels an escalating unreachable probe: a record that already
-    /// holds one (`unreachable_parks > 0` with a scheduled retry) was parked
-    /// by [`Self::apply_recipient_unreachable_failure`], which already set the
-    /// same reason code and pushed the same TTL — so this adds nothing and
-    /// would only downgrade the probe to edge-only. That matters because on an
-    /// internet-only device this runs once per presence rotation for as long
-    /// as the peer is down, which would otherwise re-strand the welcome after
-    /// every single verdict. The distinction is budget: the data-plane retry
-    /// this *does* cancel was charged an attempt by a carrier-backed failure,
-    /// while the probe refunds its attempt on every verdict.
+    /// holds one was parked by [`Self::apply_recipient_unreachable_failure`],
+    /// which already set the same reason code and pushed the same TTL — so this
+    /// adds nothing and would only downgrade the probe to edge-only. That
+    /// matters because on an internet-only device this runs once per presence
+    /// rotation for as long as the peer is down, which would otherwise
+    /// re-strand the welcome after every single verdict. The distinction is
+    /// budget: the data-plane retry this *does* cancel was charged an attempt
+    /// by a carrier-backed failure, while the probe refunds its attempt on
+    /// every verdict.
+    ///
+    /// `last_reason_code` — not `unreachable_parks` alone — is what encodes
+    /// that distinction. The counter is sticky (only `rearm_welcome_for_peer`
+    /// clears it), so gating on it by itself would keep shielding the record
+    /// long after the probe resolved: a probe that earns no verdict (the
+    /// relay's push fallback accepted the frame) ends at the confirm timeout
+    /// instead, which charges an attempt and arms a plain data-plane retry —
+    /// precisely the budget-burner this park exists to cancel, and left
+    /// running it expires the welcome at `max_retries`. Only
+    /// `park_welcome_no_carrier` stamps `PeerUnreachable`; a carrier-backed
+    /// failure stamps `Timeout`/`SendFailed` and a successful send clears the
+    /// code entirely.
     fn park_welcome_peer_unreachable(&mut self, peer_id: &str) {
         if self.confirmed_sessions.contains(peer_id) {
             return;
@@ -1241,7 +1269,10 @@ impl OfflineProtocol {
         ) {
             return;
         }
-        if record.unreachable_parks > 0 && record.next_retry_at.is_some() {
+        if record.last_reason_code == Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+            && record.unreachable_parks > 0
+            && record.next_retry_at.is_some()
+        {
             return;
         }
         // Local mesh carriers only (BLE / WiFi-Direct): Nostr and Reticulum
@@ -1285,9 +1316,10 @@ impl OfflineProtocol {
     /// what bounds the retry: DORS may keep routing to the internet path,
     /// where each round trips another budget-refunded `DeliveryError`, and
     /// without escalation that would be an unbounded resend loop into the
-    /// relay. Every verdict refunds the attempt and pushes the TTL, so the
-    /// probes never age the welcome out or burn its real-delivery budget, and
-    /// the counter resets on any reachability edge
+    /// relay. Every verdict refunds the attempt and pushes the TTL — past the
+    /// scheduled probe, see the invariant on [`Self::park_welcome_no_carrier`]
+    /// — so the probes never age the welcome out or burn its real-delivery
+    /// budget, and the counter resets on any reachability edge
     /// (`rearm_welcome_for_peer`).
     pub(super) fn apply_recipient_unreachable_failure(
         &mut self,

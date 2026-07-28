@@ -2060,9 +2060,10 @@ impl OfflineProtocol {
         retry_count: u32,
     ) -> Result<()> {
         // A plain DM whose recipient still holds a live unreachable-park
-        // counter re-parks instead of settling: the exhausted budget was
-        // burnt by mesh reachability probes, which can never earn the relay
-        // verdict that would have re-parked it (see try_repark_exhausted_dm).
+        // counter re-parks instead of settling: the exhausted budget was burnt
+        // by reachability probes — sends that succeed locally without proving
+        // the peer is back — not by a peer believed reachable (see
+        // try_repark_exhausted_dm).
         if self.try_repark_exhausted_dm(message_id) {
             return Ok(());
         }
