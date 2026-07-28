@@ -197,13 +197,20 @@ impl OfflineProtocol {
             .into_bytes())
     }
 
-    /// Loads one protocol-state entry, treating
-    /// [`ProtocolStateError::NotFound`] as absence.
+    /// Loads one protocol-state entry for a caller that only needs to know
+    /// whether usable bytes are there.
     ///
-    /// The trait documents `NotFound` as the variant for implementations whose
-    /// platform API cannot express absence any other way, so it has to be
-    /// *read* as absence here — otherwise a provider that honors that contract
-    /// turns every record it holds into a spurious unrecoverable loss.
+    /// Both [`ProtocolStateError::NotFound`] and
+    /// [`ProtocolStateError::Corrupted`] read as `None`. The trait documents
+    /// `NotFound` as the variant for implementations whose platform API cannot
+    /// express absence any other way, so it has to be *read* as absence here —
+    /// otherwise a provider that honors that contract turns every record it
+    /// holds into a spurious unrecoverable loss. `Corrupted` is a record that
+    /// exists and can never be decoded, which for a probe is the same answer:
+    /// there is nothing to inherit, and writing over it is the recovery.
+    ///
+    /// Callers that owe the app a settlement need the two kept apart and go
+    /// through [`Self::read_state_record_detailed`] instead.
     fn load_state_bytes(
         storage: &dyn ProtocolStateStorage,
         key_type: &str,
@@ -211,7 +218,26 @@ impl OfflineProtocol {
     ) -> ProtocolStateResult<Option<Vec<u8>>> {
         match storage.load(key_type, key_id) {
             Ok(data) => Ok(data),
-            Err(ProtocolStateError::NotFound(_)) => Ok(None),
+            Err(ProtocolStateError::NotFound(_) | ProtocolStateError::Corrupted(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Lists one protocol-state category, treating
+    /// [`ProtocolStateError::NotFound`] as an empty category.
+    ///
+    /// Same reasoning as [`Self::load_state_bytes`]: a backend that can only
+    /// spell "nothing is filed under this key type" as `NotFound` is reporting
+    /// emptiness, not failure. Every restore propagates a listing error, so
+    /// without this a provider honoring that contract fails restore and rolls
+    /// `initialize_mls` back over a store that is merely empty.
+    fn list_state_keys(
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+    ) -> ProtocolStateResult<Vec<String>> {
+        match storage.list_keys(key_type) {
+            Ok(keys) => Ok(keys),
+            Err(ProtocolStateError::NotFound(_)) => Ok(Vec::new()),
             Err(e) => Err(e),
         }
     }
@@ -231,14 +257,40 @@ impl OfflineProtocol {
     /// [`StateRecord::Unavailable`]. Nothing is recovered from them this run
     /// either way, but a later launch can — which is exactly why they must not
     /// be settled as failures now.
+    ///
+    /// The same split applies to what the store itself reports.
+    /// [`ProtocolStateError::Corrupted`] is documented as a record that exists
+    /// and cannot be decoded, which is permanent by construction — so it is
+    /// [`StateRecord::Unreadable`], not a read to retry. Every other error is a
+    /// failure of *this* read and stays [`StateRecord::Unavailable`].
     pub(crate) fn read_state_record_detailed(
         &self,
         storage: &dyn ProtocolStateStorage,
         key_type: &str,
         key_id: &str,
     ) -> ProtocolStateResult<StateRecord> {
-        let Some(data) = Self::load_state_bytes(storage, key_type, key_id)? else {
-            return Ok(StateRecord::Missing);
+        let data = match storage.load(key_type, key_id) {
+            Ok(Some(data)) => data,
+            Ok(None) => return Ok(StateRecord::Missing),
+            // Absence, spelled as an error by a backend that cannot spell it
+            // any other way.
+            Err(ProtocolStateError::NotFound(_)) => return Ok(StateRecord::Missing),
+            // A record was there and its store cannot decode it. Nothing will
+            // ever decode it, so this is a loss to settle rather than a read to
+            // retry — and it is deleted so it cannot be re-examined on every
+            // boot. Providers that detect corruption themselves have usually
+            // deleted it already, which makes the delete a no-op.
+            Err(ProtocolStateError::Corrupted(detail)) => {
+                warn!(
+                    key_type = %key_type,
+                    key_id = %key_id,
+                    detail = %detail,
+                    "Protocol state record reported corrupt by its store; dropping"
+                );
+                let _ = storage.delete(key_type, key_id);
+                return Ok(StateRecord::Unreadable);
+            }
+            Err(e) => return Err(e),
         };
 
         // Bound before deserialization: a corrupted or tampered record must not
@@ -744,8 +796,7 @@ impl OfflineProtocol {
             return Ok(());
         };
 
-        let recipients = storage
-            .list_keys(storage_keys::PENDING_MESSAGES)
+        let recipients = Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_MESSAGES)
             .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
         let listed = recipients.len();
 
@@ -966,8 +1017,7 @@ impl OfflineProtocol {
             return Ok(());
         };
 
-        let peer_ids = storage
-            .list_keys(storage_keys::PEER_KEY_PACKAGES)
+        let peer_ids = Self::list_state_keys(storage.as_ref(), storage_keys::PEER_KEY_PACKAGES)
             .map_err(|e| Error::Other(format!("Failed to list peer key packages: {}", e)))?;
 
         let sessions = {
@@ -1119,13 +1169,14 @@ impl OfflineProtocol {
         let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
-        let peer_ids = match storage.list_keys(storage_keys::PEER_CAPABILITIES) {
-            Ok(ids) => ids,
-            Err(e) => {
-                warn!(error = %e, "Failed to list peer capabilities, skipping restore");
-                return;
-            }
-        };
+        let peer_ids =
+            match Self::list_state_keys(storage.as_ref(), storage_keys::PEER_CAPABILITIES) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(error = %e, "Failed to list peer capabilities, skipping restore");
+                    return;
+                }
+            };
 
         // Best-effort session lookup: if it fails, restore proceeds in
         // backend order rather than not at all.
@@ -1549,8 +1600,7 @@ impl OfflineProtocol {
             return Ok(());
         };
 
-        let message_ids = storage
-            .list_keys(storage_keys::OUTBOX)
+        let message_ids = Self::list_state_keys(storage.as_ref(), storage_keys::OUTBOX)
             .map_err(|e| Error::Other(format!("Failed to list outbox entries: {}", e)))?;
 
         let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms;
@@ -1570,7 +1620,7 @@ impl OfflineProtocol {
                 Some(Ok(StateRecord::Missing)) | None => continue,
                 Some(Ok(StateRecord::Unreadable)) => {
                     warn!(message_id = %message_id, "Dropping unreadable outbox entry");
-                    unrecoverable.extend(MessageId::from_str(&message_id));
+                    unrecoverable.extend(MessageId::from_str(&message_id).ok());
                     continue;
                 }
                 // Still on disk and probably intact — the record key is not
@@ -1594,7 +1644,7 @@ impl OfflineProtocol {
                 Err(e) => {
                     warn!(message_id = %message_id, error = %e, "Dropping corrupted outbox entry");
                     self.delete_outbox_key(&message_id);
-                    unrecoverable.extend(MessageId::from_str(&message_id));
+                    unrecoverable.extend(MessageId::from_str(&message_id).ok());
                     continue;
                 }
             };
@@ -1798,8 +1848,7 @@ impl OfflineProtocol {
             return Ok(());
         };
 
-        let file_ids = storage
-            .list_keys(storage_keys::MEDIA_DESCRIPTORS)
+        let file_ids = Self::list_state_keys(storage.as_ref(), storage_keys::MEDIA_DESCRIPTORS)
             .map_err(|e| Error::Other(format!("Failed to list media descriptors: {}", e)))?;
 
         let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms;

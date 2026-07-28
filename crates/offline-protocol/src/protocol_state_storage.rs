@@ -41,7 +41,27 @@ pub enum ProtocolStateError {
     /// an implementation that reports absence this way does **not** cause
     /// spurious `message_failed` settlements on restore.
     NotFound(String),
-    /// The entry exists but could not be decoded by the backing store.
+    /// The entry exists but can never be decoded by the backing store.
+    ///
+    /// This is the variant for a *permanent* loss the implementation detected
+    /// itself — a truncated or tampered record, a framing header that does not
+    /// parse, an entry over
+    /// [`MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES`]. The SDK reads it as
+    /// exactly that: the record is dropped and, for categories the application
+    /// holds message ids for, settled with a terminal `message_failed` (or a
+    /// `pending_state_lost` diagnostic) so the id cannot hang forever.
+    ///
+    /// Report it *only* when the record can never be read. Every other error
+    /// variant means "this read failed", which the SDK treats as recoverable:
+    /// the record is left in place for a later launch and nothing is settled.
+    /// Reporting a transient failure here would tell the application a message
+    /// failed terminally and then deliver it on the next launch.
+    ///
+    /// Returning `Ok(None)` for a record the implementation destroyed is
+    /// accepted — the built-in providers did that before this variant carried
+    /// meaning — but it costs the settlement: the SDK cannot distinguish it
+    /// from a record that was never written, so the application is told
+    /// nothing at all.
     Corrupted(String),
     /// The entry could not be written.
     StoreFailed(String),
@@ -114,10 +134,16 @@ pub trait ProtocolStateStorage: Send + Sync {
     /// **Implementations must bound the read.** Check the stored entry's size
     /// before materializing it and never return — or allocate — more than
     /// [`MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES`]. An entry above the ceiling
-    /// is corrupt or tampered by construction; drop it and return `Ok(None)`,
-    /// which is also what core does with an oversized record it manages to see.
-    /// Returning it instead defeats the size policy, because core can only
+    /// is corrupt or tampered by construction; drop it and report
+    /// [`ProtocolStateError::Corrupted`], which is what lets core settle the
+    /// message ids the application is still holding for it. Returning the
+    /// oversized value instead defeats the size policy, because core can only
     /// check a length it has already been handed.
+    ///
+    /// The same applies to a record whose framing does not parse. Reserve
+    /// `Corrupted` for losses that are permanent — anything transient belongs
+    /// in [`ProtocolStateError::LoadFailed`], which core leaves in place to
+    /// retry.
     fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>>;
 
     /// Deletes one protocol-state entry and succeeds when it is already absent.
@@ -128,6 +154,10 @@ pub trait ProtocolStateStorage: Send + Sync {
     /// Like [`Self::load`], enumeration should stay bounded: core caps every
     /// category well below any sane ceiling, so a store holding vastly more
     /// has been tampered with and an implementation may stop early.
+    ///
+    /// An empty category is `Ok(vec![])`. A backend that can only spell it as
+    /// [`ProtocolStateError::NotFound`] is read the same way, so honoring that
+    /// contract does not fail restore.
     fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>>;
 }
 

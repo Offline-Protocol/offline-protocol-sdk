@@ -6294,6 +6294,125 @@ fn test_adoption_marker_is_withheld_when_a_category_cannot_be_listed() {
         .is_some());
 }
 
+/// A provider-side [`crate::ProtocolStateStorage`] that reports the two
+/// "nothing usable here" errors the trait documents, so tests can check the SDK
+/// reads each one the way the contract promises.
+struct ReportingStorage {
+    inner: Arc<InMemoryStorage>,
+    /// `(key_type, key_id)` whose `load` reports permanent corruption.
+    corrupt: Option<(&'static str, String)>,
+    /// Category whose `list_keys` reports `NotFound` instead of an empty list.
+    empty_as_not_found: Option<&'static str>,
+}
+
+impl crate::ProtocolStateStorage for ReportingStorage {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .store(key_type, key_id, data)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        if self
+            .corrupt
+            .as_ref()
+            .is_some_and(|(t, id)| *t == key_type && id == key_id)
+        {
+            return Err(crate::ProtocolStateError::Corrupted(
+                "framing does not parse".to_string(),
+            ));
+        }
+        self.inner
+            .load(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .delete(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        let keys = self
+            .inner
+            .list_keys(key_type)
+            .map_err(crate::protocol::map_test_storage_error)?;
+        if keys.is_empty() && self.empty_as_not_found == Some(key_type) {
+            return Err(crate::ProtocolStateError::NotFound(key_type.to_string()));
+        }
+        Ok(keys)
+    }
+}
+
+#[test]
+fn test_corrupted_from_a_provider_load_is_settled_and_deleted() {
+    // `Corrupted` is documented as a record that exists and can never be
+    // decoded. Lumping it in with a transient read failure gets it wrong twice:
+    // the app is never told the message failed (its id hangs forever), and the
+    // poison record is left in place to be re-examined on every single boot.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let message_id = MessageId::new();
+    state
+        .store(storage_keys::OUTBOX, &message_id.as_str(), b"unreadable")
+        .unwrap();
+
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(ReportingStorage {
+        inner: state.clone(),
+        corrupt: Some((storage_keys::OUTBOX, message_id.as_str())),
+        empty_as_not_found: None,
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let events = started_protocol_events(&mut protocol);
+    let settled = events.lock().unwrap().iter().any(|event| {
+        matches!(
+            event,
+            Event::MessageFailed { message_id: id, .. } if *id == message_id.as_str()
+        )
+    });
+    assert!(
+        settled,
+        "a record the store reports as permanently corrupt must be settled"
+    );
+    assert!(
+        state
+            .load(storage_keys::OUTBOX, &message_id.as_str())
+            .unwrap()
+            .is_none(),
+        "a corrupt record must be deleted, not re-read on every boot"
+    );
+}
+
+#[test]
+fn test_not_found_from_a_provider_list_reads_as_an_empty_category() {
+    // Same contract as `load`: a backend that can only spell "nothing is filed
+    // under this key type" as NotFound is reporting emptiness. Every restore
+    // propagates a listing error, so reading it as failure would roll
+    // initialization back over a store that is merely empty.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(ReportingStorage {
+        inner: state.clone(),
+        corrupt: None,
+        empty_as_not_found: Some(storage_keys::OUTBOX),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .expect("an empty category reported as NotFound must not fail initialization");
+    assert!(protocol.is_mls_initialized());
+}
+
 #[test]
 fn test_pending_byte_budget_holds_for_worst_case_json_escaping() {
     // `MAX_MESSAGE_CONTENT_BYTES` bounds the *raw* content, but the queue

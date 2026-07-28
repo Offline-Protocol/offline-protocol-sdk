@@ -372,11 +372,22 @@ other store that can outlive the app container. State writes must be atomic.
 **`load` must bound its read.** Check the stored entry's size *before*
 materializing it and never allocate — or hand back across the FFI — more than
 8 MiB. The SDK refuses to write anything near that, so a larger entry is corrupt
-or tampered: drop it and report absence, which is what the SDK does with an
-oversized record it manages to see. This obligation cannot live in the SDK,
-because by the time it can check a length the provider has already allocated the
-bytes. `listKeys` should stay bounded for the same reason; the SDK caps every
-category well below any sane ceiling.
+or tampered. This obligation cannot live in the SDK, because by the time it can
+check a length the provider has already allocated the bytes. `listKeys` should
+stay bounded for the same reason; the SDK caps every category well below any
+sane ceiling.
+
+**Report a record you had to destroy as `CorruptedData`, not as absence.**
+Destruction and absence are different answers. When a provider drops an entry it
+can never decode — oversized, truncated, framing that does not parse — the SDK
+settles it: a lost outbox entry emits a terminal `message_failed`, because the
+application is holding the id `sendMessage` returned for it, and a lost pending
+queue emits a `pending_state_lost` diagnostic for the recipient. Returning
+`null` instead is accepted, but it is indistinguishable from a record that was
+never written, so the application is told nothing and that id never resolves.
+Reserve `CorruptedData` for permanent losses — a transient read failure is
+`LoadFailed`, which the SDK leaves in place for a later launch rather than
+settling.
 
 **If you address entries by filename, do not encode the key into the name.**
 Key ids are peer and message ids, so an encoding is both case-sensitive (`AAG`

@@ -196,7 +196,7 @@ final class ProtocolStateStorageTests: XCTestCase {
         try handle.truncate(atOffset: UInt64(ProtocolStateRecord.maxFileBytes) + 1)
         try handle.close()
 
-        XCTAssertNil(try storage.load(keyType: "outbox", keyId: "message-1"))
+        assertCorrupted(try storage.load(keyType: "outbox", keyId: "message-1"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
 
@@ -211,7 +211,8 @@ final class ProtocolStateStorageTests: XCTestCase {
     }
 
     /// A file whose framing does not name the key that was asked for is not
-    /// that record — return absence rather than someone else's bytes.
+    /// that record — drop it rather than hand back someone else's bytes, and
+    /// report the drop so the SDK can settle the message id the app holds.
     func testMalformedRecordIsDroppedRatherThanReturned() throws {
         let root = temporaryRoot("malformed")
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
@@ -226,8 +227,27 @@ final class ProtocolStateStorageTests: XCTestCase {
             )
         try Data([0, 1, 2, 3, 4, 5, 6, 7, 8]).write(to: path)
 
-        XCTAssertNil(try storage.load(keyType: "outbox", keyId: "message-1"))
+        assertCorrupted(try storage.load(keyType: "outbox", keyId: "message-1"))
         XCTAssertEqual(try storage.listKeys(keyType: "outbox"), [])
+    }
+
+    /// Destruction is not absence. A record the provider had to drop must be
+    /// reported as `CorruptedData`, because that is what lets the SDK settle
+    /// the message id the application is still holding for it; a silent `nil`
+    /// is indistinguishable from a record that was never written and leaves
+    /// that id unresolved forever.
+    private func assertCorrupted(
+        _ expression: @autoclosure () throws -> [UInt8]?,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(try expression(), file: file, line: line) { error in
+            guard let storageError = error as? MlsStorageError,
+                  case .CorruptedData = storageError
+            else {
+                return XCTFail("expected CorruptedData, got \(error)", file: file, line: line)
+            }
+        }
     }
 
     func testUnframedStrayFilesAreIgnoredByListing() throws {

@@ -203,7 +203,9 @@ class ProtocolStateStorageTest {
             it.setLength(ProtocolStateRecord.MAX_FILE_BYTES.toLong() + 1)
         }
 
-        assertNull(loadedBytes(storage, "outbox", "message-1"))
+        assertThrows(MlsStorageException.CorruptedData::class.java) {
+            storage.load("outbox", "message-1")
+        }
         assertFalse(file.exists())
     }
 
@@ -220,7 +222,12 @@ class ProtocolStateStorageTest {
 
     /**
      * A file whose framing does not name the key that was asked for is not that
-     * record — return absence rather than someone else's bytes.
+     * record — drop it rather than hand back someone else's bytes, and report
+     * the drop so the SDK can settle the message id the app holds.
+     *
+     * Destruction is not absence: a silent null is indistinguishable from a
+     * record that was never written, which would leave that id unresolved
+     * forever.
      */
     @Test
     fun malformedRecordIsDroppedRatherThanReturned() {
@@ -231,7 +238,9 @@ class ProtocolStateStorageTest {
         entryFile(account, "outbox", "message-1")
             .writeBytes(byteArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8))
 
-        assertNull(loadedBytes(storage, "outbox", "message-1"))
+        assertThrows(MlsStorageException.CorruptedData::class.java) {
+            storage.load("outbox", "message-1")
+        }
         assertEquals(emptyList<String>(), storage.listKeys("outbox"))
     }
 

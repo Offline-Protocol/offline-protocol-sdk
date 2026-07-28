@@ -42,9 +42,16 @@ callback interface MlsStorageProvider {
 //
 // `load` must bound its read: check the entry's stored size first and never
 // materialize (or copy across this boundary) more than 8 MiB. Core refuses to
-// write anything near that, so a larger entry is corrupt or tampered — drop it
-// and report absence. Core can only check a length it has already been handed,
-// so an unbounded provider read defeats the size policy entirely.
+// write anything near that, so a larger entry is corrupt or tampered. Core can
+// only check a length it has already been handed, so an unbounded provider read
+// defeats the size policy entirely.
+//
+// Drop such an entry and throw CorruptedData — not a null. Destruction and
+// absence are different answers: a record the provider destroyed is settled
+// with a terminal message_failed, because the application is holding the
+// message id sendMessage returned for it, while absence is simply nothing to
+// restore. Reserve CorruptedData for permanent losses; a transient read failure
+// is LoadFailed, which leaves the record in place for a later launch.
 callback interface ProtocolStateStorageProvider {
     [Throws=MlsStorageError]
     void store(string key_type, string key_id, sequence<u8> data);

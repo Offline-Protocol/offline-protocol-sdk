@@ -234,15 +234,15 @@ class AppStateStorage(ProtocolStateStorageProvider):
 
             # Unlink outside the `with`: Windows refuses to remove an open file.
             if oversized or len(raw) > MAX_FILE_BYTES:
-                self._discard(path, "oversized")
-                return None
+                raise self._discard(path, "record is over the ceiling")
 
             header = _parse_header(raw)
             if header is None or header[0] != key_type or header[1] != key_id:
                 # Malformed framing, or a name that resolves to some other
                 # record: either way this is not the entry that was asked for.
-                self._discard(path, "malformed")
-                return None
+                raise self._discard(
+                    path, f"record framing does not name {key_type}/{key_id}"
+                )
             return list(raw[header[2] :])
 
     def delete(self, key_type: str, key_id: str) -> None:
@@ -294,12 +294,25 @@ class AppStateStorage(ProtocolStateStorageProvider):
             return None
 
     @staticmethod
-    def _discard(path: Path, reason: str) -> None:
-        logger.warning("dropping %s protocol-state record %s", reason, path.name)
+    def _discard(path: Path, reason: str) -> Exception:
+        """Remove a record that can never be read and return the error saying so.
+
+        ``CorruptedData``, not a silent ``None``: absence and destruction are
+        different answers upstream. The SDK settles a destroyed record — the
+        application is holding the message id ``send_message`` returned for it —
+        while absence is simply nothing to restore, reported to no one.
+        """
+
+        logger.warning("dropping protocol-state record %s: %s", path.name, reason)
         try:
             path.unlink()
         except OSError:
             pass
+        else:
+            _sync_directory(path.parent)
+        return MlsStorageError.CorruptedData(
+            f"dropped unreadable protocol-state record: {reason}"
+        )
 
     def _type_directory(self, key_type: str) -> Path:
         return self._root / _type_directory_name(key_type)

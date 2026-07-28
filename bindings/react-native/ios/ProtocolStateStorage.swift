@@ -14,10 +14,11 @@ import CryptoKit
 import Foundation
 
 #if SWIFT_PACKAGE
-enum MlsStorageError: Error {
+enum MlsStorageError: Error, Equatable {
     case StoreFailed(message: String)
     case LoadFailed(message: String)
     case DeleteFailed(message: String)
+    case CorruptedData(message: String)
 }
 
 protocol ProtocolStateStorageProvider {
@@ -242,8 +243,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         // the read itself from becoming an unbounded allocation.
         let attributes = try? fileManager.attributesOfItem(atPath: url.path)
         if let size = attributes?[.size] as? Int, size > ProtocolStateRecord.maxFileBytes {
-            try? fileManager.removeItem(at: url)
-            return nil
+            throw discard(url, reason: "record is \(size) bytes, over the ceiling")
         }
 
         let raw: Data
@@ -258,8 +258,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         // Re-check post-read: the stat can race a concurrent writer, and on a
         // filesystem that refuses to report a size it is skipped entirely.
         guard raw.count <= ProtocolStateRecord.maxFileBytes else {
-            try? fileManager.removeItem(at: url)
-            return nil
+            throw discard(url, reason: "record is \(raw.count) bytes, over the ceiling")
         }
 
         let bytes = [UInt8](raw)
@@ -269,8 +268,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         else {
             // Malformed framing, or a name that resolves to some other record:
             // either way this is not the entry that was asked for.
-            try? fileManager.removeItem(at: url)
-            return nil
+            throw discard(url, reason: "record framing does not name \(keyType)/\(keyId)")
         }
         return Array(bytes[header.valueOffset...])
     }
@@ -338,6 +336,20 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
             return nil
         }
         return (header.keyType, header.keyId)
+    }
+
+    /// Removes a record that can never be read and returns the error that says
+    /// so.
+    ///
+    /// `CorruptedData`, not a silent `nil`: absence and destruction are
+    /// different answers upstream. The SDK settles a destroyed record — the
+    /// application is holding the message id `send_message` returned for it —
+    /// while absence is simply nothing to restore, reported to no one.
+    private func discard(_ url: URL, reason: String) -> MlsStorageError {
+        try? fileManager.removeItem(at: url)
+        return MlsStorageError.CorruptedData(
+            message: "Dropped unreadable protocol-state record: \(reason)"
+        )
     }
 
     private func typeDirectory(_ keyType: String) -> URL {

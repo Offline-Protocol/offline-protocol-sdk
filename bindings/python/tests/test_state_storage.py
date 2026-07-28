@@ -7,6 +7,7 @@ import os
 import pytest
 
 from offline_protocol_sdk import state_storage as state_storage_module
+from offline_protocol_sdk.offline_protocol import MlsStorageError
 from offline_protocol_sdk.state_storage import AppStateStorage
 
 ALICE = "account-" + "a" * 64
@@ -214,7 +215,8 @@ def test_oversized_file_is_rejected_without_being_read(tmp_path) -> None:
     with open(path, "r+b") as handle:
         handle.truncate(state_storage_module.MAX_FILE_BYTES + 1)
 
-    assert storage.load("outbox", "message-1") is None
+    with pytest.raises(MlsStorageError.CorruptedData):
+        storage.load("outbox", "message-1")
     assert not path.exists()
 
 
@@ -227,7 +229,12 @@ def test_store_refuses_values_over_the_ceiling() -> None:
 
 def test_malformed_record_is_dropped_rather_than_returned(tmp_path) -> None:
     # A file whose framing does not name the key that was asked for is not that
-    # record — return absence rather than someone else's bytes.
+    # record — drop it rather than hand back someone else's bytes, and report
+    # the drop so the SDK can settle the message id the app holds.
+    #
+    # Destruction is not absence: a silent None is indistinguishable from a
+    # record that was never written, which would leave that id unresolved
+    # forever.
     storage = AppStateStorage(tmp_path / "state")
     storage.store("outbox", "message-1", [1, 2, 3])
 
@@ -239,7 +246,8 @@ def test_malformed_record_is_dropped_rather_than_returned(tmp_path) -> None:
     )
     path.write_bytes(bytes(range(9)))
 
-    assert storage.load("outbox", "message-1") is None
+    with pytest.raises(MlsStorageError.CorruptedData):
+        storage.load("outbox", "message-1")
     assert storage.list_keys("outbox") == []
 
 
