@@ -64,6 +64,22 @@ class SecureStorage(MlsStorageProvider):
             else None
         )
 
+        # Adoption records its claim under the account namespace, so a store
+        # built without one cannot participate — and on the default service
+        # that means an upgraded install silently mints a fresh MLS identity,
+        # abandoning every session, group, and TOFU pin it had. Say so: every
+        # other platform surfaces the analogous case as an error diagnostic.
+        # ``ProtocolManager`` supplies the namespace; this fires for callers
+        # that construct their own provider.
+        if adopt_legacy_store and service == _DEFAULT_SERVICE and namespace is None:
+            logger.warning(
+                "SecureStorage built without an account namespace: the "
+                "pre-namespace store cannot be adopted, so an upgraded install "
+                "starts from a fresh MLS identity and cannot decrypt its old "
+                "sessions. Pass namespace=account_storage_namespace(app_id, "
+                "user_id), or let ProtocolManager build the provider."
+            )
+
         # Warn if keyring resolved to a plaintext or null backend — MLS key
         # material would be stored unprotected.
         try:

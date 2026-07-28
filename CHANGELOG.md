@@ -59,6 +59,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Restores that walk a whole category are now bounded consistently.** Blocked users, the both-create owner gate, and Welcome lifecycles were reading every key a store listed straight into memory, while the categories touched by this branch stop at a generous multiple of their own caps. The justification for that bound is a tampered store — and this state just moved out of the credential store into the app container, where write access is easier to obtain, so it applies more strongly than before, not less. All three now stop at the same bound and log the ignored tail.
 
+- **A Python `SecureStorage` built without an account namespace now says it cannot adopt the pre-namespace store.** Adoption records its claim under the namespace, so a provider constructed without one silently lands on the new service name, finds nothing, and mints a fresh MLS identity — abandoning every session, group, and TOFU pin the install had. `ProtocolManager` always supplies the namespace, but the provider is a documented constructor parameter; a caller building their own now gets a warning instead of a silent identity reset. Explicitly passing `adopt_legacy_store=False` stays quiet, since that is a decision rather than an accident.
+
 - **Malformed or unresolved recipient tokens are rejected before any queue, outbox, group mutation, clock, or transport side effect.** All outbound user-targeted APIs, including group invite/removal/role mutation, now validate the recipient at the SDK boundary, preventing app-owned unresolved identifiers such as `unresolved:token` from becoming indefinitely retried protocol state.
 
 ## [0.16.6] — 2026-07-28

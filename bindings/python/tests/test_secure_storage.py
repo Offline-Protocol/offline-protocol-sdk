@@ -261,3 +261,35 @@ class TestLegacyStoreAdoption:
 
         assert store.legacy_adoption.kind == "none"
         assert store.load("identity", "key_pair") is None
+
+    def test_a_namespaceless_store_says_it_cannot_adopt(
+        self, fake_keyring: FakeKeyring, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Adoption records its claim under the account namespace, so a store
+        # built without one cannot participate — and on the default service
+        # that silently mints a fresh MLS identity on upgrade. ProtocolManager
+        # always supplies the namespace; a caller constructing its own provider
+        # must not have that happen quietly.
+        fake_keyring.seed(
+            secure_storage_module._LEGACY_SERVICE, "identity", "key_pair", b"old-key"
+        )
+
+        with caplog.at_level("WARNING"):
+            store = SecureStorage()
+
+        assert store.legacy_adoption.kind == "none"
+        assert store.load("identity", "key_pair") is None
+        assert any(
+            "account namespace" in record.message for record in caplog.records
+        ), caplog.text
+
+    def test_an_explicitly_disabled_store_stays_quiet(
+        self, fake_keyring: FakeKeyring, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Opting out is a decision, not an accident — no warning for it.
+        with caplog.at_level("WARNING"):
+            SecureStorage(adopt_legacy_store=False)
+
+        assert not any(
+            "account namespace" in record.message for record in caplog.records
+        ), caplog.text
