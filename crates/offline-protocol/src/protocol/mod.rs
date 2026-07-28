@@ -49,6 +49,19 @@ use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
+/// Returns whether `timestamp` is at least `lifetime_ms` old without relying
+/// on Chrono's panicking `DateTime - Duration` operator.
+///
+/// A lifetime too large to represent, or whose cutoff predates Chrono's
+/// calendar range, cannot expire a representable timestamp.
+fn lifetime_expired(now: DateTime<Utc>, timestamp: DateTime<Utc>, lifetime_ms: u64) -> bool {
+    let Ok(lifetime_ms) = i64::try_from(lifetime_ms) else {
+        return false;
+    };
+    now.checked_sub_signed(chrono::Duration::milliseconds(lifetime_ms))
+        .is_some_and(|cutoff| timestamp <= cutoff)
+}
+
 /// Main entry point for the Offline Protocol SDK.
 ///
 /// This struct combines all protocol components and provides a unified API

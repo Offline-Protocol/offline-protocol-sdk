@@ -1,15 +1,15 @@
 //! Send pipeline, outbox management, and delivery tracking.
 
 use super::{
-    base64_encode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
-    ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions, MediaTransferDescriptor,
-    OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation, OutboxEntry, OutboxReseal,
-    PendingConnectionRequest, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
-    RichPayloadV1, RichSendExtras, SendMessageOptions, TypingIndicatorPayload,
-    WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO,
-    MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
-    MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
-    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
+    base64_encode, internal_prefixes, lifetime_expired, lock_shared_state,
+    ConnectionAcceptedPayload, ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions,
+    MediaTransferDescriptor, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
+    OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PresencePayload,
+    ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras, SendMessageOptions,
+    TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS,
+    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
+    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use crate::constants::{
@@ -20,7 +20,7 @@ use crate::file_transfer::{FileChunk, OutboundTransferState};
 use crate::media_envelope::{encode_media_envelope, MediaChunkPlaintext, MediaRichExtras};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 use crate::{Error, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use offline_protocol_core::{
     AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, UserId,
     TTL,
@@ -2333,15 +2333,15 @@ impl OfflineProtocol {
             .config
             .reliability
             .retry
-            .pending_message_max_lifetime_ms as i64;
-        let cutoff = Utc::now() - ChronoDuration::milliseconds(lifetime_ms);
+            .pending_message_max_lifetime_ms;
+        let now = Utc::now();
         let mut changed_recipients = Vec::new();
         let mut expired_ids = Vec::new();
 
         for (recipient, messages) in &mut self.pending_encrypted_messages {
             let previous_len = messages.len();
             messages.retain(|pending| {
-                if pending.queued_at <= cutoff {
+                if lifetime_expired(now, pending.queued_at, lifetime_ms) {
                     expired_ids.push(pending.message_id.clone());
                     false
                 } else {
@@ -2377,22 +2377,20 @@ impl OfflineProtocol {
 
     pub(super) fn cleanup_outbox(&mut self) {
         let now = Utc::now();
-        let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms as i64;
-        let cutoff = now - ChronoDuration::milliseconds(lifetime_ms);
+        let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms;
         // In-process twin of the restore path's absolute cap
         // (`restore_outbox`): the carrier-relative window slides on every
         // send, and an unreachable-parked DM's mesh reachability probe keeps
         // sending — without an absolute bound from `first_sent_at`, a
         // long-lived process would keep such an entry alive forever.
-        let absolute_cutoff = now
-            - ChronoDuration::milliseconds(
-                lifetime_ms
-                    .saturating_mul(crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as i64),
-            );
+        let absolute_lifetime_ms =
+            lifetime_ms.saturating_mul(crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as u64);
 
         let mut expired_from_outbox = Vec::new();
         for (message_id, entry) in &self.outbox {
-            if entry.last_sent_at >= cutoff && entry.first_sent_at >= absolute_cutoff {
+            if !lifetime_expired(now, entry.last_sent_at, lifetime_ms)
+                && !lifetime_expired(now, entry.first_sent_at, absolute_lifetime_ms)
+            {
                 continue;
             }
             if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(&entry.message.id)
@@ -2450,7 +2448,7 @@ impl OfflineProtocol {
 
         let mut expired_from_media = Vec::new();
         for (message_id, entry) in &self.media_outbox {
-            if entry.last_sent_at >= cutoff {
+            if !lifetime_expired(now, entry.last_sent_at, lifetime_ms) {
                 continue;
             }
             if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(&entry.message.id)

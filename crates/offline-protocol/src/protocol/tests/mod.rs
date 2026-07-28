@@ -436,6 +436,24 @@ fn test_pending_session_messages_expire_and_are_deleted_from_state_storage() {
 }
 
 #[test]
+fn test_lifetime_expiry_handles_extreme_configured_bounds() {
+    let now = Utc::now();
+
+    assert!(!lifetime_expired(now, now, i64::MAX as u64));
+    assert!(!lifetime_expired(
+        now,
+        DateTime::<Utc>::MIN_UTC,
+        i64::MAX as u64
+    ));
+    assert!(!lifetime_expired(now, now, u64::MAX));
+    assert!(lifetime_expired(
+        now,
+        now - ChronoDuration::milliseconds(2),
+        1
+    ));
+}
+
+#[test]
 fn test_runtime_retry_and_ack_updates_reject_zero_delays() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let original_retry = protocol.config.reliability.retry.clone();

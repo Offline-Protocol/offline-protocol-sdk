@@ -1,10 +1,11 @@
 //! Storage persistence methods for protocol state.
 
 use super::{
-    storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry, PeerCapabilities,
-    PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MAX_PERSISTED_CAPABILITY_VERSIONS,
-    MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
+    lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
+    PeerCapabilities, PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState,
+    WelcomeLifecycleRecord, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
+    MAX_PERSISTED_CAPABILITY_VERSIONS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
+    WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::{Error, Result};
@@ -745,9 +746,7 @@ impl OfflineProtocol {
             .list_keys(storage_keys::OUTBOX)
             .map_err(|e| Error::Other(format!("Failed to list outbox entries: {}", e)))?;
 
-        let lifetime = ChronoDuration::milliseconds(
-            self.config.reliability.retry.outbox_max_lifetime_ms as i64,
-        );
+        let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms;
 
         let mut restored: Vec<OutboxEntry> = Vec::new();
         for message_id in message_ids {
@@ -783,11 +782,14 @@ impl OfflineProtocol {
         // the carrier-relative refresh below would otherwise re-grant them a
         // fresh window on every restart, indefinitely. This is a terminal
         // drop — emit `message_failed` like the in-process expiry does.
-        let absolute_cap = lifetime * crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR;
+        let absolute_lifetime_ms =
+            lifetime_ms.saturating_mul(crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as u64);
         let now = Utc::now();
         let mut absolutely_expired: Vec<OutboxEntry> = Vec::new();
         restored.retain(|entry| {
-            if entry.last_sent_at + lifetime <= now && entry.first_sent_at + absolute_cap <= now {
+            if lifetime_expired(now, entry.last_sent_at, lifetime_ms)
+                && lifetime_expired(now, entry.first_sent_at, absolute_lifetime_ms)
+            {
                 absolutely_expired.push(entry.clone());
                 return false;
             }
@@ -826,7 +828,7 @@ impl OfflineProtocol {
         // be re-persisted below, once the mutable borrow of `restored` is gone.
         let mut refreshed: Vec<OutboxEntry> = Vec::new();
         for entry in &mut restored {
-            if entry.last_sent_at + lifetime <= now {
+            if lifetime_expired(now, entry.last_sent_at, lifetime_ms) {
                 entry.last_sent_at = now;
                 refreshed.push(entry.clone());
                 info!(
@@ -943,9 +945,7 @@ impl OfflineProtocol {
             .list_keys(storage_keys::MEDIA_DESCRIPTORS)
             .map_err(|e| Error::Other(format!("Failed to list media descriptors: {}", e)))?;
 
-        let lifetime = ChronoDuration::milliseconds(
-            self.config.reliability.retry.outbox_max_lifetime_ms as i64,
-        );
+        let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms;
         let now = Utc::now();
 
         let mut restored: Vec<MediaTransferDescriptor> = Vec::new();
@@ -968,7 +968,7 @@ impl OfflineProtocol {
                 }
             };
 
-            if descriptor.queued_at + lifetime <= now {
+            if lifetime_expired(now, descriptor.queued_at, lifetime_ms) {
                 debug!(file_id = %file_id, "Dropping expired media descriptor");
                 self.delete_media_descriptor_key(&file_id);
                 continue;
