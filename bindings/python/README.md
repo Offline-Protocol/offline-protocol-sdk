@@ -106,8 +106,16 @@ MLS cryptographic key material is stored using the `keyring` library:
 Restartable message-plane state is kept separately by `AppStateStorage`, outside
 the credential store. The built-in stores derive an opaque account namespace
 from both `app_id` and `user_id`, so multiple `ProtocolManager` instances do
-not share keys, outboxes, or retry state. The new layout does not migrate data
-from pre-split storage.
+not share keys, outboxes, or retry state.
+
+Upgrading an install that predates namespacing keeps its MLS identity: the first
+account to launch adopts the old, unscoped keyring service and inherits its
+identity, sessions, and TOFU pins on demand. The old service was shared by every
+account on the install, so only one can inherit it — a second account starts
+from a fresh identity and logs an error saying so. Inspect the outcome with
+`SecureStorage(...).legacy_adoption`, or opt out with
+`adopt_legacy_store=False`. Restartable delivery state is *not* inherited; it is
+re-driven from the outbox and pending queues instead.
 
 Python has no portable app container: `Application Support`, `LOCALAPPDATA`,
 and XDG data directories commonly survive package removal. The SDK therefore

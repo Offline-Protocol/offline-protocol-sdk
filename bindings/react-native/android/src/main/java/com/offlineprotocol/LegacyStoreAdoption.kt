@@ -1,0 +1,69 @@
+package com.offlineprotocol
+
+/**
+ * Whether an account may read through to the legacy, un-namespaced secure store
+ * that shipped before storage was scoped to `(app_id, user_id)`.
+ *
+ * Scoping the store renamed it. Left alone, the first launch after an upgrade
+ * would find an empty store, mint a *new* MLS signing identity, and abandon
+ * every session, group, and TOFU pin the install already had — peers still
+ * holding the old pin would then reject it. So the new store adopts the old one
+ * instead.
+ *
+ * Adoption is read-through rather than a bulk copy on purpose. The legacy
+ * store's key types are not a closed set (OpenMLS contributes its own labels
+ * and Python's keyring backend cannot enumerate at all), so there is no
+ * reliable way to walk it. A miss in the new store consults the legacy one and
+ * promotes what it finds, which is naturally idempotent and resumable.
+ *
+ * The legacy store was shared by every account on the install, so at most one
+ * account can inherit it. The first to launch writes a claim; a second account
+ * seeing a foreign claim gets a fresh identity — correct, because the legacy
+ * store never held a separable identity for it — but must say so out loud
+ * rather than rotate silently.
+ *
+ * Keep this policy in sync with `LegacyStoreAdoption.swift` and
+ * `legacy_store_adoption.py`.
+ */
+internal object LegacyStoreAdoption {
+    /**
+     * Key under which an adopting account records its claim in the *legacy*
+     * store. Namespaced away from any real key type so it can never collide
+     * with MLS material, and filtered out of read-through and listing.
+     */
+    const val CLAIM_KEY_TYPE = "__offline_protocol_migration__"
+    const val CLAIM_KEY_ID = "claimed_by"
+
+    sealed class Decision {
+        /** Legacy store is unclaimed: claim it and read through. */
+        object Adopt : Decision()
+
+        /** We already claimed it on an earlier launch: keep reading through. */
+        object Resume : Decision()
+
+        /**
+         * Another account owns the legacy identity. Read-through is off and
+         * this account starts fresh — surface it.
+         */
+        data class Conflict(val claimedBy: String) : Decision()
+
+        /** No legacy store to inherit from (fresh install, or opted out). */
+        object None : Decision()
+    }
+
+    fun decide(existingClaim: String?, namespace: String): Decision = when {
+        existingClaim.isNullOrEmpty() -> Decision.Adopt
+        existingClaim == namespace -> Decision.Resume
+        else -> Decision.Conflict(existingClaim)
+    }
+
+    /** True when read-through to the legacy store is permitted. */
+    fun allowsReadThrough(decision: Decision?): Boolean =
+        decision is Decision.Adopt || decision is Decision.Resume
+
+    /**
+     * True for the reserved claim entry, which must never be promoted into the
+     * new store or reported by `listKeys`.
+     */
+    fun isClaimEntry(keyType: String): Boolean = keyType == CLAIM_KEY_TYPE
+}

@@ -2729,7 +2729,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                 appId: config.appId,
                 userId: config.userId
             )
-            let secureStorage = MlsSecureStorage(
+            let secureStorage = try MlsSecureStorage(
                 accountNamespace: accountNamespace
             )
             let protocolStateStorage = try AppContainerProtocolStateStorage(
@@ -2739,6 +2739,16 @@ class OfflineProtocolModule: RCTEventEmitter {
                 secureStorage: secureStorage,
                 protocolStateStorage: protocolStateStorage
             )
+            // A legacy store claimed by a different account means this one is
+            // starting from a fresh MLS identity — never let that pass silently.
+            if case .conflict? = secureStorage.legacyAdoption {
+                emitDiagnostic(
+                    level: "error",
+                    message: "Legacy secure store belongs to another account; "
+                        + "this account starts from a fresh MLS identity and "
+                        + "cannot decrypt its previous sessions"
+                )
+            }
             emitDiagnostic(
                 level: "info",
                 message: "MLS initialized with split Keychain and app-container storage"

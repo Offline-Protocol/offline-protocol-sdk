@@ -127,8 +127,15 @@ await protocol.destroy();
 ```
 
 Built-in secure and restartable-state stores are isolated by both `appId` and
-`userId`. Changing either value selects a fresh storage namespace. Data from
-the earlier unscoped layout is not migrated and is left untouched.
+`userId`. Changing either value selects a fresh storage namespace.
+
+Upgrading an install that predates namespacing keeps its MLS identity: the
+first account to launch adopts the old, unscoped secure store and inherits its
+identity, sessions, and TOFU pins on demand. The old store was shared by every
+account on the install, so only one can inherit it — a second account starts
+from a fresh identity and reports it as an `error` diagnostic
+(`Legacy secure store belongs to another account…`). Restartable delivery state
+is *not* inherited; it is re-driven from the outbox and pending queues instead.
 
 ### End-to-End Encryption
 

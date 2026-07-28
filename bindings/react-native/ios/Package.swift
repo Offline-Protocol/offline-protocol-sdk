@@ -8,6 +8,12 @@
 // exactly the Foundation-only helpers those suites cover — nothing that
 // imports React, CoreBluetooth, or the Generated UniFFI module.
 //
+// The storage providers are included for compile coverage: under SWIFT_PACKAGE
+// they bind to the local protocol shims in ProtocolStateStorage.swift instead
+// of the Generated ones. Only the file-backed state store is exercised at
+// runtime — the Keychain-backed one would touch the developer's login keychain,
+// so its policy lives in LegacyStoreAdoption, which is tested directly.
+//
 // The library target is named OfflineProtocol so the suites' existing
 // `@testable import OfflineProtocol` keeps matching the pod module name.
 //
@@ -38,7 +44,6 @@ let package = Package(
                 "Generated",
                 "InternetManager.swift",
                 "MeshSdk.podspec",
-                "MlsSecureStorage.swift",
                 "NostrManager.swift",
                 "OfflineProtocolModule.m",
                 "OfflineProtocolModule.swift",
@@ -56,6 +61,8 @@ let package = Package(
                 "ForcedPresenceCheckQueue.swift",
                 "ForegroundReconnectPolicy.swift",
                 "LegacyRelayMessage.swift",
+                "LegacyStoreAdoption.swift",
+                "MlsSecureStorage.swift",
                 "MonotonicClock.swift",
                 "PresenceWatchPolicy.swift",
                 "ProtocolStateStorage.swift",
@@ -87,6 +94,7 @@ let package = Package(
                 "ForcedPresenceCheckQueueTests.swift",
                 "ForegroundReconnectPolicyTests.swift",
                 "LegacyRelayMessageTests.swift",
+                "LegacyStoreAdoptionTests.swift",
                 "PresenceWatchPolicyTests.swift",
                 "ProtocolStateStorageTests.swift",
                 "RecipientInFlightTrackerTests.swift",

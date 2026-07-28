@@ -2800,6 +2800,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     accountNamespace
                 )
             proto.initializeMls(secureStorage, protocolStateStorage)
+            // A legacy store claimed by a different account means this one is
+            // starting from a fresh MLS identity — never let that pass silently.
+            val adoption = secureStorage.legacyAdoption
+            if (adoption is LegacyStoreAdoption.Decision.Conflict) {
+                emitDiagnostic(
+                    "error",
+                    "Legacy secure store belongs to another account; this " +
+                        "account starts from a fresh MLS identity and cannot " +
+                        "decrypt its previous sessions"
+                )
+            }
             emitDiagnostic(
                 "info",
                 "MLS initialized with split secure and app-container storage"

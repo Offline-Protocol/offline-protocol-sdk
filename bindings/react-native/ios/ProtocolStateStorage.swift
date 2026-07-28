@@ -25,6 +25,15 @@ protocol ProtocolStateStorageProvider {
     func delete(keyType: String, keyId: String) throws
     func listKeys(keyType: String) throws -> [String]
 }
+
+// Same shape, distinct domain — mirrors the generated UniFFI protocol so
+// `MlsSecureStorage` compiles under the test harness too.
+protocol MlsStorageProvider {
+    func store(keyType: String, keyId: String, data: [UInt8]) throws
+    func load(keyType: String, keyId: String) throws -> [UInt8]?
+    func delete(keyType: String, keyId: String) throws
+    func listKeys(keyType: String) throws -> [String]
+}
 #endif
 
 /// File-backed protocol state whose lifecycle is tied to the app container.
