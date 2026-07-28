@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from offline_protocol_sdk.state_storage import AppStateStorage
 
 
@@ -37,3 +39,26 @@ def test_state_storage_namespaces_accounts(tmp_path) -> None:
 
     assert alice.load("outbox", "message-1") == [1, 2, 3]
     assert bob.load("outbox", "message-1") is None
+
+
+def test_state_storage_requires_an_install_owned_root(monkeypatch) -> None:
+    monkeypatch.delenv("OFFLINE_PROTOCOL_STATE_ROOT", raising=False)
+
+    with pytest.raises(ValueError, match="no safe process-wide default"):
+        AppStateStorage()
+
+
+def test_state_storage_uses_configured_install_root(monkeypatch, tmp_path) -> None:
+    install_root = tmp_path / "install-a" / "protocol-state"
+    monkeypatch.setenv("OFFLINE_PROTOCOL_STATE_ROOT", str(install_root))
+
+    before_reinstall = AppStateStorage(namespace="account-alice")
+    before_reinstall.store("outbox", "message-1", [1, 2, 3])
+
+    monkeypatch.setenv(
+        "OFFLINE_PROTOCOL_STATE_ROOT",
+        str(tmp_path / "install-b" / "protocol-state"),
+    )
+    after_reinstall = AppStateStorage(namespace="account-alice")
+
+    assert after_reinstall.load("outbox", "message-1") is None

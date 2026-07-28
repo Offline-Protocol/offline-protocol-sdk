@@ -25,6 +25,8 @@ pip install -e .
 
 ```python
 import asyncio
+from pathlib import Path
+
 from offline_protocol_sdk import ProtocolManager
 from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
 
@@ -49,7 +51,13 @@ config = ProtocolConfig(
 )
 
 async def main():
-    async with ProtocolManager(config, event_handler=print) as pm:
+    # The installer must remove this application-owned directory on uninstall.
+    state_root = Path("/app/install-owned-data/offline-protocol")
+    async with ProtocolManager(
+        config,
+        event_handler=print,
+        state_root=state_root,
+    ) as pm:
         pm.internet.configure(server_url="ws://relay.example.com")
         await pm.internet.start()
 
@@ -100,6 +108,22 @@ the credential store. The built-in stores derive an opaque account namespace
 from both `app_id` and `user_id`, so multiple `ProtocolManager` instances do
 not share keys, outboxes, or retry state. The new layout does not migrate data
 from pre-split storage.
+
+Python has no portable app container: `Application Support`, `LOCALAPPDATA`,
+and XDG data directories commonly survive package removal. The SDK therefore
+does not guess a persistent default. Pass `state_root=` or set
+`OFFLINE_PROTOCOL_STATE_ROOT` to a directory owned by the installed
+application, and make the installer remove that directory on uninstall:
+
+```python
+pm = ProtocolManager(
+    config,
+    state_root="/app/install-owned-data/offline-protocol",
+)
+```
+
+Passing a custom `state_storage` bypasses `state_root`; the custom provider
+then owns both account isolation and uninstall cleanup.
 
 Custom integrations must provide both lifecycle-separated, account-isolated
 interfaces:

@@ -85,7 +85,11 @@ config = ProtocolConfig(
     pending_ttl_ms=120_000,
     overflow_policy=OverflowPolicy.DROP_OLDEST,
 )
-protocol = ProtocolManager(config)
+protocol = ProtocolManager(
+    config,
+    # Must be removed by the application uninstaller.
+    state_root="/app/install-owned-data/offline-protocol",
+)
 ```
 
 See the [Python binding guide](bindings/python/README.md) for transport setup,

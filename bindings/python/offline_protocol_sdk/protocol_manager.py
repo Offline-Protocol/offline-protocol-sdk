@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Callable
 
 from .offline_protocol import (
@@ -110,7 +111,7 @@ class ProtocolManager:
 
     Typical usage::
 
-        async with ProtocolManager(config) as pm:
+        async with ProtocolManager(config, state_root="/app/install/state") as pm:
             pm.on_event(lambda e: print(e))
             pm.internet.configure(server_url="ws://relay.example.com")
             await pm.internet.start()
@@ -118,7 +119,7 @@ class ProtocolManager:
 
     Or without ``async with``::
 
-        pm = ProtocolManager(config)
+        pm = ProtocolManager(config, state_root="/app/install/state")
         await pm.start()
         ...
         await pm.stop()
@@ -134,8 +135,12 @@ class ProtocolManager:
         :class:`SecureStorage` backed by the platform keyring.
     state_storage:
         Optional ``ProtocolStateStorageProvider`` for restartable delivery
-        state. Defaults to :class:`AppStateStorage` outside the credential
-        store.
+        state. When omitted, ``state_root`` or ``OFFLINE_PROTOCOL_STATE_ROOT``
+        must select an application-owned directory that the installer removes
+        with the application.
+    state_root:
+        Root directory for the built-in :class:`AppStateStorage`. Ignored when
+        ``state_storage`` is supplied.
     """
 
     def __init__(
@@ -144,6 +149,8 @@ class ProtocolManager:
         event_handler: Callable[[dict[str, Any]], None] | None = None,
         storage: Any | None = None,
         state_storage: Any | None = None,
+        *,
+        state_root: str | Path | None = None,
     ) -> None:
         self._config = config
         self._event_handler = event_handler
@@ -159,7 +166,7 @@ class ProtocolManager:
         self._state_storage = (
             state_storage
             if state_storage is not None
-            else AppStateStorage(namespace=storage_namespace)
+            else AppStateStorage(root=state_root, namespace=storage_namespace)
         )
 
         # Create the core protocol instance

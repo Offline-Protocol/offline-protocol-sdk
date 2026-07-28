@@ -4,22 +4,24 @@ from __future__ import annotations
 
 import base64
 import os
-import sys
 import tempfile
 import threading
 from pathlib import Path
 
 from .offline_protocol import MlsStorageError, ProtocolStateStorageProvider
 
+_STATE_ROOT_ENV = "OFFLINE_PROTOCOL_STATE_ROOT"
+
 
 def _default_root() -> Path:
-    if sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support"
-    elif os.name == "nt":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    else:
-        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    return base / "offline-protocol" / "protocol-state-v1"
+    configured = os.environ.get(_STATE_ROOT_ENV)
+    if configured:
+        return Path(configured)
+    raise ValueError(
+        "protocol state has no safe process-wide default; pass root=... or set "
+        f"{_STATE_ROOT_ENV} to an application-owned directory that is removed "
+        "when the application is uninstalled"
+    )
 
 
 def _encode_component(value: str) -> str:

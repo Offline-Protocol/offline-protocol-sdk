@@ -61,7 +61,7 @@ class TestProtocolManagerLifecycle:
             "account-814873e0cbdb2a1f25f14b31625e7f904cf9923e55b415b91ca4b29b210c12a1"
         )
         secure_storage.assert_called_once_with(namespace=expected)
-        state_storage.assert_called_once_with(namespace=expected)
+        state_storage.assert_called_once_with(root=None, namespace=expected)
 
     @pytest.mark.asyncio
     async def test_start_stop(self):

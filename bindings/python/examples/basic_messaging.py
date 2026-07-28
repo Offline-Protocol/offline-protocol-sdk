@@ -21,6 +21,7 @@ import json
 import logging
 import signal
 import sys
+from pathlib import Path
 from typing import Any
 
 from offline_protocol_sdk import (
@@ -61,7 +62,7 @@ def on_event(event: dict[str, Any]) -> None:
         logger.debug("Event: %s", json.dumps(event, indent=2))
 
 
-async def main(user_id: str, server_url: str) -> None:
+async def main(user_id: str, server_url: str, state_root: Path) -> None:
     config = ProtocolConfig(
         app_id="offline-example",
         user_id=user_id,
@@ -82,7 +83,11 @@ async def main(user_id: str, server_url: str) -> None:
         overflow_policy=OverflowPolicy.DROP_OLDEST,
     )
 
-    async with ProtocolManager(config, event_handler=on_event) as pm:
+    async with ProtocolManager(
+        config,
+        event_handler=on_event,
+        state_root=state_root,
+    ) as pm:
         # Configure and start Internet transport
         assert pm.internet is not None
         pm.internet.configure(server_url=server_url)
@@ -132,9 +137,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Offline Protocol SDK example")
     parser.add_argument("--user", required=True, help="Your user ID")
     parser.add_argument("--server", required=True, help="Relay WebSocket URL")
+    parser.add_argument(
+        "--state-root",
+        required=True,
+        type=Path,
+        help="Install-owned state directory removed by the app uninstaller",
+    )
     args = parser.parse_args()
 
     try:
-        asyncio.run(main(args.user, args.server))
+        asyncio.run(main(args.user, args.server, args.state_root))
     except KeyboardInterrupt:
         pass
