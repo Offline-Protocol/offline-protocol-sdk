@@ -298,7 +298,12 @@ fn test_secure_and_protocol_state_storage_are_routed_separately() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     protocol
-        .initialize_mls(secure.clone(), state.clone())
+        .initialize_mls(
+            secure.clone(),
+            Arc::new(TestProtocolStateStorage {
+                storage: state.clone(),
+            }),
+        )
         .unwrap();
     protocol.start().unwrap();
     protocol
@@ -344,7 +349,12 @@ fn test_fresh_protocol_state_does_not_restore_pre_reinstall_pending_messages() {
     {
         let mut before_reinstall = OfflineProtocol::new(config.clone()).unwrap();
         before_reinstall
-            .initialize_mls(secure.clone(), old_state.clone())
+            .initialize_mls(
+                secure.clone(),
+                Arc::new(TestProtocolStateStorage {
+                    storage: old_state.clone(),
+                }),
+            )
             .unwrap();
         before_reinstall.start().unwrap();
         before_reinstall
@@ -366,7 +376,12 @@ fn test_fresh_protocol_state_does_not_restore_pre_reinstall_pending_messages() {
     let fresh_state = Arc::new(crate::mls::InMemoryStorage::new());
     let mut after_reinstall = OfflineProtocol::new(config).unwrap();
     after_reinstall
-        .initialize_mls(secure, fresh_state.clone())
+        .initialize_mls(
+            secure,
+            Arc::new(TestProtocolStateStorage {
+                storage: fresh_state.clone(),
+            }),
+        )
         .unwrap();
 
     assert!(after_reinstall.pending_encrypted_messages.is_empty());
@@ -408,7 +423,14 @@ fn test_pending_session_messages_expire_and_are_deleted_from_state_storage() {
     let event_sink = events.clone();
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.on_event(move |event| event_sink.lock().unwrap().push(event));
-    protocol.initialize_mls(secure, state.clone()).unwrap();
+    protocol
+        .initialize_mls(
+            secure,
+            Arc::new(TestProtocolStateStorage {
+                storage: state.clone(),
+            }),
+        )
+        .unwrap();
     protocol.start().unwrap();
 
     let message_id = protocol

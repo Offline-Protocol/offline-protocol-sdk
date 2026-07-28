@@ -398,7 +398,7 @@ struct TestProtocolStateStorage {
 }
 
 #[cfg(test)]
-impl MlsStorage for TestProtocolStateStorage {
+impl ProtocolStateStorage for TestProtocolStateStorage {
     fn store(
         &self,
         key_type: &str,
@@ -431,9 +431,6 @@ impl MlsStorage for TestProtocolStateStorage {
         self.storage.list_keys(key_type)
     }
 }
-
-#[cfg(test)]
-impl ProtocolStateStorage for TestProtocolStateStorage {}
 
 impl OfflineProtocol {
     /// Creates a new protocol instance.

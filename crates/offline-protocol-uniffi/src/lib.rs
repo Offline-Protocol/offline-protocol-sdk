@@ -272,211 +272,100 @@ struct MlsStorageWrapper {
     provider: Arc<dyn MlsStorageProvider>,
 }
 
-impl CoreMlsStorage for MlsStorageWrapper {
-    fn store(
-        &self,
-        key_type: &str,
-        key_id: &str,
-        data: &[u8],
-    ) -> offline_protocol_mls::storage::StorageResult<()> {
-        self.provider
-            .store(key_type.to_string(), key_id.to_string(), data.to_vec())
-            .map_err(|e| match e {
-                MlsStorageError::StoreFailed => {
-                    CoreStorageError::StoreFailed("Storage failed".to_string())
-                }
-                MlsStorageError::LoadFailed => {
-                    CoreStorageError::StoreFailed("Load failed".to_string())
-                }
-                MlsStorageError::DeleteFailed => {
-                    CoreStorageError::StoreFailed("Delete failed".to_string())
-                }
-                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
-                MlsStorageError::CorruptedData => {
-                    CoreStorageError::CorruptedData("Data corrupted".to_string())
-                }
-            })
-    }
-
-    fn load(
-        &self,
-        key_type: &str,
-        key_id: &str,
-    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
-        self.provider
-            .load(key_type.to_string(), key_id.to_string())
-            .map_err(|e| match e {
-                MlsStorageError::StoreFailed => {
-                    CoreStorageError::StoreFailed("Store failed".to_string())
-                }
-                MlsStorageError::LoadFailed => {
-                    CoreStorageError::LoadFailed("Load failed".to_string())
-                }
-                MlsStorageError::DeleteFailed => {
-                    CoreStorageError::DeleteFailed("Delete failed".to_string())
-                }
-                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
-                MlsStorageError::CorruptedData => {
-                    CoreStorageError::CorruptedData("Data corrupted".to_string())
-                }
-            })
-    }
-
-    fn delete(
-        &self,
-        key_type: &str,
-        key_id: &str,
-    ) -> offline_protocol_mls::storage::StorageResult<()> {
-        self.provider
-            .delete(key_type.to_string(), key_id.to_string())
-            .map_err(|e| match e {
-                MlsStorageError::StoreFailed => {
-                    CoreStorageError::DeleteFailed("Storage failed".to_string())
-                }
-                MlsStorageError::LoadFailed => {
-                    CoreStorageError::DeleteFailed("Load failed".to_string())
-                }
-                MlsStorageError::DeleteFailed => {
-                    CoreStorageError::DeleteFailed("Delete failed".to_string())
-                }
-                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
-                MlsStorageError::CorruptedData => {
-                    CoreStorageError::CorruptedData("Data corrupted".to_string())
-                }
-            })
-    }
-
-    fn list_keys(
-        &self,
-        key_type: &str,
-    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
-        self.provider
-            .list_keys(key_type.to_string())
-            .map_err(|e| match e {
-                MlsStorageError::StoreFailed => {
-                    CoreStorageError::StoreFailed("Store failed".to_string())
-                }
-                MlsStorageError::LoadFailed => {
-                    CoreStorageError::LoadFailed("Load failed".to_string())
-                }
-                MlsStorageError::DeleteFailed => {
-                    CoreStorageError::DeleteFailed("Delete failed".to_string())
-                }
-                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound("".to_string()),
-                MlsStorageError::CorruptedData => {
-                    CoreStorageError::CorruptedData("Data corrupted".to_string())
-                }
-            })
-    }
-}
-
 /// Wrapper to adapt the install-scoped UniFFI callback to core protocol-state
-/// storage. It also implements the low-level storage operations inherited by
-/// the marker trait, while remaining a different concrete type from the
-/// secure-storage wrapper.
+/// storage while remaining a different concrete type from secure storage.
 struct ProtocolStateStorageWrapper {
     provider: Arc<dyn ProtocolStateStorageProvider>,
 }
 
-impl CoreMlsStorage for ProtocolStateStorageWrapper {
-    fn store(
-        &self,
-        key_type: &str,
-        key_id: &str,
-        data: &[u8],
-    ) -> offline_protocol_mls::storage::StorageResult<()> {
-        self.provider
-            .store(key_type.to_string(), key_id.to_string(), data.to_vec())
-            .map_err(|e| match e {
-                MlsStorageError::StoreFailed => {
-                    CoreStorageError::StoreFailed("Storage failed".to_string())
-                }
-                MlsStorageError::LoadFailed => {
-                    CoreStorageError::StoreFailed("Load failed".to_string())
-                }
-                MlsStorageError::DeleteFailed => {
-                    CoreStorageError::StoreFailed("Delete failed".to_string())
-                }
-                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
-                MlsStorageError::CorruptedData => {
-                    CoreStorageError::CorruptedData("Data corrupted".to_string())
-                }
-            })
-    }
+#[derive(Clone, Copy)]
+enum StorageOperation {
+    Store,
+    Load,
+    Delete,
+}
 
-    fn load(
-        &self,
-        key_type: &str,
-        key_id: &str,
-    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
-        self.provider
-            .load(key_type.to_string(), key_id.to_string())
-            .map_err(|e| match e {
-                MlsStorageError::StoreFailed => {
-                    CoreStorageError::StoreFailed("Store failed".to_string())
-                }
-                MlsStorageError::LoadFailed => {
-                    CoreStorageError::LoadFailed("Load failed".to_string())
-                }
-                MlsStorageError::DeleteFailed => {
-                    CoreStorageError::DeleteFailed("Delete failed".to_string())
-                }
-                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
-                MlsStorageError::CorruptedData => {
-                    CoreStorageError::CorruptedData("Data corrupted".to_string())
-                }
-            })
-    }
-
-    fn delete(
-        &self,
-        key_type: &str,
-        key_id: &str,
-    ) -> offline_protocol_mls::storage::StorageResult<()> {
-        self.provider
-            .delete(key_type.to_string(), key_id.to_string())
-            .map_err(|e| match e {
-                MlsStorageError::StoreFailed => {
-                    CoreStorageError::DeleteFailed("Storage failed".to_string())
-                }
-                MlsStorageError::LoadFailed => {
-                    CoreStorageError::DeleteFailed("Load failed".to_string())
-                }
-                MlsStorageError::DeleteFailed => {
-                    CoreStorageError::DeleteFailed("Delete failed".to_string())
-                }
-                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
-                MlsStorageError::CorruptedData => {
-                    CoreStorageError::CorruptedData("Data corrupted".to_string())
-                }
-            })
-    }
-
-    fn list_keys(
-        &self,
-        key_type: &str,
-    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
-        self.provider
-            .list_keys(key_type.to_string())
-            .map_err(|e| match e {
-                MlsStorageError::StoreFailed => {
-                    CoreStorageError::StoreFailed("Store failed".to_string())
-                }
-                MlsStorageError::LoadFailed => {
-                    CoreStorageError::LoadFailed("Load failed".to_string())
-                }
-                MlsStorageError::DeleteFailed => {
-                    CoreStorageError::DeleteFailed("Delete failed".to_string())
-                }
-                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound("".to_string()),
-                MlsStorageError::CorruptedData => {
-                    CoreStorageError::CorruptedData("Data corrupted".to_string())
-                }
-            })
+fn map_storage_provider_error(
+    error: MlsStorageError,
+    operation: StorageOperation,
+    key_id: &str,
+) -> CoreStorageError {
+    match error {
+        MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
+        MlsStorageError::CorruptedData => {
+            CoreStorageError::CorruptedData("Data corrupted".to_string())
+        }
+        other => {
+            let detail = match other {
+                MlsStorageError::StoreFailed => "Store failed",
+                MlsStorageError::LoadFailed => "Load failed",
+                MlsStorageError::DeleteFailed => "Delete failed",
+                MlsStorageError::KeyNotFound | MlsStorageError::CorruptedData => unreachable!(),
+            }
+            .to_string();
+            match operation {
+                StorageOperation::Store => CoreStorageError::StoreFailed(detail),
+                StorageOperation::Load => CoreStorageError::LoadFailed(detail),
+                StorageOperation::Delete => CoreStorageError::DeleteFailed(detail),
+            }
+        }
     }
 }
 
-impl CoreProtocolStateStorage for ProtocolStateStorageWrapper {}
+macro_rules! impl_storage_wrapper {
+    ($wrapper:ty, $storage_trait:path) => {
+        impl $storage_trait for $wrapper {
+            fn store(
+                &self,
+                key_type: &str,
+                key_id: &str,
+                data: &[u8],
+            ) -> offline_protocol_mls::storage::StorageResult<()> {
+                self.provider
+                    .store(key_type.to_string(), key_id.to_string(), data.to_vec())
+                    .map_err(|error| {
+                        map_storage_provider_error(error, StorageOperation::Store, key_id)
+                    })
+            }
+
+            fn load(
+                &self,
+                key_type: &str,
+                key_id: &str,
+            ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+                self.provider
+                    .load(key_type.to_string(), key_id.to_string())
+                    .map_err(|error| {
+                        map_storage_provider_error(error, StorageOperation::Load, key_id)
+                    })
+            }
+
+            fn delete(
+                &self,
+                key_type: &str,
+                key_id: &str,
+            ) -> offline_protocol_mls::storage::StorageResult<()> {
+                self.provider
+                    .delete(key_type.to_string(), key_id.to_string())
+                    .map_err(|error| {
+                        map_storage_provider_error(error, StorageOperation::Delete, key_id)
+                    })
+            }
+
+            fn list_keys(
+                &self,
+                key_type: &str,
+            ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+                self.provider
+                    .list_keys(key_type.to_string())
+                    .map_err(|error| map_storage_provider_error(error, StorageOperation::Load, ""))
+            }
+        }
+    };
+}
+
+impl_storage_wrapper!(MlsStorageWrapper, CoreMlsStorage);
+impl_storage_wrapper!(ProtocolStateStorageWrapper, CoreProtocolStateStorage);
 
 impl From<offline_protocol::Error> for ProtocolError {
     // Exhaustive on purpose (no `_` arm): a new engine error variant must
