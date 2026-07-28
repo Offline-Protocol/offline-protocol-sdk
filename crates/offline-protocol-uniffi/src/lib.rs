@@ -14,6 +14,7 @@ use offline_protocol::{
     NoopTelemetrySink as CoreNoopTelemetrySink, OfflineProtocol as CoreProtocol,
     OverflowPolicy as CoreOverflowPolicy, PendingQueueConfig as CorePendingQueueConfig,
     PresenceStatus as CorePresenceStatus, ProtocolConfig as CoreConfig,
+    ProtocolStateError as CoreProtocolStateError, ProtocolStateResult as CoreProtocolStateResult,
     ProtocolStateStorage as CoreProtocolStateStorage, RoutingDecision as CoreRoutingDecision,
     RoutingPhase as CoreRoutingPhase, RoutingReasonCode as CoreRoutingReasonCode,
     SendMessageOptions as CoreSendMessageOptions, TelemetryConfig as CoreTelemetryConfig,
@@ -365,7 +366,72 @@ macro_rules! impl_storage_wrapper {
 }
 
 impl_storage_wrapper!(MlsStorageWrapper, CoreMlsStorage);
-impl_storage_wrapper!(ProtocolStateStorageWrapper, CoreProtocolStateStorage);
+
+/// Maps a provider failure onto the protocol-state contract.
+///
+/// The UDL keeps declaring `MlsStorageError` on the provider callback — that is
+/// the app-facing surface, and churning it would mean regenerating every
+/// binding for no behavioral gain — but the *Rust* abstraction no longer speaks
+/// the MLS crate's error type, so the two storage domains are decoupled where
+/// it matters.
+fn map_protocol_state_provider_error(
+    error: MlsStorageError,
+    operation: StorageOperation,
+    key_id: &str,
+) -> CoreProtocolStateError {
+    match error {
+        MlsStorageError::KeyNotFound => CoreProtocolStateError::NotFound(key_id.to_string()),
+        MlsStorageError::CorruptedData => {
+            CoreProtocolStateError::Corrupted("Data corrupted".to_string())
+        }
+        other => {
+            let detail = match other {
+                MlsStorageError::StoreFailed => "Store failed",
+                MlsStorageError::LoadFailed => "Load failed",
+                MlsStorageError::DeleteFailed => "Delete failed",
+                MlsStorageError::KeyNotFound | MlsStorageError::CorruptedData => unreachable!(),
+            }
+            .to_string();
+            match operation {
+                StorageOperation::Store => CoreProtocolStateError::StoreFailed(detail),
+                StorageOperation::Load => CoreProtocolStateError::LoadFailed(detail),
+                StorageOperation::Delete => CoreProtocolStateError::DeleteFailed(detail),
+            }
+        }
+    }
+}
+
+impl CoreProtocolStateStorage for ProtocolStateStorageWrapper {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> CoreProtocolStateResult<()> {
+        self.provider
+            .store(key_type.to_string(), key_id.to_string(), data.to_vec())
+            .map_err(|error| {
+                map_protocol_state_provider_error(error, StorageOperation::Store, key_id)
+            })
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> CoreProtocolStateResult<Option<Vec<u8>>> {
+        self.provider
+            .load(key_type.to_string(), key_id.to_string())
+            .map_err(|error| {
+                map_protocol_state_provider_error(error, StorageOperation::Load, key_id)
+            })
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> CoreProtocolStateResult<()> {
+        self.provider
+            .delete(key_type.to_string(), key_id.to_string())
+            .map_err(|error| {
+                map_protocol_state_provider_error(error, StorageOperation::Delete, key_id)
+            })
+    }
+
+    fn list_keys(&self, key_type: &str) -> CoreProtocolStateResult<Vec<String>> {
+        self.provider
+            .list_keys(key_type.to_string())
+            .map_err(|error| map_protocol_state_provider_error(error, StorageOperation::Load, ""))
+    }
+}
 
 impl From<offline_protocol::Error> for ProtocolError {
     // Exhaustive on purpose (no `_` arm): a new engine error variant must

@@ -405,38 +405,48 @@ struct TestProtocolStateStorage {
     storage: Arc<dyn MlsStorage>,
 }
 
+/// Maps the fixture's MLS-storage failures onto the protocol-state contract,
+/// mirroring what the UniFFI adapter does for real providers.
+#[cfg(test)]
+pub(crate) fn map_test_storage_error(
+    error: offline_protocol_mls::StorageError,
+) -> crate::ProtocolStateError {
+    use crate::ProtocolStateError as P;
+    use offline_protocol_mls::StorageError as S;
+    match error {
+        S::KeyNotFound(detail) => P::NotFound(detail),
+        S::CorruptedData(detail) => P::Corrupted(detail),
+        S::StoreFailed(detail) => P::StoreFailed(detail),
+        S::LoadFailed(detail) => P::LoadFailed(detail),
+        S::DeleteFailed(detail) => P::DeleteFailed(detail),
+        S::Unavailable(detail) => P::LoadFailed(detail),
+    }
+}
+
 #[cfg(test)]
 impl ProtocolStateStorage for TestProtocolStateStorage {
-    fn store(
-        &self,
-        key_type: &str,
-        key_id: &str,
-        data: &[u8],
-    ) -> offline_protocol_mls::storage::StorageResult<()> {
-        self.storage.store(key_type, key_id, data)
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        self.storage
+            .store(key_type, key_id, data)
+            .map_err(map_test_storage_error)
     }
 
-    fn load(
-        &self,
-        key_type: &str,
-        key_id: &str,
-    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
-        self.storage.load(key_type, key_id)
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        self.storage
+            .load(key_type, key_id)
+            .map_err(map_test_storage_error)
     }
 
-    fn delete(
-        &self,
-        key_type: &str,
-        key_id: &str,
-    ) -> offline_protocol_mls::storage::StorageResult<()> {
-        self.storage.delete(key_type, key_id)
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        self.storage
+            .delete(key_type, key_id)
+            .map_err(map_test_storage_error)
     }
 
-    fn list_keys(
-        &self,
-        key_type: &str,
-    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
-        self.storage.list_keys(key_type)
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        self.storage
+            .list_keys(key_type)
+            .map_err(map_test_storage_error)
     }
 }
 
