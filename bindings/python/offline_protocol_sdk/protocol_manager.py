@@ -29,6 +29,7 @@ from .ble_peripheral import BlePeripheral
 from .internet_manager import InternetManager
 from .secure_storage import SecureStorage
 from .state_storage import AppStateStorage
+from .storage_namespace import account_storage_namespace
 
 logger = logging.getLogger(__name__)
 
@@ -146,16 +147,25 @@ class ProtocolManager:
     ) -> None:
         self._config = config
         self._event_handler = event_handler
-        self._storage = storage or SecureStorage()
-        self._state_storage = state_storage or AppStateStorage()
+
+        device_id = config.user_id  # type: ignore[union-attr]
+        app_id = getattr(config, "app_id", "offline-messenger")
+        storage_namespace = account_storage_namespace(app_id, device_id)
+        self._storage = (
+            storage
+            if storage is not None
+            else SecureStorage(namespace=storage_namespace)
+        )
+        self._state_storage = (
+            state_storage
+            if state_storage is not None
+            else AppStateStorage(namespace=storage_namespace)
+        )
 
         # Create the core protocol instance
         self._protocol = OfflineProtocol(config)
 
         # Transport managers
-        device_id = config.user_id  # type: ignore[union-attr]
-        app_id = getattr(config, "app_id", "offline-messenger")
-
         self.ble: BleManager | None = None
         if getattr(config, "ble_enabled", False):
             self.ble = BleManager(self._protocol, device_id)

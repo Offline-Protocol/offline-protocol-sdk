@@ -70,3 +70,14 @@ class TestSecureStorage:
 
         result = store.list_keys("identity")
         assert result == ["key-1", "key-2"]
+
+    @patch("offline_protocol_sdk.secure_storage.keyring")
+    def test_namespace_is_part_of_keyring_service(self, mock_kr: MagicMock) -> None:
+        store = SecureStorage(service="test-svc", namespace="account-alice")
+        mock_kr.get_password.return_value = None
+
+        store.store("identity", "key-1", [1])
+
+        assert mock_kr.set_password.call_args_list[0].args[0] == (
+            "test-svc:account-alice"
+        )

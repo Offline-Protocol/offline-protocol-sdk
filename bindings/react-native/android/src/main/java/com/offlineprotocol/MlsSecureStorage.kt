@@ -15,7 +15,10 @@ import uniffi.offline_protocol.MlsStorageProvider
  * - Provides atomic operations for thread safety
  * - Maintains an index for efficient key listing
  */
-class MlsSecureStorage(context: Context) : MlsStorageProvider {
+class MlsSecureStorage(
+    context: Context,
+    accountNamespace: String
+) : MlsStorageProvider {
     
     private val masterKey = MasterKey.Builder(context)
         .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -23,22 +26,17 @@ class MlsSecureStorage(context: Context) : MlsStorageProvider {
     
     private val sharedPreferences = EncryptedSharedPreferences.create(
         context,
-        PREFS_FILE_NAME,
+        "$PREFS_FILE_PREFIX${StorageNamespace.requireAccount(accountNamespace)}",
         masterKey,
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
     
     companion object {
-        private const val PREFS_FILE_NAME = "mls_secure_storage_v2"
-        private const val LEGACY_PREFS_FILE_NAME = "mls_secure_storage"
+        private const val PREFS_FILE_PREFIX = "mls_secure_storage_v2_"
         private const val INDEX_PREFIX = "index:"
         // Global lock to ensure index consistency across instances/threads
         private val LOCK = Any()
-
-        fun purgeLegacyStorage(context: Context) {
-            context.deleteSharedPreferences(LEGACY_PREFS_FILE_NAME)
-        }
     }
     
     /**

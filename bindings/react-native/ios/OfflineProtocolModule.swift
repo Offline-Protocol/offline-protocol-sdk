@@ -2720,10 +2720,21 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_MLS", "Protocol not initialized", nil)
             return
         }
+        guard let config = currentConfig else {
+            rejecter("ERROR_MLS", "Protocol config not initialized", nil)
+            return
+        }
         do {
-            try MlsSecureStorage.purgeLegacyService()
-            let secureStorage = MlsSecureStorage()
-            let protocolStateStorage = try AppContainerProtocolStateStorage()
+            let accountNamespace = StorageNamespace.account(
+                appId: config.appId,
+                userId: config.userId
+            )
+            let secureStorage = MlsSecureStorage(
+                accountNamespace: accountNamespace
+            )
+            let protocolStateStorage = try AppContainerProtocolStateStorage(
+                accountNamespace: accountNamespace
+            )
             try proto.initializeMls(
                 secureStorage: secureStorage,
                 protocolStateStorage: protocolStateStorage

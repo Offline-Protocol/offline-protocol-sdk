@@ -2789,10 +2789,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     fun initializeMlsWithSecureStorage(promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            MlsSecureStorage.purgeLegacyStorage(reactApplicationContext)
-            val secureStorage = MlsSecureStorage(reactApplicationContext)
+            val config = currentConfig
+                ?: throw IllegalStateException("Protocol config not initialized")
+            val accountNamespace = StorageNamespace.account(config.appId, config.userId)
+            val secureStorage =
+                MlsSecureStorage(reactApplicationContext, accountNamespace)
             val protocolStateStorage =
-                AppContainerProtocolStateStorage(reactApplicationContext)
+                AppContainerProtocolStateStorage(
+                    reactApplicationContext,
+                    accountNamespace
+                )
             proto.initializeMls(secureStorage, protocolStateStorage)
             emitDiagnostic(
                 "info",

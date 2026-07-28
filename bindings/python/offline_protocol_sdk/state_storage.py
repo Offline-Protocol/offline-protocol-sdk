@@ -41,8 +41,18 @@ def _decode_component(value: str) -> str | None:
 class AppStateStorage(ProtocolStateStorageProvider):
     """Atomic application-data storage kept outside the OS credential store."""
 
-    def __init__(self, root: str | Path | None = None) -> None:
-        self._root = Path(root) if root is not None else _default_root()
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        base_root = Path(root) if root is not None else _default_root()
+        self._root = (
+            base_root / _encode_component(namespace)
+            if namespace is not None
+            else base_root
+        )
         self._lock = threading.RLock()
         try:
             self._root.mkdir(parents=True, exist_ok=True)

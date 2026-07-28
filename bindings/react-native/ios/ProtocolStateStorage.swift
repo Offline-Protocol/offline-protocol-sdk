@@ -18,7 +18,10 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     private let root: URL
     private let lock = NSLock()
 
-    init(fileManager: FileManager = .default) throws {
+    init(
+        accountNamespace: String,
+        fileManager: FileManager = .default
+    ) throws {
         guard let applicationSupport = fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -32,6 +35,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         root = applicationSupport
             .appendingPathComponent(bundleComponent, isDirectory: true)
             .appendingPathComponent(Self.schemaDirectory, isDirectory: true)
+            .appendingPathComponent(accountNamespace, isDirectory: true)
 
         do {
             try fileManager.createDirectory(

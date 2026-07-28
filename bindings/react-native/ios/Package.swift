@@ -18,6 +18,10 @@ import PackageDescription
 
 let package = Package(
     name: "OfflineProtocol",
+    platforms: [
+        .macOS(.v10_15),
+        .iOS(.v13)
+    ],
     products: [
         .library(name: "OfflineProtocol", targets: ["OfflineProtocol"])
     ],
@@ -61,6 +65,7 @@ let package = Package(
                 "RelayRateLimiter.swift",
                 "RelayTimestamps.swift",
                 "SocketGenerationTracker.swift",
+                "StorageNamespace.swift",
                 "SupersededLatchPolicy.swift",
                 "WriteStallWatchdog.swift"
             ]
@@ -89,6 +94,7 @@ let package = Package(
                 "RelayRateLimiterTests.swift",
                 "RelayTimestampsTests.swift",
                 "SocketGenerationTrackerTests.swift",
+                "StorageNamespaceTests.swift",
                 "SupersededLatchPolicyTests.swift",
                 "WriteStallWatchdogTests.swift"
             ]

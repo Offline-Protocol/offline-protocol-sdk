@@ -96,7 +96,12 @@ MLS cryptographic key material is stored using the `keyring` library:
 | Windows | Windows Credential Locker |
 
 Restartable message-plane state is kept separately by `AppStateStorage`, outside
-the credential store. Custom integrations must provide both lifecycle-separated
+the credential store. The built-in stores derive an opaque account namespace
+from both `app_id` and `user_id`, so multiple `ProtocolManager` instances do
+not share keys, outboxes, or retry state. The new layout does not migrate data
+from pre-split storage.
+
+Custom integrations must provide both lifecycle-separated, account-isolated
 interfaces:
 
 ```python
@@ -126,7 +131,8 @@ pm = ProtocolManager(
 
 `ProtocolManager` keeps both callback objects alive for the protocol lifetime.
 Protocol state must live in application data rather than Keychain, Secret
-Service, or Windows Credential Locker.
+Service, or Windows Credential Locker. A custom provider shared by multiple
+accounts must apply the same `(app_id, user_id)` isolation itself.
 
 ## Running the Example
 

@@ -27,3 +27,13 @@ def test_state_storage_overwrite_is_atomic_and_delete_is_idempotent(tmp_path) ->
     storage.delete("outbox", "message-1")
     assert storage.load("outbox", "message-1") is None
     assert storage.list_keys("outbox") == []
+
+
+def test_state_storage_namespaces_accounts(tmp_path) -> None:
+    alice = AppStateStorage(tmp_path / "state", namespace="account-alice")
+    bob = AppStateStorage(tmp_path / "state", namespace="account-bob")
+
+    alice.store("outbox", "message-1", [1, 2, 3])
+
+    assert alice.load("outbox", "message-1") == [1, 2, 3]
+    assert bob.load("outbox", "message-1") is None

@@ -14,8 +14,14 @@ import java.io.FileOutputStream
  * The root lives under noBackupFilesDir, so neither uninstall/reinstall nor
  * Android Auto Backup can resurrect an old outbox or retry lifecycle.
  */
-class AppContainerProtocolStateStorage(context: Context) : ProtocolStateStorageProvider {
-    private val root = File(context.noBackupFilesDir, SCHEMA_DIRECTORY).also {
+class AppContainerProtocolStateStorage(
+    context: Context,
+    accountNamespace: String
+) : ProtocolStateStorageProvider {
+    private val root = File(
+        File(context.noBackupFilesDir, SCHEMA_DIRECTORY),
+        StorageNamespace.requireAccount(accountNamespace)
+    ).also {
         if (!it.exists() && !it.mkdirs()) {
             throw MlsStorageException.StoreFailed(
                 "Failed to create protocol-state directory: ${it.absolutePath}"

@@ -19,7 +19,7 @@ from .offline_protocol import MlsStorageError, MlsStorageProvider
 
 logger = logging.getLogger(__name__)
 
-# Service name used for all keyring entries
+# Base service name used for keyring entries
 _DEFAULT_SERVICE = "offline-protocol-mls-v2"
 
 # Prefix for index entries that track key IDs per key_type
@@ -38,8 +38,13 @@ class SecureStorage(MlsStorageProvider):
     callback pointers on the Rust side become dangling.
     """
 
-    def __init__(self, service: str = _DEFAULT_SERVICE) -> None:
-        self._service = service
+    def __init__(
+        self,
+        service: str = _DEFAULT_SERVICE,
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        self._service = f"{service}:{namespace}" if namespace is not None else service
         self._lock = threading.Lock()
 
         # Warn if keyring resolved to a plaintext or null backend — MLS key

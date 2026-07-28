@@ -21,7 +21,7 @@ class InMemoryStorage(MlsStorageProvider):
     exercise the same concurrency contract the real storage provides.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *args: object, **kwargs: object) -> None:
         self._data: dict[tuple[str, str], bytes] = {}
         self._lock = threading.Lock()
 

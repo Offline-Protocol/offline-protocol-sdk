@@ -126,6 +126,10 @@ await protocol.stop();
 await protocol.destroy();
 ```
 
+Built-in secure and restartable-state stores are isolated by both `appId` and
+`userId`. Changing either value selects a fresh storage namespace. Data from
+the earlier unscoped layout is not migrated and is left untouched.
+
 ### End-to-End Encryption
 
 The SDK provides automatic end-to-end encryption using MLS (RFC 9420):

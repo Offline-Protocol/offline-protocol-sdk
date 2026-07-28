@@ -22,27 +22,18 @@ final class MlsSecureStorage: MlsStorageProvider {
     /// Creates a new Keychain-backed MLS storage.
     ///
     /// - Parameters:
-    ///   - service: Keychain service identifier (defaults to bundle ID + ".mls.v2")
+    ///   - accountNamespace: Opaque namespace derived from app and user IDs.
+    ///   - service: Keychain service prefix (defaults to bundle ID + ".mls.v2")
     ///   - accessGroup: Optional keychain access group for app group sharing
-    init(service: String? = nil, accessGroup: String? = nil) {
-        self.service = service ?? (Bundle.main.bundleIdentifier ?? "com.offlineprotocol") + ".mls.v2"
+    init(
+        accountNamespace: String,
+        service: String? = nil,
+        accessGroup: String? = nil
+    ) {
+        let servicePrefix =
+            service ?? (Bundle.main.bundleIdentifier ?? "com.offlineprotocol") + ".mls.v2"
+        self.service = "\(servicePrefix).\(accountNamespace)"
         self.accessGroup = accessGroup
-    }
-
-    /// Deletes the pre-split development service. The new v2 service contains
-    /// only cryptographic/key material.
-    static func purgeLegacyService() throws {
-        let legacyService = (Bundle.main.bundleIdentifier ?? "com.offlineprotocol") + ".mls"
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: legacyService
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw MlsStorageError.DeleteFailed(
-                message: "Failed to purge legacy Keychain storage: \(status)"
-            )
-        }
     }
     
     /// Stores data securely in the Keychain.
