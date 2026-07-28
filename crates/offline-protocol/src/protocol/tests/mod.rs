@@ -5460,6 +5460,98 @@ fn test_internet_only_probe_exhaustion_reparks_not_terminal() {
 }
 
 #[test]
+fn test_delivery_ack_redrives_the_peers_other_parked_dms() {
+    // The park counter is per-peer while the probes are per-message, so a
+    // burst of DMs to an offline peer escalates the shared ladder once per
+    // park: message 1 probes at 15s but message 3 is already scheduled at 60s,
+    // and a burst of seven lands the last at the 600s cap. Clearing the
+    // counter on delivery is therefore not enough on its own — delivery of any
+    // one of them proves the rest can go NOW, and on a consumer that never
+    // polls presence this ACK is the only edge that will ever say so.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    let internet_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let ids: Vec<_> = (0..3)
+        .map(|i| {
+            protocol
+                .send_message(
+                    "bob",
+                    &format!("hello {}", i),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap()
+        })
+        .collect();
+    for id in &ids {
+        protocol
+            .on_transport_send_failed(
+                &id.as_str(),
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&3),
+        "each park escalates the shared per-peer ladder"
+    );
+    for id in &ids {
+        assert!(
+            !protocol.ack_manager.is_waiting_for_ack(id),
+            "a parked DM holds no pending ACK"
+        );
+    }
+
+    // Message 0's probe fires and registers its ACK (what the retry queue does
+    // on a probe send); the peer answers it. Deliberately WITHOUT an
+    // ACK_TRANSPORT_KEY label — that field is peer-supplied and decodes to BLE
+    // when absent, so pinning the re-drive to it unconditionally would fail
+    // every sibling send against this internet-only device and silently strand
+    // them. The re-drive must fall back to DORS instead.
+    let probed = protocol.outbox.get(&ids[0]).unwrap().message.clone();
+    protocol.ensure_ack_registration(&probed).unwrap();
+    let sends_before = internet_handle.sent_messages().len();
+
+    let ack = Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .metadata(ACK_FOR_KEY, ids[0].as_str())
+    .build();
+    protocol.handle_ack_message(&ack);
+
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        None,
+        "delivery proves reachability: the escalation starts over"
+    );
+    assert!(
+        internet_handle.sent_messages().len() > sends_before,
+        "the siblings must go out now, not wait out their escalated timers"
+    );
+    for id in &ids[1..] {
+        assert!(
+            protocol.ack_manager.is_waiting_for_ack(id),
+            "each sibling must be re-driven with a fresh ACK budget"
+        );
+        assert!(
+            protocol.outbox.contains_key(id),
+            "re-driving must not settle the sibling"
+        );
+    }
+}
+
+#[test]
 fn test_unreachable_dm_mesh_probe_escalates_and_resets_on_edge() {
     // With a local mesh carrier up the peer may be a room away, so the park
     // keeps a timed reachability probe whose interval escalates per

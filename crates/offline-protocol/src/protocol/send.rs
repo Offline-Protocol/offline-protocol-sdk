@@ -3212,10 +3212,36 @@ impl OfflineProtocol {
                     self.handle_outbound_media_chunk_delivered(&message_id);
                     self.retry_queue.remove(&message_id.as_str());
                     if let Some(entry) = self.remove_outbox_entry(&message_id) {
-                        // Delivery proves reachability: the escalating
-                        // unreachable-probe interval starts over.
-                        self.dm_unreachable_parks
-                            .remove(entry.message.recipient.as_str());
+                        // Delivery proves reachability, so the escalating
+                        // unreachable-probe interval starts over. Clearing the
+                        // counter is not enough on its own: it is per-peer
+                        // while the probes are per-message, so a burst of DMs
+                        // to an offline peer escalates the shared ladder once
+                        // per park and leaves the later ones scheduled minutes
+                        // out (at the 600s cap after seven). Delivery of any
+                        // one of them proves the rest can go now, and on a
+                        // consumer that never polls presence this ACK is the
+                        // only edge that will say so. Flushing owns the
+                        // counter reset — including restoring it when every
+                        // re-drive fails — so this must not pre-clear it.
+                        //
+                        // The ACK's transport is genuine per-transport
+                        // reachability proof, so it overrides DORS the way
+                        // presence-online pins Internet — but only when it is
+                        // actually available: ACK_TRANSPORT_KEY is
+                        // peer-supplied and falls back to BLE when absent, and
+                        // forcing a carrier this device does not have would
+                        // fail every sibling send and silently strand them on
+                        // the timers this exists to skip.
+                        let recipient = entry.message.recipient.as_str().to_string();
+                        if self.dm_unreachable_parks.contains_key(&recipient) {
+                            let redrive_via = self
+                                .transport_manager
+                                .get_available_transports()
+                                .contains_key(&transport)
+                                .then_some(transport);
+                            self.flush_outbox_for_peer_via(&recipient, redrive_via);
+                        }
                     }
                 }
             }
