@@ -19,4 +19,28 @@ final class StorageNamespaceTests: XCTestCase {
             StorageNamespace.account(appId: "other-chat", userId: "alice")
         )
     }
+
+    func testGeneratedNamespacesPassValidation() throws {
+        let namespace = StorageNamespace.account(appId: "chat", userId: "alice")
+        XCTAssertEqual(try StorageNamespace.requireAccount(namespace), namespace)
+    }
+
+    /// A namespace becomes a directory component and a Keychain service suffix,
+    /// so anything that could escape or collide must be refused at the door.
+    func testMalformedNamespacesAreRefused() {
+        for value in [
+            "",
+            "account-",
+            "../../etc",
+            "account-" + String(repeating: "a", count: 63),
+            "account-" + String(repeating: "a", count: 65),
+            "account-" + String(repeating: "A", count: 64),
+            "account-" + String(repeating: "g", count: 64)
+        ] {
+            XCTAssertThrowsError(
+                try StorageNamespace.requireAccount(value),
+                "expected \(value) to be refused"
+            )
+        }
+    }
 }

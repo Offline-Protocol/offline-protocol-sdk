@@ -2,6 +2,7 @@ package com.offlineprotocol
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class StorageNamespaceTest {
@@ -25,8 +26,31 @@ class StorageNamespaceTest {
         )
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun accountNamespaceRejectsPathComponents() {
-        StorageNamespace.requireAccount("../../other-account")
+    @Test
+    fun generatedNamespacesPassValidation() {
+        val namespace = StorageNamespace.account("chat", "alice")
+        assertEquals(namespace, StorageNamespace.requireAccount(namespace))
+    }
+
+    /**
+     * A namespace becomes a directory component and a preferences file name, so
+     * anything that could escape or collide must be refused at the door.
+     */
+    @Test
+    fun malformedNamespacesAreRefused() {
+        val rejected = listOf(
+            "",
+            "account-",
+            "../../other-account",
+            "account-" + "a".repeat(63),
+            "account-" + "a".repeat(65),
+            "account-" + "A".repeat(64),
+            "account-" + "g".repeat(64)
+        )
+        for (value in rejected) {
+            assertThrows(IllegalArgumentException::class.java) {
+                StorageNamespace.requireAccount(value)
+            }
+        }
     }
 }
