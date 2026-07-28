@@ -6414,6 +6414,72 @@ fn test_not_found_from_a_provider_list_reads_as_an_empty_category() {
 }
 
 #[test]
+fn test_adoption_retries_the_tail_it_could_not_reach_in_one_pass() {
+    // A pass that had to truncate is not a completed pass. Marking it done
+    // would abandon the tail in the credential store forever — for
+    // `pending_messages` and `outbox`, that is message plaintext and
+    // cloud-media key material parked in the one place the sweep exists to
+    // clear. Adoption deletes what it adopts, so withholding the marker drains
+    // the remainder over successive launches instead.
+    use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
+
+    let over_cap = MAX_RESTORE_KEYS_PER_CATEGORY + 1;
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    for index in 0..over_cap {
+        secure
+            .store(
+                storage_keys::BLOCKED_USERS,
+                &format!("peer-{index:06}"),
+                &[],
+            )
+            .unwrap();
+    }
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls(secure_handle, state_handle).unwrap();
+
+    assert_eq!(
+        secure.list_keys(storage_keys::BLOCKED_USERS).unwrap().len(),
+        over_cap - MAX_RESTORE_KEYS_PER_CATEGORY,
+        "the pass must adopt a full prefix and leave the rest"
+    );
+    assert!(
+        state
+            .load(
+                storage_keys::STATE_ADOPTION,
+                storage_keys::STATE_ADOPTION_ID
+            )
+            .unwrap()
+            .is_none(),
+        "a truncated pass must not claim to be complete"
+    );
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls(secure_handle, state_handle).unwrap();
+
+    assert!(
+        secure
+            .list_keys(storage_keys::BLOCKED_USERS)
+            .unwrap()
+            .is_empty(),
+        "the next launch must drain the tail the first one could not reach"
+    );
+    assert!(
+        state
+            .load(
+                storage_keys::STATE_ADOPTION,
+                storage_keys::STATE_ADOPTION_ID
+            )
+            .unwrap()
+            .is_some(),
+        "a pass that reached everything marks the sweep complete"
+    );
+}
+
+#[test]
 fn test_pending_byte_budget_holds_for_worst_case_json_escaping() {
     // `MAX_MESSAGE_CONTENT_BYTES` bounds the *raw* content, but the queue
     // budgets and the record cap are measured on the serialized entry. NUL is

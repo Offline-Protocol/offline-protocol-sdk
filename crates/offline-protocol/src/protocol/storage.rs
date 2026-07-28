@@ -103,21 +103,28 @@ enum PendingRestore {
     Restored(Vec<PendingMessage>),
 }
 
-/// Largest number of keys any single restore pass will process for a category
-/// with no live insert-time cap of its own.
+/// Largest number of keys any single pass will process for a category with no
+/// live insert-time cap of its own.
 ///
 /// The pending queue is the widest such category, at
 /// [`MAX_PENDING_MESSAGES_GLOBAL`] recipients, so a store listing more than a
 /// generous multiple of that has been tampered with or was written by a build
-/// with wildly different bounds. Restores stop there and *ignore* the tail —
-/// they do not delete it, and because `list_keys` order is backend-defined a
-/// later launch may walk a different subset. Sealing already keeps a forged
-/// record from ever deserializing; this bounds the *work* as well as the
-/// result.
+/// with wildly different bounds. That threat matters more here than it did
+/// before the storage split, not less: this state used to live in the
+/// credential store and now lives in the app container, where write access is
+/// easier to come by. Sealing already keeps a forged record from ever
+/// deserializing; this bounds the *work* as well as the result.
+///
+/// **Restores** stop there and *ignore* the tail — they do not delete it, and
+/// because `list_keys` order is backend-defined a later launch may walk a
+/// different subset. **Adoption** treats hitting this bound as an incomplete
+/// pass instead: it deletes each record it moves, so withholding its completion
+/// marker drains the remainder over successive launches rather than abandoning
+/// it in the credential store (see `adopt_legacy_protocol_state`).
 ///
 /// Categories whose live insert path is capped get a tighter bound derived from
 /// that cap instead (see [`OUTBOX_RESTORE_KEY_CAP`]).
-const MAX_RESTORE_KEYS_PER_CATEGORY: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
+pub(super) const MAX_RESTORE_KEYS_PER_CATEGORY: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
 
 /// Restore-walk bound for the outbox.
 ///
@@ -437,15 +444,21 @@ impl OfflineProtocol {
             };
 
             if key_ids.len() > MAX_RESTORE_KEYS_PER_CATEGORY {
-                // Never reachable from state this SDK wrote. Say so rather than
-                // letting the tail vanish behind a `take` — the marker below
-                // will make this the only pass that ever looks.
+                // Never reachable from state this SDK wrote, so bound the pass
+                // — but a truncated pass is not a completed one. Withholding
+                // the marker is what makes the tail drain over successive
+                // launches (each one adopts and deletes a prefix) instead of
+                // being abandoned in the credential store forever, which for
+                // `pending_messages` and `outbox` means message plaintext and
+                // cloud-media key material parked in the one place this sweep
+                // exists to clear.
                 warn!(
                     key_type = %key_type,
                     listed = key_ids.len(),
                     cap = MAX_RESTORE_KEYS_PER_CATEGORY,
-                    "Legacy protocol state listed more entries than any legitimate run can produce; adopting only the first"
+                    "Legacy protocol state listed more entries than any legitimate run can produce; adopting a prefix and retrying the rest next launch"
                 );
+                failed = true;
             }
             for key_id in key_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
                 match self.adopt_one_legacy_record(
@@ -1413,11 +1426,11 @@ impl OfflineProtocol {
             return Ok(());
         };
 
-        let peers = storage
-            .list_keys(storage_keys::WELCOME_LIFECYCLES)
+        let peers = Self::list_state_keys(storage.as_ref(), storage_keys::WELCOME_LIFECYCLES)
             .map_err(|e| Error::Other(format!("Failed to list welcome lifecycles: {}", e)))?;
+        let listed = peers.len();
 
-        for peer_id in peers {
+        for peer_id in peers.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if let Some(mut record) = self.load_welcome_lifecycle_entry(&peer_id)? {
                 if matches!(
                     record.state,
@@ -1512,6 +1525,14 @@ impl OfflineProtocol {
                     "welcome_lifecycle_restored"
                 );
             }
+        }
+
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Welcome lifecycle store listed more peers than any legitimate run can produce; ignoring the tail"
+            );
         }
 
         Ok(())
@@ -1957,19 +1978,27 @@ impl OfflineProtocol {
         let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-        let user_ids = match storage.list_keys(storage_keys::BLOCKED_USERS) {
+        let user_ids = match Self::list_state_keys(storage.as_ref(), storage_keys::BLOCKED_USERS) {
             Ok(keys) => keys,
             Err(e) => {
                 warn!(error = %e, "Failed to list blocked users from storage");
                 return;
             }
         };
-        for user_id in &user_ids {
+        let listed = user_ids.len();
+        for user_id in user_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if offline_protocol_core::UserId::new(user_id).is_err() {
                 warn!(user_id = %user_id, "Skipping blocked user entry with invalid user ID");
                 continue;
             }
             self.blocked_users.insert(user_id.clone());
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Blocked-user store listed more entries than any legitimate run can produce; ignoring the tail"
+            );
         }
         if !self.blocked_users.is_empty() {
             info!(
@@ -2017,15 +2046,26 @@ impl OfflineProtocol {
         let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-        let peer_ids = match storage.list_keys(storage_keys::BOTH_CREATE_AWAITING_DECRYPT) {
+        let peer_ids = match Self::list_state_keys(
+            storage.as_ref(),
+            storage_keys::BOTH_CREATE_AWAITING_DECRYPT,
+        ) {
             Ok(keys) => keys,
             Err(e) => {
                 warn!(error = %e, "Failed to list both-create owner gate from storage");
                 return;
             }
         };
-        for peer_id in &peer_ids {
+        let listed = peer_ids.len();
+        for peer_id in peer_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             self.both_create_awaiting_decrypt.insert(peer_id.clone());
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Both-create owner gate listed more peers than any legitimate run can produce; ignoring the tail"
+            );
         }
         if !self.both_create_awaiting_decrypt.is_empty() {
             info!(
