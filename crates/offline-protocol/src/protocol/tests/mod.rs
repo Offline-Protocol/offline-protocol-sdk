@@ -5687,6 +5687,161 @@ fn test_record_key_load_failure_drops_the_previously_installed_cipher() {
     );
 }
 
+/// Wires two *distinct* backends the way production does. Most fixtures point
+/// both handles at one store, which is fine for routing assertions but hides
+/// anything that moves records between the domains.
+fn split_storage(
+    secure: &Arc<InMemoryStorage>,
+    state: &Arc<InMemoryStorage>,
+) -> (Arc<dyn MlsStorage>, Arc<dyn crate::ProtocolStateStorage>) {
+    let state_handle: Arc<dyn MlsStorage> = state.clone();
+    (
+        secure.clone(),
+        Arc::new(TestProtocolStateStorage {
+            storage: state_handle,
+        }),
+    )
+}
+
+fn pending_record(content: &str) -> (MessageId, Vec<u8>) {
+    let message_id = MessageId::new();
+    let mut pending = PendingMessage {
+        content: content.to_string(),
+        priority: MessagePriority::Medium,
+        message_id: message_id.clone(),
+        reply_to_msg: None,
+        forwarded_from: None,
+        content_type: ContentType::Text,
+        media_metadata: None,
+        rich: None,
+        queued_at: Utc::now(),
+        serialized_bytes: 0,
+    };
+    pending.measure();
+    (message_id, serde_json::to_vec(&vec![pending]).unwrap())
+}
+
+fn started_protocol_events(protocol: &mut OfflineProtocol) -> Arc<Mutex<Vec<Event>>> {
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    protocol.on_event(move |event| handle.lock().unwrap().push(event));
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+    events
+}
+
+#[test]
+fn test_unreadable_outbox_entry_is_settled_rather_than_dropped_silently() {
+    // A record sealed under a key this install no longer has is gone for good.
+    // The app is still holding the id `send_message` returned, so the loss has
+    // to be settled — otherwise that id never resolves to anything and the
+    // message shows as "sending" forever.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let message_id = MessageId::new();
+    let foreign =
+        state_crypto::StateRecordCipher::new(&[9u8; state_crypto::STATE_RECORD_KEY_BYTES]);
+    state
+        .store(
+            storage_keys::OUTBOX,
+            &message_id.as_str(),
+            &foreign
+                .seal(storage_keys::OUTBOX, &message_id.as_str(), b"{}")
+                .unwrap(),
+        )
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    // Restore runs before the app can install a callback, so the settlement is
+    // parked rather than emitted into nothing.
+    assert_eq!(protocol.deferred_restore_settlements.len(), 1);
+
+    let events = started_protocol_events(&mut protocol);
+    let settled = events.lock().unwrap().iter().any(|event| {
+        matches!(
+            event,
+            Event::MessageFailed { message_id: id, .. } if *id == message_id.as_str()
+        )
+    });
+    assert!(
+        settled,
+        "an unrecoverable outbox entry must be settled on start"
+    );
+}
+
+#[test]
+fn test_unreadable_pending_queue_is_surfaced_per_recipient() {
+    // The ids live inside the record that would not open, so they cannot be
+    // settled individually — but the loss must not read as "nothing was
+    // queued". One diagnostic per recipient is the most that is recoverable.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let foreign =
+        state_crypto::StateRecordCipher::new(&[9u8; state_crypto::STATE_RECORD_KEY_BYTES]);
+    state
+        .store(
+            storage_keys::PENDING_MESSAGES,
+            "bob",
+            &foreign
+                .seal(storage_keys::PENDING_MESSAGES, "bob", b"[]")
+                .unwrap(),
+        )
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let events = started_protocol_events(&mut protocol);
+    let surfaced = events.lock().unwrap().iter().any(|event| {
+        matches!(
+            event,
+            Event::ConvergenceDiag { stage, peer_id, .. }
+                if stage == "pending_state_lost" && peer_id == "bob"
+        )
+    });
+    assert!(
+        surfaced,
+        "a lost pending queue must be surfaced, not skipped"
+    );
+}
+
+#[test]
+fn test_pending_byte_budget_holds_for_worst_case_json_escaping() {
+    // `MAX_MESSAGE_CONTENT_BYTES` bounds the *raw* content, but the queue
+    // budgets and the record cap are measured on the serialized entry. NUL is
+    // the worst case: one byte in, six out (` `). The relationship the
+    // constants assert has to survive that expansion, or a single
+    // boundary-legal message would fail to fit an empty queue.
+    let (_, encoded) = pending_record(&"\0".repeat(MAX_MESSAGE_CONTENT_BYTES));
+    let entry: Vec<PendingMessage> = serde_json::from_slice(&encoded).unwrap();
+    let mut entry = entry.into_iter().next().unwrap();
+    entry.measure();
+
+    assert!(
+        entry.serialized_bytes + MAX_RICH_EXTRAS_BYTES < MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+        "worst-case escaping ({} bytes) must still fit the per-peer budget",
+        entry.serialized_bytes
+    );
+    assert!(
+        encoded.len() < MAX_PROTOCOL_STATE_RECORD_BYTES,
+        "worst-case escaping must still be a writable protocol-state record"
+    );
+}
+
 #[test]
 fn test_flush_terminal_welcome_failure_drops_pending_without_resurrection() {
     // A terminal Welcome failure surfacing mid-flush runs
@@ -18775,6 +18930,17 @@ fn test_restore_outbox_drops_absolutely_expired() {
     let keys = storage.list_keys(storage_keys::OUTBOX).unwrap();
     assert_eq!(keys.len(), 1, "the dead entry must be deleted from storage");
     assert!(!keys.iter().any(|k| *k == dead_id.as_str()));
+
+    // Restore settlements are parked until the event pipeline is live: an app
+    // that installs its callback after `initialize_mls` — the common shape —
+    // would otherwise never learn this id is dead.
+    assert!(events.lock().unwrap().is_empty());
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
 
     let captured = events.lock().unwrap();
     let failed: Vec<_> = captured

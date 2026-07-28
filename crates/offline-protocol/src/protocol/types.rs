@@ -228,6 +228,24 @@ pub(crate) const MAX_MESSAGE_CONTENT_BYTES: usize = 256 * 1024;
 /// [`MAX_MESSAGE_CONTENT_BYTES`] plus [`MAX_RICH_EXTRAS_BYTES`] so a single
 /// boundary-legal message always fits in an empty queue and admission can never
 /// livelock (pinned by `pending_queue_byte_budgets_admit_any_boundary_legal_message`).
+///
+/// # Write amplification
+///
+/// Pending messages are persisted as one record *per recipient*, so every
+/// enqueue rewrites that peer's whole queue: filling one peer to this budget
+/// costs on the order of `budget × entries / 2` bytes written in total, not
+/// `budget`. On Android each of those writes also crosses UniFFI as a
+/// `List<UByte>` and is unboxed to a `ByteArray`, so a 2 MiB record is roughly
+/// two million short-lived boxed objects on the way in *and* again on the way
+/// out.
+///
+/// That is why this budget is sized to bound a pathological queue rather than
+/// to describe a normal one — real queues hold a handful of short messages
+/// waiting on a handshake. Raising it raises the write cost quadratically;
+/// lowering it below `MAX_MESSAGE_CONTENT_BYTES + MAX_RICH_EXTRAS_BYTES` breaks
+/// admission outright. Making large queues genuinely cheap needs a per-message
+/// record layout, which is a storage-format change and deliberately not part of
+/// the split.
 pub(crate) const MAX_PENDING_MESSAGE_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
 
 /// Maximum total serialized bytes of the pending-session queue across all

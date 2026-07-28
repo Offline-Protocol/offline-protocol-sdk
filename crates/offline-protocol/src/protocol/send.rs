@@ -584,7 +584,12 @@ impl OfflineProtocol {
         )
     }
 
-    /// Creates a new message from the given parameters.
+    /// Rejects a recipient token that is not a well-formed [`UserId`].
+    ///
+    /// Enforced at every outbound boundary so an app-owned placeholder (an
+    /// `unresolved:token`, an empty string) cannot become durable protocol
+    /// state — an outbox entry or pending-queue record that is retried, stored,
+    /// and restored forever against an address no transport can ever resolve.
     pub(crate) fn validate_outbound_recipient(recipient: &str) -> Result<()> {
         UserId::new(recipient)
             .map(|_| ())
@@ -2650,7 +2655,9 @@ impl OfflineProtocol {
         self.recompute_next_pending_message_expiry();
 
         for message_id in expired_ids {
-            self.emit_event(Event::message_failed(
+            // Reached both from `process()` (emits immediately) and from
+            // restore, which runs before the event pipeline is live.
+            self.settle_restored_message_failure(Event::message_failed(
                 message_id,
                 "Pending session lifetime exceeded".to_string(),
                 0,

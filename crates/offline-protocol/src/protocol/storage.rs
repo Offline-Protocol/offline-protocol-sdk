@@ -46,6 +46,57 @@ fn record_requires_sealing(key_type: &str) -> bool {
     )
 }
 
+/// Outcome of reading one protocol-state record.
+///
+/// The distinction that matters is [`Self::Missing`] versus
+/// [`Self::Unreadable`]: both yield no bytes, but the second means a record
+/// *was* there and its contents are now gone for good (oversized, tampered, or
+/// sealed under a key this install no longer has). Restore paths that own
+/// app-visible message state have to settle what they lost rather than skip it
+/// silently, and they cannot do that if absence and destruction look alike.
+pub(crate) enum StateRecord {
+    /// No record under this key.
+    Missing,
+    /// A record existed but could not be returned; it has been deleted.
+    Unreadable,
+    /// The record's plaintext value.
+    Present(Vec<u8>),
+}
+
+impl StateRecord {
+    /// The record's bytes, treating a destroyed record like an absent one.
+    /// For callers whose category carries no app-visible commitment.
+    fn into_bytes(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Present(data) => Some(data),
+            Self::Missing | Self::Unreadable => None,
+        }
+    }
+}
+
+/// Outcome of restoring one recipient's pending queue.
+enum PendingRestore {
+    /// Nothing was queued for this recipient.
+    Absent,
+    /// A queue existed but could not be recovered. Its message ids are inside
+    /// the record that would not open, so they cannot be settled individually.
+    Lost,
+    /// The recovered queue (possibly empty).
+    Restored(Vec<PendingMessage>),
+}
+
+/// Largest number of keys any single restore pass will process for one
+/// category.
+///
+/// Every category is capped far below this in normal operation (the biggest is
+/// the pending queue at [`MAX_PENDING_MESSAGES_GLOBAL`] recipients), so a store
+/// listing more has been tampered with or was written by a build with wildly
+/// different bounds. Restores stop there and delete the tail rather than walk
+/// an attacker-chosen number of entries during startup. Sealing already keeps a
+/// forged record from ever deserializing; this bounds the *work* as well as the
+/// result.
+const MAX_RESTORE_KEYS_PER_CATEGORY: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
+
 impl OfflineProtocol {
     // ========================================================================
     // PROTOCOL-STATE RECORD I/O (SEALING + SIZE POLICY CHOKEPOINT)
@@ -94,22 +145,42 @@ impl OfflineProtocol {
         storage.store(key_type, key_id, &sealed)
     }
 
-    /// Reads one protocol-state record, opening it when its category is sealed.
-    ///
-    /// Returns `Ok(None)` — never raw bytes — for a record that is oversized or
-    /// will not open. Such a record is corrupt or tampered, so it is also
-    /// deleted, which keeps a poison record from being re-examined on every
-    /// boot. The one exception is a missing record key: those records may be
-    /// perfectly good and simply unreadable *this session*, so they are left
-    /// alone.
+    /// Reads one protocol-state record, opening it when its category is sealed,
+    /// and discarding the bytes for callers that do not need the
+    /// missing-versus-destroyed distinction.
     pub(crate) fn read_state_record(
         &self,
         storage: &dyn ProtocolStateStorage,
         key_type: &str,
         key_id: &str,
     ) -> ProtocolStateResult<Option<Vec<u8>>> {
+        Ok(self
+            .read_state_record_detailed(storage, key_type, key_id)?
+            .into_bytes())
+    }
+
+    /// Reads one protocol-state record, distinguishing an absent record from
+    /// one that existed but could not be returned.
+    ///
+    /// Never yields raw bytes for a record that is oversized or will not open.
+    /// Such a record is corrupt or tampered, so it is also deleted, which keeps
+    /// a poison record from being re-examined on every boot — and reported as
+    /// [`StateRecord::Unreadable`], because a caller holding an app-visible
+    /// promise about that record (an outbox entry the app was told was queued)
+    /// has to settle it rather than let it evaporate.
+    ///
+    /// The one exception is a missing record *key*: those records may be
+    /// perfectly good and simply unreadable *this session*, so they are left on
+    /// disk. That still reports `Unreadable` — nothing will be recovered from
+    /// them this run either way.
+    pub(crate) fn read_state_record_detailed(
+        &self,
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+    ) -> ProtocolStateResult<StateRecord> {
         let Some(data) = storage.load(key_type, key_id)? else {
-            return Ok(None);
+            return Ok(StateRecord::Missing);
         };
 
         // Bound before deserialization: a corrupted or tampered record must not
@@ -132,11 +203,11 @@ impl OfflineProtocol {
                 "Dropping oversized protocol state record"
             );
             let _ = storage.delete(key_type, key_id);
-            return Ok(None);
+            return Ok(StateRecord::Unreadable);
         }
 
         if !sealed {
-            return Ok(Some(data));
+            return Ok(StateRecord::Present(data));
         }
 
         let Some(cipher) = &self.state_record_cipher else {
@@ -145,11 +216,11 @@ impl OfflineProtocol {
                 key_id = %key_id,
                 "Protocol state record key unavailable; skipping sealed record"
             );
-            return Ok(None);
+            return Ok(StateRecord::Unreadable);
         };
 
         match cipher.open(key_type, key_id, &data) {
-            Some(plaintext) => Ok(Some(plaintext)),
+            Some(plaintext) => Ok(StateRecord::Present(plaintext)),
             None => {
                 warn!(
                     key_type = %key_type,
@@ -158,7 +229,7 @@ impl OfflineProtocol {
                     "Protocol state record failed to open; deleting"
                 );
                 let _ = storage.delete(key_type, key_id);
-                Ok(None)
+                Ok(StateRecord::Unreadable)
             }
         }
     }
@@ -308,19 +379,50 @@ impl OfflineProtocol {
     /// The derived `serialized_bytes` is recomputed here — it is deliberately
     /// not persisted — so restored entries carry their real weight into the
     /// queue byte budgets instead of reading as free.
+    ///
+    /// Production restore goes through [`Self::load_pending_messages_detailed`]
+    /// instead: collapsing "nothing queued" into "the queue is gone" is exactly
+    /// the distinction restore has to act on.
+    #[cfg(test)]
     pub(crate) fn load_pending_messages_from_storage(
         &self,
         recipient: &str,
     ) -> Option<Vec<PendingMessage>> {
-        let storage = self.protocol_state_storage.as_ref()?;
-        let data = self
-            .read_state_record(storage.as_ref(), storage_keys::PENDING_MESSAGES, recipient)
-            .ok()??;
-        let mut messages: Vec<PendingMessage> = serde_json::from_slice(&data).ok()?;
+        match self.load_pending_messages_detailed(recipient) {
+            PendingRestore::Restored(messages) => Some(messages),
+            PendingRestore::Absent | PendingRestore::Lost => None,
+        }
+    }
+
+    /// Loads a recipient's pending queue, distinguishing "nothing queued" from
+    /// "a queue existed and its contents are gone".
+    fn load_pending_messages_detailed(&self, recipient: &str) -> PendingRestore {
+        let Some(storage) = self.protocol_state_storage.as_ref() else {
+            return PendingRestore::Absent;
+        };
+        let record = self.read_state_record_detailed(
+            storage.as_ref(),
+            storage_keys::PENDING_MESSAGES,
+            recipient,
+        );
+        let data = match record {
+            Ok(StateRecord::Present(data)) => data,
+            Ok(StateRecord::Missing) => return PendingRestore::Absent,
+            // An unreadable record, or a load the backend refused: either way a
+            // queue that existed is not coming back this run.
+            Ok(StateRecord::Unreadable) | Err(_) => return PendingRestore::Lost,
+        };
+        let Ok(mut messages) = serde_json::from_slice::<Vec<PendingMessage>>(&data) else {
+            // Parsed-as-garbage is the same loss as failed-to-open. Drop the
+            // record so it is not re-parsed on every boot.
+            warn!(recipient = %recipient, "Dropping corrupted pending message record");
+            let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
+            return PendingRestore::Lost;
+        };
         for message in &mut messages {
             message.measure();
         }
-        Some(messages)
+        PendingRestore::Restored(messages)
     }
 
     /// Removes pending messages for a recipient from storage.
@@ -342,15 +444,43 @@ impl OfflineProtocol {
         let recipients = storage
             .list_keys(storage_keys::PENDING_MESSAGES)
             .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
+        let listed = recipients.len();
 
         let mut capacity_evicted = Vec::new();
+        let mut lost_recipients = Vec::new();
         let mut changed_recipients = std::collections::HashSet::new();
-        for recipient in recipients {
+        // Running totals, maintained rather than recomputed: the global caps
+        // below would otherwise re-walk the whole queue once per eviction.
+        let mut global_count = 0usize;
+        let mut global_bytes = 0usize;
+        for recipient in recipients.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if Self::validate_outbound_recipient(&recipient).is_err() {
+                // The queue is unaddressable — nothing can ever be sent to this
+                // recipient again — so it is dropped, but the app still holds
+                // ids from `send_message*` that must be settled. The record has
+                // to be read *before* deleting it to recover them.
+                if let PendingRestore::Restored(messages) =
+                    self.load_pending_messages_detailed(&recipient)
+                {
+                    capacity_evicted.extend(messages.into_iter().map(|m| m.message_id));
+                }
+                warn!(recipient = %recipient, "Dropping persisted pending queue for an invalid recipient");
                 let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
                 continue;
             }
-            if let Some(mut messages) = self.load_pending_messages_from_storage(&recipient) {
+            let mut messages = match self.load_pending_messages_detailed(&recipient) {
+                PendingRestore::Restored(messages) => messages,
+                PendingRestore::Absent => continue,
+                // A queue existed and its contents are gone. The ids are inside
+                // the record we could not open, so they cannot be settled
+                // individually — surface the loss per recipient instead of
+                // letting it read as "there was nothing queued".
+                PendingRestore::Lost => {
+                    lost_recipients.push(recipient);
+                    continue;
+                }
+            };
+            {
                 let overflow = messages.len().saturating_sub(MAX_PENDING_MESSAGES_PER_PEER);
                 if overflow > 0 {
                     capacity_evicted
@@ -384,33 +514,55 @@ impl OfflineProtocol {
                 }
                 if !messages.is_empty() {
                     info!(recipient = %recipient, count = messages.len(), "Restored pending messages from storage");
+                    global_count += messages.len();
+                    global_bytes += peer_bytes;
                     self.pending_encrypted_messages
                         .insert(recipient.clone(), messages);
                 } else {
                     let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
                 }
 
-                while self.total_pending_message_count() > MAX_PENDING_MESSAGES_GLOBAL
-                    || self.total_pending_message_bytes() > MAX_PENDING_MESSAGE_BYTES_GLOBAL
+                while global_count > MAX_PENDING_MESSAGES_GLOBAL
+                    || global_bytes > MAX_PENDING_MESSAGE_BYTES_GLOBAL
                 {
                     let Some((evicted_recipient, message)) = self.evict_oldest_pending_message()
                     else {
                         break;
                     };
+                    global_count = global_count.saturating_sub(1);
+                    global_bytes = global_bytes.saturating_sub(message.serialized_bytes);
                     changed_recipients.insert(evicted_recipient);
                     capacity_evicted.push(message.message_id);
                 }
             }
         }
 
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Pending message store listed more recipients than any legitimate run can produce; ignoring the tail"
+            );
+        }
+
         for recipient in changed_recipients {
             self.persist_or_clear_pending_messages(&recipient);
         }
         for message_id in capacity_evicted {
-            self.emit_event(crate::Event::message_failed(
+            self.settle_restored_message_failure(crate::Event::message_failed(
                 message_id,
                 "Pending session queue capacity exceeded".to_string(),
                 0,
+            ));
+        }
+        for recipient in lost_recipients {
+            warn!(recipient = %recipient, "Persisted pending queue was unreadable and has been dropped");
+            self.settle_restored_message_failure(crate::Event::convergence_diag(
+                "pending_state_lost".to_string(),
+                recipient,
+                "Queued messages awaiting session establishment could not be recovered \
+                 from protocol-state storage and have been dropped"
+                    .to_string(),
             ));
         }
 
@@ -1079,16 +1231,25 @@ impl OfflineProtocol {
             .map_err(|e| Error::Other(format!("Failed to list outbox entries: {}", e)))?;
 
         let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms;
+        let listed = message_ids.len();
 
         let mut restored: Vec<OutboxEntry> = Vec::new();
-        for message_id in message_ids {
-            let loaded = self.protocol_state_storage.as_ref().and_then(|s| {
-                self.read_state_record(s.as_ref(), storage_keys::OUTBOX, &message_id)
-                    .ok()
-                    .flatten()
+        // Entries the app was told were queued but that cannot be recovered.
+        // Unlike the pending queue, an outbox record is keyed *by* its message
+        // id, so each loss is individually settleable without opening it.
+        let mut unrecoverable: Vec<MessageId> = Vec::new();
+        for message_id in message_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+            let loaded = self.protocol_state_storage.as_ref().map(|s| {
+                self.read_state_record_detailed(s.as_ref(), storage_keys::OUTBOX, &message_id)
             });
-            let Some(data) = loaded else {
-                continue;
+            let data = match loaded {
+                Some(Ok(StateRecord::Present(data))) => data,
+                Some(Ok(StateRecord::Missing)) | None => continue,
+                Some(Ok(StateRecord::Unreadable)) | Some(Err(_)) => {
+                    warn!(message_id = %message_id, "Dropping unreadable outbox entry");
+                    unrecoverable.extend(MessageId::from_str(&message_id));
+                    continue;
+                }
             };
 
             let entry = match serde_json::from_slice::<OutboxEntry>(&data) {
@@ -1096,6 +1257,7 @@ impl OfflineProtocol {
                 Err(e) => {
                     warn!(message_id = %message_id, error = %e, "Dropping corrupted outbox entry");
                     self.delete_outbox_key(&message_id);
+                    unrecoverable.extend(MessageId::from_str(&message_id));
                     continue;
                 }
             };
@@ -1136,7 +1298,7 @@ impl OfflineProtocol {
                 repair_action = "absolute_lifetime_exceeded",
                 "outbox_entry_dropped"
             );
-            self.emit_event(crate::events::Event::message_failed(
+            self.settle_restored_message_failure(crate::events::Event::message_failed(
                 entry.message.id.clone(),
                 "Outbox lifetime exceeded".to_string(),
                 entry.attempt_count,
@@ -1152,7 +1314,29 @@ impl OfflineProtocol {
             restored.sort_by_key(|e| std::cmp::Reverse(e.last_sent_at));
             for entry in restored.drain(MAX_OUTBOX_ENTRIES..) {
                 self.delete_outbox_key(&entry.message.id.as_str());
+                // Terminal, like the pending queue's capacity eviction: the app
+                // holds this id and nothing will ever resolve it otherwise.
+                self.settle_restored_message_failure(crate::events::Event::message_failed(
+                    entry.message.id.clone(),
+                    "Outbox capacity exceeded".to_string(),
+                    entry.attempt_count,
+                ));
             }
+        }
+
+        for message_id in unrecoverable {
+            self.settle_restored_message_failure(crate::events::Event::message_failed(
+                message_id,
+                "Outbox entry could not be recovered from protocol-state storage".to_string(),
+                0,
+            ));
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Outbox store listed more entries than any legitimate run can produce; ignoring the tail"
+            );
         }
 
         // Carrier-relative TTL: refresh any entry already past the outbox
@@ -1285,7 +1469,10 @@ impl OfflineProtocol {
         let now = Utc::now();
 
         let mut restored: Vec<MediaTransferDescriptor> = Vec::new();
-        for file_id in file_ids {
+        // Bounded like the other restores. A descriptor loss is advisory (the
+        // app re-initiates the transfer), so there is nothing to settle here —
+        // only the walk itself needs a ceiling.
+        for file_id in file_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             let loaded = self.protocol_state_storage.as_ref().and_then(|s| {
                 self.read_state_record(s.as_ref(), storage_keys::MEDIA_DESCRIPTORS, &file_id)
                     .ok()

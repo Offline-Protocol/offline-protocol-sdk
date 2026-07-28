@@ -401,7 +401,34 @@ descriptors — with ChaCha20-Poly1305 under a per-install key kept in
 associated data binds it to its `(keyType, keyId)` slot, so a record cannot be
 moved between peers or categories by anyone with write access to the container.
 Record *keys* are not sealed: they are peer and message ids, and the store needs
-them in the clear to address entries.
+them in the clear to address entries. Built-in providers name files by digest,
+but each record carries its own `(keyType, keyId)` in its header, so treat the
+key as readable by anyone who can read the container.
+
+**What this does and does not hide.** Sealing protects message content and media
+key material. It does not protect the peer graph. These categories are stored in
+the clear, and for the marker-style ones the key *is* the whole content:
+
+| Category | In the clear |
+| --- | --- |
+| `blocked_users` | which peers you have blocked |
+| `both_create_awaiting_decrypt` | which peers are mid-handshake |
+| `session_states`, `welcome_lifecycles` | which peers you have sessions with, and their delivery state |
+| `peer_key_packages`, `peer_capabilities` | which peers you have exchanged with (public wire material) |
+| sealed categories' *keys* | which peers you have queued messages for, and their message ids |
+
+Before the storage split this metadata sat behind the OS keystore, so an
+attacker with app-container access but no credential-store access learned
+nothing from it; now they learn the graph. That is the deliberate cost of giving
+delivery state the container's lifecycle. If your threat model includes an
+attacker who can read the app container of an unlocked device, treat the peer
+graph as exposed.
+
+`blocked_users` in particular is *deliberately* left unsealed rather than folded
+into one sealed record. Sealing fails closed, and a block list that silently
+stops persisting whenever the record key is unavailable is a worse failure than
+a readable one: blocking is a safety control, and it must survive every state in
+which the SDK still runs.
 
 Consequences worth knowing:
 
@@ -412,6 +439,13 @@ Consequences worth knowing:
   without clearing the app container leaves records that no longer open; the SDK
   drops them on read. Clearing the app container alone is the normal uninstall
   path and is always safe.
+- **A dropped record is reported, not swallowed.** Anything the app was told was
+  queued gets settled when it cannot be recovered: an unrecoverable outbox entry
+  emits `message_failed`, and an unrecoverable pending queue emits a
+  `convergence_diag` with stage `pending_state_lost` naming the recipient (its
+  message ids are inside the record that would not open, so they cannot be named
+  individually). These are emitted on `start()`, not during `initialize_mls`, so
+  install your event callback before starting if you want to observe them.
 - **Records have a size ceiling.** The SDK refuses to write, and refuses to
   deserialize on restore, any single record over 4 MiB — a corrupted or tampered
   state file cannot become an unbounded allocation during startup.

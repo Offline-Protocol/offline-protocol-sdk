@@ -122,6 +122,16 @@ pub struct OfflineProtocol {
     /// Pending messages waiting for session establishment (recipient -> messages).
     pending_encrypted_messages: HashMap<String, Vec<PendingMessage>>,
 
+    /// Terminal message settlements produced while restoring, held until the
+    /// event pipeline is live.
+    ///
+    /// Restore runs inside `initialize_mls`, which apps routinely call before
+    /// installing an event callback — so a `message_failed` emitted there would
+    /// be dropped, and the app would keep an id that never resolves. `start()`
+    /// drains this, mirroring how restored media descriptors already wait to be
+    /// announced. Bounded by the restore caps that produce it.
+    deferred_restore_settlements: Vec<Event>,
+
     /// Earliest wall-clock expiry in `pending_encrypted_messages`.
     ///
     /// `process()` consults this before scanning the bounded queue, avoiding an
@@ -506,6 +516,7 @@ impl OfflineProtocol {
             dm_unreachable_parks: HashMap::new(),
             mls_manager: None,
             pending_encrypted_messages: HashMap::new(),
+            deferred_restore_settlements: Vec::new(),
             next_pending_message_expiry: None,
             pending_key_packages: HashMap::new(),
             key_package_sent_to: std::collections::HashSet::new(),
@@ -608,6 +619,7 @@ impl OfflineProtocol {
         let previous_state_record_cipher = self.state_record_cipher.take();
         let previous_pending_messages = self.pending_encrypted_messages.clone();
         let previous_pending_message_expiry = self.next_pending_message_expiry;
+        let previous_restore_settlements = self.deferred_restore_settlements.clone();
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
@@ -662,6 +674,9 @@ impl OfflineProtocol {
             self.state_record_cipher = previous_state_record_cipher;
             self.pending_encrypted_messages = previous_pending_messages;
             self.next_pending_message_expiry = previous_pending_message_expiry;
+            // A rolled-back restore never happened, so neither did anything it
+            // decided to settle; a retry re-derives them.
+            self.deferred_restore_settlements = previous_restore_settlements;
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
@@ -904,6 +919,15 @@ impl OfflineProtocol {
 
         state.state = ProtocolState::Running;
         drop(state);
+
+        // Settle what restore could not recover, now that the event pipeline is
+        // live. These ids were handed to the app by `send_message*` before the
+        // process died; without this they would never resolve to anything.
+        // Drained before the flush below so an app sees the failures first and
+        // cannot mistake a restored send for the settlement of a lost one.
+        for event in std::mem::take(&mut self.deferred_restore_settlements) {
+            self.emit_event(event);
+        }
 
         self.flush_restored_confirmed_pending_messages();
         self.kick_pending_session_reconciliation("start");
@@ -2267,6 +2291,26 @@ impl OfflineProtocol {
     pub(crate) fn emit_event(&self, event: Event) {
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(event);
+        }
+    }
+
+    /// Emits a terminal settlement, or parks it until `start()` if the event
+    /// pipeline is not live yet.
+    ///
+    /// Restore paths settle messages the app is still holding ids for. They run
+    /// from `initialize_mls`, before `start()` and often before the app has
+    /// installed its event callback, so emitting directly there would silently
+    /// discard exactly the signals that exist to stop an id from hanging
+    /// forever. Once running, this is a plain emit — the same call is used from
+    /// `process()`-driven expiry, where no deferral is wanted.
+    pub(crate) fn settle_restored_message_failure(&mut self, event: Event) {
+        let running = lock_shared_state(&self.shared_state)
+            .map(|state| state.state == ProtocolState::Running)
+            .unwrap_or(false);
+        if running {
+            self.emit_event(event);
+        } else {
+            self.deferred_restore_settlements.push(event);
         }
     }
 
