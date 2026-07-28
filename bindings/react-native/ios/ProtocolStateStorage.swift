@@ -7,6 +7,21 @@
 
 import Foundation
 
+#if SWIFT_PACKAGE
+enum MlsStorageError: Error {
+    case StoreFailed(message: String)
+    case LoadFailed(message: String)
+    case DeleteFailed(message: String)
+}
+
+protocol ProtocolStateStorageProvider {
+    func store(keyType: String, keyId: String, data: [UInt8]) throws
+    func load(keyType: String, keyId: String) throws -> [UInt8]?
+    func delete(keyType: String, keyId: String) throws
+    func listKeys(keyType: String) throws -> [String]
+}
+#endif
+
 /// File-backed protocol state whose lifecycle is tied to the app container.
 ///
 /// Each entry is written atomically. The directory is excluded from device
@@ -16,9 +31,10 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     private static let schemaDirectory = "protocol-state-v1"
 
     private let root: URL
+    private let fileManager: FileManager
     private let lock = NSLock()
 
-    init(
+    convenience init(
         accountNamespace: String,
         fileManager: FileManager = .default
     ) throws {
@@ -32,10 +48,19 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         }
 
         let bundleComponent = Bundle.main.bundleIdentifier ?? "com.offlineprotocol"
-        root = applicationSupport
+        let root = applicationSupport
             .appendingPathComponent(bundleComponent, isDirectory: true)
             .appendingPathComponent(Self.schemaDirectory, isDirectory: true)
             .appendingPathComponent(accountNamespace, isDirectory: true)
+        try self.init(root: root, fileManager: fileManager)
+    }
+
+    init(
+        root: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        self.root = root
+        self.fileManager = fileManager
 
         do {
             try fileManager.createDirectory(
@@ -57,7 +82,6 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         lock.lock()
         defer { lock.unlock() }
 
-        let fileManager = FileManager.default
         let directory = typeDirectory(keyType)
         do {
             try fileManager.createDirectory(
@@ -77,7 +101,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         defer { lock.unlock() }
 
         let url = entryURL(keyType: keyType, keyId: keyId)
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard fileManager.fileExists(atPath: url.path) else {
             return nil
         }
         do {
@@ -94,11 +118,11 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         defer { lock.unlock() }
 
         let url = entryURL(keyType: keyType, keyId: keyId)
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard fileManager.fileExists(atPath: url.path) else {
             return
         }
         do {
-            try FileManager.default.removeItem(at: url)
+            try fileManager.removeItem(at: url)
         } catch {
             throw MlsStorageError.DeleteFailed(
                 message: "Failed to delete protocol state: \(error)"
@@ -111,11 +135,11 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         defer { lock.unlock() }
 
         let directory = typeDirectory(keyType)
-        guard FileManager.default.fileExists(atPath: directory.path) else {
+        guard fileManager.fileExists(atPath: directory.path) else {
             return []
         }
         do {
-            return try FileManager.default
+            return try fileManager
                 .contentsOfDirectory(
                     at: directory,
                     includingPropertiesForKeys: nil,
