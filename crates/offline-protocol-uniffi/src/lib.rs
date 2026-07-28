@@ -313,59 +313,47 @@ fn map_storage_provider_error(
     }
 }
 
-macro_rules! impl_storage_wrapper {
-    ($wrapper:ty, $storage_trait:path) => {
-        impl $storage_trait for $wrapper {
-            fn store(
-                &self,
-                key_type: &str,
-                key_id: &str,
-                data: &[u8],
-            ) -> offline_protocol_mls::storage::StorageResult<()> {
-                self.provider
-                    .store(key_type.to_string(), key_id.to_string(), data.to_vec())
-                    .map_err(|error| {
-                        map_storage_provider_error(error, StorageOperation::Store, key_id)
-                    })
-            }
+impl CoreMlsStorage for MlsStorageWrapper {
+    fn store(
+        &self,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.provider
+            .store(key_type.to_string(), key_id.to_string(), data.to_vec())
+            .map_err(|error| map_storage_provider_error(error, StorageOperation::Store, key_id))
+    }
 
-            fn load(
-                &self,
-                key_type: &str,
-                key_id: &str,
-            ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
-                self.provider
-                    .load(key_type.to_string(), key_id.to_string())
-                    .map_err(|error| {
-                        map_storage_provider_error(error, StorageOperation::Load, key_id)
-                    })
-            }
+    fn load(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+        self.provider
+            .load(key_type.to_string(), key_id.to_string())
+            .map_err(|error| map_storage_provider_error(error, StorageOperation::Load, key_id))
+    }
 
-            fn delete(
-                &self,
-                key_type: &str,
-                key_id: &str,
-            ) -> offline_protocol_mls::storage::StorageResult<()> {
-                self.provider
-                    .delete(key_type.to_string(), key_id.to_string())
-                    .map_err(|error| {
-                        map_storage_provider_error(error, StorageOperation::Delete, key_id)
-                    })
-            }
+    fn delete(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.provider
+            .delete(key_type.to_string(), key_id.to_string())
+            .map_err(|error| map_storage_provider_error(error, StorageOperation::Delete, key_id))
+    }
 
-            fn list_keys(
-                &self,
-                key_type: &str,
-            ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
-                self.provider
-                    .list_keys(key_type.to_string())
-                    .map_err(|error| map_storage_provider_error(error, StorageOperation::Load, ""))
-            }
-        }
-    };
+    fn list_keys(
+        &self,
+        key_type: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        self.provider
+            .list_keys(key_type.to_string())
+            .map_err(|error| map_storage_provider_error(error, StorageOperation::Load, ""))
+    }
 }
-
-impl_storage_wrapper!(MlsStorageWrapper, CoreMlsStorage);
 
 /// Maps a provider failure onto the protocol-state contract.
 ///
