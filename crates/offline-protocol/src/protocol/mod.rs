@@ -599,6 +599,19 @@ impl OfflineProtocol {
         secure_storage: Arc<dyn MlsStorage>,
         protocol_state_storage: Arc<dyn ProtocolStateStorage>,
     ) -> Result<()> {
+        self.initialize_mls_inner(secure_storage, protocol_state_storage, true)
+    }
+
+    /// `adopt_legacy_state` exists only so test fixtures can point both handles
+    /// at one backend. Adoption moves records *between* the two stores, which
+    /// on a shared backend would mean deleting a record through the same store
+    /// it was just read from.
+    fn initialize_mls_inner(
+        &mut self,
+        secure_storage: Arc<dyn MlsStorage>,
+        protocol_state_storage: Arc<dyn ProtocolStateStorage>,
+        adopt_legacy_state: bool,
+    ) -> Result<()> {
         if self.mls_manager.is_some() {
             return Ok(());
         }
@@ -638,6 +651,16 @@ impl OfflineProtocol {
         // this key, so restoring first would silently start from empty and then
         // overwrite durable state with that empty view.
         self.restore_or_init_state_record_key();
+
+        // Then adopt anything the pre-split build left in secure storage, so
+        // the restores below see one complete view. Must follow the record key
+        // (adoption seals what it moves) and precede every restore (a restore
+        // that ran first would find nothing and then overwrite the legacy state
+        // with that empty view). Best-effort and resumable: a failure here
+        // leaves the legacy records in place for the next launch.
+        if adopt_legacy_state {
+            self.adopt_legacy_protocol_state();
+        }
 
         // Load the persistent scrub secret outside the transactional restore
         // below: it is independent of MLS state, and a later MLS-restore
@@ -703,7 +726,7 @@ impl OfflineProtocol {
         let protocol_state_storage = Arc::new(TestProtocolStateStorage {
             storage: storage.clone(),
         });
-        self.initialize_mls(storage, protocol_state_storage)
+        self.initialize_mls_inner(storage, protocol_state_storage, false)
     }
 
     /// Test-only storage initialization for persistence-focused fixtures that

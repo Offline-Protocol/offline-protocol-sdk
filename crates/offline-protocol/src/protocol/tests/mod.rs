@@ -5735,6 +5735,135 @@ fn started_protocol_events(protocol: &mut OfflineProtocol) -> Arc<Mutex<Vec<Even
 }
 
 #[test]
+fn test_pre_split_protocol_state_is_adopted_out_of_secure_storage() {
+    // Splitting the storage domains renamed where delivery state lives. Without
+    // an adoption sweep, the first launch after an upgrade comes up with an
+    // empty block list — every previously blocked peer silently unblocked —
+    // and an empty outbox, while the old records sit in the credential store
+    // forever with nothing ever reading or deleting them.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    secure
+        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .unwrap();
+    let (pending_id, pending_json) = pending_record("queued before the upgrade");
+    secure
+        .store(storage_keys::PENDING_MESSAGES, "bob", &pending_json)
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert!(
+        protocol.is_user_blocked("mallory"),
+        "a block predating the split must survive the upgrade"
+    );
+    let restored = protocol.pending_encrypted_messages.get("bob").unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].message_id, pending_id);
+
+    // Moved, not copied. A leftover copy would keep message plaintext in the
+    // credential store indefinitely — the exact resting place the split exists
+    // to get it out of.
+    assert!(secure
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .is_none());
+    assert!(secure
+        .load(storage_keys::BLOCKED_USERS, "mallory")
+        .unwrap()
+        .is_none());
+
+    // And what landed in the app container is sealed, not the plaintext that
+    // was safe only because the credential store was protecting it.
+    let adopted = state
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .unwrap();
+    assert!(
+        !adopted
+            .windows(b"queued before the upgrade".len())
+            .any(|window| window == b"queued before the upgrade"),
+        "adoption must seal on the way in"
+    );
+}
+
+#[test]
+fn test_adoption_never_overwrites_post_split_state() {
+    // Post-split state is authoritative. A blind copy would also be unsafe on a
+    // shared backend, where the delete would remove the record through the same
+    // store it was just read from.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let (_, legacy_json) = pending_record("stale legacy copy");
+    secure
+        .store(storage_keys::PENDING_MESSAGES, "bob", &legacy_json)
+        .unwrap();
+    let (current_id, current_json) = pending_record("current copy");
+    let cipher = state_record_cipher_for(&secure);
+    state
+        .store(
+            storage_keys::PENDING_MESSAGES,
+            "bob",
+            &cipher
+                .seal(storage_keys::PENDING_MESSAGES, "bob", &current_json)
+                .unwrap(),
+        )
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let restored = protocol.pending_encrypted_messages.get("bob").unwrap();
+    assert_eq!(restored[0].message_id, current_id, "post-split state wins");
+    assert!(
+        secure
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_some(),
+        "a skipped record must be left alone, not deleted"
+    );
+}
+
+#[test]
+fn test_adoption_runs_once_and_does_not_resurrect_deleted_state() {
+    // The marker makes the sweep one-shot. Without it, a peer unblocked after
+    // the upgrade would be re-blocked by the next launch re-reading a legacy
+    // record — or, worse, a settled outbox entry would be resent.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    secure
+        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls(secure_handle, state_handle).unwrap();
+    first.unblock_user("mallory").unwrap();
+
+    // Put the legacy record back, as an interrupted first sweep might have.
+    secure
+        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls(secure_handle, state_handle).unwrap();
+    assert!(
+        !second.is_user_blocked("mallory"),
+        "the marker must stop a second sweep from resurrecting adopted state"
+    );
+}
+
+#[test]
 fn test_unreadable_outbox_entry_is_settled_rather_than_dropped_silently() {
     // A record sealed under a key this install no longer has is gone for good.
     // The app is still holding the id `send_message` returned, so the loss has

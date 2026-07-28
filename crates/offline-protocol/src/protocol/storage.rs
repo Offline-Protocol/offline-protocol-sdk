@@ -14,7 +14,7 @@ use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::{Error, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{LamportClock, MessageId};
-use offline_protocol_mls::MlsManager;
+use offline_protocol_mls::{MlsManager, MlsStorage};
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
@@ -232,6 +232,190 @@ impl OfflineProtocol {
                 Ok(StateRecord::Unreadable)
             }
         }
+    }
+
+    // ========================================================================
+    // PRE-SPLIT PROTOCOL STATE ADOPTION
+    // ========================================================================
+
+    /// Adopts protocol state written before the storage split, moving it out of
+    /// secure storage and into the install-scoped store.
+    ///
+    /// Splitting the domains renamed where this state lives. Without a sweep,
+    /// the first launch after an upgrade would come up with an empty outbox, an
+    /// empty pending queue, and — most sharply — an **empty block list**, since
+    /// all of it was previously persisted through the `MlsStorage` handle. The
+    /// records would also stay in the credential store forever with nothing
+    /// ever reading or deleting them, which is the worst possible resting place
+    /// for `pending_messages` (message plaintext) and `outbox` (cloud-media
+    /// `encryption_key`/`iv`) — the very values the split exists to seal.
+    ///
+    /// This is a bulk move rather than the read-through
+    /// [`crate::MlsStorage`] adoption used for MLS material, because
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] is a *closed* set: the SDK
+    /// declares every protocol-state category itself, where OpenMLS contributes
+    /// arbitrary labels to the MLS keyspace. Enumeration therefore terminates,
+    /// which read-through can never guarantee.
+    ///
+    /// Properties worth keeping if this is ever touched:
+    ///
+    /// - **Resumable.** Each record is deleted from secure storage only once it
+    ///   is durably written to protocol-state storage, so a crash mid-sweep
+    ///   leaves the remainder to be re-adopted next launch.
+    /// - **Non-destructive.** A key already present in protocol-state storage
+    ///   wins and its legacy twin is left alone. Post-split state is always
+    ///   authoritative, and — since one backend may legitimately serve both
+    ///   handles in tests — a blind copy-then-delete could otherwise delete a
+    ///   record through the same store it just read it from.
+    /// - **All-or-nothing marker.** The marker is written only when the sweep
+    ///   completed without a storage error, so a transiently unavailable
+    ///   credential store means "try again next launch", not "give up forever".
+    /// - **Sealing applies.** Records are written through
+    ///   [`Self::write_state_record`], so categories that require sealing are
+    ///   sealed on the way in and the legacy plaintext is then deleted.
+    pub(crate) fn adopt_legacy_protocol_state(&mut self) {
+        let (Some(secure), Some(state)) = (
+            self.secure_storage.clone(),
+            self.protocol_state_storage.clone(),
+        ) else {
+            return;
+        };
+
+        match state.load(
+            storage_keys::STATE_ADOPTION,
+            storage_keys::STATE_ADOPTION_ID,
+        ) {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(e) => {
+                // Unknown whether the sweep already ran. Skipping is the safe
+                // side: adoption is non-destructive, so re-running it later
+                // costs nothing, while running it against a store we cannot
+                // read is unnecessary work on every boot.
+                warn!(error = %e, "Could not read the protocol-state adoption marker; skipping adoption");
+                return;
+            }
+        }
+
+        let mut adopted = 0usize;
+        let mut failed = false;
+        for key_type in storage_keys::ADOPTABLE_STATE_KEY_TYPES {
+            let key_ids = match secure.list_keys(key_type) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(key_type = %key_type, error = %e, "Failed to list legacy protocol state");
+                    failed = true;
+                    continue;
+                }
+            };
+
+            if key_ids.len() > MAX_RESTORE_KEYS_PER_CATEGORY {
+                // Never reachable from state this SDK wrote. Say so rather than
+                // letting the tail vanish behind a `take` — the marker below
+                // will make this the only pass that ever looks.
+                warn!(
+                    key_type = %key_type,
+                    listed = key_ids.len(),
+                    cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                    "Legacy protocol state listed more entries than any legitimate run can produce; adopting only the first"
+                );
+            }
+            for key_id in key_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+                match self.adopt_one_legacy_record(
+                    secure.as_ref(),
+                    state.as_ref(),
+                    key_type,
+                    &key_id,
+                ) {
+                    Ok(true) => adopted += 1,
+                    Ok(false) => {}
+                    Err(()) => failed = true,
+                }
+            }
+        }
+
+        if failed {
+            warn!(
+                adopted,
+                "Pre-split protocol state only partially adopted; will retry on the next launch"
+            );
+            return;
+        }
+
+        if let Err(e) = state.store(
+            storage_keys::STATE_ADOPTION,
+            storage_keys::STATE_ADOPTION_ID,
+            &[],
+        ) {
+            // Without the marker the sweep simply runs again next launch. It is
+            // idempotent, so that costs one wasted enumeration, not correctness.
+            warn!(error = %e, "Failed to record the protocol-state adoption marker");
+        }
+        if adopted > 0 {
+            info!(
+                count = adopted,
+                "Adopted pre-split protocol state from secure storage"
+            );
+        }
+    }
+
+    /// Moves one legacy record. `Ok(true)` when it was adopted, `Ok(false)`
+    /// when there was nothing to do, `Err(())` when a storage failure means the
+    /// sweep must be retried later.
+    fn adopt_one_legacy_record(
+        &self,
+        secure: &dyn MlsStorage,
+        state: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+    ) -> std::result::Result<bool, ()> {
+        // Post-split state wins: never overwrite a record this build wrote.
+        match state.load(key_type, key_id) {
+            Ok(Some(_)) => return Ok(false),
+            Ok(None) => {}
+            Err(e) => {
+                warn!(key_type = %key_type, error = %e, "Failed to probe protocol state during adoption");
+                return Err(());
+            }
+        }
+
+        let data = match secure.load(key_type, key_id) {
+            Ok(Some(data)) => data,
+            // A key that listed but no longer loads was deleted underneath us.
+            Ok(None) => return Ok(false),
+            Err(e) => {
+                warn!(key_type = %key_type, error = %e, "Failed to read legacy protocol state");
+                return Err(());
+            }
+        };
+
+        if data.len() > MAX_PROTOCOL_STATE_RECORD_BYTES {
+            // Over the record cap, so it could never be written or restored.
+            // Delete it rather than retrying the sweep forever over a record
+            // that has no reachable destination.
+            warn!(
+                key_type = %key_type,
+                len = data.len(),
+                "Dropping oversized legacy protocol state record"
+            );
+            let _ = secure.delete(key_type, key_id);
+            return Ok(false);
+        }
+
+        if let Err(e) = self.write_state_record(state, key_type, key_id, &data) {
+            warn!(key_type = %key_type, error = %e, "Failed to adopt legacy protocol state record");
+            return Err(());
+        }
+
+        // Only now is the legacy copy redundant. Ordering matters: a delete
+        // before the write would lose the record on a crash in between.
+        if let Err(e) = secure.delete(key_type, key_id) {
+            // The record is safely adopted; the leftover is cosmetic and the
+            // next sweep's "already present" check will skip it. Do not fail
+            // the sweep over it.
+            debug!(key_type = %key_type, error = %e, "Failed to delete adopted legacy protocol state record");
+        }
+        Ok(true)
     }
 
     // ========================================================================

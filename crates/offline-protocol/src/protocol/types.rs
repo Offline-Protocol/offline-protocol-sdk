@@ -1129,6 +1129,37 @@ pub(crate) mod storage_keys {
     /// Persisted so an owner restart mid-convergence cannot let a stale plaintext
     /// probe/ack prematurely confirm and strand the peer on a divergent group.
     pub const BOTH_CREATE_AWAITING_DECRYPT: &str = "both_create_awaiting_decrypt";
+    /// Key type for the marker recording that pre-split protocol state has been
+    /// adopted out of secure storage (see
+    /// `OfflineProtocol::adopt_legacy_protocol_state`). Lives in *protocol
+    /// state* storage, so a reinstall — which drops that container — correctly
+    /// re-runs the sweep against whatever the credential store still holds.
+    pub const STATE_ADOPTION: &str = "protocol_state_adoption";
+    /// Key ID for the single state-adoption marker entry.
+    pub const STATE_ADOPTION_ID: &str = "v1";
+
+    /// Every key type that moved from secure storage into protocol-state
+    /// storage when the two domains were split.
+    ///
+    /// Unlike the MLS key-type set — which is open, because OpenMLS contributes
+    /// its own labels through `storage_adapter.rs` — this set is closed and
+    /// declared right here, which is what makes a one-shot bulk adoption
+    /// possible at all (see `OfflineProtocol::adopt_legacy_protocol_state`).
+    /// A new protocol-state category added *after* the split must NOT be added
+    /// here: there is no pre-split data for it to inherit, and listing it would
+    /// only cost a pointless enumeration of the credential store.
+    pub const ADOPTABLE_STATE_KEY_TYPES: &[&str] = &[
+        BLOCKED_USERS,
+        OUTBOX,
+        PENDING_MESSAGES,
+        SESSION_STATES,
+        WELCOME_LIFECYCLES,
+        PEER_KEY_PACKAGES,
+        PEER_CAPABILITIES,
+        MEDIA_DESCRIPTORS,
+        BOTH_CREATE_AWAITING_DECRYPT,
+        LAMPORT_CLOCK,
+    ];
 }
 
 /// Protocol state.
