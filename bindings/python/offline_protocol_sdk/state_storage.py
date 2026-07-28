@@ -29,6 +29,32 @@ def _default_root() -> Path:
     )
 
 
+def _sync_directory(directory: Path) -> None:
+    """Flush a directory entry so a rename or unlink in it survives a crash.
+
+    ``fsync`` on the temporary file only makes its *contents* durable; the link
+    that ``os.replace`` (or ``unlink``) creates or removes lives in the parent
+    directory and needs its own flush. Without this a power loss can lose a
+    store the SDK was told succeeded — most sharply for the sealed record key's
+    counterpart records — or resurrect a deleted outbox entry and resend work
+    that was already settled.
+
+    Best effort: directories cannot be opened for ``fsync`` on every platform
+    (notably Windows), and there the file-level ``fsync`` above remains the
+    strongest guarantee available.
+    """
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 def _encode_component(value: str) -> str:
     encoded = base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii")
     return f"k_{encoded.rstrip('=')}"
@@ -80,6 +106,7 @@ class AppStateStorage(ProtocolStateStorageProvider):
                         handle.flush()
                         os.fsync(handle.fileno())
                     os.replace(temporary, self._entry_path(key_type, key_id))
+                    _sync_directory(directory)
                 except BaseException:
                     try:
                         os.unlink(temporary)
@@ -105,12 +132,16 @@ class AppStateStorage(ProtocolStateStorageProvider):
 
     def delete(self, key_type: str, key_id: str) -> None:
         with self._lock:
+            path = self._entry_path(key_type, key_id)
             try:
-                self._entry_path(key_type, key_id).unlink(missing_ok=True)
+                path.unlink()
+            except FileNotFoundError:
+                return
             except OSError as exc:
                 raise MlsStorageError.DeleteFailed(
                     f"failed to delete protocol state: {exc}"
                 ) from exc
+            _sync_directory(path.parent)
 
     def list_keys(self, key_type: str) -> list[str]:
         with self._lock:

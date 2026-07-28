@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
+from offline_protocol_sdk import state_storage as state_storage_module
 from offline_protocol_sdk.state_storage import AppStateStorage
 
 
@@ -29,6 +32,49 @@ def test_state_storage_overwrite_is_atomic_and_delete_is_idempotent(tmp_path) ->
     storage.delete("outbox", "message-1")
     assert storage.load("outbox", "message-1") is None
     assert storage.list_keys("outbox") == []
+
+
+def test_state_storage_flushes_the_directory_after_rename_and_unlink(
+    tmp_path, monkeypatch
+) -> None:
+    # fsyncing the temporary file only makes its contents durable; the link
+    # os.replace creates (and unlink removes) lives in the parent directory and
+    # needs its own flush, or a crash can lose an acknowledged store or
+    # resurrect a deleted outbox entry.
+    synced: list[str] = []
+    real_sync = state_storage_module._sync_directory
+
+    def recording_sync(directory) -> None:
+        synced.append(str(directory))
+        real_sync(directory)
+
+    monkeypatch.setattr(state_storage_module, "_sync_directory", recording_sync)
+
+    storage = AppStateStorage(tmp_path / "state")
+    storage.store("outbox", "message-1", [1, 2, 3])
+    assert len(synced) == 1
+
+    storage.delete("outbox", "message-1")
+    assert len(synced) == 2
+
+    # A delete of an absent entry changed no directory entry, so it has nothing
+    # to flush.
+    storage.delete("outbox", "message-1")
+    assert len(synced) == 2
+
+
+def test_sync_directory_is_best_effort_on_platforms_that_refuse_it(
+    tmp_path, monkeypatch
+) -> None:
+    # Windows cannot open a directory for fsync. That must degrade to the
+    # file-level fsync, never raise out of a store the caller was told
+    # succeeded.
+    def refusing_open(*args, **kwargs):
+        raise OSError("directories cannot be opened here")
+
+    monkeypatch.setattr(os, "open", refusing_open)
+
+    state_storage_module._sync_directory(tmp_path)
 
 
 def test_state_storage_namespaces_accounts(tmp_path) -> None:

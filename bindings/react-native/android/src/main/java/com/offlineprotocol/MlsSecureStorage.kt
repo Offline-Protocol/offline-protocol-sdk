@@ -14,6 +14,13 @@ import uniffi.offline_protocol.MlsStorageProvider
  * - Uses AES-256 encryption with hardware-backed keystore when available
  * - Provides atomic operations for thread safety
  * - Maintains an index for efficient key listing
+ *
+ * Writes are durable before they return. Core treats a successful [store] as
+ * persisted — most sharply for the per-install protocol-state record key, which
+ * it immediately starts sealing app-container records under — so every mutation
+ * uses `commit()` (synchronous, reports failure) rather than `apply()`
+ * (in-memory now, disk later, failure invisible). A crash in an `apply()`
+ * window would leave durable ciphertext whose key was never written.
  */
 class MlsSecureStorage(
     context: Context,
@@ -48,26 +55,26 @@ class MlsSecureStorage(
                 val key = makeKey(keyType, keyId)
                 val byteArray = data.map { it.toByte() }.toByteArray()
                 val encoded = Base64.encodeToString(byteArray, Base64.NO_WRAP)
-                
-                sharedPreferences.edit().apply {
-                    putString(key, encoded)
-                    
-                    // Update the index for this key type
-                    val indexKey = "$INDEX_PREFIX$keyType"
-                    // Note: getStringSet returns a reference that shouldn't be modified directly
-                    // We must create a new set to avoid ConcurrentModificationException or side effects
-                    val existingKeys = sharedPreferences.getStringSet(indexKey, null) ?: emptySet()
-                    val updatedKeys = HashSet(existingKeys)
-                    updatedKeys.add(keyId)
-                    
-                    putStringSet(indexKey, updatedKeys)
-                    
-                    // Use commit() instead of apply() to ensure synchronous persistence if needed, 
-                    // or stick to apply() if speed is preferred. 
-                    // Since we are synchronized, apply() is safe for the in-memory state which 
-                    // SharedPreferences maintains.
-                    apply() 
+
+                // Update the index for this key type.
+                // Note: getStringSet returns a reference that shouldn't be modified directly.
+                // We must create a new set to avoid ConcurrentModificationException or side effects
+                val indexKey = "$INDEX_PREFIX$keyType"
+                val existingKeys = sharedPreferences.getStringSet(indexKey, null) ?: emptySet()
+                val updatedKeys = HashSet(existingKeys)
+                updatedKeys.add(keyId)
+
+                val committed = sharedPreferences.edit()
+                    .putString(key, encoded)
+                    .putStringSet(indexKey, updatedKeys)
+                    .commit()
+                if (!committed) {
+                    throw MlsStorageException.StoreFailed(
+                        "EncryptedSharedPreferences store failed: commit rejected for $keyType"
+                    )
                 }
+            } catch (e: MlsStorageException) {
+                throw e
             } catch (e: Exception) {
                 throw MlsStorageException.StoreFailed("EncryptedSharedPreferences store failed: ${e.message}")
             }
@@ -96,21 +103,27 @@ class MlsSecureStorage(
         synchronized(LOCK) {
             try {
                 val key = makeKey(keyType, keyId)
-                
-                sharedPreferences.edit().apply {
-                    remove(key)
-                    
-                    // Update the index for this key type
-                    val indexKey = "$INDEX_PREFIX$keyType"
-                    val existingKeys = sharedPreferences.getStringSet(indexKey, null) ?: emptySet()
-                    if (existingKeys.contains(keyId)) {
-                        val updatedKeys = HashSet(existingKeys)
-                        updatedKeys.remove(keyId)
-                        putStringSet(indexKey, updatedKeys)
-                    }
-                    
-                    apply()
+                val editor = sharedPreferences.edit().remove(key)
+
+                // Update the index for this key type
+                val indexKey = "$INDEX_PREFIX$keyType"
+                val existingKeys = sharedPreferences.getStringSet(indexKey, null) ?: emptySet()
+                if (existingKeys.contains(keyId)) {
+                    val updatedKeys = HashSet(existingKeys)
+                    updatedKeys.remove(keyId)
+                    editor.putStringSet(indexKey, updatedKeys)
                 }
+
+                // commit(), not apply(): a delete that is only in memory can be
+                // undone by a crash, resurrecting key material the caller
+                // believes is gone.
+                if (!editor.commit()) {
+                    throw MlsStorageException.DeleteFailed(
+                        "EncryptedSharedPreferences delete failed: commit rejected for $keyType"
+                    )
+                }
+            } catch (e: MlsStorageException) {
+                throw e
             } catch (e: Exception) {
                 throw MlsStorageException.DeleteFailed("EncryptedSharedPreferences delete failed: ${e.message}")
             }
