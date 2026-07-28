@@ -197,6 +197,7 @@ const config = {
       maxDelayMs: 300000,          // Backoff ceiling (5 min)
       backoffMultiplier: 2.0,      // Exponential factor
       outboxMaxLifetimeMs: 604800000, // 7 day outbox lifetime
+      pendingMessageMaxLifetimeMs: 604800000, // 7 days awaiting MLS session
     },
   },
 };

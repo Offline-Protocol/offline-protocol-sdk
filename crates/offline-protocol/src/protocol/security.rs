@@ -519,7 +519,7 @@ impl OfflineProtocol {
 
     /// Persists a single TOFU entry to storage.
     pub(super) fn persist_tofu_entry(&self, peer_id: &str, entry: &TofuEntry) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.secure_storage else {
             return;
         };
         match serde_json::to_vec(entry) {
@@ -536,7 +536,7 @@ impl OfflineProtocol {
 
     /// Deletes a TOFU entry from storage (e.g. on LRU eviction).
     pub(super) fn delete_tofu_entry(&self, peer_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.secure_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::TOFU_KEYS, peer_id) {
@@ -610,7 +610,7 @@ impl OfflineProtocol {
     /// capacity limit even if storage contains more entries (e.g. after
     /// the limit was lowered in a new version).
     pub(super) fn restore_tofu_keys(&mut self) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.secure_storage else {
             return;
         };
         let peer_ids = match storage.list_keys(storage_keys::TOFU_KEYS) {

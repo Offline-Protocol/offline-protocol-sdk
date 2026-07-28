@@ -164,6 +164,11 @@ Use the manual MLS APIs (described below) when you need:
 │  │  │  - iOS: Keychain                 │  │ │
 │  │  │  - Android: EncryptedPrefs       │  │ │
 │  │  └──────────────────────────────────┘  │ │
+│  │  ┌──────────────────────────────────┐  │ │
+│  │  │ App-Container Protocol State     │  │ │
+│  │  │ - Outbox / pending messages      │  │ │
+│  │  │ - Retry / delivery lifecycles    │  │ │
+│  │  └──────────────────────────────────┘  │ │
 │  └────────────────────────────────────────┘ │
 └─────────────────────────────────────────────┘
 ```
@@ -172,24 +177,27 @@ Use the manual MLS APIs (described below) when you need:
 
 ### 1. Initialize MLS
 
-MLS persists key material through a secure-storage backend that you provide by implementing
-`MlsStorageProvider` (iOS Keychain, Android Keystore / EncryptedSharedPreferences, or your own
-scheme). Pass your provider to `initializeMls` — see [Custom Storage](#custom-storage-advanced)
-for a complete provider implementation:
+MLS initialization requires two storage providers with different lifecycles:
+
+- `MlsStorageProvider` stores cryptographic material in Keychain, Keystore-backed
+  encrypted preferences, or another credential store.
+- `ProtocolStateStorageProvider` stores restartable delivery state inside the app
+  container. It must be removed on app deletion and must not use a credential store.
 
 ```swift
-// iOS — `storage` is your MlsStorageProvider (e.g. Keychain-backed)
-try mesh.initializeMls(storage: storage)
+try mesh.initializeMls(
+    secureStorage: keychainStorage,
+    protocolStateStorage: appContainerStorage
+)
 ```
 
 ```kotlin
-// Android — `storage` is your MlsStorageProvider (e.g. EncryptedSharedPreferences-backed)
-protocol.initializeMls(storage)
+protocol.initializeMls(encryptedStorage, appContainerStorage)
 ```
 
-> **React Native:** the wrapper bundles a Keychain / EncryptedSharedPreferences provider, so RN
-> apps can just call `initializeMlsWithSecureStorage()` — or let `start()` initialize MLS
-> automatically when encryption is enabled.
+> **React Native:** the wrapper supplies both providers, so apps can call
+> `initializeMlsWithSecureStorage()` — or let `start()` initialize MLS automatically
+> when encryption is enabled.
 
 ### 2. Generate and Share Key Packages
 
@@ -279,25 +287,33 @@ if let welcomeData = message.metadata["mls_welcome"] {
 
 ## Custom Storage (Advanced)
 
-The React Native wrapper ships built-in secure storage; native (Swift/Kotlin) integrations provide their own by implementing `MlsStorageProvider`. A custom provider is also useful for custom backup strategies, additional encryption layers, or testing.
+The React Native wrapper ships both built-in providers. Native Swift/Kotlin
+integrations provide an `MlsStorageProvider` for key material and a
+`ProtocolStateStorageProvider` for app-container state. Both interfaces expose
+the same CRUD operations, but they are intentionally different types so their
+lifecycles cannot be wired accidentally.
 
 ### Using Custom Storage
 
 ```swift
-// iOS - custom storage
-let customStorage = MyCustomMlsStorage()
-try mesh.initializeMls(storage: customStorage)
+let secureStorage = MyCustomMlsStorage()
+let stateStorage = MyAppContainerStateStorage()
+try mesh.initializeMls(
+    secureStorage: secureStorage,
+    protocolStateStorage: stateStorage
+)
 ```
 
 ```kotlin
-// Android - custom storage
-val customStorage = MyCustomMlsStorage()
-protocol.initializeMls(customStorage)
+val secureStorage = MyCustomMlsStorage()
+val stateStorage = MyAppContainerStateStorage()
+protocol.initializeMls(secureStorage, stateStorage)
 ```
 
-### Implementing MlsStorageProvider
+### Implementing the Providers
 
-To create a custom storage provider, implement the `MlsStorageProvider` protocol:
+Implement `MlsStorageProvider` for secure material. Implement
+`ProtocolStateStorageProvider` with the same methods for app-container state:
 
 ```swift
 // iOS Custom Implementation
@@ -340,6 +356,10 @@ class MyCustomMlsStorage : MlsStorageProvider {
     }
 }
 ```
+
+Do not implement the protocol-state provider with Keychain,
+EncryptedSharedPreferences backed by a surviving Keystore namespace, or any
+other store that can outlive the app container. State writes must be atomic.
 
 ### React Native
 
@@ -506,14 +526,15 @@ for runtime disable semantics.
 > The method names in these tables follow the **React Native / JS wrapper** API — including the
 > `mesh*` group helpers and `initializeMlsWithSecureStorage()`. The native UniFFI bindings expose
 > the same operations under their generated names (e.g. `createGroup`, `inviteToGroup`,
-> `sendGroupMessage`, `initializeMls(storage)`), as shown in the Swift/Kotlin snippets above.
+> `sendGroupMessage`, `initializeMls(secureStorage, protocolStateStorage)`), as shown in the
+> Swift/Kotlin snippets above.
 
 ### Initialization
 
 | Method | Description |
 |--------|-------------|
-| `initializeMlsWithSecureStorage()` | Initialize MLS with built-in platform secure storage (recommended) |
-| `initializeMls(storage)` | Initialize MLS with custom storage provider |
+| `initializeMlsWithSecureStorage()` | Initialize MLS with built-in secure and app-container state storage (recommended) |
+| `initializeMls(secureStorage, protocolStateStorage)` | Initialize MLS with custom lifecycle-separated providers |
 | `isMlsInitialized()` | Check if MLS is initialized |
 
 ### Key Packages

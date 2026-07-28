@@ -37,7 +37,7 @@ impl OfflineProtocol {
         recipient: &str,
         messages: &[PendingMessage],
     ) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
 
@@ -69,7 +69,7 @@ impl OfflineProtocol {
         &self,
         recipient: &str,
     ) -> Option<Vec<PendingMessage>> {
-        let storage = self.message_storage.as_ref()?;
+        let storage = self.protocol_state_storage.as_ref()?;
         let data = storage
             .load(storage_keys::PENDING_MESSAGES, recipient)
             .ok()??;
@@ -78,7 +78,7 @@ impl OfflineProtocol {
 
     /// Removes pending messages for a recipient from storage.
     pub(crate) fn clear_pending_messages_from_storage(&self, recipient: &str) {
-        if let Some(storage) = &self.message_storage {
+        if let Some(storage) = &self.protocol_state_storage {
             let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
         }
     }
@@ -88,7 +88,7 @@ impl OfflineProtocol {
     /// This should be called after initializing storage to recover
     /// any messages that were pending when the app was terminated.
     pub(crate) fn restore_pending_messages(&mut self) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
 
@@ -105,6 +105,7 @@ impl OfflineProtocol {
             }
         }
 
+        self.cleanup_expired_pending_messages();
         Ok(())
     }
 
@@ -114,7 +115,7 @@ impl OfflineProtocol {
 
     /// Persists a received key package for a peer so it survives restart.
     pub(crate) fn persist_peer_key_package(&self, peer_id: &str, pkg: &ReceivedKeyPackage) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         match serde_json::to_vec(pkg) {
@@ -134,7 +135,7 @@ impl OfflineProtocol {
         &self,
         peer_id: &str,
     ) -> Option<ReceivedKeyPackage> {
-        let storage = self.message_storage.as_ref()?;
+        let storage = self.protocol_state_storage.as_ref()?;
         let data = storage
             .load(storage_keys::PEER_KEY_PACKAGES, peer_id)
             .ok()??;
@@ -149,7 +150,7 @@ impl OfflineProtocol {
 
     /// Removes persisted key package for a peer (e.g. after session created).
     pub(crate) fn delete_peer_key_package_from_storage(&self, peer_id: &str) {
-        if let Some(storage) = &self.message_storage {
+        if let Some(storage) = &self.protocol_state_storage {
             let _ = storage.delete(storage_keys::PEER_KEY_PACKAGES, peer_id);
         }
     }
@@ -171,7 +172,7 @@ impl OfflineProtocol {
         &mut self,
         mls: &Arc<RwLock<MlsManager>>,
     ) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
 
@@ -232,7 +233,7 @@ impl OfflineProtocol {
     /// other persist paths: a lost record only degrades output (JSON
     /// envelope, dropped rich extras) until the next live exchange.
     pub(crate) fn persist_peer_capabilities(&self, peer_id: &str, caps: &PeerCapabilities) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         match serde_json::to_vec(caps) {
@@ -250,7 +251,7 @@ impl OfflineProtocol {
     /// Removes the persisted capability record for a peer (downgrade,
     /// eviction, or peer-state cleanup).
     pub(crate) fn delete_peer_capabilities_from_storage(&self, peer_id: &str) {
-        if let Some(storage) = &self.message_storage {
+        if let Some(storage) = &self.protocol_state_storage {
             let _ = storage.delete(storage_keys::PEER_CAPABILITIES, peer_id);
         }
     }
@@ -258,7 +259,7 @@ impl OfflineProtocol {
     /// Loads the persisted capability record for a peer, if any. Best-effort:
     /// storage or parse failures read as "no record".
     fn load_peer_capabilities(&self, peer_id: &str) -> Option<PeerCapabilities> {
-        let storage = self.message_storage.as_ref()?;
+        let storage = self.protocol_state_storage.as_ref()?;
         let data = storage
             .load(storage_keys::PEER_CAPABILITIES, peer_id)
             .ok()??;
@@ -320,7 +321,7 @@ impl OfflineProtocol {
     /// leftovers. Best-effort: failures degrade output, never blocking
     /// restore.
     pub(crate) fn restore_peer_capabilities(&mut self, mls: &Arc<RwLock<MlsManager>>) {
-        let Some(storage) = self.message_storage.clone() else {
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
         let peer_ids = match storage.list_keys(storage_keys::PEER_CAPABILITIES) {
@@ -405,7 +406,7 @@ impl OfflineProtocol {
 
     /// Loads a persisted session state entry (if present).
     pub(crate) fn load_session_state_entry(&self, peer_id: &str) -> Result<Option<SessionState>> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(None);
         };
 
@@ -438,7 +439,7 @@ impl OfflineProtocol {
         new_state: SessionState,
         source_event: &str,
     ) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Err(Error::MlsNotInitialized);
         };
 
@@ -469,7 +470,7 @@ impl OfflineProtocol {
     }
 
     pub(crate) fn clear_session_state_entry(&self, peer_id: &str) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
         storage
@@ -490,7 +491,7 @@ impl OfflineProtocol {
         &self,
         peer_id: &str,
     ) -> Result<Option<WelcomeLifecycleRecord>> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(None);
         };
 
@@ -519,7 +520,7 @@ impl OfflineProtocol {
         &self,
         record: &WelcomeLifecycleRecord,
     ) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Err(Error::MlsNotInitialized);
         };
 
@@ -537,7 +538,7 @@ impl OfflineProtocol {
     }
 
     pub(crate) fn clear_welcome_lifecycle_entry(&self, peer_id: &str) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
         storage
@@ -552,7 +553,7 @@ impl OfflineProtocol {
 
     pub(crate) fn restore_welcome_lifecycles(&mut self) -> Result<()> {
         self.welcome_lifecycles.clear();
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
 
@@ -673,7 +674,7 @@ impl OfflineProtocol {
     /// belongs to the media outbox — file transfers are not persisted and
     /// resurrected chunks could never complete, so we never write them.
     pub(crate) fn persist_outbox_entry(&self, entry: &OutboxEntry) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if Self::is_media_outbox_message(&entry.message) {
@@ -696,7 +697,7 @@ impl OfflineProtocol {
     /// Removes a persisted outbox entry from storage. Best-effort: a media
     /// message id is never persisted, so deleting it is a harmless no-op.
     pub(crate) fn clear_outbox_entry_from_storage(&self, message_id: &MessageId) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::OUTBOX, &message_id.as_str()) {
@@ -736,7 +737,7 @@ impl OfflineProtocol {
     /// - pre-existing in-memory entries not yet in storage are persisted, so
     ///   memory and storage are consistent once restore returns.
     pub(crate) fn restore_outbox(&mut self) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
 
@@ -751,7 +752,7 @@ impl OfflineProtocol {
         let mut restored: Vec<OutboxEntry> = Vec::new();
         for message_id in message_ids {
             let loaded = self
-                .message_storage
+                .protocol_state_storage
                 .as_ref()
                 .and_then(|s| s.load(storage_keys::OUTBOX, &message_id).ok().flatten());
             let Some(data) = loaded else {
@@ -871,7 +872,7 @@ impl OfflineProtocol {
     /// [`Self::restore_outbox`], which already holds a storage handle and
     /// operates on raw persisted keys.
     fn delete_outbox_key(&self, message_id: &str) {
-        if let Some(storage) = &self.message_storage {
+        if let Some(storage) = &self.protocol_state_storage {
             if let Err(e) = storage.delete(storage_keys::OUTBOX, message_id) {
                 warn!(message_id = %message_id, error = %e, "Failed to delete outbox key");
             }
@@ -887,7 +888,7 @@ impl OfflineProtocol {
     /// Best-effort and infallible, like [`Self::persist_outbox_entry`]: a
     /// failed write only costs the crash-recovery signal, not the transfer.
     pub(crate) fn persist_media_descriptor(&self, descriptor: &MediaTransferDescriptor) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         match serde_json::to_vec(descriptor) {
@@ -912,7 +913,7 @@ impl OfflineProtocol {
     /// died mid-transfer.
     pub(crate) fn remove_media_descriptor(&mut self, file_id: &str) {
         self.restored_media_descriptors.remove(file_id);
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::MEDIA_DESCRIPTORS, file_id) {
@@ -934,7 +935,7 @@ impl OfflineProtocol {
     /// leaving entries parked until a same-`file_id` resend consumes them or
     /// the restore TTL prunes them.
     pub(crate) fn restore_media_descriptors(&mut self) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
 
@@ -949,7 +950,7 @@ impl OfflineProtocol {
 
         let mut restored: Vec<MediaTransferDescriptor> = Vec::new();
         for file_id in file_ids {
-            let loaded = self.message_storage.as_ref().and_then(|s| {
+            let loaded = self.protocol_state_storage.as_ref().and_then(|s| {
                 s.load(storage_keys::MEDIA_DESCRIPTORS, &file_id)
                     .ok()
                     .flatten()
@@ -1001,7 +1002,7 @@ impl OfflineProtocol {
     /// Deletes a media descriptor key from storage (restore-internal, mirrors
     /// [`Self::delete_outbox_key`]).
     fn delete_media_descriptor_key(&self, file_id: &str) {
-        if let Some(storage) = &self.message_storage {
+        if let Some(storage) = &self.protocol_state_storage {
             if let Err(e) = storage.delete(storage_keys::MEDIA_DESCRIPTORS, file_id) {
                 warn!(file_id = %file_id, error = %e, "Failed to delete media descriptor key");
             }
@@ -1014,7 +1015,7 @@ impl OfflineProtocol {
 
     /// Persists a blocked user entry to storage.
     pub(crate) fn persist_blocked_user(&self, user_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.store(storage_keys::BLOCKED_USERS, user_id, &[]) {
@@ -1024,7 +1025,7 @@ impl OfflineProtocol {
 
     /// Deletes a blocked user entry from storage.
     pub(crate) fn delete_blocked_user(&self, user_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::BLOCKED_USERS, user_id) {
@@ -1036,7 +1037,7 @@ impl OfflineProtocol {
     ///
     /// Skips entries with invalid user IDs (best-effort restore).
     pub(crate) fn restore_blocked_users(&mut self) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         let user_ids = match storage.list_keys(storage_keys::BLOCKED_USERS) {
@@ -1067,7 +1068,7 @@ impl OfflineProtocol {
 
     /// Persists a both-create owner-gate entry (value-less; the key is the peer).
     pub(crate) fn persist_both_create_awaiting_decrypt(&self, peer_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.store(storage_keys::BOTH_CREATE_AWAITING_DECRYPT, peer_id, &[]) {
@@ -1077,7 +1078,7 @@ impl OfflineProtocol {
 
     /// Deletes a both-create owner-gate entry once the peer has converged.
     pub(crate) fn delete_both_create_awaiting_decrypt(&self, peer_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::BOTH_CREATE_AWAITING_DECRYPT, peer_id) {
@@ -1091,7 +1092,7 @@ impl OfflineProtocol {
     /// peers are harmless (confirmation short-circuits) and are cleared on the
     /// next confirm.
     pub(crate) fn restore_both_create_awaiting_decrypt(&mut self) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         let peer_ids = match storage.list_keys(storage_keys::BOTH_CREATE_AWAITING_DECRYPT) {
@@ -1132,15 +1133,15 @@ impl OfflineProtocol {
     /// [`crate::telemetry::TelemetryConfig::with_scrub_secret`] still wins over
     /// this persistent fallback (see [`crate::telemetry::Scrubber::from_config`]).
     ///
-    /// Idempotent across the two storage-entry paths (`initialize_mls` and
-    /// `enable_message_persistence`) via `telemetry_secret_persisted`. All
+    /// Idempotent across repeated initialization attempts via
+    /// `telemetry_secret_persisted`. All
     /// storage failures degrade gracefully to the in-memory random fallback —
     /// telemetry pseudonymization must never block protocol initialization.
     pub(crate) fn restore_or_init_scrub_secret(&mut self) {
         if self.telemetry_secret_persisted {
             return;
         }
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.secure_storage else {
             return;
         };
 
@@ -1201,8 +1202,8 @@ impl OfflineProtocol {
     /// is unaffected because it uses the separate routing tag, which remains
     /// derived from the device ID.
     ///
-    /// Idempotent across the two storage-entry paths (`initialize_mls` and
-    /// `enable_message_persistence`) via `nostr_secret_persisted`. All
+    /// Idempotent across repeated initialization attempts via
+    /// `nostr_secret_persisted`. All
     /// failures degrade gracefully to the construction-time ephemeral key,
     /// which is equally unforgeable but rotates per process — transport
     /// keying must never block protocol initialization. A secret that was
@@ -1213,7 +1214,7 @@ impl OfflineProtocol {
         if self.nostr_secret_persisted {
             return;
         }
-        let Some(storage) = self.message_storage.clone() else {
+        let Some(storage) = self.secure_storage.clone() else {
             return;
         };
         let Some(nostr_arc) = self.transport_manager.get_transport(TransportType::Nostr) else {
@@ -1330,11 +1331,10 @@ impl OfflineProtocol {
     /// ever equal the domain and collide with the install id.
     ///
     /// Returns `None` while the SDK is still on the random per-instance
-    /// fallback secret — i.e. before storage is provided via
-    /// [`super::OfflineProtocol::initialize_mls`] /
-    /// [`super::OfflineProtocol::enable_message_persistence`], or when
-    /// persistence failed this session. In that state the id would not be
-    /// stable across launches, so none is exposed.
+    /// fallback secret — i.e. before secure storage is provided via
+    /// [`super::OfflineProtocol::initialize_mls`], or when persistence failed
+    /// this session. In that state the id would not be stable across launches,
+    /// so none is exposed.
     ///
     /// Deliberately derived from the persistent fallback secret, not from an
     /// installed [`crate::telemetry::TelemetryConfig::with_scrub_secret`]
@@ -1376,7 +1376,7 @@ impl OfflineProtocol {
     }
 
     fn write_lamport_clock_to_storage(&mut self, value: u64) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         let bytes = value.to_le_bytes();
@@ -1396,7 +1396,7 @@ impl OfflineProtocol {
     /// Uses `max(current, restored)` so the clock never goes backward even
     /// if the in-memory value has advanced before storage was attached.
     pub(crate) fn restore_lamport_clock(&mut self) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Ok(Some(data)) =

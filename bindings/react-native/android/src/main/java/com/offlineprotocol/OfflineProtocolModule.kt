@@ -2355,7 +2355,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val json = JSONObject(configJson)
             val ackConfig = AckConfig(
-                defaultTimeoutMs = json.optLong("defaultTimeoutMs", 5000).toULong(),
+                defaultTimeoutMs = json.optLong("defaultTimeoutMs", 10000).toULong(),
                 maxPendingAcks = json.optLong("maxPendingAcks", 1000).toULong()
             )
             
@@ -2379,7 +2379,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 initialDelayMs = json.optLong("initialDelayMs", 1000).toULong(),
                 maxDelayMs = json.optLong("maxDelayMs", 300000).toULong(),
                 backoffMultiplier = json.optDouble("backoffMultiplier", 2.0).toFloat(),
-                outboxMaxLifetimeMs = json.optLong("outboxMaxLifetimeMs", 604800000).toULong()
+                outboxMaxLifetimeMs = json.optLong("outboxMaxLifetimeMs", 604800000).toULong(),
+                pendingMessageMaxLifetimeMs =
+                    json.optLong("pendingMessageMaxLifetimeMs", 604800000).toULong()
             )
             
             protocol?.updateRetryConfig(retryConfig)
@@ -2787,9 +2789,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     fun initializeMlsWithSecureStorage(promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val storage = MlsSecureStorage(reactApplicationContext)
-            proto.initializeMls(storage)
-            emitDiagnostic("info", "MLS initialized with EncryptedSharedPreferences storage")
+            MlsSecureStorage.purgeLegacyStorage(reactApplicationContext)
+            val secureStorage = MlsSecureStorage(reactApplicationContext)
+            val protocolStateStorage =
+                AppContainerProtocolStateStorage(reactApplicationContext)
+            proto.initializeMls(secureStorage, protocolStateStorage)
+            emitDiagnostic(
+                "info",
+                "MLS initialized with split secure and app-container storage"
+            )
             promise.resolve(null)
         } catch (e: Exception) {
             emitDiagnostic("error", "Failed to initialize MLS", mapOf(

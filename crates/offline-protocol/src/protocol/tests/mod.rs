@@ -290,6 +290,192 @@ fn test_protocol_creation() {
 }
 
 #[test]
+fn test_secure_and_protocol_state_storage_are_routed_separately() {
+    let mut config = ProtocolConfig::new("test-app", "alice");
+    config.transport.internet_enabled = true;
+    let secure = Arc::new(crate::mls::InMemoryStorage::new());
+    let state = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    protocol
+        .initialize_mls(secure.clone(), state.clone())
+        .unwrap();
+    protocol.start().unwrap();
+    protocol
+        .send_message("bob", "queued", None, None::<String>)
+        .unwrap();
+    let outbox_id = protocol
+        .send_connection_request("carol", "Alice", None, None)
+        .unwrap();
+
+    assert!(secure
+        .load(storage_keys::SCRUB_SECRET, storage_keys::SCRUB_SECRET_ID)
+        .unwrap()
+        .is_some());
+    assert!(state
+        .load(storage_keys::SCRUB_SECRET, storage_keys::SCRUB_SECRET_ID)
+        .unwrap()
+        .is_none());
+    assert!(state
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .is_some());
+    assert!(secure
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .is_none());
+    assert!(state
+        .load(storage_keys::OUTBOX, &outbox_id.as_str())
+        .unwrap()
+        .is_some());
+    assert!(secure
+        .load(storage_keys::OUTBOX, &outbox_id.as_str())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn test_fresh_protocol_state_does_not_restore_pre_reinstall_pending_messages() {
+    let mut config = ProtocolConfig::new("test-app", "alice");
+    config.transport.internet_enabled = true;
+    let secure = Arc::new(crate::mls::InMemoryStorage::new());
+    let old_state = Arc::new(crate::mls::InMemoryStorage::new());
+
+    {
+        let mut before_reinstall = OfflineProtocol::new(config.clone()).unwrap();
+        before_reinstall
+            .initialize_mls(secure.clone(), old_state.clone())
+            .unwrap();
+        before_reinstall.start().unwrap();
+        before_reinstall
+            .send_message("bob", "stale", None, None::<String>)
+            .unwrap();
+        before_reinstall
+            .send_connection_request("carol", "Alice", None, None)
+            .unwrap();
+        assert!(old_state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_some());
+        assert!(!old_state
+            .list_keys(storage_keys::OUTBOX)
+            .unwrap()
+            .is_empty());
+    }
+
+    let fresh_state = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut after_reinstall = OfflineProtocol::new(config).unwrap();
+    after_reinstall
+        .initialize_mls(secure, fresh_state.clone())
+        .unwrap();
+
+    assert!(after_reinstall.pending_encrypted_messages.is_empty());
+    assert!(after_reinstall.outbox.is_empty());
+    assert!(fresh_state
+        .list_keys(storage_keys::PENDING_MESSAGES)
+        .unwrap()
+        .is_empty());
+    assert!(fresh_state
+        .list_keys(storage_keys::OUTBOX)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn test_invalid_recipient_is_rejected_before_queue_or_clock_side_effects() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.start().unwrap();
+    let clock_before = protocol.lamport_clock.value();
+
+    let error = protocol
+        .send_message("unresolved:token", "hello", None, None::<String>)
+        .unwrap_err();
+
+    assert!(matches!(error, Error::InvalidArgument(_)));
+    assert!(protocol.pending_encrypted_messages.is_empty());
+    assert!(protocol.outbox.is_empty());
+    assert_eq!(protocol.lamport_clock.value(), clock_before);
+}
+
+#[test]
+fn test_pending_session_messages_expire_and_are_deleted_from_state_storage() {
+    let mut config = ProtocolConfig::new("test-app", "alice");
+    config.transport.internet_enabled = true;
+    config.reliability.retry.pending_message_max_lifetime_ms = 1;
+    let secure = Arc::new(crate::mls::InMemoryStorage::new());
+    let state = Arc::new(crate::mls::InMemoryStorage::new());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let event_sink = events.clone();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.on_event(move |event| event_sink.lock().unwrap().push(event));
+    protocol.initialize_mls(secure, state.clone()).unwrap();
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "queued", None, None::<String>)
+        .unwrap();
+    protocol.pending_encrypted_messages.get_mut("bob").unwrap()[0].queued_at =
+        Utc::now() - ChronoDuration::milliseconds(2);
+
+    protocol.cleanup_expired_pending_messages();
+
+    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(state
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .is_none());
+    assert!(events.lock().unwrap().iter().any(|event| matches!(
+        event,
+        Event::MessageFailed {
+            message_id: failed_id,
+            reason,
+            retry_count: 0,
+        } if failed_id == &message_id.as_str()
+            && reason == "Pending session lifetime exceeded"
+    )));
+}
+
+#[test]
+fn test_runtime_retry_and_ack_updates_reject_zero_delays() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let original_retry = protocol.config.reliability.retry.clone();
+    let original_ack = protocol.config.reliability.ack.clone();
+
+    let mut retry = original_retry.clone();
+    retry.initial_delay_ms = 0;
+    assert!(matches!(
+        protocol.update_retry_config(retry),
+        Err(Error::InvalidConfiguration(_))
+    ));
+    assert_eq!(
+        protocol.config.reliability.retry.initial_delay_ms,
+        original_retry.initial_delay_ms
+    );
+
+    let mut retry = original_retry.clone();
+    retry.outbox_max_lifetime_ms = 0;
+    assert!(matches!(
+        protocol.update_retry_config(retry),
+        Err(Error::InvalidConfiguration(_))
+    ));
+    assert_eq!(
+        protocol.config.reliability.retry.outbox_max_lifetime_ms,
+        original_retry.outbox_max_lifetime_ms
+    );
+
+    let mut ack = original_ack.clone();
+    ack.default_timeout_ms = 0;
+    assert!(matches!(
+        protocol.update_ack_config(ack),
+        Err(Error::InvalidConfiguration(_))
+    ));
+    assert_eq!(
+        protocol.config.reliability.ack.default_timeout_ms,
+        original_ack.default_timeout_ms
+    );
+}
+
+#[test]
 fn test_protocol_start_stop() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
@@ -438,7 +624,7 @@ fn test_encrypted_receive_drops_relay_injected_reply_context() {
     alice_config.encryption.enabled = true;
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     alice
-        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
     let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
@@ -451,7 +637,7 @@ fn test_encrypted_receive_drops_relay_injected_reply_context() {
     let mut bob_config = create_test_config_for_user("bob");
     bob_config.encryption.enabled = true;
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
     let bob_transport = MockTransport::new(TransportType::BLE);
     bob_transport.start().unwrap();
@@ -743,7 +929,7 @@ fn test_mls_observability_emits_initialized_event() {
     protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
 
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let events = emitter.take();
     assert!(
@@ -779,7 +965,7 @@ fn test_mls_observability_emits_encryption_used_for_successful_encrypt() {
     let emitter = RecordingMlsEmitter::default();
     protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
     let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
@@ -853,7 +1039,7 @@ fn test_mls_observability_no_encryption_event_on_aborted_encrypt() {
     let emitter = RecordingMlsEmitter::default();
     protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     protocol.pending_key_packages.insert(
         "bob".to_string(),
@@ -884,7 +1070,7 @@ fn test_mls_observability_session_ready_emits_once_for_idempotent_confirm() {
     let emitter = RecordingMlsEmitter::default();
     protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     protocol.welcome_lifecycles.insert(
         "bob".to_string(),
@@ -929,7 +1115,7 @@ fn test_mls_observability_uses_opaque_identifiers() {
     let emitter = RecordingMlsEmitter::default();
     protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let events = emitter.take();
     let initialized = events
@@ -985,7 +1171,7 @@ fn test_telemetry_sink_receives_mls_events() {
         .unwrap();
 
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let records = sink.take();
     assert!(
@@ -1011,7 +1197,7 @@ fn test_mls_verbosity_off_suppresses_both_sink_and_legacy_emitter() {
         .unwrap();
 
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let legacy = emitter.take();
     let sink_records = sink.take();
@@ -1225,7 +1411,7 @@ fn test_mls_verbosity_diagnostic_matches_lifecycle_today() {
             )
             .unwrap();
         let storage = Arc::new(crate::mls::InMemoryStorage::new());
-        protocol.initialize_mls(storage).unwrap();
+        protocol.initialize_mls_for_test(storage).unwrap();
         sink.take()
     }
 
@@ -1327,7 +1513,7 @@ fn test_sink_installed_after_initialize_mls_does_not_replay() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Sink installed *after* MLS init.
     let sink = RecordingTelemetrySink::default();
@@ -1830,7 +2016,7 @@ fn protocol_with_mls_storage(storage: Arc<InMemoryStorage>) -> OfflineProtocol {
     let mut config = create_test_config();
     config.encryption.enabled = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol
 }
 
@@ -1889,7 +2075,7 @@ fn peer_capability_restore_respects_kill_switch_but_keeps_record() {
     config.encryption.enabled = true;
     config.encryption.rich_payload_enabled = false;
     let mut gated = OfflineProtocol::new(config).unwrap();
-    gated.initialize_mls(storage.clone()).unwrap();
+    gated.initialize_mls_for_test(storage.clone()).unwrap();
     assert!(!gated.peer_rich_payload.contains("peer"));
     assert!(!gated.peer_supports_rich_payload("peer"));
 
@@ -2195,7 +2381,7 @@ fn attested_rich_kill_switch_gates_memory_but_keeps_record() {
     config.encryption.enabled = true;
     config.encryption.rich_payload_enabled = false;
     let mut gated = OfflineProtocol::new(config).unwrap();
-    gated.initialize_mls(storage.clone()).unwrap();
+    gated.initialize_mls_for_test(storage.clone()).unwrap();
     gated.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
     assert!(!gated.peer_rich_attested.contains("peer"));
 
@@ -4271,7 +4457,7 @@ fn test_require_encryption_returns_typed_failures() {
         .add_transport(TransportType::BLE, Box::new(no_key_transport));
     no_key_protocol.start().unwrap();
     no_key_protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let no_key_result =
         no_key_protocol.send_message("bob", "nkp", None::<MessagePriority>, None::<String>);
@@ -4292,7 +4478,7 @@ fn test_require_encryption_returns_typed_failures() {
         .add_transport(TransportType::BLE, Box::new(pending_transport));
     pending_protocol.start().unwrap();
     pending_protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let bob_manager =
         crate::mls::MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
@@ -4344,7 +4530,7 @@ fn test_require_encryption_queues_when_store_pending_enabled() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
@@ -4405,7 +4591,7 @@ fn test_require_encryption_queues_message_when_session_pending_with_key_package(
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
@@ -4476,7 +4662,7 @@ fn test_require_encryption_queues_for_send_message_via_transport() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
@@ -4519,7 +4705,7 @@ fn test_require_encryption_pending_flush_encrypts_and_delivers() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -4590,7 +4776,7 @@ fn test_flush_pending_message_keeps_queued_id() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -4640,7 +4826,7 @@ fn test_flush_requeue_keeps_queued_id_and_storage() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -4699,7 +4885,7 @@ fn test_flush_terminal_welcome_failure_drops_pending_without_resurrection() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_handle = Arc::clone(&events);
@@ -4778,7 +4964,7 @@ fn test_flush_drops_pending_for_blocked_recipient() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_handle = Arc::clone(&events);
@@ -4837,7 +5023,7 @@ fn test_flush_dedup_hit_drops_already_dispatched_message() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_handle = Arc::clone(&events);
@@ -4904,7 +5090,7 @@ fn test_flush_bloom_dedup_hit_settles_with_message_failed() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_handle = Arc::clone(&events);
@@ -6611,7 +6797,7 @@ fn test_non_strict_mode_preserves_pending_queue_behavior() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
@@ -6668,8 +6854,10 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
 
-    alice.initialize_mls(alice_storage.clone()).unwrap();
-    bob.initialize_mls(bob_storage.clone()).unwrap();
+    alice
+        .initialize_mls_for_test(alice_storage.clone())
+        .unwrap();
+    bob.initialize_mls_for_test(bob_storage.clone()).unwrap();
 
     let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
@@ -6729,7 +6917,9 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
     let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice2.config.encryption.enabled = true;
     alice2.config.encryption.store_pending = true;
-    alice2.initialize_mls(alice_storage.clone()).unwrap();
+    alice2
+        .initialize_mls_for_test(alice_storage.clone())
+        .unwrap();
     let alice2_transport = MockTransport::new(TransportType::BLE);
     alice2_transport.start().unwrap();
     let alice2_transport_handle = alice2_transport.clone();
@@ -6741,7 +6931,7 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
     let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     bob2.config.encryption.enabled = true;
     bob2.config.encryption.store_pending = true;
-    bob2.initialize_mls(bob_storage.clone()).unwrap();
+    bob2.initialize_mls_for_test(bob_storage.clone()).unwrap();
     let bob2_transport = MockTransport::new(TransportType::BLE);
     bob2_transport.start().unwrap();
     let bob2_transport_handle = bob2_transport.clone();
@@ -6788,10 +6978,11 @@ fn test_initialize_mls_restore_failure_does_not_publish_partial_state() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let initial_clock = protocol.lamport_clock.value();
 
-    let result = protocol.initialize_mls(Arc::new(FailingPendingListStorage::default()));
+    let result = protocol.initialize_mls_for_test(Arc::new(FailingPendingListStorage::default()));
     assert!(result.is_err());
     assert!(protocol.mls_manager.is_none());
-    assert!(protocol.message_storage.is_none());
+    assert!(protocol.secure_storage.is_none());
+    assert!(protocol.protocol_state_storage.is_none());
     assert!(protocol.pending_encrypted_messages.is_empty());
     assert!(protocol.confirmed_sessions.is_empty());
     assert!(protocol.welcome_lifecycles.is_empty());
@@ -6853,10 +7044,11 @@ fn test_initialize_mls_restore_failure_rolls_back_outbox() {
     protocol.ensure_outbox_entry(&test_message("bob", "pre-existing"));
     assert_eq!(protocol.outbox_entry_count(), 1);
 
-    let result = protocol.initialize_mls(Arc::new(FailingOutboxListStorage::default()));
+    let result = protocol.initialize_mls_for_test(Arc::new(FailingOutboxListStorage::default()));
     assert!(result.is_err());
     assert!(protocol.mls_manager.is_none());
-    assert!(protocol.message_storage.is_none());
+    assert!(protocol.secure_storage.is_none());
+    assert!(protocol.protocol_state_storage.is_none());
     assert_eq!(
         protocol.outbox_entry_count(),
         1,
@@ -6873,7 +7065,7 @@ fn test_auto_send_and_manual_mls_share_single_state_under_concurrency() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let transport = MockTransport::new(TransportType::BLE);
@@ -6971,7 +7163,7 @@ fn test_manual_welcome_processing_confirms_session_for_auto_encrypt_flow() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let transport = MockTransport::new(TransportType::BLE);
@@ -7024,7 +7216,7 @@ fn test_manual_delete_session_clears_protocol_session_state() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let bob_manager = MlsManager::new("bob", Arc::new(InMemoryStorage::new())).unwrap();
@@ -7060,7 +7252,7 @@ fn test_manual_delete_session_failure_keeps_protocol_state_unchanged() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     protocol.confirm_session_state("bob", "test_setup").unwrap();
@@ -7099,7 +7291,7 @@ fn test_is_session_confirmed_trusts_cache_and_encrypt_evicts_stale() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     protocol.confirm_session_state("bob", "test_setup").unwrap();
@@ -7135,7 +7327,7 @@ fn test_encrypt_confirmed_session_transient_error_preserves_cache() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Create a real MLS session
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
@@ -7186,7 +7378,7 @@ fn test_externally_deleted_confirmed_session_queues_message() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -7258,7 +7450,7 @@ fn test_confirmation_crash_recovery_before_first_send() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Build a real session in MLS storage without using protocol transport.
     let bob_storage = Arc::new(InMemoryStorage::new());
@@ -7279,7 +7471,7 @@ fn test_confirmation_crash_recovery_before_first_send() {
     let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     restarted.config.encryption.enabled = true;
     restarted.config.encryption.store_pending = true;
-    restarted.initialize_mls(storage).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
     let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     let transport_handle = transport.clone();
@@ -7312,7 +7504,7 @@ fn test_confirmation_transition_idempotent() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // First confirmation transitions Pending -> Confirmed.
     assert!(protocol
@@ -7338,7 +7530,7 @@ fn test_pending_session_state_blocks_send_until_confirmed() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -7389,7 +7581,7 @@ fn test_welcome_send_failure_keeps_session_pending_and_emits_reason_code() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
     flaky.start().unwrap();
@@ -7459,7 +7651,7 @@ fn test_welcome_retry_exhaustion_expires_and_aborts_pending_queue() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let flaky = FlakyTransport::fail_first(TransportType::BLE, 10);
     flaky.start().unwrap();
@@ -7523,7 +7715,7 @@ fn test_welcome_partial_success_after_retry_reaches_sent() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
     flaky.start().unwrap();
@@ -7587,7 +7779,7 @@ fn test_welcome_internet_requires_async_confirmation_before_sent() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -7652,7 +7844,7 @@ fn test_on_transport_send_confirmed_sends_immediate_probe() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -7730,7 +7922,7 @@ fn test_mesh_welcome_sender_probes_for_confirmation() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Mesh transport only — no Internet path to confirm the send for us.
     let ble = MockTransport::new(TransportType::BLE);
@@ -7797,7 +7989,7 @@ fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
     bob_config.encryption.store_pending = true;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -7876,7 +8068,7 @@ fn test_welcome_terminal_lifecycle_can_be_overwritten() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let message = Message::new(
         UserId::new("alice").unwrap(),
@@ -7907,7 +8099,7 @@ fn test_welcome_non_terminal_lifecycle_cannot_be_overwritten() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let message = Message::new(
         UserId::new("alice").unwrap(),
@@ -7935,7 +8127,7 @@ fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -8009,7 +8201,7 @@ fn test_welcome_restart_recovery_restores_failed_lifecycle() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     let flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
     flaky.start().unwrap();
@@ -8043,7 +8235,7 @@ fn test_welcome_restart_recovery_restores_failed_lifecycle() {
     );
 
     let mut restarted = OfflineProtocol::new(config).unwrap();
-    restarted.initialize_mls(storage).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
     let restored = restarted.welcome_lifecycles.get("bob").unwrap();
     assert_eq!(restored.state, WelcomeDeliveryState::Failed);
     assert!(restored.next_retry_at.is_some());
@@ -8057,7 +8249,7 @@ fn test_welcome_restore_repairs_failed_without_retry_schedule() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     let message = Message::new(
         UserId::new("alice").unwrap(),
@@ -8086,7 +8278,7 @@ fn test_welcome_restore_repairs_failed_without_retry_schedule() {
         .unwrap();
 
     let mut restarted = OfflineProtocol::new(config).unwrap();
-    restarted.initialize_mls(storage).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
     let restored = restarted.welcome_lifecycles.get("bob").unwrap();
     assert_eq!(restored.state, WelcomeDeliveryState::Failed);
     assert!(restored.next_retry_at.is_some());
@@ -8100,7 +8292,7 @@ fn test_welcome_restore_promotes_retry_exhausted_failed_to_expired() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     let message = Message::new(
         UserId::new("alice").unwrap(),
@@ -8129,7 +8321,7 @@ fn test_welcome_restore_promotes_retry_exhausted_failed_to_expired() {
         .unwrap();
 
     let mut restarted = OfflineProtocol::new(config).unwrap();
-    restarted.initialize_mls(storage).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
     let restored = restarted.welcome_lifecycles.get("bob").unwrap();
     assert_eq!(restored.state, WelcomeDeliveryState::Expired);
     assert!(restored.next_retry_at.is_none());
@@ -8146,7 +8338,7 @@ fn test_welcome_no_carrier_ticks_keep_lifecycle_alive() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // No transport is added, so every send fails with TransportNotAvailable.
     let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
@@ -8220,7 +8412,7 @@ fn test_no_carrier_welcome_parks_without_churn() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
     let observed_events_clone = observed_events.clone();
@@ -8299,7 +8491,7 @@ fn test_both_create_gate_survives_owner_restart() {
     let storage = Arc::new(InMemoryStorage::new());
 
     let mut owner = OfflineProtocol::new(config.clone()).unwrap();
-    owner.initialize_mls(storage.clone()).unwrap();
+    owner.initialize_mls_for_test(storage.clone()).unwrap();
     owner.mark_both_create_awaiting_decrypt("bob");
     assert!(owner.both_create_awaiting_decrypt.contains("bob"));
     // The gate blocks a plaintext-ack confirmation (only a decrypt is accepted).
@@ -8307,7 +8499,7 @@ fn test_both_create_gate_survives_owner_restart() {
 
     // Restart with the same storage: the gate must be restored.
     let mut restarted = OfflineProtocol::new(config.clone()).unwrap();
-    restarted.initialize_mls(storage.clone()).unwrap();
+    restarted.initialize_mls_for_test(storage.clone()).unwrap();
     assert!(
         restarted.both_create_awaiting_decrypt.contains("bob"),
         "both-create owner gate must survive a restart"
@@ -8321,7 +8513,7 @@ fn test_both_create_gate_survives_owner_restart() {
     // it (which would wrongly keep blocking confirmation of a converged peer).
     restarted.clear_both_create_awaiting_decrypt("bob");
     let mut after_converge = OfflineProtocol::new(config).unwrap();
-    after_converge.initialize_mls(storage).unwrap();
+    after_converge.initialize_mls_for_test(storage).unwrap();
     assert!(
         !after_converge.both_create_awaiting_decrypt.contains("bob"),
         "a cleared gate must not be restored after convergence"
@@ -8339,7 +8531,7 @@ fn test_both_create_gate_cleared_on_session_delete() {
     let storage = Arc::new(InMemoryStorage::new());
 
     let mut owner = OfflineProtocol::new(config.clone()).unwrap();
-    owner.initialize_mls(storage.clone()).unwrap();
+    owner.initialize_mls_for_test(storage.clone()).unwrap();
     owner.mark_both_create_awaiting_decrypt("bob");
     assert!(owner.both_create_awaiting_decrypt.contains("bob"));
     assert!(!owner.can_confirm_from_source("bob", "welcome_received"));
@@ -8358,7 +8550,7 @@ fn test_both_create_gate_cleared_on_session_delete() {
 
     // A restart must not revive the cleared gate from storage.
     let mut restarted = OfflineProtocol::new(config).unwrap();
-    restarted.initialize_mls(storage).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
     assert!(
         !restarted.both_create_awaiting_decrypt.contains("bob"),
         "a deleted gate must not be restored after restart"
@@ -8376,7 +8568,7 @@ fn test_welcome_sends_when_carrier_appears() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     let bob_storage = Arc::new(InMemoryStorage::new());
@@ -8438,7 +8630,7 @@ fn test_welcome_restart_keeps_no_carrier_lifecycle_alive() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // A Welcome that stalled with no carrier and then aged past its TTL while
     // the device was offline, with no retry scheduled.
@@ -8470,7 +8662,7 @@ fn test_welcome_restart_keeps_no_carrier_lifecycle_alive() {
 
     // Restart: the no-carrier Welcome must survive, not be promoted to Expired.
     let mut restarted = OfflineProtocol::new(config).unwrap();
-    restarted.initialize_mls(storage).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
 
     let restored = restarted.welcome_lifecycles.get("bob").unwrap();
     assert_eq!(
@@ -8494,7 +8686,7 @@ fn test_welcome_expired_rearms_on_peer_rediscovery() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // A present-but-failing carrier: the first send fails (SendFailed), which
     // with max_retries=1 exhausts the Welcome to Expired.
@@ -8555,7 +8747,7 @@ fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -8632,7 +8824,7 @@ fn test_welcome_dropped_confirmation_expires_with_explicit_failure_events() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -8712,7 +8904,7 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
@@ -8800,7 +8992,7 @@ fn test_both_create_owner_confirms_via_decrypt_after_welcome_expired() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // We are the both-create owner: we created our own group for "bob" and sent a
     // Welcome that never reached `Sent` — retries exhausted it to `Expired`.
@@ -8892,8 +9084,8 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
 
-    alice.initialize_mls(alice_storage).unwrap();
-    bob.initialize_mls(bob_storage).unwrap();
+    alice.initialize_mls_for_test(alice_storage).unwrap();
+    bob.initialize_mls_for_test(bob_storage).unwrap();
 
     let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
@@ -8994,7 +9186,7 @@ fn test_welcome_delayed_confirmation_after_timeout_converges_to_sent() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -9059,7 +9251,7 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
     bob_config.encryption.store_pending = true;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -9151,7 +9343,7 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
     bob_config.encryption.store_pending = true;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -9295,7 +9487,7 @@ fn test_crypto_recovery_disabled_falls_back_to_drop_and_ack() {
     bob_config.encryption.crypto_recovery_enabled = false;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -9402,7 +9594,7 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
     bob_config.encryption.store_pending = true;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -9508,7 +9700,7 @@ fn test_desync_rekey_is_rate_limited() {
     bob_config.encryption.enabled = true;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -9550,7 +9742,7 @@ fn test_desync_rekey_floor_not_reset_by_successful_decrypt() {
     bob_config.encryption.enabled = true;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -9609,7 +9801,7 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
 
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     alice
-        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
     let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
@@ -9715,7 +9907,7 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
 fn test_reseal_is_noop_without_provenance() {
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice
-        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let mut plain = Message::new(
@@ -9740,7 +9932,7 @@ fn make_encrypted_protocol(user_id: &str) -> (OfflineProtocol, MockTransport) {
     config.encryption.store_pending = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
     let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
@@ -9954,7 +10146,7 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
     bob_config.encryption.pending_queue.max_pending_per_peer = 1;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -10098,9 +10290,9 @@ fn test_pending_queue_drains_on_decrypt_confirmation_owner_path() {
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
     alice
-        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let alice_transport = MockTransport::new(TransportType::BLE);
@@ -10333,7 +10525,7 @@ fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
     bob_config.encryption.store_pending = true;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -10421,7 +10613,7 @@ fn test_plaintext_media_chunk_rejected_withholds_ack_and_unmarks() {
     config.encryption.require_encryption = true;
 
     let mut bob = OfflineProtocol::new(config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -10489,7 +10681,7 @@ fn test_welcome_duplicate_delivery_emits_single_established_event() {
     bob_config.encryption.store_pending = true;
 
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -10552,7 +10744,7 @@ fn test_restore_session_state_migrates_legacy_session_to_pending_without_inferen
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Build a real session in MLS storage but leave session state absent.
     let bob_storage = Arc::new(InMemoryStorage::new());
@@ -10572,7 +10764,7 @@ fn test_restore_session_state_migrates_legacy_session_to_pending_without_inferen
     let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     restarted.config.encryption.enabled = true;
     restarted.config.encryption.store_pending = true;
-    restarted.initialize_mls(storage).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
 
     let restored = restarted.load_session_state_entry("bob").unwrap().unwrap();
     assert_eq!(restored, SessionState::Pending);
@@ -10586,7 +10778,7 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Build a real session in MLS storage but leave session state absent.
     let bob_storage = Arc::new(InMemoryStorage::new());
@@ -10617,7 +10809,7 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
     let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     restarted.config.encryption.enabled = true;
     restarted.config.encryption.store_pending = true;
-    restarted.initialize_mls(storage).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
 
     let restored = restarted.load_session_state_entry("bob").unwrap().unwrap();
     assert_eq!(restored, SessionState::Pending);
@@ -10639,7 +10831,7 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Build a real session and mark it confirmed.
     let bob_storage = Arc::new(InMemoryStorage::new());
@@ -10670,7 +10862,7 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
     let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     restarted.config.encryption.enabled = true;
     restarted.config.encryption.store_pending = true;
-    restarted.initialize_mls(storage).unwrap();
+    restarted.initialize_mls_for_test(storage).unwrap();
 
     let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
@@ -10708,8 +10900,10 @@ fn test_pending_sessions_reconcile_via_probe_after_restart() {
     // Build a durable MLS session on both peers, but leave confirmation Pending.
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    alice.initialize_mls(alice_storage.clone()).unwrap();
-    bob.initialize_mls(bob_storage.clone()).unwrap();
+    alice
+        .initialize_mls_for_test(alice_storage.clone())
+        .unwrap();
+    bob.initialize_mls_for_test(bob_storage.clone()).unwrap();
 
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
@@ -10736,11 +10930,11 @@ fn test_pending_sessions_reconcile_via_probe_after_restart() {
     let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice2.config.encryption.enabled = true;
     alice2.config.encryption.store_pending = true;
-    alice2.initialize_mls(alice_storage).unwrap();
+    alice2.initialize_mls_for_test(alice_storage).unwrap();
     let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     bob2.config.encryption.enabled = true;
     bob2.config.encryption.store_pending = true;
-    bob2.initialize_mls(bob_storage).unwrap();
+    bob2.initialize_mls_for_test(bob_storage).unwrap();
 
     let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
@@ -10841,8 +11035,10 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
     // Build a durable MLS session on both peers, but leave confirmation Pending.
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    alice.initialize_mls(alice_storage.clone()).unwrap();
-    bob.initialize_mls(bob_storage.clone()).unwrap();
+    alice
+        .initialize_mls_for_test(alice_storage.clone())
+        .unwrap();
+    bob.initialize_mls_for_test(bob_storage.clone()).unwrap();
 
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
@@ -10869,11 +11065,11 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
     let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice2.config.encryption.enabled = true;
     alice2.config.encryption.store_pending = true;
-    alice2.initialize_mls(alice_storage).unwrap();
+    alice2.initialize_mls_for_test(alice_storage).unwrap();
     let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     bob2.config.encryption.enabled = true;
     bob2.config.encryption.store_pending = true;
-    bob2.initialize_mls(bob_storage).unwrap();
+    bob2.initialize_mls_for_test(bob_storage).unwrap();
 
     let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
@@ -10990,8 +11186,10 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
     // Build a durable MLS session on both peers, but leave confirmation Pending.
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    alice.initialize_mls(alice_storage.clone()).unwrap();
-    bob.initialize_mls(bob_storage.clone()).unwrap();
+    alice
+        .initialize_mls_for_test(alice_storage.clone())
+        .unwrap();
+    bob.initialize_mls_for_test(bob_storage.clone()).unwrap();
 
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
@@ -11018,11 +11216,11 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
     let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice2.config.encryption.enabled = true;
     alice2.config.encryption.store_pending = true;
-    alice2.initialize_mls(alice_storage).unwrap();
+    alice2.initialize_mls_for_test(alice_storage).unwrap();
     let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     bob2.config.encryption.enabled = true;
     bob2.config.encryption.store_pending = true;
-    bob2.initialize_mls(bob_storage).unwrap();
+    bob2.initialize_mls_for_test(bob_storage).unwrap();
 
     let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
@@ -11193,7 +11391,7 @@ fn test_send_message_via_transport_respects_session_confirmation_gating() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
@@ -11250,7 +11448,7 @@ fn test_send_message_fails_closed_when_confirmation_state_is_corrupted() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
@@ -11300,8 +11498,10 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
     // Build a durable MLS session on both peers, but leave confirmation Pending.
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    alice.initialize_mls(alice_storage.clone()).unwrap();
-    bob.initialize_mls(bob_storage.clone()).unwrap();
+    alice
+        .initialize_mls_for_test(alice_storage.clone())
+        .unwrap();
+    bob.initialize_mls_for_test(bob_storage.clone()).unwrap();
 
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
@@ -11352,11 +11552,11 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
     let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice2.config.encryption.enabled = true;
     alice2.config.encryption.store_pending = true;
-    alice2.initialize_mls(alice_storage).unwrap();
+    alice2.initialize_mls_for_test(alice_storage).unwrap();
     let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     bob2.config.encryption.enabled = true;
     bob2.config.encryption.store_pending = true;
-    bob2.initialize_mls(bob_storage).unwrap();
+    bob2.initialize_mls_for_test(bob_storage).unwrap();
 
     let alice_transport = MockTransport::new(TransportType::BLE);
     alice_transport.start().unwrap();
@@ -11601,9 +11801,9 @@ fn test_mls_pipeline_happy_path_init_send_encrypted_receive_decrypted() {
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
     alice
-        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let alice_transport = MockTransport::new(TransportType::BLE);
@@ -11688,7 +11888,7 @@ fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
     config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
 
     let mut bob = OfflineProtocol::new(config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
@@ -11950,7 +12150,7 @@ fn test_encrypted_message_group_not_found_is_queued_with_typed_classification() 
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let encrypted_content = format!(
@@ -12014,7 +12214,7 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let valid_early_encrypted = format!(
@@ -12209,7 +12409,7 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
     let mut bob_config = create_test_config_for_user("bob");
     bob_config.encryption.enabled = true;
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
@@ -12415,7 +12615,7 @@ fn test_lamport_clock_persists_and_restores() {
             .add_transport(TransportType::BLE, Box::new(mock_transport));
 
         protocol
-            .enable_message_persistence(storage.clone())
+            .enable_message_persistence_for_test(storage.clone())
             .unwrap();
         protocol.start().unwrap();
 
@@ -12445,7 +12645,7 @@ fn test_lamport_clock_persists_and_restores() {
         assert_eq!(protocol.lamport_clock.value(), 0);
 
         protocol
-            .enable_message_persistence(storage.clone())
+            .enable_message_persistence_for_test(storage.clone())
             .unwrap();
 
         // After attaching storage, clock should be restored
@@ -12480,7 +12680,7 @@ fn test_lamport_clock_restore_with_corrupted_data() {
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     // Clock should remain at 0 (corrupted data ignored)
@@ -12499,7 +12699,7 @@ fn test_lamport_clock_debounce_threshold() {
         .add_transport(TransportType::BLE, Box::new(mock_transport));
 
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
     protocol.start().unwrap();
 
@@ -12563,7 +12763,7 @@ fn test_lamport_clock_restore_never_goes_backward() {
 
     // Attaching storage should NOT regress to 10
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
     assert_eq!(protocol.lamport_clock.value(), 20);
 }
@@ -12854,7 +13054,7 @@ fn test_key_package_expired_discarded() {
     // MLS must be initialized so establish_secure_session reaches the
     // expiry check instead of short-circuiting with MlsNotInitialized.
     let storage = Arc::new(InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Manually insert an already-expired key package
     protocol.pending_key_packages.insert(
@@ -12885,7 +13085,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
     // the pending key package.
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        protocol.initialize_mls(storage.clone()).unwrap();
+        protocol.initialize_mls_for_test(storage.clone()).unwrap();
         let key_pkg_payload = KeyPackagePayload {
             user_id: "bob".to_string(),
             key_package_data: bob_key_package.key_package_data.clone(),
@@ -12923,7 +13123,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
     // restorable from the shared storage.
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        protocol.initialize_mls(storage.clone()).unwrap();
+        protocol.initialize_mls_for_test(storage.clone()).unwrap();
         // Session already exists from the first instance (shared storage)
         let welcome = protocol.establish_secure_session("bob").unwrap();
         assert!(
@@ -12949,7 +13149,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
     config.encryption.auto_key_exchange = false;
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Fill the map to capacity. One entry ("victim") is the unambiguous
     // soonest-to-expire; the rest expire far in the future.
@@ -13026,7 +13226,7 @@ fn test_received_key_package_lifetime_is_clamped() {
     config.encryption.auto_key_exchange = false;
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let before_ms = chrono::Utc::now().timestamp_millis() as u64;
     let key_pkg_payload = KeyPackagePayload {
@@ -13083,7 +13283,7 @@ fn test_restore_peer_key_packages_prunes_overflow_from_storage() {
     // writing straight to durable storage to bypass the live insert cap.
     {
         let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
-        writer.initialize_mls(storage.clone()).unwrap();
+        writer.initialize_mls_for_test(storage.clone()).unwrap();
         let pkg = ReceivedKeyPackage {
             key_package_data: vec![0],
             local_expires_at_ms: u64::MAX, // never expired
@@ -13104,7 +13304,7 @@ fn test_restore_peer_key_packages_prunes_overflow_from_storage() {
     // Boot a fresh instance against the same storage; initialize_mls runs the
     // restore path.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     assert_eq!(
         protocol.pending_key_packages.len(),
@@ -13129,7 +13329,7 @@ fn test_establishment_state_returns_correct_states() {
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // No key package, no session
     assert_eq!(
@@ -13184,7 +13384,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
     // immediately, consuming the key package.
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        protocol.initialize_mls(storage.clone()).unwrap();
+        protocol.initialize_mls_for_test(storage.clone()).unwrap();
         let key_pkg_payload = KeyPackagePayload {
             user_id: "bob".to_string(),
             key_package_data: bob_key_package.key_package_data.clone(),
@@ -13217,7 +13417,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
     // New protocol instance: session should be restorable from shared storage
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        protocol.initialize_mls(storage.clone()).unwrap();
+        protocol.initialize_mls_for_test(storage.clone()).unwrap();
         // Session already exists from the first instance
         let result = protocol.establish_secure_session("bob");
         assert!(
@@ -14366,7 +14566,7 @@ fn test_internal_prefixes_completeness() {
 fn test_sign_and_verify_control_message_roundtrip() {
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Create a control message from "alice"
     let mut msg = Message::new(
@@ -14409,7 +14609,7 @@ fn test_sign_and_verify_control_message_roundtrip() {
 fn test_sign_and_verify_rejects_tampered_content() {
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mut msg = Message::new(
         UserId::new("alice").unwrap(),
@@ -14538,12 +14738,12 @@ fn test_integration_signed_control_message_via_mock_transport() {
     // Set up "alice" as the sender with MLS initialized so she can sign.
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
 
     // Set up "bob" as the receiver with MLS initialized so he can verify.
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
-    bob.initialize_mls(storage_b).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -14591,11 +14791,11 @@ fn test_integration_spoofed_transport_identity_rejected() {
     // by transport peer "eve" must be rejected.
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
 
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
-    bob.initialize_mls(storage_b).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -14688,7 +14888,7 @@ fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
     alice_config.encryption.store_pending = true;
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     alice
-        .initialize_mls(Arc::new(InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let alice_transport = MockTransport::new(TransportType::BLE);
@@ -14704,7 +14904,7 @@ fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
     bob_config.encryption.enabled = true;
     bob_config.encryption.store_pending = true;
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
-    bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
     let bob_transport = MockTransport::new(TransportType::BLE);
@@ -15041,12 +15241,12 @@ fn test_signature_downgrade_detection_for_tofu_pinned_peer() {
     // downgrade attack (impersonation attempt).
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Set up "alice" as a sender with MLS so she can sign.
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
 
     // Alice creates and signs a control message.
     let mut signed_msg = Message::new(
@@ -15095,11 +15295,11 @@ fn test_second_signed_message_from_tofu_pinned_peer_passes_gate() {
     // from the same peer (with the same key) should pass the security gate.
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
 
     // First signed message — pins alice's key.
     let mut msg1 = Message::new(
@@ -15139,7 +15339,7 @@ fn test_security_rejected_does_not_send_ack() {
     // preventing an attacker from confirming the target is online.
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
-    bob.initialize_mls(storage_b).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -15184,7 +15384,7 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
     // test_security_rejected_does_not_send_ack.)
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage).unwrap();
+    alice.initialize_mls_for_test(storage).unwrap();
 
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
     let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
@@ -15254,7 +15454,7 @@ fn test_mls_enc_non_utf8_plaintext_rejected() {
     // malicious peer can produce this.
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage).unwrap();
+    alice.initialize_mls_for_test(storage).unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_handle = Arc::clone(&events);
@@ -15318,7 +15518,7 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
     // dropped before any session state changes — inviter_id is used
     // downstream as a raw storage key.
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
     let zoe_manager = MlsManager::new("zoe", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
@@ -15361,7 +15561,7 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
 fn test_tofu_entries_persisted_via_storage() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Pin a key for "alice"
     let pk = vec![42u8; 32];
@@ -15383,7 +15583,7 @@ fn test_tofu_entries_restored_on_restart() {
     // Protocol A pins a key for "alice"
     {
         let mut protocol_a = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-        protocol_a.initialize_mls(storage.clone()).unwrap();
+        protocol_a.initialize_mls_for_test(storage.clone()).unwrap();
         protocol_a
             .tofu_check_or_pin("alice", vec![10u8; 32])
             .unwrap();
@@ -15391,7 +15591,7 @@ fn test_tofu_entries_restored_on_restart() {
 
     // Protocol B uses the same storage — simulates restart
     let mut protocol_b = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    protocol_b.initialize_mls(storage.clone()).unwrap();
+    protocol_b.initialize_mls_for_test(storage.clone()).unwrap();
 
     // The restored TOFU store should contain alice's pinned key
     assert!(
@@ -15415,7 +15615,7 @@ fn test_tofu_entries_restored_on_restart() {
 fn test_tofu_eviction_deletes_from_storage() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Fill the TOFU store with old entries
     let old_base = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS - 100_000;
@@ -15467,7 +15667,7 @@ fn test_tofu_eviction_deletes_from_storage() {
 fn test_tofu_last_seen_update_persisted() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     let pk = vec![7u8; 32];
     protocol.tofu_check_or_pin("carol", pk.clone()).unwrap();
@@ -15521,7 +15721,9 @@ fn test_tofu_restore_skips_corrupted_entries() {
         .unwrap();
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
 
     // Valid entry should be restored, corrupted should be skipped
     assert!(
@@ -15557,7 +15759,9 @@ fn test_tofu_restore_caps_at_max_peers() {
     }
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
 
     assert!(
         protocol.known_peer_public_keys.len() <= MAX_TOFU_PEERS,
@@ -15572,12 +15776,12 @@ fn test_security_gate_rejects_missing_transport_id_when_required() {
     config.security.require_transport_identity = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Create a signed control message from alice with no transport_peer_id
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
 
     let mut msg = Message::new(
         UserId::new("alice").unwrap(),
@@ -15602,11 +15806,11 @@ fn test_security_gate_passes_with_matching_transport_id_when_required() {
     config.security.require_transport_identity = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
 
     let mut msg = Message::new(
         UserId::new("alice").unwrap(),
@@ -15663,11 +15867,11 @@ fn test_relayed_signed_control_passes_when_identity_required() {
     config.security.require_transport_identity = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
 
     let mut msg = Message::new(
         UserId::new("alice").unwrap(),
@@ -15697,11 +15901,11 @@ fn test_relayed_signed_control_passes_when_identity_required() {
 fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
 
     // Pin alice's key first — any prior signed control contact does this,
     // which is what made the unsigned relay-native rebuild undeliverable.
@@ -15776,7 +15980,9 @@ fn test_enable_message_persistence_restores_tofu_keys() {
 
     // Use enable_message_persistence (not initialize_mls)
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
 
     assert!(
         protocol.known_peer_public_keys.contains_key("dave"),
@@ -15821,7 +16027,9 @@ fn test_tofu_restore_skips_invalid_peer_ids() {
     }
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
 
     assert!(
         protocol.known_peer_public_keys.contains_key("valid_peer"),
@@ -15870,13 +16078,15 @@ fn test_tofu_restore_truncation_deterministic_on_equal_timestamps() {
     // Restore twice and verify we get the same set both times
     let mut protocol_a = OfflineProtocol::new(create_test_config()).unwrap();
     protocol_a
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
     let keys_a: std::collections::BTreeSet<String> =
         protocol_a.known_peer_public_keys.keys().cloned().collect();
 
     let mut protocol_b = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol_b.enable_message_persistence(storage).unwrap();
+    protocol_b
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
     let keys_b: std::collections::BTreeSet<String> =
         protocol_b.known_peer_public_keys.keys().cloned().collect();
 
@@ -16733,7 +16943,7 @@ fn test_outbox_persisted_and_restored_after_restart() {
     {
         let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
         protocol
-            .enable_message_persistence(storage.clone())
+            .enable_message_persistence_for_test(storage.clone())
             .unwrap();
 
         // Failing transport so the send is deferred into the outbox.
@@ -16757,7 +16967,7 @@ fn test_outbox_persisted_and_restored_after_restart() {
     // New protocol instance, same storage: the outbox should be restored.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
     assert_eq!(
         protocol.outbox_entry_count(),
@@ -16774,7 +16984,7 @@ fn test_remove_outbox_entry_clears_storage() {
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
@@ -16808,7 +17018,7 @@ fn test_outbox_eviction_deletes_from_storage() {
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
@@ -16859,7 +17069,7 @@ fn test_restore_outbox_skips_corrupted_entries() {
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     assert_eq!(
@@ -16907,7 +17117,7 @@ fn test_restore_outbox_prunes_overflow() {
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     assert_eq!(
@@ -16947,7 +17157,7 @@ fn test_restore_outbox_refreshes_expired_ttl_carrier_relative() {
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
     assert_eq!(
         protocol.outbox_entry_count(),
@@ -16970,7 +17180,7 @@ fn test_media_outbox_entry_not_persisted() {
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     let mut msg = test_message("bob", "chunk");
@@ -16995,7 +17205,7 @@ fn test_restored_outbox_entry_flushed_on_start() {
     {
         let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
         protocol
-            .enable_message_persistence(storage.clone())
+            .enable_message_persistence_for_test(storage.clone())
             .unwrap();
         let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
         protocol
@@ -17012,7 +17222,7 @@ fn test_restored_outbox_entry_flushed_on_start() {
     // entry and actually deliver it.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
     assert_eq!(protocol.outbox_entry_count(), 1);
 
@@ -17055,7 +17265,7 @@ fn test_restore_outbox_preserves_preexisting_in_memory_entry() {
     // Enabling persistence runs restore_outbox. The pre-existing entry must
     // survive and become durable.
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
     assert_eq!(
         protocol.outbox_entry_count(),
@@ -17112,7 +17322,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     assert_eq!(
@@ -17732,7 +17942,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
     });
 
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     assert_eq!(
@@ -18894,7 +19104,7 @@ fn test_sink_panic_in_mls_lifecycle_does_not_panic_protocol() {
     // and this test would fail with the propagated panic message instead
     // of an assertion failure.
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
-    let result = protocol.initialize_mls(storage);
+    let result = protocol.initialize_mls_for_test(storage);
     assert!(
         result.is_ok(),
         "initialize_mls must return Ok even when the sink panics on MLS records, got {result:?}",
@@ -18975,7 +19185,9 @@ fn scrub_secret_is_persisted_and_stable_across_instances() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
 
     let mut first = OfflineProtocol::new(create_test_config()).unwrap();
-    first.enable_message_persistence(storage.clone()).unwrap();
+    first
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
     let first_secret = first.telemetry_fallback_secret;
     assert!(first.telemetry_secret_persisted);
 
@@ -18989,7 +19201,9 @@ fn scrub_secret_is_persisted_and_stable_across_instances() {
     // A second instance backed by the same storage adopts the same secret, so
     // the same raw identifier hashes to the same opaque id across sessions.
     let mut second = OfflineProtocol::new(create_test_config()).unwrap();
-    second.enable_message_persistence(storage.clone()).unwrap();
+    second
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
     assert_eq!(second.telemetry_fallback_secret, first_secret);
     assert_eq!(
         first.telemetry_scrubber.hash_id("peer:alice"),
@@ -19004,11 +19218,13 @@ fn scrub_secret_load_is_idempotent_across_entry_paths() {
     // initialize_mls also enables persistence; a later explicit
     // enable_message_persistence must not rotate or rewrite the secret.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
     let secret_after_init = protocol.telemetry_fallback_secret;
     assert!(protocol.telemetry_secret_persisted);
 
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
     assert_eq!(protocol.telemetry_fallback_secret, secret_after_init);
 }
 
@@ -19026,7 +19242,7 @@ fn corrupt_persisted_scrub_secret_is_regenerated() {
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     // A fresh 16-byte secret replaces the corrupt entry rather than panicking
@@ -19044,7 +19260,9 @@ fn corrupt_persisted_scrub_secret_is_regenerated() {
 fn explicit_config_secret_wins_over_persistent_fallback() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
 
     // Installing a sink with an explicit scrub_secret must use that secret for
     // opaque-id hashing, not the SDK-managed persistent fallback.
@@ -19103,7 +19321,9 @@ fn nostr_signing_secret_is_persisted_and_stable_across_instances() {
 
     let mut first = protocol_with_nostr_transport();
     let ephemeral_pubkey = nostr_signing_pubkey(&first);
-    first.enable_message_persistence(storage.clone()).unwrap();
+    first
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
     assert!(first.nostr_secret_persisted);
 
     // The persisted secret replaced the construction-time ephemeral key.
@@ -19124,7 +19344,9 @@ fn nostr_signing_secret_is_persisted_and_stable_across_instances() {
     // identity — the install's Nostr pubkey is stable across restarts.
     let mut second = protocol_with_nostr_transport();
     assert_ne!(nostr_signing_pubkey(&second), first_pubkey);
-    second.enable_message_persistence(storage.clone()).unwrap();
+    second
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
     assert_eq!(nostr_signing_pubkey(&second), first_pubkey);
 }
 
@@ -19135,11 +19357,13 @@ fn nostr_signing_secret_load_is_idempotent_across_entry_paths() {
     // initialize_mls also enables persistence; a later explicit
     // enable_message_persistence must not rotate the signing identity.
     let mut protocol = protocol_with_nostr_transport();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
     assert!(protocol.nostr_secret_persisted);
     let pubkey_after_init = nostr_signing_pubkey(&protocol);
 
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
     assert_eq!(nostr_signing_pubkey(&protocol), pubkey_after_init);
 }
 
@@ -19157,7 +19381,7 @@ fn corrupt_persisted_nostr_secret_is_regenerated() {
 
     let mut protocol = protocol_with_nostr_transport();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     // A fresh 32-byte secret replaces the corrupt entry rather than pinning
@@ -19182,7 +19406,7 @@ fn nostr_secret_store_failure_retries_the_same_secret() {
 
     let mut protocol = protocol_with_nostr_transport();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     // Store failed: the fresh secret was installed (stable identity for this
@@ -19203,7 +19427,7 @@ fn nostr_secret_store_failure_retries_the_same_secret() {
     storage
         .fail_store
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     assert!(protocol.nostr_secret_persisted);
     assert!(protocol.nostr_unpersisted_secret.is_none());
@@ -19225,7 +19449,7 @@ fn nostr_secret_restore_without_nostr_transport_is_a_noop() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(storage.clone())
+        .enable_message_persistence_for_test(storage.clone())
         .unwrap();
 
     assert!(!protocol.nostr_secret_persisted);
@@ -19251,7 +19475,9 @@ fn telemetry_install_id_is_stable_across_instances_sharing_storage() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
 
     let mut first = OfflineProtocol::new(create_test_config()).unwrap();
-    first.enable_message_persistence(storage.clone()).unwrap();
+    first
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
     let first_id = first
         .telemetry_install_id()
         .expect("id should be available once the secret is persisted");
@@ -19261,17 +19487,17 @@ fn telemetry_install_id_is_stable_across_instances_sharing_storage() {
     // Same storage = same install: the id must match across sessions so
     // backend distinct-device aggregation counts one device, not many.
     let mut second = OfflineProtocol::new(create_test_config()).unwrap();
-    second.enable_message_persistence(storage).unwrap();
+    second.enable_message_persistence_for_test(storage).unwrap();
     assert_eq!(second.telemetry_install_id(), Some(first_id));
 }
 
 #[test]
 fn telemetry_install_id_differs_across_installs() {
     let mut a = OfflineProtocol::new(create_test_config()).unwrap();
-    a.enable_message_persistence(Arc::new(crate::mls::InMemoryStorage::new()))
+    a.enable_message_persistence_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let mut b = OfflineProtocol::new(create_test_config()).unwrap();
-    b.enable_message_persistence(Arc::new(crate::mls::InMemoryStorage::new()))
+    b.enable_message_persistence_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     assert_ne!(a.telemetry_install_id(), b.telemetry_install_id());
 }
@@ -19283,7 +19509,9 @@ fn telemetry_install_id_survives_explicit_config_secret() {
     // it stays pinned to the SDK-managed persistent secret.
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
     let before = protocol.telemetry_install_id();
     assert!(before.is_some());
 
@@ -19313,7 +19541,9 @@ fn telemetry_install_id_is_domain_separated_from_scrubbed_ids() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
     let id = protocol.telemetry_install_id().unwrap();
     assert_ne!(
         id,
@@ -19340,7 +19570,9 @@ fn telemetry_install_id_derivation_is_frozen() {
         )
         .unwrap();
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
     assert_eq!(
         protocol.telemetry_install_id().as_deref(),
         Some("888112d3efecdb64bbc60cb9b55359c6")
@@ -19355,7 +19587,7 @@ fn telemetry_install_id_is_none_when_secret_persist_fails() {
     // contract in the UDL/TS docs).
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     protocol
-        .enable_message_persistence(Arc::new(FailingScrubSecretStorage::default()))
+        .enable_message_persistence_for_test(Arc::new(FailingScrubSecretStorage::default()))
         .unwrap();
     assert_eq!(protocol.telemetry_install_id(), None);
 }
@@ -19372,7 +19604,7 @@ fn media_test_protocol(user_id: &str) -> (OfflineProtocol, MockTransport) {
     config.encryption.enabled = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -19574,7 +19806,7 @@ fn compact_envelope_interop_legacy_recipient_and_ungated_parsing() {
     carol_config.encryption.compact_envelope_enabled = false;
     let mut carol = OfflineProtocol::new(carol_config).unwrap();
     carol
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let (mut dave, dave_handle) = media_test_protocol("dave");
     // establish_media_session hardcodes alice/bob ids; wire dave<->carol by hand.
@@ -20150,7 +20382,9 @@ fn rich_payload_flush_after_restart_seals_with_restored_capability() {
     alice_config.encryption.enabled = true;
     alice_config.encryption.store_pending = true;
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
-    alice.initialize_mls(alice_storage.clone()).unwrap();
+    alice
+        .initialize_mls_for_test(alice_storage.clone())
+        .unwrap();
 
     let (mut bob, _bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
@@ -20173,7 +20407,7 @@ fn rich_payload_flush_after_restart_seals_with_restored_capability() {
     alice2_config.encryption.enabled = true;
     alice2_config.encryption.store_pending = true;
     let mut alice2 = OfflineProtocol::new(alice2_config).unwrap();
-    alice2.initialize_mls(alice_storage).unwrap();
+    alice2.initialize_mls_for_test(alice_storage).unwrap();
     assert!(
         alice2.peer_supports_rich_payload("bob"),
         "restored capability must be visible before the flush runs"
@@ -20695,7 +20929,7 @@ fn test_send_media_rich_extras_dropped_when_kill_switch_off() {
     config.encryption.rich_payload_enabled = false;
     let mut alice = OfflineProtocol::new(config).unwrap();
     alice
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -20866,7 +21100,9 @@ fn plaintext_media_protocol_with_storage(
         events_handle.lock().unwrap().push(event);
     });
 
-    protocol.enable_message_persistence(storage).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage)
+        .unwrap();
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
     let handle = mock_transport.clone();
@@ -21168,7 +21404,7 @@ fn test_plaintext_media_rejected_when_encryption_required() {
     config.encryption.require_encryption = true;
 
     let mut bob = OfflineProtocol::new(config).unwrap();
-    bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -21204,7 +21440,7 @@ fn test_plaintext_text_rejected_when_encryption_required() {
     config.encryption.require_encryption = true;
 
     let mut bob = OfflineProtocol::new(config).unwrap();
-    bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -21313,7 +21549,7 @@ fn strict_text_protocol(user_id: &str, init_mls: bool) -> (OfflineProtocol, Mock
     let mut protocol = OfflineProtocol::new(config).unwrap();
     if init_mls {
         protocol
-            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
             .unwrap();
     }
     let mock_transport = MockTransport::new(TransportType::BLE);
@@ -21716,7 +21952,7 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
     config.encryption.enabled = true;
     config.encryption.pending_queue.max_pending_per_peer = 1;
     let mut bob = OfflineProtocol::new(config).unwrap();
-    bob.initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+    bob.initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
@@ -22263,7 +22499,7 @@ fn test_group_registration_enqueue_does_not_mark_relay_synced() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -22303,7 +22539,7 @@ fn test_group_send_takes_broadcast_path_only_when_relay_synced() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -22351,7 +22587,7 @@ fn test_recipient_unreachable_reason_parks_welcome_without_burning_budget() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -22423,7 +22659,7 @@ fn test_carrier_backed_failure_still_burns_welcome_budget() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -22480,7 +22716,7 @@ fn setup_internet_protocol_with_pending_welcome() -> (OfflineProtocol, MockTrans
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -23424,7 +23660,7 @@ fn test_group_created_ack_gates_relay_sync() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -23537,7 +23773,7 @@ fn test_unanswered_relay_registration_expires_and_retries() {
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();

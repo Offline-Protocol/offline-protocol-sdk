@@ -71,6 +71,7 @@ offline_protocol_sdk/
 ├── internet_manager.py      # WebSocket transport (websockets library)
 ├── ble_manager.py           # BLE transport (bleak library)
 ├── secure_storage.py        # MLS key storage (keyring library)
+├── state_storage.py         # Restartable protocol state (application data)
 └── transport_manager.py     # Base transport abstraction
 ```
 
@@ -94,21 +95,38 @@ MLS cryptographic key material is stored using the `keyring` library:
 | Linux | Secret Service (GNOME Keyring / KWallet) |
 | Windows | Windows Credential Locker |
 
-You can provide your own storage by implementing the `MlsStorageProvider` callback interface:
+Restartable message-plane state is kept separately by `AppStateStorage`, outside
+the credential store. Custom integrations must provide both lifecycle-separated
+interfaces:
 
 ```python
-from offline_protocol_sdk.offline_protocol import MlsStorageProvider
+from offline_protocol_sdk.offline_protocol import (
+    MlsStorageProvider,
+    ProtocolStateStorageProvider,
+)
 
-class MyStorage(MlsStorageProvider):
+class MySecureStorage(MlsStorageProvider):
     def store(self, key_type: str, key_id: str, data: list[int]) -> None: ...
     def load(self, key_type: str, key_id: str) -> list[int] | None: ...
     def delete(self, key_type: str, key_id: str) -> None: ...
     def list_keys(self, key_type: str) -> list[str]: ...
 
-pm = ProtocolManager(config, storage=MyStorage())
+class MyStateStorage(ProtocolStateStorageProvider):
+    def store(self, key_type: str, key_id: str, data: list[int]) -> None: ...
+    def load(self, key_type: str, key_id: str) -> list[int] | None: ...
+    def delete(self, key_type: str, key_id: str) -> None: ...
+    def list_keys(self, key_type: str) -> list[str]: ...
+
+pm = ProtocolManager(
+    config,
+    storage=MySecureStorage(),
+    state_storage=MyStateStorage(),
+)
 ```
 
-**Important:** Keep a reference to the storage object alive for the entire protocol lifetime. If Python garbage-collects it, the Rust-side callback pointers become dangling.
+`ProtocolManager` keeps both callback objects alive for the protocol lifetime.
+Protocol state must live in application data rather than Keychain, Secret
+Service, or Windows Credential Locker.
 
 ## Running the Example
 

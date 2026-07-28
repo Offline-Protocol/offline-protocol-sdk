@@ -13,7 +13,7 @@ use std::time::{Duration as StdDuration, Instant};
 fn setup_started_with_events() -> (OfflineProtocol, Arc<Mutex<Vec<Event>>>) {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -29,7 +29,7 @@ fn setup_started_with_events() -> (OfflineProtocol, Arc<Mutex<Vec<Event>>>) {
 fn setup_with_events() -> (OfflineProtocol, Arc<Mutex<Vec<Event>>>) {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_clone = events.clone();
@@ -47,8 +47,8 @@ fn setup_alice_bob_group(group_name: &str) -> (OfflineProtocol, OfflineProtocol,
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
     alice.start().unwrap();
     bob.start().unwrap();
 
@@ -107,8 +107,8 @@ fn test_group_welcome_cannot_squat_session_slot() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut mallory = OfflineProtocol::new(create_test_config_for_user("mallory")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    mallory.initialize_mls(storage_m).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
+    mallory.initialize_mls_for_test(storage_m).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
     mallory.start().unwrap();
     bob.start().unwrap();
 
@@ -172,7 +172,7 @@ fn test_group_mls_create_mesh_group_requires_mls() {
 fn test_group_mls_create_mesh_group_with_mls() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let group_info = protocol.create_group("Test Group").unwrap();
     assert_eq!(group_info.name, Some("Test Group".to_string()));
@@ -192,7 +192,7 @@ fn test_group_mls_create_mesh_group_with_mls() {
 fn test_group_mls_list_groups() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Initially no groups
     let groups = protocol.list_groups().unwrap();
@@ -216,7 +216,7 @@ fn test_group_mls_send_message_requires_mls() {
 fn test_group_mls_send_message_group_not_found() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Sending to non-existent group should fail
     let result = protocol.send_group_message("nonexistent-group", "hello", None, None);
@@ -260,7 +260,7 @@ fn test_group_mls_leave_group() {
 fn test_group_mls_invite_requires_key_package() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let info = protocol.create_group("Invite Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
@@ -391,7 +391,7 @@ fn test_group_mls_process_commit_empty_ciphertext_no_event() {
 fn test_group_mls_refresh_group_members() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Create group
     let info = protocol.create_group("Refresh Test").unwrap();
@@ -1165,7 +1165,7 @@ fn test_group_mls_welcome_valid_base64_bad_mls_no_panic() {
 fn test_group_mls_send_message_partial_failure() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     // NOTE: Do NOT call protocol.start() — send_internal_message will fail
     // for all members because the protocol is not running, simulating
     // total delivery failure.
@@ -1316,7 +1316,7 @@ fn test_group_mls_dedup_inserted_before_decrypt_attempt() {
 fn test_group_mls_leave_preserves_state_on_total_send_failure() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     // Note: protocol NOT started — send_internal_message will fail with NotStarted
 
     let info = protocol.create_group("Leave Fail Test").unwrap();
@@ -1607,7 +1607,7 @@ fn test_group_mls_invite_custom_max_members() {
     let mut config = create_test_config();
     config.group.max_group_members = 3; // small cap for testing
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     let info = protocol.create_group("Custom Cap Test").unwrap();
@@ -1635,7 +1635,7 @@ fn test_group_mls_invite_below_custom_cap_allowed() {
     let mut config = create_test_config();
     config.group.max_group_members = 3;
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     let info = protocol.create_group("Below Cap Test").unwrap();
@@ -1664,7 +1664,7 @@ fn test_group_mls_invite_max_members_1_blocks_any_invite() {
     let mut config = create_test_config();
     config.group.max_group_members = 1;
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     let info = protocol.create_group("Solo Only").unwrap();
@@ -1684,7 +1684,7 @@ fn test_group_mls_invite_large_max_members_not_rejected() {
     let mut config = create_test_config();
     config.group.max_group_members = 10_000;
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     let info = protocol.create_group("Large Cap Test").unwrap();
@@ -1944,7 +1944,7 @@ fn test_group_mls_invite_respects_max_group_members() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     let info = protocol.create_group("Capped Group").unwrap();
@@ -1975,8 +1975,8 @@ fn test_group_mls_invite_to_group_end_to_end() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
     alice.start().unwrap();
     bob.start().unwrap();
 
@@ -2041,8 +2041,8 @@ fn test_group_mls_invite_and_bob_joins_via_welcome() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
     alice.start().unwrap();
     bob.start().unwrap();
 
@@ -2089,8 +2089,8 @@ fn test_group_mls_invite_sends_commit_to_existing_members() {
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let carol_proto = OfflineProtocol::new(create_test_config_for_user("carol")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
     drop(carol_proto);
     alice.start().unwrap();
     bob.start().unwrap();
@@ -2206,7 +2206,7 @@ fn test_group_mls_max_group_members_enforced_with_valid_key_package() {
     let mut config = create_test_config_for_user("alice");
     config.group.max_group_members = 1; // only creator allowed
     let mut alice = OfflineProtocol::new(config).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
     alice.start().unwrap();
 
     let info = alice.create_group("Cap Enforcement").unwrap();
@@ -2291,7 +2291,7 @@ fn test_group_mls_invite_multiple_members_successively() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
     alice.start().unwrap();
 
     let group_info = alice.create_group("Multi Invite Test").unwrap();
@@ -2461,7 +2461,7 @@ fn test_group_mls_max_group_members_boundary() {
     let mut config = create_test_config_for_user("alice");
     config.group.max_group_members = 2;
     let mut alice = OfflineProtocol::new(config).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
     alice.start().unwrap();
 
     let info = alice.create_group("Tiny Group").unwrap();
@@ -2736,7 +2736,7 @@ fn test_relay_sync_cleared_on_internet_lost() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Add Internet transport and start
     let internet = MockTransport::new(TransportType::Internet);
@@ -2793,7 +2793,7 @@ fn test_group_relay_sync_changed_event_lifecycle() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -2892,7 +2892,7 @@ fn test_relay_register_ack_timeout_emits_sync_changed() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -2953,7 +2953,7 @@ fn test_internet_lost_emits_sync_changed_per_group() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -3015,7 +3015,7 @@ fn test_request_group_relay_registration() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Unknown group → Err, regardless of transports.
     assert!(protocol
@@ -3092,7 +3092,7 @@ fn test_relay_sync_disabled_config() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -3120,7 +3120,7 @@ fn test_relay_broadcast_used_when_synced() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Add Internet transport
     let internet = MockTransport::new(TransportType::Internet);
@@ -3181,7 +3181,7 @@ fn test_relay_broadcast_fallback_to_fanout() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -3384,7 +3384,7 @@ fn test_relay_register_group_on_create() {
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let internet = MockTransport::new(TransportType::Internet);
     internet.start().unwrap();
@@ -3459,7 +3459,7 @@ fn test_is_internet_available() {
 fn test_group_mls_send_total_failure_emits_partial_failure_event() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     // NOT started — all sends will fail with NotStarted
 
     let info = protocol.create_group("Failure Event Test").unwrap();
@@ -3805,7 +3805,7 @@ fn test_epoch_fork_resolution_by_leader() {
 fn test_epoch_fork_resolution_skipped_for_non_leader() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("zoe")).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     let _info = protocol.create_group("Non-Leader Test").unwrap();
 
     // Use a fake group_id for the fork so refresh_group_members fails and
@@ -4181,8 +4181,8 @@ fn test_epoch_fork_resolution_includes_failed_members() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
     alice.start().unwrap();
     bob.start().unwrap();
 
@@ -4291,7 +4291,7 @@ fn test_epoch_fork_update_keys_failure_leaves_resolution_attempted() {
     // When update_keys fails, resolution_attempted stays true (manual intervention needed).
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Use a fake group_id that doesn't exist in MLS — update_keys will fail.
     let fake_group_id = "group:nonexistent-for-update".to_string();
@@ -5108,7 +5108,7 @@ fn test_handle_group_mls_leave_records_pending_election_for_non_elected() {
     // member fails.
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("zoe")).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let group_id = "group:leave-else-branch".to_string();
     // Sorted remaining after "bob" leaves: ["alice", "zoe"]
@@ -5278,7 +5278,7 @@ fn test_leave_election_remove_failure_keeps_election_pending() {
     // remain pending (with cooldown set) so the next candidate can try.
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     // Use a fake group where the leaver is "in the group" per cache but
     // remove_from_group will fail because the MLS group doesn't exist.
@@ -5332,7 +5332,7 @@ fn test_invite_to_group_consumes_key_package() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
     alice.start().unwrap();
 
     let group_info = alice.create_group("Consume KP Test").unwrap();
@@ -5367,7 +5367,7 @@ fn test_invite_same_peer_to_two_groups_needs_fresh_key_package() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
     alice.start().unwrap();
 
     // Create two groups
@@ -5623,7 +5623,7 @@ fn test_relay_group_message_no_raw_on_decrypt_failure() {
 fn test_invite_commit_retry_no_panic() {
     let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
-    charlie.initialize_mls(storage_c).unwrap();
+    charlie.initialize_mls_for_test(storage_c).unwrap();
     charlie.start().unwrap();
 
     let (mut alice, _bob, group_id) = setup_alice_bob_group("Invite Retry");
@@ -6093,7 +6093,7 @@ fn test_fallback_admin_uses_created_by() {
     // should be treated as admin via the fallback path.
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     let group_info = protocol.create_group("Fallback Group").unwrap();
@@ -6130,8 +6130,8 @@ fn test_fallback_admin_denies_non_creator() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
     alice.start().unwrap();
     bob.start().unwrap();
 
@@ -6183,7 +6183,7 @@ fn test_no_metadata_denies_admin() {
     // but not misreported as a permissions failure.
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     // Simulate having a group in the member list but no MLS state
@@ -6246,7 +6246,7 @@ fn test_role_getters_on_metadata_less_group_return_defaults() {
     use crate::mls::MlsStorage;
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage.clone()).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     let info = protocol.create_group("Legacy Group").unwrap();
     let group_id = info.group_id.as_str().to_string();
@@ -6282,7 +6282,7 @@ fn test_legacy_roles_in_custom_map_are_migrated() {
     // roles are stored as "role:user_id" keys in the `custom` map.
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
     let group_info = protocol.create_group("Migration Test").unwrap();
@@ -6593,8 +6593,8 @@ fn test_welcome_payload_roles_stored_on_join() {
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
     alice.start().unwrap();
     bob.start().unwrap();
 
@@ -7486,7 +7486,7 @@ fn test_rename_group_empty_name_rejected() {
 fn test_create_group_empty_name_rejected() {
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
 
     let result = protocol.create_group("");
     assert!(result.is_err());
@@ -7530,8 +7530,8 @@ fn setup_race_alice_bob() -> (
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_clone = events.clone();
@@ -7874,7 +7874,7 @@ fn test_group_message_at_future_epoch_buffered_then_delivered_after_commit() {
     // Alice adds Charlie, advancing the epoch. Bob has not seen the commit.
     let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
-    charlie.initialize_mls(storage_c).unwrap();
+    charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
         let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
         charlie_mls.generate_key_package().unwrap()
@@ -7983,7 +7983,7 @@ fn test_commit_riding_message_channel_drains_buffered_messages() {
     // Alice adds Charlie, advancing the epoch. Bob has not seen the commit.
     let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
-    charlie.initialize_mls(storage_c).unwrap();
+    charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
         let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
         charlie_mls.generate_key_package().unwrap()
@@ -8042,7 +8042,7 @@ fn test_buffered_commit_riding_message_channel_unblocks_earlier_entries() {
     // Welcome (which joins at the pre-Charlie epoch).
     let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
-    charlie.initialize_mls(storage_c).unwrap();
+    charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
         let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
         charlie_mls.generate_key_package().unwrap()
@@ -8216,7 +8216,7 @@ fn test_commit_and_message_both_outrun_welcome() {
     // add-Charlie commit too.
     let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
-    charlie.initialize_mls(storage_c).unwrap();
+    charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
         let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
         charlie_mls.generate_key_package().unwrap()
@@ -9843,7 +9843,7 @@ fn group_rich_seal_gate_requires_every_member_capable() {
     // member); the self entry is exempt from the check.
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice
-        .initialize_mls(Arc::new(crate::mls::InMemoryStorage::default()))
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::default()))
         .unwrap();
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
@@ -9991,9 +9991,9 @@ fn setup_three_party_invite(
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let mut carol = OfflineProtocol::new(create_test_config_for_user("carol")).unwrap();
-    alice.initialize_mls(storage_a).unwrap();
-    bob.initialize_mls(storage_b).unwrap();
-    carol.initialize_mls(storage_c).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
+    carol.initialize_mls_for_test(storage_c).unwrap();
     alice.start().unwrap();
     bob.start().unwrap();
     carol.start().unwrap();

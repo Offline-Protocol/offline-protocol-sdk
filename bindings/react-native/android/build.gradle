@@ -2,7 +2,12 @@ apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
 def reactNative = new File("$projectDir/../node_modules/react-native")
-def reactNativeExists = reactNative.exists()
+// Only use the legacy local Maven repository when it actually exists.
+// Newer React Native packages keep sources under ReactAndroid/ and do not
+// publish an `android/` Maven repo, so checking only the package directory
+// produces an unversioned `react-android` dependency in the standalone
+// harness.
+def reactNativeExists = new File(reactNative, "android").exists()
 
 android {
     namespace 'com.offlineprotocol'

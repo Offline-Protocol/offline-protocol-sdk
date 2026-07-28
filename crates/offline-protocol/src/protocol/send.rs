@@ -108,6 +108,7 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let content_str: String = content.into();
         let priority = options.priority.unwrap_or(MessagePriority::Medium);
+        Self::validate_outbound_recipient(&recipient_str)?;
 
         // Prevent sending messages to blocked users. Blocking is bidirectional:
         // we neither receive from nor send to a blocked peer.
@@ -249,6 +250,7 @@ impl OfflineProtocol {
 
         let recipient_str: String = new_recipient.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
+        Self::validate_outbound_recipient(&recipient_str)?;
 
         if self.is_user_blocked(&recipient_str) {
             return Err(Error::UserBlocked(recipient_str));
@@ -575,6 +577,13 @@ impl OfflineProtocol {
                 ..Default::default()
             },
         )
+    }
+
+    /// Creates a new message from the given parameters.
+    pub(super) fn validate_outbound_recipient(recipient: &str) -> Result<()> {
+        UserId::new(recipient)
+            .map(|_| ())
+            .map_err(|error| Error::InvalidArgument(format!("Invalid recipient user ID: {error}")))
     }
 
     /// Creates a new message from the given parameters.
@@ -1184,7 +1193,7 @@ impl OfflineProtocol {
         } else if self.config.encryption.require_encryption {
             Err(Error::EncryptFailed(
                 "MLS encryption is required (the default) but MLS is not initialized — \
-                 call initialize_mls() with an MlsStorage, or explicitly opt out with \
+                 call initialize_mls() with secure and protocol-state storage, or explicitly opt out with \
                  require_encryption=false to send plaintext"
                     .to_string(),
             ))
@@ -1611,6 +1620,7 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let file_name_str: String = file_name.into();
         let media_metadata = options.media_metadata;
+        Self::validate_outbound_recipient(&recipient_str)?;
 
         // Validate the reply id like send_message_with does — a malformed id
         // fails the call instead of riding sealed to the receiver.
@@ -1722,7 +1732,7 @@ impl OfflineProtocol {
         } else if self.config.encryption.require_encryption {
             return Err(Error::EncryptFailed(
                 "MLS encryption is required (the default) but MLS is not initialized — \
-                 call initialize_mls() with an MlsStorage, or explicitly opt out with \
+                 call initialize_mls() with secure and protocol-state storage, or explicitly opt out with \
                  require_encryption=false to send plaintext media"
                     .to_string(),
             ));
@@ -2313,6 +2323,56 @@ impl OfflineProtocol {
             .remove(&message_id.as_str())
             .filter(|pending| pending.sent_at.elapsed() <= PENDING_CONNECTION_REQUEST_TTL)
             .map(|pending| pending.recipient)
+    }
+
+    /// Removes messages that have waited too long for MLS session
+    /// establishment. This gives the pre-outbox queue the same bounded
+    /// lifecycle guarantee as dispatched messages.
+    pub(super) fn cleanup_expired_pending_messages(&mut self) {
+        let lifetime_ms = self
+            .config
+            .reliability
+            .retry
+            .pending_message_max_lifetime_ms as i64;
+        let cutoff = Utc::now() - ChronoDuration::milliseconds(lifetime_ms);
+        let mut changed_recipients = Vec::new();
+        let mut expired_ids = Vec::new();
+
+        for (recipient, messages) in &mut self.pending_encrypted_messages {
+            let previous_len = messages.len();
+            messages.retain(|pending| {
+                if pending.queued_at <= cutoff {
+                    expired_ids.push(pending.message_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            if messages.len() != previous_len {
+                changed_recipients.push(recipient.clone());
+            }
+        }
+
+        for recipient in changed_recipients {
+            if self
+                .pending_encrypted_messages
+                .get(&recipient)
+                .is_some_and(Vec::is_empty)
+            {
+                self.pending_encrypted_messages.remove(&recipient);
+                self.clear_pending_messages_from_storage(&recipient);
+            } else {
+                self.persist_pending_messages_for_recipient(&recipient);
+            }
+        }
+
+        for message_id in expired_ids {
+            self.emit_event(Event::message_failed(
+                message_id,
+                "Pending session lifetime exceeded".to_string(),
+                0,
+            ));
+        }
     }
 
     pub(super) fn cleanup_outbox(&mut self) {
@@ -3395,6 +3455,7 @@ impl OfflineProtocol {
         key_package: Option<Vec<u8>>,
         initial_message: Option<String>,
     ) -> Result<MessageId> {
+        Self::validate_outbound_recipient(recipient)?;
         if let Some(msg) = initial_message.as_deref() {
             if msg.len() > MAX_INITIAL_MESSAGE_BYTES {
                 return Err(Error::InvalidArgument(format!(
@@ -3475,6 +3536,7 @@ impl OfflineProtocol {
         accepter_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
+        Self::validate_outbound_recipient(recipient)?;
         // Accept messages are internal control messages (not user content),
         // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
@@ -3509,6 +3571,7 @@ impl OfflineProtocol {
     /// Connection rejects are internal control messages sent in plaintext,
     /// exempt from `require_encryption` (same as key packages and welcome messages).
     pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
+        Self::validate_outbound_recipient(recipient)?;
         // Reject messages are internal control messages (not user content),
         // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
@@ -3535,6 +3598,7 @@ impl OfflineProtocol {
     /// Connection cancellations are internal control messages sent in plaintext,
     /// exempt from `require_encryption` (same as key packages and welcome messages).
     pub fn cancel_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
+        Self::validate_outbound_recipient(recipient)?;
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -3560,11 +3624,7 @@ impl OfflineProtocol {
         recipient: &str,
         status: PresenceStatus,
     ) -> Result<MessageId> {
-        if recipient.is_empty() {
-            return Err(Error::InvalidArgument(
-                "recipient must not be empty".to_string(),
-            ));
-        }
+        Self::validate_outbound_recipient(recipient)?;
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -3596,11 +3656,7 @@ impl OfflineProtocol {
         conversation_id: &str,
         is_typing: bool,
     ) -> Result<MessageId> {
-        if recipient.is_empty() {
-            return Err(Error::InvalidArgument(
-                "recipient must not be empty".to_string(),
-            ));
-        }
+        Self::validate_outbound_recipient(recipient)?;
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -3636,11 +3692,7 @@ impl OfflineProtocol {
         recipient: &str,
         message_ids: Vec<String>,
     ) -> Result<MessageId> {
-        if recipient.is_empty() {
-            return Err(Error::InvalidArgument(
-                "recipient must not be empty".to_string(),
-            ));
-        }
+        Self::validate_outbound_recipient(recipient)?;
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }

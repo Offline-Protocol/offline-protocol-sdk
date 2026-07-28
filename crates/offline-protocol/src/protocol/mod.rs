@@ -29,7 +29,10 @@ use crate::telemetry::aggregator::{
 use crate::telemetry::{
     dispatch_record, Scrubber, TelemetryConfig, TelemetryContext, TelemetryRecord, TelemetrySink,
 };
-use crate::{Error, EstablishmentState, Event, ProtocolConfig, Result, TransportManager};
+use crate::{
+    Error, EstablishmentState, Event, ProtocolConfig, ProtocolStateStorage, Result,
+    TransportManager,
+};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{LamportClock, Message, MessageId, MutexExt};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
@@ -176,9 +179,11 @@ pub struct OfflineProtocol {
     /// the MLS session is ready.
     pub(crate) pending_queue: PendingDecryptionQueue,
 
-    /// Storage for persisting pending messages (reuses MLS storage).
-    /// When set, pending messages survive app crashes/restarts.
-    message_storage: Option<Arc<dyn MlsStorage>>,
+    /// Secure storage for MLS/key material and SDK-owned secrets.
+    secure_storage: Option<Arc<dyn MlsStorage>>,
+
+    /// Install-scoped storage for restartable message-plane and protocol state.
+    protocol_state_storage: Option<Arc<dyn ProtocolStateStorage>>,
 
     /// Lamport logical clock for causal message ordering.
     /// Ticked on send, merged on receive.
@@ -336,7 +341,7 @@ pub struct OfflineProtocol {
     known_peer_public_keys: HashMap<String, TofuEntry>,
 
     /// Set of blocked user IDs. Messages from blocked users are silently
-    /// dropped (no ACK, no event). Persisted via `MlsStorage`.
+    /// dropped (no ACK, no event). Persisted via `ProtocolStateStorage`.
     blocked_users: HashSet<String>,
 
     /// Timestamp of the last `kick_pending_session_reconciliation` execution.
@@ -373,6 +378,49 @@ impl Drop for OfflineProtocol {
         self.flush_lamport_clock();
     }
 }
+
+#[cfg(test)]
+struct TestProtocolStateStorage {
+    storage: Arc<dyn MlsStorage>,
+}
+
+#[cfg(test)]
+impl MlsStorage for TestProtocolStateStorage {
+    fn store(
+        &self,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.storage.store(key_type, key_id, data)
+    }
+
+    fn load(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+        self.storage.load(key_type, key_id)
+    }
+
+    fn delete(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.storage.delete(key_type, key_id)
+    }
+
+    fn list_keys(
+        &self,
+        key_type: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        self.storage.list_keys(key_type)
+    }
+}
+
+#[cfg(test)]
+impl ProtocolStateStorage for TestProtocolStateStorage {}
 
 impl OfflineProtocol {
     /// Creates a new protocol instance.
@@ -426,7 +474,8 @@ impl OfflineProtocol {
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
             pending_queue: PendingDecryptionQueue::default(),
-            message_storage: None,
+            secure_storage: None,
+            protocol_state_storage: None,
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
@@ -473,11 +522,12 @@ impl OfflineProtocol {
         })
     }
 
-    /// Initializes MLS encryption with the provided storage backend.
+    /// Initializes MLS encryption and protocol persistence.
     ///
     /// This must be called before encryption can be used. The storage
-    /// backend should be a platform-native secure storage implementation
-    /// (iOS Keychain, Android EncryptedSharedPreferences, etc.).
+    /// `secure_storage` must be a platform-native credential store.
+    /// `protocol_state_storage` must be scoped to the app container and is
+    /// removed when that container is deleted.
     ///
     /// Ownership model:
     /// - `OfflineProtocol` is the single authoritative owner of `MlsManager`
@@ -486,23 +536,27 @@ impl OfflineProtocol {
     /// - manager publication is transactional: restore must succeed before
     ///   `mls_manager` becomes visible to callers
     ///
-    /// The same storage is also used for persisting pending messages and the
-    /// store-and-forward outbox (under the `outbox` key type), ensuring both
-    /// survive app crashes/restarts. The media (file-chunk) outbox is not
-    /// persisted — file transfers must be re-initiated after a restart.
-    pub fn initialize_mls(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
+    /// The two storage domains are intentionally different trait objects. This
+    /// prevents message-plane state from inheriting the lifecycle of Keychain
+    /// or another credential store.
+    pub fn initialize_mls(
+        &mut self,
+        secure_storage: Arc<dyn MlsStorage>,
+        protocol_state_storage: Arc<dyn ProtocolStateStorage>,
+    ) -> Result<()> {
         if self.mls_manager.is_some() {
             return Ok(());
         }
 
         let manager = Arc::new(RwLock::new(MlsManager::new(
             &self.config.user_id,
-            storage.clone(),
+            secure_storage.clone(),
         )?));
 
         // Keep initialization transactional so a restore failure cannot leave
         // partially-initialized MLS state visible and then permanently block retries.
-        let previous_message_storage = self.message_storage.clone();
+        let previous_secure_storage = self.secure_storage.clone();
+        let previous_protocol_state_storage = self.protocol_state_storage.clone();
         let previous_pending_messages = self.pending_encrypted_messages.clone();
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
@@ -514,8 +568,8 @@ impl OfflineProtocol {
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
 
-        // Also use this storage for pending message persistence
-        self.message_storage = Some(storage);
+        self.secure_storage = Some(secure_storage);
+        self.protocol_state_storage = Some(protocol_state_storage);
 
         // Load the persistent scrub secret outside the transactional restore
         // below: it is independent of MLS state, and a later MLS-restore
@@ -547,7 +601,8 @@ impl OfflineProtocol {
         })();
 
         if let Err(err) = restore_result {
-            self.message_storage = previous_message_storage;
+            self.secure_storage = previous_secure_storage;
+            self.protocol_state_storage = previous_protocol_state_storage;
             self.pending_encrypted_messages = previous_pending_messages;
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;
@@ -564,22 +619,29 @@ impl OfflineProtocol {
         self.mls_manager = Some(manager);
         self.emit_mls_initialized();
 
-        info!(user_id = %self.config.user_id, "MLS encryption initialized with message persistence");
+        info!(user_id = %self.config.user_id, "MLS encryption initialized with split secure and protocol-state storage");
         Ok(())
     }
 
-    /// Enables message persistence using the provided storage backend.
-    ///
-    /// This allows pending messages and the store-and-forward outbox to
-    /// survive app crashes/restarts even when MLS encryption is not used. The
-    /// storage backend should be a platform-native secure storage
-    /// implementation. The media (file-chunk) outbox is not persisted — file
-    /// transfers must be re-initiated after a restart.
-    ///
-    /// Note: If you call `initialize_mls()`, message persistence is
-    /// automatically enabled using the same storage.
-    pub fn enable_message_persistence(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
-        self.message_storage = Some(storage);
+    /// Test-only adapter for fixtures that intentionally use one
+    /// in-memory/fault-injection backend to observe both storage domains.
+    #[cfg(test)]
+    pub(crate) fn initialize_mls_for_test(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
+        let protocol_state_storage = Arc::new(TestProtocolStateStorage {
+            storage: storage.clone(),
+        });
+        self.initialize_mls(storage, protocol_state_storage)
+    }
+
+    /// Test-only storage initialization for persistence-focused fixtures that
+    /// do not need an MLS manager.
+    #[cfg(test)]
+    pub(crate) fn enable_message_persistence_for_test(
+        &mut self,
+        storage: Arc<dyn MlsStorage>,
+    ) -> Result<()> {
+        self.secure_storage = Some(storage.clone());
+        self.protocol_state_storage = Some(Arc::new(TestProtocolStateStorage { storage }));
         self.restore_or_init_scrub_secret();
         self.restore_or_init_nostr_signing_secret();
         self.restore_pending_messages()?;
@@ -588,7 +650,6 @@ impl OfflineProtocol {
         self.restore_blocked_users();
         self.restore_outbox()?;
         self.restore_media_descriptors()?;
-        info!("Message persistence enabled");
         Ok(())
     }
 

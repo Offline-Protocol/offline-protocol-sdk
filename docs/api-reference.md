@@ -410,10 +410,17 @@ protocol.on_event(|event| {
 #### Encryption (Auto-Encryption)
 
 ```rust
-pub fn initialize_mls(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()>
+pub fn initialize_mls(
+    &mut self,
+    secure_storage: Arc<dyn MlsStorage>,
+    protocol_state_storage: Arc<dyn ProtocolStateStorage>,
+) -> Result<()>
 ```
 
-Initializes MLS encryption with the provided storage backend. Required before encryption can be used.
+Initializes MLS encryption with two lifecycle-separated backends. `secure_storage`
+holds cryptographic and install-secret material. `protocol_state_storage` holds
+restartable message-plane state and must live inside the app container so app
+deletion removes pending messages, outbox entries, and retry lifecycles.
 
 ```rust
 pub fn is_mls_initialized(&self) -> bool

@@ -38,6 +38,7 @@ Pod::Spec.new do |s|
     "NostrManager.swift",
     "ReticulumManager.swift",
     "MlsSecureStorage.swift",
+    "ProtocolStateStorage.swift",
     "ble/**/*.swift",
     "mesh/**/*.swift",
     "Generated/offline_protocol.swift",  # UniFFI generated Swift file

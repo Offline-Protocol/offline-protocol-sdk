@@ -20,7 +20,7 @@ from .offline_protocol import MlsStorageError, MlsStorageProvider
 logger = logging.getLogger(__name__)
 
 # Service name used for all keyring entries
-_DEFAULT_SERVICE = "offline-protocol-mls"
+_DEFAULT_SERVICE = "offline-protocol-mls-v2"
 
 # Prefix for index entries that track key IDs per key_type
 _INDEX_PREFIX = "index:"

@@ -631,7 +631,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 49895:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 27506:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 23277:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink() != 38856:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -809,13 +809,13 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink() != 3716:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 47359:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 15033:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 52923:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 50236:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 51768:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 45701:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config() != 13854:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1198,6 +1198,35 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransport
     ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolNostrTransportCallback),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback.restype = None
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
+)
+_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
+)
+class _UniffiVTableCallbackInterfaceOfflineProtocolProtocolStateStorageProvider(ctypes.Structure):
+    _fields_ = [
+        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER),
+        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER),
+        ("store", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0),
+        ("load", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1),
+        ("delete", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2),
+        ("list_keys", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3),
+    ]
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolProtocolStateStorageProvider),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider.restype = None
 _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
@@ -1634,6 +1663,7 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route.ar
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route.restype = ctypes.c_int8
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls.argtypes = (
+    ctypes.c_uint64,
     ctypes.c_uint64,
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -5731,18 +5761,19 @@ class _UniffiFfiConverterTypeRelayConfig(_UniffiConverterRustBuffer):
 
 @dataclass
 class RetryConfig:
-    def __init__(self, *, max_retries:int, initial_delay_ms:int, max_delay_ms:int, backoff_multiplier:float, outbox_max_lifetime_ms:int):
+    def __init__(self, *, max_retries:int, initial_delay_ms:int, max_delay_ms:int, backoff_multiplier:float, outbox_max_lifetime_ms:int, pending_message_max_lifetime_ms:int):
         self.max_retries = max_retries
         self.initial_delay_ms = initial_delay_ms
         self.max_delay_ms = max_delay_ms
         self.backoff_multiplier = backoff_multiplier
         self.outbox_max_lifetime_ms = outbox_max_lifetime_ms
+        self.pending_message_max_lifetime_ms = pending_message_max_lifetime_ms
         
         
 
     
     def __str__(self):
-        return "RetryConfig(max_retries={}, initial_delay_ms={}, max_delay_ms={}, backoff_multiplier={}, outbox_max_lifetime_ms={})".format(self.max_retries, self.initial_delay_ms, self.max_delay_ms, self.backoff_multiplier, self.outbox_max_lifetime_ms)
+        return "RetryConfig(max_retries={}, initial_delay_ms={}, max_delay_ms={}, backoff_multiplier={}, outbox_max_lifetime_ms={}, pending_message_max_lifetime_ms={})".format(self.max_retries, self.initial_delay_ms, self.max_delay_ms, self.backoff_multiplier, self.outbox_max_lifetime_ms, self.pending_message_max_lifetime_ms)
     def __eq__(self, other):
         if self.max_retries != other.max_retries:
             return False
@@ -5753,6 +5784,8 @@ class RetryConfig:
         if self.backoff_multiplier != other.backoff_multiplier:
             return False
         if self.outbox_max_lifetime_ms != other.outbox_max_lifetime_ms:
+            return False
+        if self.pending_message_max_lifetime_ms != other.pending_message_max_lifetime_ms:
             return False
         return True
 
@@ -5765,6 +5798,7 @@ class _UniffiFfiConverterTypeRetryConfig(_UniffiConverterRustBuffer):
             max_delay_ms=_UniffiFfiConverterUInt64.read(buf),
             backoff_multiplier=_UniffiFfiConverterFloat32.read(buf),
             outbox_max_lifetime_ms=_UniffiFfiConverterUInt64.read(buf),
+            pending_message_max_lifetime_ms=_UniffiFfiConverterUInt64.read(buf),
         )
 
     @staticmethod
@@ -5774,6 +5808,7 @@ class _UniffiFfiConverterTypeRetryConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.check_lower(value.max_delay_ms)
         _UniffiFfiConverterFloat32.check_lower(value.backoff_multiplier)
         _UniffiFfiConverterUInt64.check_lower(value.outbox_max_lifetime_ms)
+        _UniffiFfiConverterUInt64.check_lower(value.pending_message_max_lifetime_ms)
 
     @staticmethod
     def write(value, buf):
@@ -5782,6 +5817,7 @@ class _UniffiFfiConverterTypeRetryConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.write(value.max_delay_ms, buf)
         _UniffiFfiConverterFloat32.write(value.backoff_multiplier, buf)
         _UniffiFfiConverterUInt64.write(value.outbox_max_lifetime_ms, buf)
+        _UniffiFfiConverterUInt64.write(value.pending_message_max_lifetime_ms, buf)
 
 @dataclass
 class ReliabilityConfig:
@@ -8066,6 +8102,137 @@ _UniffiFfiConverterTypeMlsStorageProvider = _UniffiCallbackInterfaceFfiConverter
 
 
 
+class ProtocolStateStorageProvider(typing.Protocol):
+
+    def store(self, key_type: str,key_id: str,data: typing.List[int]) -> None:
+        raise NotImplementedError
+    def load(self, key_type: str,key_id: str) -> typing.Optional[typing.List[int]]:
+        raise NotImplementedError
+    def delete(self, key_type: str,key_id: str) -> None:
+        raise NotImplementedError
+    def list_keys(self, key_type: str) -> typing.List[str]:
+        raise NotImplementedError
+# Put all the bits inside a class to keep the top-level namespace clean
+class _UniffiTraitImplProtocolStateStorageProviderImpl:
+    # For each method, generate a callback function to pass to Rust
+
+    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0
+    def store(
+            uniffi_handle,
+            key_type,
+            key_id,
+            data,
+            uniffi_out_return,
+            uniffi_call_status_ptr,
+        ):
+        uniffi_obj = _UniffiFfiConverterTypeProtocolStateStorageProvider._handle_map.get(uniffi_handle)
+        def make_call():
+            uniffi_args = (_UniffiFfiConverterString.lift(key_type), _UniffiFfiConverterString.lift(key_id), _UniffiFfiConverterSequenceUInt8.lift(data), )
+            uniffi_method = uniffi_obj.store
+            return uniffi_method(*uniffi_args)
+        write_return_value = lambda v: None
+        _uniffi_trait_interface_call_with_error(
+                uniffi_call_status_ptr.contents,
+                make_call,
+                write_return_value,
+                MlsStorageError,
+                _UniffiFfiConverterTypeMlsStorageError.lower,
+        )
+
+    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1
+    def load(
+            uniffi_handle,
+            key_type,
+            key_id,
+            uniffi_out_return,
+            uniffi_call_status_ptr,
+        ):
+        uniffi_obj = _UniffiFfiConverterTypeProtocolStateStorageProvider._handle_map.get(uniffi_handle)
+        def make_call():
+            uniffi_args = (_UniffiFfiConverterString.lift(key_type), _UniffiFfiConverterString.lift(key_id), )
+            uniffi_method = uniffi_obj.load
+            return uniffi_method(*uniffi_args)
+        def write_return_value(v):
+            uniffi_out_return[0] = _UniffiFfiConverterOptionalSequenceUInt8.lower(v)
+        _uniffi_trait_interface_call_with_error(
+                uniffi_call_status_ptr.contents,
+                make_call,
+                write_return_value,
+                MlsStorageError,
+                _UniffiFfiConverterTypeMlsStorageError.lower,
+        )
+
+    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2
+    def delete(
+            uniffi_handle,
+            key_type,
+            key_id,
+            uniffi_out_return,
+            uniffi_call_status_ptr,
+        ):
+        uniffi_obj = _UniffiFfiConverterTypeProtocolStateStorageProvider._handle_map.get(uniffi_handle)
+        def make_call():
+            uniffi_args = (_UniffiFfiConverterString.lift(key_type), _UniffiFfiConverterString.lift(key_id), )
+            uniffi_method = uniffi_obj.delete
+            return uniffi_method(*uniffi_args)
+        write_return_value = lambda v: None
+        _uniffi_trait_interface_call_with_error(
+                uniffi_call_status_ptr.contents,
+                make_call,
+                write_return_value,
+                MlsStorageError,
+                _UniffiFfiConverterTypeMlsStorageError.lower,
+        )
+
+    @_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3
+    def list_keys(
+            uniffi_handle,
+            key_type,
+            uniffi_out_return,
+            uniffi_call_status_ptr,
+        ):
+        uniffi_obj = _UniffiFfiConverterTypeProtocolStateStorageProvider._handle_map.get(uniffi_handle)
+        def make_call():
+            uniffi_args = (_UniffiFfiConverterString.lift(key_type), )
+            uniffi_method = uniffi_obj.list_keys
+            return uniffi_method(*uniffi_args)
+        def write_return_value(v):
+            uniffi_out_return[0] = _UniffiFfiConverterSequenceString.lower(v)
+        _uniffi_trait_interface_call_with_error(
+                uniffi_call_status_ptr.contents,
+                make_call,
+                write_return_value,
+                MlsStorageError,
+                _UniffiFfiConverterTypeMlsStorageError.lower,
+        )
+
+    @_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER
+    def _uniffi_free(uniffi_handle):
+        _UniffiFfiConverterTypeProtocolStateStorageProvider._handle_map.remove(uniffi_handle)
+
+    @_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER
+    def _uniffi_clone(uniffi_handle):
+        return _UniffiFfiConverterTypeProtocolStateStorageProvider._handle_map.clone(uniffi_handle)
+
+    # Generate the FFI VTable.  This has a field for each callback interface method.
+    _uniffi_vtable = _UniffiVTableCallbackInterfaceOfflineProtocolProtocolStateStorageProvider(
+        _uniffi_free,
+        _uniffi_clone,
+        store,
+        load,
+        delete,
+        list_keys,
+    )
+    # Send Rust a pointer to the VTable.  Note: this means we need to keep the struct alive forever,
+    # or else bad things will happen when Rust tries to access it.
+    _UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider(ctypes.byref(_uniffi_vtable))
+
+# The _UniffiConverter which transforms the Callbacks in to Handles to pass to Rust.
+_UniffiFfiConverterTypeProtocolStateStorageProvider = _UniffiCallbackInterfaceFfiConverter()
+
+
+
+
 class TelemetrySink(typing.Protocol):
     
     def on_protocol_event(self, event_json: str) -> None:
@@ -8732,7 +8899,7 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def has_route(self, destination: str) -> bool:
         raise NotImplementedError
-    def initialize_mls(self, storage: MlsStorageProvider) -> None:
+    def initialize_mls(self, secure_storage: MlsStorageProvider,protocol_state_storage: ProtocolStateStorageProvider) -> None:
         raise NotImplementedError
     def install_telemetry_sink(self, sink: TelemetrySink,config: TelemetryConfig) -> None:
         raise NotImplementedError
@@ -9743,12 +9910,15 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
-    def initialize_mls(self, storage: MlsStorageProvider) -> None:
+    def initialize_mls(self, secure_storage: MlsStorageProvider,protocol_state_storage: ProtocolStateStorageProvider) -> None:
+
+        _UniffiFfiConverterTypeMlsStorageProvider.check_lower(secure_storage)
         
-        _UniffiFfiConverterTypeMlsStorageProvider.check_lower(storage)
+        _UniffiFfiConverterTypeProtocolStateStorageProvider.check_lower(protocol_state_storage)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
-            _UniffiFfiConverterTypeMlsStorageProvider.lower(storage),
+            _UniffiFfiConverterTypeMlsStorageProvider.lower(secure_storage),
+            _UniffiFfiConverterTypeProtocolStateStorageProvider.lower(protocol_state_storage),
         )
         _uniffi_lift_return = lambda val: None
         _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
@@ -11167,7 +11337,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
             _UniffiFfiConverterTypeAckConfig.lower(config),
         )
         _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config,
@@ -11212,7 +11382,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
             _UniffiFfiConverterTypeRetryConfig.lower(config),
         )
         _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config,
@@ -11470,6 +11640,7 @@ __all__ = [
     "OfflineProtocol",
     "OfflineProtocolProtocol",
     "MlsStorageProvider",
+    "ProtocolStateStorageProvider",
     "TelemetrySink",
     "BleTransportCallback",
     "EventCallback",

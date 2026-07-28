@@ -14,11 +14,11 @@ use offline_protocol::{
     NoopTelemetrySink as CoreNoopTelemetrySink, OfflineProtocol as CoreProtocol,
     OverflowPolicy as CoreOverflowPolicy, PendingQueueConfig as CorePendingQueueConfig,
     PresenceStatus as CorePresenceStatus, ProtocolConfig as CoreConfig,
-    RoutingDecision as CoreRoutingDecision, RoutingPhase as CoreRoutingPhase,
-    RoutingReasonCode as CoreRoutingReasonCode, SendMessageOptions as CoreSendMessageOptions,
-    TelemetryConfig as CoreTelemetryConfig, TelemetryRecord as CoreTelemetryRecord,
-    TelemetrySink as CoreTelemetrySink, TransportStateEvent as CoreTransportStateEvent,
-    DEFAULT_PENDING_TTL_MS,
+    ProtocolStateStorage as CoreProtocolStateStorage, RoutingDecision as CoreRoutingDecision,
+    RoutingPhase as CoreRoutingPhase, RoutingReasonCode as CoreRoutingReasonCode,
+    SendMessageOptions as CoreSendMessageOptions, TelemetryConfig as CoreTelemetryConfig,
+    TelemetryRecord as CoreTelemetryRecord, TelemetrySink as CoreTelemetrySink,
+    TransportStateEvent as CoreTransportStateEvent, DEFAULT_PENDING_TTL_MS,
 };
 use offline_protocol_core::{
     ContentType as CoreContentType, ForwardInfo as CoreForwardInfo,
@@ -251,6 +251,22 @@ pub trait MlsStorageProvider: Send + Sync {
     fn list_keys(&self, key_type: String) -> Result<Vec<String>, MlsStorageError>;
 }
 
+/// Install-scoped storage callback for non-cryptographic protocol state.
+pub trait ProtocolStateStorageProvider: Send + Sync {
+    /// Store data with the given key type and ID.
+    fn store(&self, key_type: String, key_id: String, data: Vec<u8>)
+        -> Result<(), MlsStorageError>;
+
+    /// Load data for the given key type and ID.
+    fn load(&self, key_type: String, key_id: String) -> Result<Option<Vec<u8>>, MlsStorageError>;
+
+    /// Delete data for the given key type and ID.
+    fn delete(&self, key_type: String, key_id: String) -> Result<(), MlsStorageError>;
+
+    /// List all key IDs for a given key type.
+    fn list_keys(&self, key_type: String) -> Result<Vec<String>, MlsStorageError>;
+}
+
 /// Wrapper to adapt UniFFI callback to core MlsStorage trait
 struct MlsStorageWrapper {
     provider: Arc<dyn MlsStorageProvider>,
@@ -353,6 +369,114 @@ impl CoreMlsStorage for MlsStorageWrapper {
             })
     }
 }
+
+/// Wrapper to adapt the install-scoped UniFFI callback to core protocol-state
+/// storage. It also implements the low-level storage operations inherited by
+/// the marker trait, while remaining a different concrete type from the
+/// secure-storage wrapper.
+struct ProtocolStateStorageWrapper {
+    provider: Arc<dyn ProtocolStateStorageProvider>,
+}
+
+impl CoreMlsStorage for ProtocolStateStorageWrapper {
+    fn store(
+        &self,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.provider
+            .store(key_type.to_string(), key_id.to_string(), data.to_vec())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => {
+                    CoreStorageError::StoreFailed("Storage failed".to_string())
+                }
+                MlsStorageError::LoadFailed => {
+                    CoreStorageError::StoreFailed("Load failed".to_string())
+                }
+                MlsStorageError::DeleteFailed => {
+                    CoreStorageError::StoreFailed("Delete failed".to_string())
+                }
+                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
+                MlsStorageError::CorruptedData => {
+                    CoreStorageError::CorruptedData("Data corrupted".to_string())
+                }
+            })
+    }
+
+    fn load(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+        self.provider
+            .load(key_type.to_string(), key_id.to_string())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => {
+                    CoreStorageError::StoreFailed("Store failed".to_string())
+                }
+                MlsStorageError::LoadFailed => {
+                    CoreStorageError::LoadFailed("Load failed".to_string())
+                }
+                MlsStorageError::DeleteFailed => {
+                    CoreStorageError::DeleteFailed("Delete failed".to_string())
+                }
+                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
+                MlsStorageError::CorruptedData => {
+                    CoreStorageError::CorruptedData("Data corrupted".to_string())
+                }
+            })
+    }
+
+    fn delete(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.provider
+            .delete(key_type.to_string(), key_id.to_string())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => {
+                    CoreStorageError::DeleteFailed("Storage failed".to_string())
+                }
+                MlsStorageError::LoadFailed => {
+                    CoreStorageError::DeleteFailed("Load failed".to_string())
+                }
+                MlsStorageError::DeleteFailed => {
+                    CoreStorageError::DeleteFailed("Delete failed".to_string())
+                }
+                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
+                MlsStorageError::CorruptedData => {
+                    CoreStorageError::CorruptedData("Data corrupted".to_string())
+                }
+            })
+    }
+
+    fn list_keys(
+        &self,
+        key_type: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        self.provider
+            .list_keys(key_type.to_string())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => {
+                    CoreStorageError::StoreFailed("Store failed".to_string())
+                }
+                MlsStorageError::LoadFailed => {
+                    CoreStorageError::LoadFailed("Load failed".to_string())
+                }
+                MlsStorageError::DeleteFailed => {
+                    CoreStorageError::DeleteFailed("Delete failed".to_string())
+                }
+                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound("".to_string()),
+                MlsStorageError::CorruptedData => {
+                    CoreStorageError::CorruptedData("Data corrupted".to_string())
+                }
+            })
+    }
+}
+
+impl CoreProtocolStateStorage for ProtocolStateStorageWrapper {}
 
 impl From<offline_protocol::Error> for ProtocolError {
     // Exhaustive on purpose (no `_` arm): a new engine error variant must
@@ -1749,6 +1873,7 @@ pub struct RetryConfig {
     pub max_delay_ms: u64,
     pub backoff_multiplier: f32,
     pub outbox_max_lifetime_ms: u64,
+    pub pending_message_max_lifetime_ms: u64,
 }
 
 /// Deduplication configuration
@@ -2686,11 +2811,10 @@ impl OfflineProtocol {
     /// derived from the SDK-managed persistent scrub secret. The secret
     /// itself never crosses the FFI and cannot be recovered from the id.
     ///
-    /// Returns `None` until the persistent secret is available — i.e.
-    /// before secure storage is wired via `initialize_mls` /
-    /// `enable_message_persistence`, or when persisting the secret failed
-    /// this session. Unaffected by installing a telemetry sink or by an
-    /// app-supplied scrub secret.
+    /// Returns `None` until the persistent secret is available — i.e. before
+    /// secure storage is wired via `initialize_mls`, or when persisting the
+    /// secret failed this session. Unaffected by installing a telemetry sink
+    /// or by an app-supplied scrub secret.
     pub fn telemetry_install_id(&self) -> Option<String> {
         recover_mutex(&self.inner, "inner").telemetry_install_id()
     }
@@ -4611,26 +4735,31 @@ impl OfflineProtocol {
     }
 
     /// Updates the ACK configuration at runtime.
-    pub fn update_ack_config(&self, config: AckConfig) {
+    pub fn update_ack_config(&self, config: AckConfig) -> Result<(), ProtocolError> {
         let core_config = offline_protocol::AckConfig {
             default_timeout_ms: config.default_timeout_ms,
             max_pending_acks: config.max_pending_acks as usize,
         };
         let mut protocol = recover_mutex(&self.inner, "inner");
-        protocol.update_ack_config(core_config);
+        protocol
+            .update_ack_config(core_config)
+            .map_err(ProtocolError::from)
     }
 
     /// Updates the retry configuration at runtime.
-    pub fn update_retry_config(&self, config: RetryConfig) {
+    pub fn update_retry_config(&self, config: RetryConfig) -> Result<(), ProtocolError> {
         let core_config = offline_protocol::RetryConfig {
             max_retries: config.max_retries,
             initial_delay_ms: config.initial_delay_ms,
             max_delay_ms: config.max_delay_ms,
             backoff_multiplier: config.backoff_multiplier,
             outbox_max_lifetime_ms: config.outbox_max_lifetime_ms,
+            pending_message_max_lifetime_ms: config.pending_message_max_lifetime_ms,
         };
         let mut protocol = recover_mutex(&self.inner, "inner");
-        protocol.update_retry_config(core_config);
+        protocol
+            .update_retry_config(core_config)
+            .map_err(ProtocolError::from)
     }
 
     /// Updates the deduplication configuration at runtime.
@@ -4672,13 +4801,17 @@ impl OfflineProtocol {
     // MLS (END-TO-END ENCRYPTION) OPERATIONS
     // ========================================================================
 
-    /// Initialize MLS with a storage provider
+    /// Initialize MLS with separate secure and install-scoped state providers.
     pub fn initialize_mls(
         &self,
-        storage: Box<dyn MlsStorageProvider>,
+        secure_storage: Box<dyn MlsStorageProvider>,
+        protocol_state_storage: Box<dyn ProtocolStateStorageProvider>,
     ) -> Result<(), ProtocolError> {
-        let wrapper = Arc::new(MlsStorageWrapper {
-            provider: Arc::from(storage),
+        let secure_wrapper = Arc::new(MlsStorageWrapper {
+            provider: Arc::from(secure_storage),
+        });
+        let state_wrapper = Arc::new(ProtocolStateStorageWrapper {
+            provider: Arc::from(protocol_state_storage),
         });
 
         // Single-authority lifecycle:
@@ -4690,7 +4823,7 @@ impl OfflineProtocol {
             return Ok(());
         }
         protocol
-            .initialize_mls(wrapper)
+            .initialize_mls(secure_wrapper, state_wrapper)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
         Ok(())
     }
@@ -5676,6 +5809,33 @@ mod tests {
         }
     }
 
+    impl ProtocolStateStorageProvider for TestMlsStorageProvider {
+        fn store(
+            &self,
+            key_type: String,
+            key_id: String,
+            data: Vec<u8>,
+        ) -> Result<(), MlsStorageError> {
+            MlsStorageProvider::store(self, key_type, key_id, data)
+        }
+
+        fn load(
+            &self,
+            key_type: String,
+            key_id: String,
+        ) -> Result<Option<Vec<u8>>, MlsStorageError> {
+            MlsStorageProvider::load(self, key_type, key_id)
+        }
+
+        fn delete(&self, key_type: String, key_id: String) -> Result<(), MlsStorageError> {
+            MlsStorageProvider::delete(self, key_type, key_id)
+        }
+
+        fn list_keys(&self, key_type: String) -> Result<Vec<String>, MlsStorageError> {
+            MlsStorageProvider::list_keys(self, key_type)
+        }
+    }
+
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig {
             binary_wire_enabled: true,
@@ -5735,12 +5895,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mls_initialize_is_idempotent_for_legacy_entrypoint() {
+    fn test_mls_initialize_is_idempotent() {
         let config = create_test_config();
         let protocol = OfflineProtocol::new(config).unwrap();
 
         protocol
-            .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
             .unwrap();
         let first_handle = {
             let guard = protocol.inner.lock().unwrap();
@@ -5748,7 +5911,10 @@ mod tests {
         };
 
         protocol
-            .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
             .unwrap();
         let second_handle = {
             let guard = protocol.inner.lock().unwrap();
@@ -5769,7 +5935,10 @@ mod tests {
             let protocol_clone = Arc::clone(&protocol);
             join_handles.push(thread::spawn(move || {
                 protocol_clone
-                    .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+                    .initialize_mls(
+                        Box::new(TestMlsStorageProvider::default()),
+                        Box::new(TestMlsStorageProvider::default()),
+                    )
                     .unwrap();
                 let core_guard = protocol_clone.inner.lock().unwrap();
                 let mls_handle = core_guard.mls_manager().cloned().unwrap();
@@ -5788,7 +5957,10 @@ mod tests {
     fn test_high_level_api_sees_groups_created_via_core() {
         let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
         protocol
-            .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
             .unwrap();
 
         // Create groups through the core MlsManager directly.
@@ -7050,7 +7222,10 @@ mod tests {
         })
         .unwrap();
         owner
-            .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
             .unwrap();
         owner.start().unwrap();
         owner.internet_status_changed(true).unwrap();
@@ -7065,8 +7240,11 @@ mod tests {
             ..create_test_config()
         })
         .unwrap();
-        peer.initialize_mls(Box::new(TestMlsStorageProvider::default()))
-            .unwrap();
+        peer.initialize_mls(
+            Box::new(TestMlsStorageProvider::default()),
+            Box::new(TestMlsStorageProvider::default()),
+        )
+        .unwrap();
         peer.start().unwrap();
         peer.internet_status_changed(true).unwrap();
         peer.force_transport(TransportType::Internet).unwrap();

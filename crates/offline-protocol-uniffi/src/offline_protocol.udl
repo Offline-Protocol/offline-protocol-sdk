@@ -34,6 +34,22 @@ callback interface MlsStorageProvider {
     sequence<string> list_keys(string key_type);
 };
 
+// Install-scoped storage for non-cryptographic protocol/message state.
+// Implementations must be removed with the app container.
+callback interface ProtocolStateStorageProvider {
+    [Throws=MlsStorageError]
+    void store(string key_type, string key_id, sequence<u8> data);
+
+    [Throws=MlsStorageError]
+    sequence<u8>? load(string key_type, string key_id);
+
+    [Throws=MlsStorageError]
+    void delete(string key_type, string key_id);
+
+    [Throws=MlsStorageError]
+    sequence<string> list_keys(string key_type);
+};
+
 // Key package bundle for distribution
 dictionary MlsKeyPackageBundle {
     string package_id;
@@ -363,6 +379,7 @@ dictionary RetryConfig {
     u64 max_delay_ms;
     f32 backoff_multiplier;
     u64 outbox_max_lifetime_ms;
+    u64 pending_message_max_lifetime_ms;
 };
 
 // Deduplication configuration
@@ -826,10 +843,9 @@ interface OfflineProtocol {
     // itself never crosses the FFI and cannot be recovered from the id.
     //
     // Returns null until the persistent secret is available — i.e. before
-    // secure storage is wired via `initialize_mls` /
-    // `enable_message_persistence`, or when persisting the secret failed
-    // this session (the id would not be stable across launches, so none
-    // is exposed). Unaffected by installing a telemetry sink or by an
+    // secure storage is wired via `initialize_mls`, or when persisting the
+    // secret failed this session (the id would not be stable across launches,
+    // so none is exposed). Unaffected by installing a telemetry sink or by an
     // app-supplied scrub secret.
     string? telemetry_install_id();
 
@@ -1106,7 +1122,9 @@ interface OfflineProtocol {
     void update_routing_config(GradientRoutingConfig config);
     
     // Reliability configuration updates
+    [Throws=ProtocolError]
     void update_ack_config(AckConfig config);
+    [Throws=ProtocolError]
     void update_retry_config(RetryConfig config);
     void update_dedup_config(DedupConfig config);
     
@@ -1119,9 +1137,12 @@ interface OfflineProtocol {
     // MLS (END-TO-END ENCRYPTION) OPERATIONS
     // ========================================================================
     
-    // Initialize MLS with a storage provider - MUST be called before using encryption
+    // Initialize MLS with separate secure and install-scoped state providers.
     [Throws=ProtocolError]
-    void initialize_mls(MlsStorageProvider storage);
+    void initialize_mls(
+        MlsStorageProvider secure_storage,
+        ProtocolStateStorageProvider protocol_state_storage
+    );
     
     // Check if MLS is initialized
     boolean is_mls_initialized();
@@ -1431,4 +1452,3 @@ dictionary NostrMessage {
     string event_id;
     string event_json;
 };
-

@@ -35,6 +35,7 @@ let package = Package(
                 "InternetManager.swift",
                 "MeshSdk.podspec",
                 "MlsSecureStorage.swift",
+                "ProtocolStateStorage.swift",
                 "NostrManager.swift",
                 "OfflineProtocolModule.m",
                 "OfflineProtocolModule.swift",

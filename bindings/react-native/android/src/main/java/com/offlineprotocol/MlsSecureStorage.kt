@@ -30,10 +30,15 @@ class MlsSecureStorage(context: Context) : MlsStorageProvider {
     )
     
     companion object {
-        private const val PREFS_FILE_NAME = "mls_secure_storage"
+        private const val PREFS_FILE_NAME = "mls_secure_storage_v2"
+        private const val LEGACY_PREFS_FILE_NAME = "mls_secure_storage"
         private const val INDEX_PREFIX = "index:"
         // Global lock to ensure index consistency across instances/threads
         private val LOCK = Any()
+
+        fun purgeLegacyStorage(context: Context) {
+            context.deleteSharedPreferences(LEGACY_PREFS_FILE_NAME)
+        }
     }
     
     /**

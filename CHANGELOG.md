@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: secure key material and restartable protocol state now use separate storage contracts.** `initialize_mls` / generated `initializeMls` now require both an `MlsStorageProvider` and an app-container-scoped `ProtocolStateStorageProvider`; the one-provider API and production `enable_message_persistence` path are removed. Outbox entries, pending messages, retry/welcome lifecycles, peer snapshots, media descriptors, and Lamport state are routed only to protocol-state storage. MLS/TOFU material and install secrets remain in secure storage. The React Native bridge supplies both providers automatically: iOS state lives in Application Support with backup disabled, Android state lives in `noBackupFilesDir`, and both secure stores use a new v2 namespace while deleting the development-era mixed namespace.
+
+- **Messages waiting for MLS session establishment now have a configurable absolute lifetime.** `RetryConfig.pending_message_max_lifetime_ms` defaults to seven days, is mirrored through UniFFI and React Native, and removes expired entries from memory and protocol-state storage while emitting `message_failed`. Retry/ACK runtime updates now reject zero delays, zero capacities, invalid lifetime bounds, and other invalid configurations instead of installing a hot-loop-capable configuration.
+
+### Fixed
+
+- **Malformed or unresolved recipient tokens are rejected before any queue, outbox, clock, or transport side effect.** All outbound user-targeted APIs now validate the recipient at the SDK boundary, preventing app-owned unresolved identifiers such as `unresolved:token` from becoming indefinitely retried protocol state.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed

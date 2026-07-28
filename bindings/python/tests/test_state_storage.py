@@ -1,0 +1,29 @@
+"""Tests for install-scoped protocol-state storage."""
+
+from __future__ import annotations
+
+from offline_protocol_sdk.state_storage import AppStateStorage
+
+
+def test_state_storage_round_trip_and_listing(tmp_path) -> None:
+    storage = AppStateStorage(tmp_path / "state")
+
+    storage.store("pending_messages", "peer/with punctuation", [0, 1, 255])
+
+    assert storage.load("pending_messages", "peer/with punctuation") == [0, 1, 255]
+    assert storage.list_keys("pending_messages") == ["peer/with punctuation"]
+
+
+def test_state_storage_overwrite_is_atomic_and_delete_is_idempotent(tmp_path) -> None:
+    storage = AppStateStorage(tmp_path / "state")
+
+    storage.store("outbox", "message-1", [1, 2, 3])
+    storage.store("outbox", "message-1", [4, 5])
+
+    assert storage.load("outbox", "message-1") == [4, 5]
+    assert not list((tmp_path / "state").rglob(".write-*"))
+
+    storage.delete("outbox", "message-1")
+    storage.delete("outbox", "message-1")
+    assert storage.load("outbox", "message-1") is None
+    assert storage.list_keys("outbox") == []

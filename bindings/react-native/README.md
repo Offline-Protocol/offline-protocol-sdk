@@ -496,9 +496,10 @@ interface ReliabilityConfig {
   retry?: {
     maxRetries?: number;         // default: 10
     initialDelayMs?: number;     // default: 1000
-    maxDelayMs?: number;         // default: 30000
+    maxDelayMs?: number;         // default: 300000
     backoffMultiplier?: number;  // default: 2.0
-    outboxMaxLifetimeMs?: number; // default: 3600000
+    outboxMaxLifetimeMs?: number; // default: 604800000
+    pendingMessageMaxLifetimeMs?: number; // default: 604800000
   };
   dedup?: {
     maxTrackedMessages?: number; // default: 1000

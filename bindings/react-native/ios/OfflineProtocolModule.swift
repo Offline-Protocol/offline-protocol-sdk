@@ -2255,7 +2255,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let ackConfig = AckConfig(
-                defaultTimeoutMs: (config["defaultTimeoutMs"] as? NSNumber)?.uint64Value ?? 5000,
+                defaultTimeoutMs: (config["defaultTimeoutMs"] as? NSNumber)?.uint64Value ?? 10000,
                 maxPendingAcks: (config["maxPendingAcks"] as? NSNumber)?.uint64Value ?? 1000
             )
             
@@ -2289,7 +2289,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 initialDelayMs: (config["initialDelayMs"] as? NSNumber)?.uint64Value ?? 1000,
                 maxDelayMs: (config["maxDelayMs"] as? NSNumber)?.uint64Value ?? 300000,
                 backoffMultiplier: (config["backoffMultiplier"] as? NSNumber)?.floatValue ?? 2.0,
-                outboxMaxLifetimeMs: (config["outboxMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000
+                outboxMaxLifetimeMs: (config["outboxMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000,
+                pendingMessageMaxLifetimeMs: (config["pendingMessageMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000
             )
             
             try proto.updateRetryConfig(config: retryConfig)
@@ -2720,9 +2721,17 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let storage = MlsSecureStorage()
-            try proto.initializeMls(storage: storage)
-            emitDiagnostic(level: "info", message: "MLS initialized with Keychain storage")
+            try MlsSecureStorage.purgeLegacyService()
+            let secureStorage = MlsSecureStorage()
+            let protocolStateStorage = try AppContainerProtocolStateStorage()
+            try proto.initializeMls(
+                secureStorage: secureStorage,
+                protocolStateStorage: protocolStateStorage
+            )
+            emitDiagnostic(
+                level: "info",
+                message: "MLS initialized with split Keychain and app-container storage"
+            )
             resolver(nil)
         } catch {
             emitDiagnostic(level: "error", message: "Failed to initialize MLS", context: [

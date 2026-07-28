@@ -78,17 +78,32 @@ impl OfflineProtocol {
     /// Updates the ACK configuration at runtime.
     ///
     /// Note: This affects new ACK registrations; existing pending ACKs keep their original timeout.
-    pub fn update_ack_config(&mut self, config: AckConfig) {
+    pub fn update_ack_config(&mut self, config: AckConfig) -> crate::Result<()> {
+        if config.default_timeout_ms == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "ack.default_timeout_ms must be greater than 0".to_string(),
+            ));
+        }
+        if config.max_pending_acks == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "ack.max_pending_acks must be greater than 0".to_string(),
+            ));
+        }
         self.ack_manager = AckManager::with_config(config.clone());
         self.config.reliability.ack = config;
+        Ok(())
     }
 
     /// Updates the retry configuration at runtime.
     ///
     /// Note: This affects new retry entries; existing entries keep their original timing.
-    pub fn update_retry_config(&mut self, config: RetryConfig) {
+    pub fn update_retry_config(&mut self, config: RetryConfig) -> crate::Result<()> {
+        let mut candidate = self.config.clone();
+        candidate.reliability.retry = config.clone();
+        candidate.validate()?;
         self.retry_queue = RetryQueue::with_config(config.clone());
         self.config.reliability.retry = config;
+        Ok(())
     }
 
     /// Updates the deduplication configuration at runtime.
@@ -142,6 +157,7 @@ impl OfflineProtocol {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.prune_stale_known_peers(std::time::Instant::now());
+        self.cleanup_expired_pending_messages();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
         self.cleanup_group_message_dedup();
@@ -259,6 +275,7 @@ impl OfflineProtocol {
     ) -> Result<String> {
         // Service requests are internal control messages (not user content),
         // so they are exempt from require_encryption.
+        Self::validate_outbound_recipient(provider)?;
 
         let result = self
             .mesh_services
@@ -280,6 +297,7 @@ impl OfflineProtocol {
     ) -> Result<MessageId> {
         // Service responses are internal control messages (not user content),
         // so they are exempt from require_encryption.
+        Self::validate_outbound_recipient(requester)?;
 
         let result = self
             .mesh_services

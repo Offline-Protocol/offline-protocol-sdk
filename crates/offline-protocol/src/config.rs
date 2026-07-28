@@ -434,6 +434,18 @@ impl ProtocolConfig {
             ));
         }
 
+        if self.reliability.ack.default_timeout_ms == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "ack.default_timeout_ms must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.reliability.ack.max_pending_acks == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "ack.max_pending_acks must be greater than 0".to_string(),
+            ));
+        }
+
         if self.reliability.retry.initial_delay_ms == 0 {
             return Err(crate::Error::InvalidConfiguration(
                 "retry.initial_delay_ms must be greater than 0".to_string(),
@@ -449,6 +461,26 @@ impl ProtocolConfig {
         if self.reliability.retry.initial_delay_ms > self.reliability.retry.max_delay_ms {
             return Err(crate::Error::InvalidConfiguration(
                 "retry.initial_delay_ms must be <= retry.max_delay_ms".to_string(),
+            ));
+        }
+
+        if self.reliability.retry.outbox_max_lifetime_ms == 0
+            || self.reliability.retry.outbox_max_lifetime_ms > i64::MAX as u64
+        {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.outbox_max_lifetime_ms must be in 1..=i64::MAX".to_string(),
+            ));
+        }
+
+        if self.reliability.retry.pending_message_max_lifetime_ms == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.pending_message_max_lifetime_ms must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.reliability.retry.pending_message_max_lifetime_ms > i64::MAX as u64 {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.pending_message_max_lifetime_ms must be <= i64::MAX".to_string(),
             ));
         }
 

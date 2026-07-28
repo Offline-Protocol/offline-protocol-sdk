@@ -28,6 +28,7 @@ from .ble_manager import BleManager
 from .ble_peripheral import BlePeripheral
 from .internet_manager import InternetManager
 from .secure_storage import SecureStorage
+from .state_storage import AppStateStorage
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,10 @@ class ProtocolManager:
     storage:
         Optional ``MlsStorageProvider`` for MLS key material.  Defaults to
         :class:`SecureStorage` backed by the platform keyring.
+    state_storage:
+        Optional ``ProtocolStateStorageProvider`` for restartable delivery
+        state. Defaults to :class:`AppStateStorage` outside the credential
+        store.
     """
 
     def __init__(
@@ -137,10 +142,12 @@ class ProtocolManager:
         config: ProtocolConfig,
         event_handler: Callable[[dict[str, Any]], None] | None = None,
         storage: Any | None = None,
+        state_storage: Any | None = None,
     ) -> None:
         self._config = config
         self._event_handler = event_handler
         self._storage = storage or SecureStorage()
+        self._state_storage = state_storage or AppStateStorage()
 
         # Create the core protocol instance
         self._protocol = OfflineProtocol(config)
@@ -214,6 +221,7 @@ class ProtocolManager:
             self._ble_cb,
             self._wifi_cb,
             self._storage,
+            self._state_storage,
         ]
         if self._nostr_cb is not None:
             self._prevent_gc.append(self._nostr_cb)
@@ -222,7 +230,7 @@ class ProtocolManager:
 
         # Initialise MLS encryption
         try:
-            self._protocol.initialize_mls(self._storage)
+            self._protocol.initialize_mls(self._storage, self._state_storage)
         except Exception as exc:
             logger.warning("MLS initialisation failed (non-fatal): %s", exc)
 
