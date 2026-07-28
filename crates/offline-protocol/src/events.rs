@@ -607,9 +607,12 @@ pub enum Event {
     /// `MessageDelivered` or, at outbox-lifetime expiry, `MessageFailed`.
     /// Media chunks are not parked and keep the normal retry machinery.
     /// May fire multiple times for the same `message_id` while the
-    /// recipient remains offline (once per attempt that reaches the
-    /// relay, e.g. mesh-carrier reachability probes). `file_id` is set
-    /// when the message is a chunk of an outbound media transfer.
+    /// recipient remains offline: a parked DM keeps an escalating
+    /// reachability probe on every carrier (15s → 600s cap), and each probe
+    /// that reaches the relay while the peer is still offline earns a fresh
+    /// verdict and re-emits this event. Apps must treat it as a repeatable
+    /// status signal, never as a terminal one. `file_id` is set when the
+    /// message is a chunk of an outbound media transfer.
     MessageUndeliverable {
         /// ID of the affected message.
         message_id: String,

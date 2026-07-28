@@ -5222,11 +5222,15 @@ fn test_unreachable_media_chunk_resolves_file_id() {
 }
 
 #[test]
-fn test_unreachable_dm_parks_edge_only_without_mesh_carrier() {
-    // Internet-only carrier: the relay's unreachable verdict parks the DM
-    // fully edge-driven — pending ACK dropped, nothing on a retry timer —
-    // so the ACK timeout loop can never burn max_retries into a terminal
-    // message_failed against a peer that is provably offline.
+fn test_unreachable_dm_internet_only_parks_with_probe() {
+    // Internet-only carrier (the default configuration for app users): the
+    // relay's unreachable verdict parks the DM — pending ACK dropped so the
+    // timeout loop can never burn max_retries into a terminal message_failed
+    // against a provably offline peer — but the park still schedules an
+    // escalating reachability probe. Without it the message would have NO
+    // self-recovery at all, leaving delivery hostage to an external edge
+    // (presence rotation / reconnect), which is what produced minutes-long
+    // delivery delays in the field.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -5263,12 +5267,18 @@ fn test_unreachable_dm_parks_edge_only_without_mesh_carrier() {
         "Park must drop the pending ACK"
     );
     assert!(
-        !protocol.retry_queue.contains(&message_id.as_str()),
-        "No mesh carrier: park must be edge-only, nothing on a timer"
+        protocol.retry_queue.contains(&message_id.as_str()),
+        "Internet-only park must still schedule a reachability probe"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&1),
+        "The park counter must be armed on every carrier — it is what makes \
+         probe exhaustion re-parkable instead of terminal"
     );
 
-    // With neither a pending ACK nor a retry entry, the tick loop has
-    // nothing to settle terminally.
+    // The probe is scheduled, not immediate: the tick loop has nothing to
+    // settle terminally in the meantime.
     protocol.process().unwrap();
     assert!(
         !events
@@ -5279,6 +5289,337 @@ fn test_unreachable_dm_parks_edge_only_without_mesh_carrier() {
         "A parked DM must not settle as message_failed"
     );
     assert!(protocol.outbox.contains_key(&message_id));
+}
+
+#[test]
+fn test_unreachable_dm_internet_only_probe_escalates_and_resets_on_edge() {
+    // The internet-only probe shares the mesh ladder: each consecutive
+    // verdict doubles the interval (15s -> 30s, 600s cap) so a peer that
+    // stays offline cannot become an unbounded resend loop into the relay,
+    // and any reachability edge resets the escalation.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+    let first_delay = protocol
+        .retry_queue
+        .time_until_next_retry()
+        .expect("first park must schedule a probe");
+    assert!(first_delay > chrono::Duration::seconds(10));
+    assert!(first_delay <= chrono::Duration::seconds(15));
+
+    // Second consecutive verdict doubles the interval (15s -> 30s).
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&2));
+    let second_delay = protocol
+        .retry_queue
+        .time_until_next_retry()
+        .expect("second park must re-schedule the probe");
+    assert!(second_delay > chrono::Duration::seconds(20));
+    assert!(second_delay <= chrono::Duration::seconds(30));
+
+    // A relay presence-online answer is the internet-only reachability edge
+    // (the mesh path uses on_neighbor_discovered): it re-drives the parked DM
+    // and resets the escalation counter.
+    protocol.on_peer_presence("bob", true, None);
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        None,
+        "A presence-online edge must reset the escalation"
+    );
+}
+
+#[test]
+fn test_unreachable_dm_internet_only_reemits_undeliverable_per_verdict() {
+    // Deliberate contract: unlike a mesh probe (which can never earn a relay
+    // verdict), an internet probe re-earns a DeliveryError while the peer
+    // stays offline, so MessageUndeliverable repeats — once per verdict. It
+    // is a repeatable status signal, never a terminal one; the terminal
+    // signal remains MessageFailed, which must NOT fire here.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    for _ in 0..2 {
+        protocol
+            .on_transport_send_failed(
+                &message_id.as_str(),
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
+    }
+
+    let events = events.lock().unwrap();
+    let undeliverable = events
+        .iter()
+        .filter(|e| matches!(e, Event::MessageUndeliverable { .. }))
+        .count();
+    assert_eq!(
+        undeliverable, 2,
+        "Each verdict must re-emit the non-terminal undeliverable signal"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "Repeated verdicts must never settle the message terminally"
+    );
+}
+
+#[test]
+fn test_internet_only_probe_exhaustion_reparks_not_terminal() {
+    // The hoisted counter is what arms try_repark_exhausted_dm on this
+    // branch. A probe that succeeds locally but is never answered burns the
+    // ACK budget; with a live counter that exhaustion must re-park (keeping
+    // the outbox entry) rather than settle terminally — otherwise unifying
+    // the branches would have traded a stalled message for a failed one.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol
+        .on_transport_send_failed(
+            &message_id.as_str(),
+            Some("recipient_unreachable: peer offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&1));
+
+    // Drive the exhaustion path directly: the probe's ACK budget ran out.
+    protocol
+        .handle_max_retries_exceeded(&message_id, 10)
+        .unwrap();
+
+    assert!(
+        protocol.outbox.contains_key(&message_id),
+        "Exhaustion with a live park counter must re-park, not evict"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "Re-parked exhaustion must not surface a terminal message_failed"
+    );
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&2),
+        "The re-park escalates the interval like any other park"
+    );
+}
+
+#[test]
+fn test_delivery_ack_redrives_the_peers_other_parked_dms() {
+    // The park counter is per-peer while the probes are per-message, so a
+    // burst of DMs to an offline peer escalates the shared ladder once per
+    // park: message 1 probes at 15s but message 3 is already scheduled at 60s,
+    // and a burst of seven lands the last at the 600s cap. Clearing the
+    // counter on delivery is therefore not enough on its own — delivery of any
+    // one of them proves the rest can go NOW, and on a consumer that never
+    // polls presence this ACK is the only edge that will ever say so.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    let internet_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let ids: Vec<_> = (0..3)
+        .map(|i| {
+            protocol
+                .send_message(
+                    "bob",
+                    &format!("hello {}", i),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap()
+        })
+        .collect();
+    for id in &ids {
+        protocol
+            .on_transport_send_failed(
+                &id.as_str(),
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        Some(&3),
+        "each park escalates the shared per-peer ladder"
+    );
+    for id in &ids {
+        assert!(
+            !protocol.ack_manager.is_waiting_for_ack(id),
+            "a parked DM holds no pending ACK"
+        );
+    }
+
+    // Message 0's probe fires and registers its ACK (what the retry queue does
+    // on a probe send); the peer answers it. The ACK deliberately carries no
+    // ACK_TRANSPORT_KEY label: the re-drive override must come from the
+    // sender's own record of the delivered send's transport
+    // (`OutboxEntry::last_transport` — Internet here, and available), never
+    // from the peer-supplied label, which decodes any absent or unknown value
+    // to BLE and would let a peer steer the sibling sends.
+    let probed = protocol.outbox.get(&ids[0]).unwrap().message.clone();
+    protocol.ensure_ack_registration(&probed).unwrap();
+    let sends_before = internet_handle.sent_messages().len();
+
+    let ack = Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .metadata(ACK_FOR_KEY, ids[0].as_str())
+    .build();
+    protocol.handle_ack_message(&ack);
+
+    assert_eq!(
+        protocol.dm_unreachable_parks.get("bob"),
+        None,
+        "delivery proves reachability: the escalation starts over"
+    );
+    assert!(
+        internet_handle.sent_messages().len() > sends_before,
+        "the siblings must go out now, not wait out their escalated timers"
+    );
+    for id in &ids[1..] {
+        assert!(
+            protocol.ack_manager.is_waiting_for_ack(id),
+            "each sibling must be re-driven with a fresh ACK budget"
+        );
+        assert!(
+            protocol.outbox.contains_key(id),
+            "re-driving must not settle the sibling"
+        );
+    }
+}
+
+#[test]
+fn test_delivery_ack_redrive_ignores_peer_label_and_falls_back_to_dors() {
+    // Two hostile-to-override conditions at once: the delivering transport
+    // recorded on the outbox entry is gone by ACK time (last_transport = BLE,
+    // never attached), and the ACK carries a garbage ACK_TRANSPORT_KEY label
+    // (peer-supplied; decodes to BLE). The re-drive must ignore the label
+    // entirely and, with its own last_transport unavailable, fall back to
+    // DORS — a missing carrier costs routing freedom, never the re-drive.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    let internet_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let ids: Vec<_> = (0..2)
+        .map(|i| {
+            protocol
+                .send_message(
+                    "bob",
+                    &format!("hello {}", i),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap()
+        })
+        .collect();
+    for id in &ids {
+        protocol
+            .on_transport_send_failed(
+                &id.as_str(),
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
+    }
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&2));
+
+    // The carrier that delivered message 0 has since dropped.
+    protocol.outbox.get_mut(&ids[0]).unwrap().last_transport = Some(TransportType::BLE);
+
+    let probed = protocol.outbox.get(&ids[0]).unwrap().message.clone();
+    protocol.ensure_ack_registration(&probed).unwrap();
+    let sends_before = internet_handle.sent_messages().len();
+
+    let ack = Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .metadata(ACK_FOR_KEY, ids[0].as_str())
+    .metadata(crate::constants::ACK_TRANSPORT_KEY, "garbage")
+    .build();
+    protocol.handle_ack_message(&ack);
+
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), None);
+    assert!(
+        internet_handle.sent_messages().len() > sends_before,
+        "the sibling must be re-driven over DORS's pick, not stranded on a \
+         carrier this device does not have"
+    );
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&ids[1]),
+        "the sibling must be re-driven with a fresh ACK budget"
+    );
 }
 
 #[test]
@@ -22042,10 +22383,9 @@ fn test_recipient_unreachable_reason_parks_welcome_without_burning_budget() {
     // The internet transport is UP, and attempt == max_retries — a plain
     // carrier-backed failure here would expire the welcome terminally. A
     // recipient_unreachable-tagged reason (the bridge's translation of the
-    // relay's DeliveryError) must instead park it pending a reachability
-    // edge: no timed retry (a timer would just re-send into another
-    // DeliveryError over the healthy socket), recovery via presence/
-    // discovery.
+    // relay's DeliveryError) must instead park it: the attempt is refunded
+    // and the TTL pushed, so the probes below never age the welcome out or
+    // burn its real-delivery budget.
     protocol
         .on_transport_send_failed(
             &welcome_id,
@@ -22060,10 +22400,15 @@ fn test_recipient_unreachable_reason_parks_welcome_without_burning_budget() {
         lifecycle.last_reason_code,
         Some(crate::events::WelcomeReasonCode::PeerUnreachable)
     );
-    assert!(
-        lifecycle.next_retry_at.is_none(),
-        "peer-unreachable parks must not schedule a timed retry"
-    );
+    // Internet-only: the park still schedules an escalating reachability
+    // probe. Parking edge-only here would leave the welcome dependent solely
+    // on a presence-online answer — the platform's polling cadence — which is
+    // the dead end that stalled parked DMs.
+    let first_retry = lifecycle
+        .next_retry_at
+        .expect("peer-unreachable park must schedule a probe on every carrier");
+    assert!(first_retry <= Utc::now() + ChronoDuration::seconds(15));
+    assert_eq!(lifecycle.unreachable_parks, 1);
     assert!(lifecycle.expires_at > Utc::now() + ChronoDuration::seconds(60));
 
     protocol.stop().unwrap();
@@ -22198,6 +22543,496 @@ fn test_peer_presence_offline_parks_failed_welcome() {
     );
     assert!(lifecycle.next_retry_at.is_none());
     assert!(lifecycle.expires_at > Utc::now() + ChronoDuration::seconds(60));
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_internet_only_welcome_probe_escalates_and_resets_on_edge() {
+    // The welcome unreachable park shares the DM ladder: each consecutive
+    // verdict doubles the probe interval (15s -> 30s, 600s cap) and every
+    // verdict refunds the attempt and pushes the TTL, so probing can never
+    // age the welcome out or burn its real-delivery budget.
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.unreachable_parks, 1);
+    let first_retry = lifecycle
+        .next_retry_at
+        .expect("internet-only park must schedule a probe");
+    assert!(first_retry <= Utc::now() + ChronoDuration::seconds(15));
+
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.unreachable_parks, 2);
+    let second_retry = lifecycle
+        .next_retry_at
+        .expect("second park must re-schedule the probe");
+    assert!(second_retry > Utc::now() + ChronoDuration::seconds(20));
+    assert!(second_retry <= Utc::now() + ChronoDuration::seconds(30));
+    assert_eq!(
+        lifecycle.attempt, 0,
+        "every verdict refunds the speculative attempt"
+    );
+
+    // A reachability edge resets the escalation.
+    protocol.on_neighbor_discovered("bob");
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.unreachable_parks, 0);
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_presence_offline_does_not_cancel_welcome_unreachable_probe() {
+    // On an internet-only device a presence-offline answer arrives once per
+    // presence rotation for as long as the peer is down. It must not cancel
+    // the escalating probe the relay verdict scheduled — doing so would
+    // re-strand the welcome edge-only after every single verdict, which is
+    // exactly the dead end this branch fixes. (The budget-burning data-plane
+    // retry IS still cancelled — see
+    // test_peer_presence_offline_parks_failed_welcome.)
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    let scheduled = protocol
+        .welcome_lifecycles
+        .get("bob")
+        .unwrap()
+        .next_retry_at
+        .expect("verdict must schedule a probe");
+
+    protocol.on_peer_presence("bob", false, Some(1_000));
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.next_retry_at,
+        Some(scheduled),
+        "a presence-offline answer must leave the unreachable probe intact"
+    );
+    assert_eq!(lifecycle.unreachable_parks, 1);
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_welcome_unreachable_probe_survives_its_own_escalated_interval() {
+    // The ladder outgrows WELCOME_LIFECYCLE_TTL_SECS (300s): 480s at six
+    // consecutive parks, 600s at the cap. try_send_welcome checks expires_at
+    // BEFORE running a due retry, so a park whose TTL does not cover the probe
+    // it just scheduled gets expired terminally by that very probe —
+    // welcome_send_expired + secure_session_failed, i.e. the self-recovery this
+    // branch adds turning into a dead session for any peer offline ~8 minutes.
+    // Every rung must keep expires_at strictly past next_retry_at.
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    for parks in 1..=7 {
+        protocol
+            .on_transport_send_failed(
+                &welcome_id,
+                Some("recipient_unreachable: Recipient is offline".to_string()),
+            )
+            .unwrap();
+        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(lifecycle.unreachable_parks, parks);
+        let next_retry = lifecycle
+            .next_retry_at
+            .expect("every park must schedule a probe");
+        assert!(
+            lifecycle.expires_at > next_retry,
+            "park {} scheduled a probe at {} but let the TTL lapse at {}",
+            parks,
+            next_retry,
+            lifecycle.expires_at
+        );
+    }
+
+    // Past the point where the old fixed 300s TTL would have lapsed first.
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert!(
+        lifecycle.next_retry_at.unwrap() > Utc::now() + ChronoDuration::seconds(300),
+        "the ladder must have escalated beyond the base TTL for this to bite"
+    );
+
+    // Run the probe when it comes due: it must send, not expire.
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
+    }
+    protocol.process_welcome_retry_queue().unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.state,
+        WelcomeDeliveryState::SendAttempted,
+        "a due probe must re-send the welcome, not settle it terminally"
+    );
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::WelcomeSendExpired { .. })),
+        "probing must never age the welcome out"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::SecureSessionFailed { .. })),
+        "probing must never abort the pending session"
+    );
+    drop(events);
+
+    protocol.stop().unwrap();
+}
+
+/// Drives one probe round: the scheduled probe fires and the relay ACCEPTS
+/// the frame (its push fallback succeeded), so no `DeliveryError` ever comes
+/// back and the probe resolves at the confirm timeout instead. Both steps
+/// force `next_retry_at` due rather than sleeping.
+fn run_accepted_welcome_probe_round(protocol: &mut OfflineProtocol, peer_id: &str) {
+    for _ in 0..2 {
+        let record = protocol.welcome_lifecycles.get_mut(peer_id).unwrap();
+        record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        protocol.process_welcome_retry_queue().unwrap();
+    }
+}
+
+#[test]
+fn test_welcome_probe_confirm_timeout_reparks_instead_of_expiring() {
+    // The probe must not destroy the welcome it exists to recover. The relay
+    // only answers DeliveryError when the recipient is undeliverable AND its
+    // push fallback also failed — so whenever push succeeds the probe earns no
+    // verdict at all and resolves at the 10s confirm timeout. Scored as a
+    // carrier-backed failure that charges the attempt and arms a plain
+    // data-plane retry, and with nothing in that ladder pushing expires_at,
+    // the record walks into terminal welcome_send_expired +
+    // secure_session_failed within one TTL window — for a peer that is merely
+    // offline. Before the probe existed this configuration simply parked quiet
+    // and survived, so scoring it that way would trade a stalled welcome for a
+    // failed one. It must re-park as another unreachable verdict instead.
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .unreachable_parks,
+        1
+    );
+
+    // Well past max_retries (3 in this helper), which is what used to settle
+    // the record terminally.
+    for round in 1..=8 {
+        run_accepted_welcome_probe_round(&mut protocol, "bob");
+
+        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(
+            lifecycle.state,
+            WelcomeDeliveryState::Failed,
+            "round {}: an unanswered probe must land back on the parked ladder",
+            round
+        );
+        assert_eq!(
+            lifecycle.last_reason_code,
+            Some(crate::events::WelcomeReasonCode::PeerUnreachable),
+            "round {}: the confirm timeout is the probe resolving, not a delivery failing",
+            round
+        );
+        assert_eq!(
+            lifecycle.attempt, 0,
+            "round {}: the probe must refund its speculative attempt, leaving the \
+             real-delivery budget intact",
+            round
+        );
+        assert_eq!(
+            lifecycle.unreachable_parks,
+            round + 1,
+            "round {}: each unanswered probe escalates the interval like any other park",
+            round
+        );
+        let next_retry = lifecycle
+            .next_retry_at
+            .expect("the ladder must stay armed so the welcome keeps self-recovering");
+        assert!(
+            lifecycle.expires_at > next_retry,
+            "round {}: the TTL must still outlive the retry it schedules",
+            round
+        );
+    }
+
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::WelcomeSendExpired { .. })),
+        "probing a peer that is merely offline must never age the welcome out"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::SecureSessionFailed { .. })),
+        "probing must never abort the pending session"
+    );
+    drop(events);
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_wire_confirmed_welcome_probe_reparks_instead_of_going_quiet() {
+    // The production internet sequence, which the mesh-driven tests above
+    // never exercise: the platform bridge calls internet_confirm_sent on
+    // socket-write success — before the relay can possibly answer. Left
+    // unguarded, that wire confirm upgrades the in-flight probe to `Sent`
+    // and clears next_retry_at; `Sent` sits outside every retry scan and
+    // even rearm_welcome_for_peer no-ops on it, so when the relay then
+    // ACCEPTS the frame (push fallback succeeded — no DeliveryError ever
+    // comes back) the welcome parks silently with no timer: the exact
+    // edge-only dead end this branch exists to close, re-opened through the
+    // confirm path. A wire confirm during a live probe round must leave the
+    // record SendAttempted with its confirm deadline armed, so the timeout
+    // can re-park it — and must not emit a welcome_send_succeeded the next
+    // verdict or timeout would only have to correct.
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .unreachable_parks,
+        1
+    );
+
+    // The probe comes due and fires.
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
+    }
+    protocol.process_welcome_retry_queue().unwrap();
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::SendAttempted
+    );
+
+    // The bridge wire-confirms the socket write.
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.state,
+        WelcomeDeliveryState::SendAttempted,
+        "a wire confirm must not upgrade a live probe to Sent"
+    );
+    assert!(
+        lifecycle.next_retry_at.is_some(),
+        "the confirm deadline must stay armed so the timeout can resolve the probe"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::WelcomeSendSucceeded { .. })),
+        "a probe's socket write proves nothing; success must not be reported"
+    );
+
+    // The relay accepted the frame, so no verdict ever arrives; the confirm
+    // deadline lapses instead.
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
+    }
+    protocol.process_welcome_retry_queue().unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.state,
+        WelcomeDeliveryState::Failed,
+        "the unanswered probe must land back on the parked ladder"
+    );
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert_eq!(lifecycle.unreachable_parks, 2, "the re-park escalates");
+    assert_eq!(lifecycle.attempt, 0, "the probe refunds its attempt");
+    let next_retry = lifecycle
+        .next_retry_at
+        .expect("the ladder must stay armed past the wire confirm");
+    assert!(lifecycle.expires_at > next_retry);
+
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::WelcomeSendExpired { .. })),
+        "a wire-confirmed probe must never age the welcome out"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::SecureSessionFailed { .. })),
+        "a wire-confirmed probe must never abort the pending session"
+    );
+    drop(events);
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_welcome_probe_repark_stops_shielding_once_the_record_ages_out() {
+    // The re-park above must not make a welcome immortal: a peer that never
+    // returns would otherwise keep one probing at the 600s cap forever, since
+    // only rearm_welcome_for_peer clears the counter. The bound is
+    // WELCOME_WATCHLIST_MAX_AGE_SECS from created_at — the same threshold that
+    // gives up watching a peer as permanently dead — past which the probe
+    // stops shielding and normal ageing settles the record. This is the
+    // welcome's twin of the DM probe's absolute outbox bound.
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.created_at =
+            Utc::now() - ChronoDuration::seconds(super::types::WELCOME_WATCHLIST_MAX_AGE_SECS + 1);
+    }
+
+    run_accepted_welcome_probe_round(&mut protocol, "bob");
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::Timeout),
+        "past the watchlist age the confirm timeout is scored carrier-backed again"
+    );
+    assert_eq!(
+        lifecycle.attempt, 1,
+        "and it charges the attempt, so the record can finally age out"
+    );
+
+    protocol.stop().unwrap();
+}
+
+#[test]
+fn test_presence_offline_still_parks_carrier_backed_retry_after_a_verdict() {
+    // The probe guard keys on the reason code, not on the sticky park counter.
+    // unreachable_parks is cleared only by rearm_welcome_for_peer, so a
+    // counter-only guard would shield the record for its whole life after one
+    // verdict — including the case here. Past WELCOME_WATCHLIST_MAX_AGE_SECS a
+    // confirm timeout stops re-parking (see the test above) and once again
+    // charges an attempt and arms a plain data-plane retry, with the counter
+    // still live. That retry is exactly what this park exists to cancel; left
+    // running it burns the welcome's budget to terminal expiry.
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    // One verdict arms the probe and the sticky counter.
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .unreachable_parks,
+        1
+    );
+
+    // Age it past the point where the probe track shields it, then let a probe
+    // fire and be accepted by the relay so no verdict comes back.
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.created_at =
+            Utc::now() - ChronoDuration::seconds(super::types::WELCOME_WATCHLIST_MAX_AGE_SECS + 1);
+    }
+    run_accepted_welcome_probe_round(&mut protocol, "bob");
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::Timeout),
+        "the confirm timeout is a carrier-backed failure, not a relay verdict"
+    );
+    assert_eq!(lifecycle.attempt, 1, "and it charges the attempt");
+    assert!(lifecycle.next_retry_at.is_some());
+    assert_eq!(
+        lifecycle.unreachable_parks, 1,
+        "the park counter is still live — a counter-only guard would stop here"
+    );
+
+    // The presence-offline answer must park THIS retry.
+    protocol.on_peer_presence("bob", false, Some(1_000));
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert!(
+        lifecycle.next_retry_at.is_none(),
+        "a carrier-backed data-plane retry must still be cancelled by the park"
+    );
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert_eq!(
+        lifecycle.attempt, 1,
+        "parking never touches the burnt budget"
+    );
 
     protocol.stop().unwrap();
 }
@@ -22834,8 +23669,8 @@ fn test_delivery_error_after_wire_confirm_corrects_false_sent() {
         )
         .unwrap();
 
-    // The false Sent is corrected: parked Failed, attempt refunded, no timed
-    // retry (a timer would re-send into another DeliveryError forever).
+    // The false Sent is corrected: parked Failed, attempt refunded, and an
+    // escalating probe scheduled (not due for 15s — see below).
     let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(lifecycle.attempt, 0, "the peer never saw the frame");
@@ -22843,7 +23678,7 @@ fn test_delivery_error_after_wire_confirm_corrects_false_sent() {
         lifecycle.last_reason_code,
         Some(crate::events::WelcomeReasonCode::PeerUnreachable)
     );
-    assert!(lifecycle.next_retry_at.is_none());
+    assert!(lifecycle.next_retry_at.is_some());
 
     // The app's earlier welcome_send_succeeded is superseded by a retryable
     // welcome_send_failed so its UI reflects the truth.
@@ -22862,7 +23697,9 @@ fn test_delivery_error_after_wire_confirm_corrects_false_sent() {
         "expected a corrective welcome_send_failed event"
     );
 
-    // The timed retry queue must NOT re-send over the healthy socket.
+    // The probe is scheduled, not immediate: a retry-queue tick right after
+    // the verdict must not re-send over the healthy socket. The escalating
+    // interval is what keeps the resend rate bounded while bob stays offline.
     let welcomes_before = internet_handle
         .sent_messages()
         .iter()
@@ -22910,7 +23747,7 @@ fn test_late_wire_confirm_does_not_resurrect_unreachable_verdict() {
         lifecycle.last_reason_code,
         Some(crate::events::WelcomeReasonCode::PeerUnreachable)
     );
-    assert!(lifecycle.next_retry_at.is_none());
+    assert!(lifecycle.next_retry_at.is_some());
 
     // The late confirm belongs to the very send the relay already failed.
     // It must not resurrect the false Sent (Failed -> Sent is otherwise
@@ -23048,14 +23885,15 @@ fn test_unreachable_parks_escalate_and_reset_on_presence() {
 }
 
 #[test]
-fn test_internet_dependent_carrier_does_not_keep_timed_retry() {
+fn test_unreachable_park_probe_is_carrier_agnostic() {
     let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
 
-    // Nostr is "available" on every internet-connected device, but it is an
-    // internet-dependent relay transport: its adapter status says nothing
-    // about local peer reachability. The relay's offline verdict must
-    // edge-park (no timer) exactly as if the internet path were the sole
-    // carrier — only BLE / WiFi-Direct justify the timed retry track.
+    // Nostr is "available" on every internet-connected device and is an
+    // internet-dependent relay transport, so its adapter status says nothing
+    // about local peer reachability. It used to veto the timed retry track;
+    // now no carrier does — the park schedules the same escalating probe
+    // whatever is available, and the escalation (not a carrier guard) is what
+    // bounds resends into the relay.
     let nostr = MockTransport::new(TransportType::Nostr);
     nostr.start().unwrap();
     protocol
@@ -23076,9 +23914,16 @@ fn test_internet_dependent_carrier_does_not_keep_timed_retry() {
         lifecycle.last_reason_code,
         Some(crate::events::WelcomeReasonCode::PeerUnreachable)
     );
+    assert_eq!(lifecycle.unreachable_parks, 1);
+    let delay = (lifecycle
+        .next_retry_at
+        .expect("every carrier keeps the probe alive")
+        - Utc::now())
+    .num_seconds();
     assert!(
-        lifecycle.next_retry_at.is_none(),
-        "an internet-dependent transport must not keep the timed retry alive"
+        (13..=15).contains(&delay),
+        "probe should start at the base interval, got {}s",
+        delay
     );
 
     protocol.stop().unwrap();

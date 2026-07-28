@@ -58,7 +58,7 @@ pub(crate) const WELCOME_MESH_CONFIRM_TIMEOUT_SECS: i64 = 15;
 /// escalation.
 pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
 /// Cap for the escalating retry interval of a welcome repeatedly parked
-/// `PeerUnreachable` while a mesh carrier is up (see
+/// `PeerUnreachable`, on every carrier (see
 /// `apply_recipient_unreachable_failure`). Each consecutive unreachable park
 /// doubles the interval from [`WELCOME_NO_CARRIER_RETRY_SECS`] up to this
 /// cap: DORS may keep selecting the internet path for the timed retry, and
@@ -68,7 +68,9 @@ pub(crate) const WELCOME_NO_CARRIER_RETRY_SECS: i64 = 15;
 /// state matches the presence-rescue cadence (one send per 10 min), which is
 /// cheap and self-resolving. Shared by the plain-DM unreachable probe
 /// (`handle_recipient_unreachable_for_message`, per-peer
-/// `dm_unreachable_parks` counter) for the same reason.
+/// `dm_unreachable_parks` counter) for the same reason — and there the
+/// escalation carries the whole bound, since that probe runs on every carrier
+/// (see `park_unreachable_dm`), including internet-only devices.
 pub(crate) const WELCOME_UNREACHABLE_RETRY_CAP_SECS: i64 = 600;
 /// Age limit for a welcome lifecycle to keep its peer on the presence
 /// watchlist (`welcome_pending_peers`). Without it the watch set only ever
@@ -99,9 +101,11 @@ pub(crate) const WELCOME_PRESENCE_RESCUE_MAX_SECS: i64 = 600;
 /// is up but this recipient is unreachable on it" (e.g. the internet relay
 /// answered `DeliveryError` for an offline peer). Classified in
 /// `on_transport_send_failed` as authoritative proof the frame was dropped:
-/// a welcome parks pending a reachability edge (no timed retry — the carrier
-/// being healthy means a timer would just re-send into another
-/// `DeliveryError`) instead of burning a retry attempt.
+/// instead of burning a retry attempt, a welcome refunds it and parks on an
+/// escalating reachability probe (`apply_recipient_unreachable_failure`), and
+/// a plain DM parks the same way (`park_unreachable_dm`). The escalation, not
+/// a carrier guard, is what keeps those probes from becoming a resend loop
+/// into the relay.
 ///
 /// Cross-layer contract: the React Native platform bridges
 /// (`InternetManager.kt` / `InternetManager.swift`) hardcode this literal when
