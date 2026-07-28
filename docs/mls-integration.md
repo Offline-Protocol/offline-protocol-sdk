@@ -184,6 +184,14 @@ MLS initialization requires two storage providers with different lifecycles:
 - `ProtocolStateStorageProvider` stores restartable delivery state inside the app
   container. It must be removed on app deletion and must not use a credential store.
 
+The split is about *lifecycle*, not trust: some delivery state (queued message
+plaintext, cloud-media `encryption_key`/`iv`) is as sensitive as anything in the
+credential store. The SDK therefore seals those record values with a per-install
+AEAD key held in `MlsStorageProvider` before they reach the protocol-state
+provider — so the provider only ever sees ciphertext, and an app container lifted
+without the credential store yields nothing. See
+[Protocol-State Confidentiality](#protocol-state-confidentiality).
+
 ```swift
 try mesh.initializeMls(
     secureStorage: keychainStorage,
@@ -360,6 +368,34 @@ class MyCustomMlsStorage : MlsStorageProvider {
 Do not implement the protocol-state provider with Keychain,
 EncryptedSharedPreferences backed by a surviving Keystore namespace, or any
 other store that can outlive the app container. State writes must be atomic.
+
+### Protocol-State Confidentiality
+
+A protocol-state provider is a byte store, not a trusted one. Store and return
+the bytes you are handed **verbatim** — do not inspect, re-encode, compress, or
+truncate them.
+
+The SDK seals the record values that can carry message plaintext or media key
+material — pending session messages, outbox entries, and media transfer
+descriptors — with ChaCha20-Poly1305 under a per-install key kept in
+`MlsStorageProvider` (key type `protocol_state_record_key`). Each record's
+associated data binds it to its `(keyType, keyId)` slot, so a record cannot be
+moved between peers or categories by anyone with write access to the container.
+Record *keys* are not sealed: they are peer and message ids, and the store needs
+them in the clear to address entries.
+
+Consequences worth knowing:
+
+- **Fail closed.** If the per-install key cannot be read or written, those
+  categories are not persisted at all for that session rather than written in the
+  clear. Delivery still works from memory; only crash recovery is lost.
+- **The key is the container's undo button.** Clearing the credential store
+  without clearing the app container leaves records that no longer open; the SDK
+  drops them on read. Clearing the app container alone is the normal uninstall
+  path and is always safe.
+- **Records have a size ceiling.** The SDK refuses to write, and refuses to
+  deserialize on restore, any single record over 4 MiB — a corrupted or tampered
+  state file cannot become an unbounded allocation during startup.
 
 ### React Native
 

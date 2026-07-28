@@ -1,5 +1,6 @@
 //! Storage persistence methods for protocol state.
 
+use super::state_crypto::{StateRecordCipher, STATE_RECORD_KEY_BYTES};
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState,
@@ -8,7 +9,7 @@ use super::{
     MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
-use crate::{Error, Result};
+use crate::{Error, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{LamportClock, MessageId};
 use offline_protocol_mls::MlsManager;
@@ -17,7 +18,193 @@ use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
+/// Whether a protocol-state category's values must be sealed before they reach
+/// the install-scoped store.
+///
+/// The single place record sensitivity is decided — adding a category means
+/// deciding here, not at each call site. Sealed categories are the ones whose
+/// values can carry message plaintext, user content, or media key material:
+///
+/// - [`storage_keys::PENDING_MESSAGES`]: original plaintext, plus rich extras
+///   that can include `MediaMetadata::encryption_key`/`iv`.
+/// - [`storage_keys::OUTBOX`]: the outgoing `Message` — ciphertext for encrypted
+///   sends, but plaintext when the app opted out of encryption, and its outer
+///   `media_metadata` carries the cloud-media secrets on the forward path.
+/// - [`storage_keys::MEDIA_DESCRIPTORS`]: file names and recipients of
+///   in-flight transfers.
+///
+/// Everything else is public wire material (key packages, advertised capability
+/// versions), a small state enum, a logical clock, or a value-less marker whose
+/// only information is the key id — which sealing cannot hide anyway, because
+/// the store addresses records by it.
+fn record_requires_sealing(key_type: &str) -> bool {
+    matches!(
+        key_type,
+        storage_keys::PENDING_MESSAGES | storage_keys::OUTBOX | storage_keys::MEDIA_DESCRIPTORS
+    )
+}
+
 impl OfflineProtocol {
+    // ========================================================================
+    // PROTOCOL-STATE RECORD I/O (SEALING + SIZE POLICY CHOKEPOINT)
+    // ========================================================================
+
+    /// Writes one protocol-state record, sealing it first when its category
+    /// requires that.
+    ///
+    /// Every value written to [`ProtocolStateStorage`] goes through here, so
+    /// confidentiality policy lives in one place rather than being re-decided
+    /// per call site.
+    pub(crate) fn write_state_record(
+        &self,
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> ProtocolStateResult<()> {
+        if !record_requires_sealing(key_type) {
+            return storage.store(key_type, key_id, data);
+        }
+
+        // Fail closed: without the per-install key this record would have to be
+        // written in the clear, and losing crash recovery for it is strictly
+        // less bad than losing at-rest confidentiality.
+        let Some(cipher) = &self.state_record_cipher else {
+            return Err(ProtocolStateError::StoreFailed(
+                "protocol state record key unavailable; refusing to persist in the clear"
+                    .to_string(),
+            ));
+        };
+        let Some(sealed) = cipher.seal(key_type, key_id, data) else {
+            return Err(ProtocolStateError::StoreFailed(
+                "failed to seal protocol state record".to_string(),
+            ));
+        };
+        storage.store(key_type, key_id, &sealed)
+    }
+
+    /// Reads one protocol-state record, opening it when its category is sealed.
+    ///
+    /// Returns `Ok(None)` — never raw bytes — for a record that will not open.
+    /// Such a record is corrupt or tampered, so it is also deleted, which keeps
+    /// a poison record from being re-examined on every boot. The one exception
+    /// is a missing record key: those records may be perfectly good and simply
+    /// unreadable *this session*, so they are left alone.
+    pub(crate) fn read_state_record(
+        &self,
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+    ) -> ProtocolStateResult<Option<Vec<u8>>> {
+        let Some(data) = storage.load(key_type, key_id)? else {
+            return Ok(None);
+        };
+
+        if !record_requires_sealing(key_type) {
+            return Ok(Some(data));
+        }
+
+        let Some(cipher) = &self.state_record_cipher else {
+            warn!(
+                key_type = %key_type,
+                key_id = %key_id,
+                "Protocol state record key unavailable; skipping sealed record"
+            );
+            return Ok(None);
+        };
+
+        match cipher.open(key_type, key_id, &data) {
+            Some(plaintext) => Ok(Some(plaintext)),
+            None => {
+                warn!(
+                    key_type = %key_type,
+                    key_id = %key_id,
+                    sealed = StateRecordCipher::looks_sealed(&data),
+                    "Protocol state record failed to open; deleting"
+                );
+                let _ = storage.delete(key_type, key_id);
+                Ok(None)
+            }
+        }
+    }
+
+    // ========================================================================
+    // PROTOCOL-STATE RECORD KEY
+    // ========================================================================
+
+    /// Loads (or, on first run, generates and persists) the per-install key that
+    /// seals sensitive protocol-state records.
+    ///
+    /// The key lives in *secure* storage while the records it protects live in
+    /// the install-scoped container: uninstalling the app drops the container,
+    /// and a container lifted without the credential store yields only
+    /// ciphertext.
+    ///
+    /// Unlike the scrub and Nostr secrets, this one does **not** degrade to a
+    /// session-local value when it cannot be persisted. A key that does not
+    /// survive the process would seal records nothing could ever open, so a
+    /// persist failure leaves the cipher uninstalled and sensitive categories
+    /// simply are not persisted this session (they stay in memory and are
+    /// re-driven from there, exactly as when no storage is configured at all).
+    ///
+    /// Unlike the other secret-restore paths this one has no "already loaded"
+    /// short circuit, so the installed cipher is always the one belonging to
+    /// the secure storage currently attached. Reusing a cipher across a storage
+    /// swap would seal records under a key the next launch cannot find, which
+    /// reads as silent loss of every sealed record.
+    pub(crate) fn restore_or_init_state_record_key(&mut self) {
+        let Some(storage) = &self.secure_storage else {
+            return;
+        };
+
+        let key: Zeroizing<[u8; STATE_RECORD_KEY_BYTES]> = match storage.load(
+            storage_keys::STATE_RECORD_KEY,
+            storage_keys::STATE_RECORD_KEY_ID,
+        ) {
+            Ok(Some(bytes)) if bytes.len() == STATE_RECORD_KEY_BYTES => {
+                let bytes = Zeroizing::new(bytes);
+                let mut key = Zeroizing::new([0u8; STATE_RECORD_KEY_BYTES]);
+                key.copy_from_slice(&bytes);
+                debug!("Restored protocol state record key from secure storage");
+                key
+            }
+            Ok(other) => {
+                // A wrong-length blob is a corrupt write, not a usable key.
+                // Replacing it abandons whatever it sealed — those records fail
+                // to open and are dropped on read — but the alternative is
+                // never sealing again.
+                if other.is_some() {
+                    warn!("Protocol state record key had unexpected length; regenerating");
+                }
+                let fresh = StateRecordCipher::generate_key();
+                if let Err(e) = storage.store(
+                    storage_keys::STATE_RECORD_KEY,
+                    storage_keys::STATE_RECORD_KEY_ID,
+                    &*fresh,
+                ) {
+                    warn!(
+                        error = %e,
+                        "Failed to persist protocol state record key; \
+                         sensitive protocol state will not be persisted this session"
+                    );
+                    return;
+                }
+                info!("Generated and persisted per-install protocol state record key");
+                fresh
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to load protocol state record key; \
+                     sensitive protocol state will not be persisted this session"
+                );
+                return;
+            }
+        };
+
+        self.state_record_cipher = Some(StateRecordCipher::new(&key));
+    }
+
     // ========================================================================
     // PENDING MESSAGES PERSISTENCE
     // ========================================================================
@@ -55,7 +242,12 @@ impl OfflineProtocol {
 
         match serde_json::to_vec(messages) {
             Ok(data) => {
-                if let Err(e) = storage.store(storage_keys::PENDING_MESSAGES, recipient, &data) {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::PENDING_MESSAGES,
+                    recipient,
+                    &data,
+                ) {
                     warn!(recipient = %recipient, error = %e, "Failed to persist pending messages");
                 }
             }
@@ -71,8 +263,8 @@ impl OfflineProtocol {
         recipient: &str,
     ) -> Option<Vec<PendingMessage>> {
         let storage = self.protocol_state_storage.as_ref()?;
-        let data = storage
-            .load(storage_keys::PENDING_MESSAGES, recipient)
+        let data = self
+            .read_state_record(storage.as_ref(), storage_keys::PENDING_MESSAGES, recipient)
             .ok()??;
         serde_json::from_slice(&data).ok()
     }
@@ -157,7 +349,12 @@ impl OfflineProtocol {
         };
         match serde_json::to_vec(pkg) {
             Ok(data) => {
-                if let Err(e) = storage.store(storage_keys::PEER_KEY_PACKAGES, peer_id, &data) {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::PEER_KEY_PACKAGES,
+                    peer_id,
+                    &data,
+                ) {
                     warn!(peer_id = %peer_id, error = %e, "Failed to persist peer key package");
                 }
             }
@@ -173,8 +370,8 @@ impl OfflineProtocol {
         peer_id: &str,
     ) -> Option<ReceivedKeyPackage> {
         let storage = self.protocol_state_storage.as_ref()?;
-        let data = storage
-            .load(storage_keys::PEER_KEY_PACKAGES, peer_id)
+        let data = self
+            .read_state_record(storage.as_ref(), storage_keys::PEER_KEY_PACKAGES, peer_id)
             .ok()??;
         let pkg: ReceivedKeyPackage = serde_json::from_slice(&data).ok()?;
         let now_ms = Utc::now().timestamp_millis() as u64;
@@ -275,7 +472,12 @@ impl OfflineProtocol {
         };
         match serde_json::to_vec(caps) {
             Ok(data) => {
-                if let Err(e) = storage.store(storage_keys::PEER_CAPABILITIES, peer_id, &data) {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::PEER_CAPABILITIES,
+                    peer_id,
+                    &data,
+                ) {
                     warn!(peer_id = %peer_id, error = %e, "Failed to persist peer capabilities");
                 }
             }
@@ -297,8 +499,8 @@ impl OfflineProtocol {
     /// storage or parse failures read as "no record".
     fn load_peer_capabilities(&self, peer_id: &str) -> Option<PeerCapabilities> {
         let storage = self.protocol_state_storage.as_ref()?;
-        let data = storage
-            .load(storage_keys::PEER_CAPABILITIES, peer_id)
+        let data = self
+            .read_state_record(storage.as_ref(), storage_keys::PEER_CAPABILITIES, peer_id)
             .ok()??;
         serde_json::from_slice::<PeerCapabilities>(&data).ok()
     }
@@ -390,7 +592,9 @@ impl OfflineProtocol {
                 pruned += 1;
                 continue;
             }
-            let Ok(Some(data)) = storage.load(storage_keys::PEER_CAPABILITIES, &peer_id) else {
+            let Ok(Some(data)) =
+                self.read_state_record(storage.as_ref(), storage_keys::PEER_CAPABILITIES, &peer_id)
+            else {
                 continue;
             };
             let Ok(caps) = serde_json::from_slice::<PeerCapabilities>(&data) else {
@@ -447,8 +651,8 @@ impl OfflineProtocol {
             return Ok(None);
         };
 
-        let Some(data) = storage
-            .load(storage_keys::SESSION_STATES, peer_id)
+        let Some(data) = self
+            .read_state_record(storage.as_ref(), storage_keys::SESSION_STATES, peer_id)
             .map_err(|e| {
                 Error::Other(format!(
                     "Failed to load session state for {}: {}",
@@ -483,14 +687,18 @@ impl OfflineProtocol {
         let encoded = serde_json::to_vec(&new_state).map_err(|e| {
             Error::Serialization(format!("Failed to serialize session state: {}", e))
         })?;
-        storage
-            .store(storage_keys::SESSION_STATES, peer_id, &encoded)
-            .map_err(|e| {
-                Error::Other(format!(
-                    "Failed to persist session state for {}: {}",
-                    peer_id, e
-                ))
-            })?;
+        self.write_state_record(
+            storage.as_ref(),
+            storage_keys::SESSION_STATES,
+            peer_id,
+            &encoded,
+        )
+        .map_err(|e| {
+            Error::Other(format!(
+                "Failed to persist session state for {}: {}",
+                peer_id, e
+            ))
+        })?;
 
         if matches!(new_state, SessionState::Confirmed) {
             info!(
@@ -532,8 +740,8 @@ impl OfflineProtocol {
             return Ok(None);
         };
 
-        let Some(data) = storage
-            .load(storage_keys::WELCOME_LIFECYCLES, peer_id)
+        let Some(data) = self
+            .read_state_record(storage.as_ref(), storage_keys::WELCOME_LIFECYCLES, peer_id)
             .map_err(|e| {
                 Error::Other(format!(
                     "Failed to load welcome lifecycle for {}: {}",
@@ -564,14 +772,18 @@ impl OfflineProtocol {
         let encoded = serde_json::to_vec(record).map_err(|e| {
             Error::Serialization(format!("Failed to serialize welcome lifecycle: {}", e))
         })?;
-        storage
-            .store(storage_keys::WELCOME_LIFECYCLES, &record.peer_id, &encoded)
-            .map_err(|e| {
-                Error::Other(format!(
-                    "Failed to persist welcome lifecycle for {}: {}",
-                    record.peer_id, e
-                ))
-            })
+        self.write_state_record(
+            storage.as_ref(),
+            storage_keys::WELCOME_LIFECYCLES,
+            &record.peer_id,
+            &encoded,
+        )
+        .map_err(|e| {
+            Error::Other(format!(
+                "Failed to persist welcome lifecycle for {}: {}",
+                record.peer_id, e
+            ))
+        })
     }
 
     pub(crate) fn clear_welcome_lifecycle_entry(&self, peer_id: &str) -> Result<()> {
@@ -719,9 +931,12 @@ impl OfflineProtocol {
         }
         match serde_json::to_vec(entry) {
             Ok(data) => {
-                if let Err(e) =
-                    storage.store(storage_keys::OUTBOX, &entry.message.id.as_str(), &data)
-                {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::OUTBOX,
+                    &entry.message.id.as_str(),
+                    &data,
+                ) {
                     warn!(message_id = %entry.message.id, error = %e, "Failed to persist outbox entry");
                 }
             }
@@ -786,10 +1001,11 @@ impl OfflineProtocol {
 
         let mut restored: Vec<OutboxEntry> = Vec::new();
         for message_id in message_ids {
-            let loaded = self
-                .protocol_state_storage
-                .as_ref()
-                .and_then(|s| s.load(storage_keys::OUTBOX, &message_id).ok().flatten());
+            let loaded = self.protocol_state_storage.as_ref().and_then(|s| {
+                self.read_state_record(s.as_ref(), storage_keys::OUTBOX, &message_id)
+                    .ok()
+                    .flatten()
+            });
             let Some(data) = loaded else {
                 continue;
             };
@@ -931,9 +1147,12 @@ impl OfflineProtocol {
         };
         match serde_json::to_vec(descriptor) {
             Ok(data) => {
-                if let Err(e) =
-                    storage.store(storage_keys::MEDIA_DESCRIPTORS, &descriptor.file_id, &data)
-                {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::MEDIA_DESCRIPTORS,
+                    &descriptor.file_id,
+                    &data,
+                ) {
                     warn!(file_id = %descriptor.file_id, error = %e, "Failed to persist media descriptor");
                 }
             }
@@ -987,7 +1206,7 @@ impl OfflineProtocol {
         let mut restored: Vec<MediaTransferDescriptor> = Vec::new();
         for file_id in file_ids {
             let loaded = self.protocol_state_storage.as_ref().and_then(|s| {
-                s.load(storage_keys::MEDIA_DESCRIPTORS, &file_id)
+                self.read_state_record(s.as_ref(), storage_keys::MEDIA_DESCRIPTORS, &file_id)
                     .ok()
                     .flatten()
             });
@@ -1054,7 +1273,9 @@ impl OfflineProtocol {
         let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-        if let Err(e) = storage.store(storage_keys::BLOCKED_USERS, user_id, &[]) {
+        if let Err(e) =
+            self.write_state_record(storage.as_ref(), storage_keys::BLOCKED_USERS, user_id, &[])
+        {
             warn!(user_id = %user_id, error = %e, "Failed to persist blocked user");
         }
     }
@@ -1107,7 +1328,12 @@ impl OfflineProtocol {
         let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-        if let Err(e) = storage.store(storage_keys::BOTH_CREATE_AWAITING_DECRYPT, peer_id, &[]) {
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
+            storage_keys::BOTH_CREATE_AWAITING_DECRYPT,
+            peer_id,
+            &[],
+        ) {
             warn!(peer_id = %peer_id, error = %e, "Failed to persist both-create owner gate");
         }
     }
@@ -1412,11 +1638,12 @@ impl OfflineProtocol {
     }
 
     fn write_lamport_clock_to_storage(&mut self, value: u64) {
-        let Some(storage) = &self.protocol_state_storage else {
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
         let bytes = value.to_le_bytes();
-        if let Err(e) = storage.store(
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
             storage_keys::LAMPORT_CLOCK,
             storage_keys::LAMPORT_CLOCK_ID,
             &bytes,
@@ -1432,12 +1659,14 @@ impl OfflineProtocol {
     /// Uses `max(current, restored)` so the clock never goes backward even
     /// if the in-memory value has advanced before storage was attached.
     pub(crate) fn restore_lamport_clock(&mut self) {
-        let Some(storage) = &self.protocol_state_storage else {
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
-        if let Ok(Some(data)) =
-            storage.load(storage_keys::LAMPORT_CLOCK, storage_keys::LAMPORT_CLOCK_ID)
-        {
+        if let Ok(Some(data)) = self.read_state_record(
+            storage.as_ref(),
+            storage_keys::LAMPORT_CLOCK,
+            storage_keys::LAMPORT_CLOCK_ID,
+        ) {
             if data.len() == 8 {
                 let restored = u64::from_le_bytes(data.try_into().expect("verified length is 8"));
                 let restored_clock = LamportClock::from_value(restored);

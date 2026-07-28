@@ -982,6 +982,16 @@ pub(crate) mod storage_keys {
     pub const NOSTR_SIGNING_SECRET: &str = "nostr_signing_secret";
     /// Key ID for the single Nostr signing-secret entry.
     pub const NOSTR_SIGNING_SECRET_ID: &str = "current";
+    /// Key type for the per-install key that seals sensitive protocol-state
+    /// records at rest.
+    ///
+    /// Lives in *secure* storage — it is the one piece of the protocol-state
+    /// domain that must be credential-backed, because it is what gives the
+    /// install-scoped container's contents their confidentiality (see
+    /// [`crate::protocol::state_crypto`]).
+    pub const STATE_RECORD_KEY: &str = "protocol_state_record_key";
+    /// Key ID for the single protocol-state record key entry.
+    pub const STATE_RECORD_KEY_ID: &str = "current";
     /// Key type for peers we are the both-create "owner" of and are awaiting a
     /// group-aware decrypt from before confirming (see
     /// [`crate::protocol::OfflineProtocol`]'s `both_create_awaiting_decrypt`).

@@ -5,6 +5,21 @@
 //! outlive an app-container incarnation. Protocol state contains restartable
 //! delivery machinery—outbox entries, pending messages, retry lifecycles, and
 //! peer snapshots—and must be removed with the app container.
+//!
+//! # Confidentiality
+//!
+//! Lifecycle separation is not confidentiality separation: some of this state
+//! (queued message plaintext, cloud-media `encryption_key`/`iv`) is as
+//! sensitive as anything in the credential store. Implementations are *not*
+//! trusted to protect it — the SDK seals those record values with an AEAD
+//! whose key lives in [`crate::MlsStorage`] before they ever reach this trait
+//! (see `protocol::state_crypto`). An implementation therefore only ever sees
+//! ciphertext for sensitive categories, and a stolen app container without the
+//! credential store yields nothing.
+//!
+//! Record *keys* (`key_type` / `key_id`) are not sealed: they are peer ids and
+//! message ids, and the storage layout needs them in the clear to list and
+//! address entries.
 
 use std::fmt;
 
@@ -58,8 +73,11 @@ pub type ProtocolStateResult<T> = Result<T, ProtocolStateError>;
 /// [`offline_protocol_mls::MlsStorage`], but this
 /// trait deliberately does not inherit from the crypto-storage contract:
 /// lifecycle separation should be structural, not a marker on the wrong
-/// abstraction — and that includes the error type, which is this crate's own
-/// rather than the MLS crate's.
+/// abstraction.
+///
+/// Values for sensitive categories arrive already sealed (see the module
+/// docs), so an implementation must store and return the bytes it is given
+/// verbatim — it must not inspect, re-encode, or truncate them.
 pub trait ProtocolStateStorage: Send + Sync {
     /// Atomically stores or replaces one protocol-state entry.
     fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()>;

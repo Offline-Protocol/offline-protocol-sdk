@@ -69,6 +69,51 @@ impl RecordingTelemetrySink {
     }
 }
 
+/// Reads (or creates) the per-install protocol-state record key held in
+/// `storage`, exactly as `restore_or_init_state_record_key` does, so a fixture
+/// can pre-seed a sealed record before the protocol is constructed.
+fn state_record_cipher_for(storage: &InMemoryStorage) -> state_crypto::StateRecordCipher {
+    use state_crypto::STATE_RECORD_KEY_BYTES;
+
+    let existing = storage
+        .load(
+            storage_keys::STATE_RECORD_KEY,
+            storage_keys::STATE_RECORD_KEY_ID,
+        )
+        .unwrap();
+    let key = match existing {
+        Some(bytes) if bytes.len() == STATE_RECORD_KEY_BYTES => bytes,
+        _ => {
+            let fresh = state_crypto::StateRecordCipher::generate_key();
+            storage
+                .store(
+                    storage_keys::STATE_RECORD_KEY,
+                    storage_keys::STATE_RECORD_KEY_ID,
+                    &*fresh,
+                )
+                .unwrap();
+            fresh.to_vec()
+        }
+    };
+    let mut key_bytes = [0u8; STATE_RECORD_KEY_BYTES];
+    key_bytes.copy_from_slice(&key);
+    state_crypto::StateRecordCipher::new(&key_bytes)
+}
+
+/// Seeds a record into a sealed protocol-state category the way the SDK writes
+/// it, so restore paths can read it back.
+fn seed_sealed_state_record(
+    storage: &InMemoryStorage,
+    key_type: &str,
+    key_id: &str,
+    plaintext: &[u8],
+) {
+    let sealed = state_record_cipher_for(storage)
+        .seal(key_type, key_id, plaintext)
+        .unwrap();
+    storage.store(key_type, key_id, &sealed).unwrap();
+}
+
 fn pending_test_message(sender: &str, content: &str) -> Message {
     Message::new(
         UserId::new(sender).unwrap(),
@@ -5030,6 +5075,155 @@ fn test_flush_requeue_keeps_queued_id_and_storage() {
     assert_eq!(
         persisted[1].message_id, second_id,
         "Persisted snapshot must preserve the original send order"
+    );
+}
+
+/// Builds a protocol whose sends always land in the pending-session queue
+/// (encryption required, `store_pending` on, no session ever established), with
+/// its MLS + protocol-state storage wired up.
+fn pending_queue_protocol() -> OfflineProtocol {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+    protocol
+}
+
+#[test]
+fn test_protocol_state_backing_bytes_hide_plaintext_and_media_keys() {
+    // The install-scoped container gets the delivery state's LIFECYCLE, not a
+    // free pass on its confidentiality: pending entries carry message
+    // plaintext and cloud-media key material, which used to sit behind the
+    // credential store. Whatever a provider is handed must be opaque.
+    const SENTINEL_TEXT: &str = "sentinel-plaintext-payload";
+    const SENTINEL_KEY: &str = "c2VudGluZWwtbWVkaWEta2V5";
+    const SENTINEL_IV: &str = "c2VudGluZWwtbWVkaWEtaXY=";
+
+    let mut protocol = pending_queue_protocol();
+    protocol
+        .send_message_with(
+            "bob",
+            SENTINEL_TEXT,
+            SendMessageOptions {
+                media_metadata: Some(offline_protocol_core::MediaMetadata {
+                    encryption_key: Some(SENTINEL_KEY.to_string()),
+                    iv: Some(SENTINEL_IV.to_string()),
+                    ..sample_media_metadata(1024)
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let state_storage = protocol.protocol_state_storage.clone().unwrap();
+    let stored = state_storage
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .expect("the pending message must have been persisted");
+
+    for sentinel in [SENTINEL_TEXT, SENTINEL_KEY, SENTINEL_IV] {
+        assert!(
+            !stored
+                .windows(sentinel.len())
+                .any(|window| window == sentinel.as_bytes()),
+            "backing bytes must not expose {sentinel:?}"
+        );
+    }
+
+    // Opaque, but not lost: the SDK still reads its own record back.
+    let restored = protocol
+        .load_pending_messages_from_storage("bob")
+        .expect("the sealed record must open for the SDK");
+    assert_eq!(restored[0].content, SENTINEL_TEXT);
+    assert_eq!(
+        restored[0]
+            .rich
+            .as_ref()
+            .and_then(|rich| rich.media_metadata.as_ref())
+            .and_then(|media| media.encryption_key.as_deref()),
+        Some(SENTINEL_KEY)
+    );
+}
+
+#[test]
+fn test_sensitive_state_is_not_persisted_in_the_clear_without_the_record_key() {
+    // Fail closed. If the per-install record key is unavailable, sensitive
+    // categories are simply not persisted — losing crash recovery is
+    // recoverable, losing at-rest confidentiality is not.
+    let mut protocol = pending_queue_protocol();
+    protocol.state_record_cipher = None;
+
+    let state_storage = protocol.protocol_state_storage.clone().unwrap();
+    let result = protocol.write_state_record(
+        state_storage.as_ref(),
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        b"sentinel-plaintext-payload",
+    );
+    assert!(
+        matches!(result, Err(crate::ProtocolStateError::StoreFailed(_))),
+        "a sealed category must refuse to write without the key, got {result:?}"
+    );
+    assert!(
+        state_storage
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "nothing may reach the store in the clear"
+    );
+
+    // A non-sensitive category is unaffected — the key gates confidentiality,
+    // not persistence in general.
+    protocol
+        .write_state_record(
+            state_storage.as_ref(),
+            storage_keys::SESSION_STATES,
+            "bob",
+            b"\"Confirmed\"",
+        )
+        .expect("non-sealed categories must still persist");
+}
+
+#[test]
+fn test_sealed_records_do_not_open_under_a_rotated_record_key() {
+    // A record key that could not be reused (corrupt blob, restored backup)
+    // must not leave undecryptable records behind forever: they fail to open
+    // and are dropped on read.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    seed_sealed_state_record(&storage, storage_keys::PENDING_MESSAGES, "bob", b"[]");
+
+    // Rotate the key out from under the record.
+    storage
+        .store(
+            storage_keys::STATE_RECORD_KEY,
+            storage_keys::STATE_RECORD_KEY_ID,
+            &*state_crypto::StateRecordCipher::generate_key(),
+        )
+        .unwrap();
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(
+        storage
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "an unopenable record must be dropped rather than retried every boot"
     );
 }
 
@@ -17086,13 +17280,12 @@ fn test_message(recipient: &str, content: &str) -> Message {
 }
 
 fn store_outbox_entry(storage: &InMemoryStorage, entry: &OutboxEntry) {
-    storage
-        .store(
-            storage_keys::OUTBOX,
-            &entry.message.id.as_str(),
-            &serde_json::to_vec(entry).unwrap(),
-        )
-        .unwrap();
+    seed_sealed_state_record(
+        storage,
+        storage_keys::OUTBOX,
+        &entry.message.id.as_str(),
+        &serde_json::to_vec(entry).unwrap(),
+    );
 }
 
 #[test]

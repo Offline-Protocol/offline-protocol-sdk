@@ -1,4 +1,9 @@
-"""File-backed storage for restartable protocol and message-plane state."""
+"""File-backed storage for restartable protocol and message-plane state.
+
+Values are opaque bytes and are written verbatim: the SDK seals the categories
+that can carry message plaintext or media key material before handing them over,
+so they arrive as ciphertext. Do not inspect, re-encode, or truncate them.
+"""
 
 from __future__ import annotations
 

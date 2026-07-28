@@ -13,6 +13,11 @@ import java.io.FileOutputStream
  *
  * The root lives under noBackupFilesDir, so neither uninstall/reinstall nor
  * Android Auto Backup can resurrect an old outbox or retry lifecycle.
+ *
+ * Values are opaque bytes and are written verbatim: the SDK seals the
+ * categories that can carry message plaintext or media key material before
+ * handing them over, so they arrive as ciphertext. Do not inspect, re-encode,
+ * or truncate them.
  */
 class AppContainerProtocolStateStorage(
     context: Context,

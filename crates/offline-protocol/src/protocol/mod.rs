@@ -11,6 +11,7 @@ mod receive;
 mod security;
 mod send;
 mod session;
+mod state_crypto;
 mod storage;
 mod types;
 
@@ -205,6 +206,19 @@ pub struct OfflineProtocol {
 
     /// Install-scoped storage for restartable message-plane and protocol state.
     protocol_state_storage: Option<Arc<dyn ProtocolStateStorage>>,
+
+    /// Seals sensitive protocol-state records before they reach the
+    /// install-scoped store, with a per-install key held in `secure_storage`.
+    ///
+    /// `None` until that key is available (and if it never becomes available,
+    /// for the whole session). Sealed categories then fail *closed*: they are
+    /// not persisted at all rather than written in the clear, since losing
+    /// crash recovery is recoverable and losing at-rest confidentiality is not.
+    /// See `state_crypto` and `restore_or_init_state_record_key`.
+    ///
+    /// Always belongs to the currently attached `secure_storage` — it is
+    /// re-derived, never carried across a storage swap.
+    state_record_cipher: Option<state_crypto::StateRecordCipher>,
 
     /// Lamport logical clock for causal message ordering.
     /// Ticked on send, merged on receive.
@@ -505,6 +519,7 @@ impl OfflineProtocol {
             pending_queue: PendingDecryptionQueue::default(),
             secure_storage: None,
             protocol_state_storage: None,
+            state_record_cipher: None,
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
@@ -601,6 +616,12 @@ impl OfflineProtocol {
         self.secure_storage = Some(secure_storage);
         self.protocol_state_storage = Some(protocol_state_storage);
 
+        // Must precede every restore below: sealed protocol-state records
+        // (pending messages, outbox, media descriptors) are unreadable without
+        // this key, so restoring first would silently start from empty and then
+        // overwrite durable state with that empty view.
+        self.restore_or_init_state_record_key();
+
         // Load the persistent scrub secret outside the transactional restore
         // below: it is independent of MLS state, and a later MLS-restore
         // rollback must not undo it (the secret is idempotent and reused on
@@ -673,6 +694,7 @@ impl OfflineProtocol {
     ) -> Result<()> {
         self.secure_storage = Some(storage.clone());
         self.protocol_state_storage = Some(Arc::new(TestProtocolStateStorage { storage }));
+        self.restore_or_init_state_record_key();
         self.restore_or_init_scrub_secret();
         self.restore_or_init_nostr_signing_secret();
         self.restore_pending_messages()?;
