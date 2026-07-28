@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+> **Downgrade is not a safe rollback.** The first launch on this release moves
+> pre-split delivery state out of the credential store and into the app
+> container, deleting the credential-store copy once the move is durable. An
+> older build reads the old location and finds none of it — so a rollback comes
+> up with an empty outbox, an empty pending queue, and, most sharply, **an empty
+> block list: every previously blocked peer silently unblocked.** Blocking is a
+> safety control, so treat a downgrade as a decision to reset it, not as an undo.
+> Ship this as an explicitly breaking release and roll forward, not back.
+
 ### Changed
 
 - **Breaking: secure key material and restartable protocol state now use separate storage contracts.** `initialize_mls` / generated `initializeMls` now require both an `MlsStorageProvider` and an app-container-scoped `ProtocolStateStorageProvider`; the one-provider API and production `enable_message_persistence` path are removed. Outbox entries, pending messages, retry/welcome lifecycles, peer snapshots, media descriptors, and Lamport state are routed only to protocol-state storage. MLS/TOFU material and install secrets remain in secure storage. Built-in Python and React Native providers isolate both stores by an opaque namespace derived from `(app_id, user_id)`, so multiple accounts cannot share keys or delivery state. iOS state lives in Application Support with backup disabled and Android state lives in `noBackupFilesDir`. Python has no portable uninstall-scoped container, so `ProtocolManager` now requires an explicit `state_root` (or `OFFLINE_PROTOCOL_STATE_ROOT`) owned and removed by the application installer. Restartable delivery state is deliberately not migrated — it is re-driven from the outbox and pending queues — but the MLS identity **is** (see below).
