@@ -187,7 +187,18 @@ impl OfflineProtocol {
     /// the secure storage currently attached. Reusing a cipher across a storage
     /// swap would seal records under a key the next launch cannot find, which
     /// reads as silent loss of every sealed record.
+    ///
+    /// That invariant is enforced, not just documented: any previously
+    /// installed cipher is dropped *before* the new store is read, so every
+    /// path out of here either installs the key belonging to the currently
+    /// attached store or leaves none at all. A failed load must not fall back
+    /// to the key of a store we are no longer using — that cipher would open
+    /// nothing here (records written under the new store's key are deleted as
+    /// unauthentic on read) and would seal records the next launch cannot
+    /// find a key for.
     pub(crate) fn restore_or_init_state_record_key(&mut self) {
+        self.state_record_cipher = None;
+
         let Some(storage) = &self.secure_storage else {
             return;
         };

@@ -601,6 +601,11 @@ impl OfflineProtocol {
         // partially-initialized MLS state visible and then permanently block retries.
         let previous_secure_storage = self.secure_storage.clone();
         let previous_protocol_state_storage = self.protocol_state_storage.clone();
+        // The record cipher belongs to the secure store it was loaded from, so
+        // it is part of the same transaction as the storage handles: taken here
+        // so a failed init cannot leave the new store's key installed next to
+        // the rolled-back handles, and restored below alongside them.
+        let previous_state_record_cipher = self.state_record_cipher.take();
         let previous_pending_messages = self.pending_encrypted_messages.clone();
         let previous_pending_message_expiry = self.next_pending_message_expiry;
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
@@ -654,6 +659,7 @@ impl OfflineProtocol {
         if let Err(err) = restore_result {
             self.secure_storage = previous_secure_storage;
             self.protocol_state_storage = previous_protocol_state_storage;
+            self.state_record_cipher = previous_state_record_cipher;
             self.pending_encrypted_messages = previous_pending_messages;
             self.next_pending_message_expiry = previous_pending_message_expiry;
             self.confirmed_sessions = previous_confirmed_sessions;

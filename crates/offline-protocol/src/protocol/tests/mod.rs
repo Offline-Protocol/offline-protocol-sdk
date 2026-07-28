@@ -5496,6 +5496,198 @@ fn test_sealed_records_do_not_open_under_a_rotated_record_key() {
 }
 
 #[test]
+fn test_failed_init_does_not_leave_the_previous_stores_record_cipher_installed() {
+    // The record cipher belongs to the secure store it was loaded from, so it
+    // is part of the same transaction as the storage handles. If an init loads
+    // (or generates) key A and then fails, a retry against store B must seal
+    // under B's key: sealing under A's would write records whose key the next
+    // launch cannot find, and reading with A's would delete B's good records as
+    // unauthentic.
+    struct FailingPendingListStorageOver {
+        inner: Arc<crate::mls::InMemoryStorage>,
+    }
+
+    impl MlsStorage for FailingPendingListStorageOver {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            self.inner.load(key_type, key_id)
+        }
+
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            if key_type == storage_keys::PENDING_MESSAGES {
+                return Err(offline_protocol_mls::StorageError::LoadFailed(
+                    "forced restore failure".to_string(),
+                ));
+            }
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let store_a = Arc::new(crate::mls::InMemoryStorage::new());
+    let failed = protocol.initialize_mls_for_test(Arc::new(FailingPendingListStorageOver {
+        inner: store_a.clone(),
+    }));
+    assert!(failed.is_err());
+    assert!(
+        protocol.state_record_cipher.is_none(),
+        "a rolled-back init must not leave the failed store's cipher installed"
+    );
+
+    // The failed attempt did persist a key into store A before it failed, so
+    // A's key is a real candidate for being wrongly reused below.
+    let key_a = store_a
+        .load(
+            storage_keys::STATE_RECORD_KEY,
+            storage_keys::STATE_RECORD_KEY_ID,
+        )
+        .unwrap()
+        .expect("the failed attempt should have persisted a key into store A");
+
+    let store_b = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls_for_test(store_b.clone()).unwrap();
+
+    let state_storage = protocol.protocol_state_storage.clone().unwrap();
+    protocol
+        .write_state_record(
+            state_storage.as_ref(),
+            storage_keys::PENDING_MESSAGES,
+            "bob",
+            b"payload",
+        )
+        .expect("the retry must have a usable record key");
+    let sealed = store_b
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .expect("the record must have reached store B");
+
+    assert_eq!(
+        state_record_cipher_for(&store_b)
+            .open(storage_keys::PENDING_MESSAGES, "bob", &sealed)
+            .as_deref(),
+        Some(&b"payload"[..]),
+        "records must be sealed under the key of the store now attached"
+    );
+
+    let mut key_a_bytes = [0u8; state_crypto::STATE_RECORD_KEY_BYTES];
+    key_a_bytes.copy_from_slice(&key_a);
+    assert!(
+        state_crypto::StateRecordCipher::new(&key_a_bytes)
+            .open(storage_keys::PENDING_MESSAGES, "bob", &sealed)
+            .is_none(),
+        "the abandoned store's key must not be what sealed the record"
+    );
+}
+
+#[test]
+fn test_record_key_load_failure_drops_the_previously_installed_cipher() {
+    // The other half of the same invariant: attaching a secure store whose
+    // record key cannot be read must leave *no* cipher installed, not the one
+    // from whatever store was attached before. Falling back to the stale key
+    // would seal records under a key this store does not hold — silently
+    // unreadable next launch — instead of failing closed.
+    struct FailingRecordKeyLoadStorage {
+        inner: crate::mls::InMemoryStorage,
+    }
+
+    impl MlsStorage for FailingRecordKeyLoadStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            if key_type == storage_keys::STATE_RECORD_KEY {
+                return Err(offline_protocol_mls::StorageError::LoadFailed(
+                    "forced record key load failure".to_string(),
+                ));
+            }
+            self.inner.load(key_type, key_id)
+        }
+
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.state_record_cipher = Some(state_crypto::StateRecordCipher::new(
+        &[7u8; state_crypto::STATE_RECORD_KEY_BYTES],
+    ));
+
+    let storage: Arc<dyn MlsStorage> = Arc::new(FailingRecordKeyLoadStorage {
+        inner: crate::mls::InMemoryStorage::new(),
+    });
+    protocol.secure_storage = Some(storage.clone());
+    let state_storage: Arc<dyn crate::ProtocolStateStorage> =
+        Arc::new(TestProtocolStateStorage { storage });
+    protocol.protocol_state_storage = Some(state_storage.clone());
+
+    protocol.restore_or_init_state_record_key();
+
+    assert!(
+        protocol.state_record_cipher.is_none(),
+        "a failed record-key load must not leave the previous store's cipher installed"
+    );
+    let result = protocol.write_state_record(
+        state_storage.as_ref(),
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        b"payload",
+    );
+    assert!(
+        matches!(result, Err(crate::ProtocolStateError::StoreFailed(_))),
+        "a sealed category must fail closed, not seal under a stale key, got {result:?}"
+    );
+}
+
+#[test]
 fn test_flush_terminal_welcome_failure_drops_pending_without_resurrection() {
     // A terminal Welcome failure surfacing mid-flush runs
     // abort_pending_session_for_peer (via the prepare path), which clears
