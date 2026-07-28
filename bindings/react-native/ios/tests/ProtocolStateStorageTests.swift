@@ -268,4 +268,50 @@ final class ProtocolStateStorageTests: XCTestCase {
 
         XCTAssertEqual(try storage.listKeys(keyType: "outbox"), ["message-1"])
     }
+
+    /// The bound exists for a tampered container, and there the entries are
+    /// exactly the ones that yield no key. Counting keys collected would leave
+    /// every one of these opened on every launch while the counter sat at zero.
+    func testEnumerationBoundCountsEntriesExaminedNotKeysReturned() throws {
+        let root = temporaryRoot("bounded-listing")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let storage = try AppContainerProtocolStateStorage(root: root)
+
+        try storage.store(keyType: "outbox", keyId: "message-1", data: [1])
+
+        let directory = root
+            .appendingPathComponent(ProtocolStateRecord.typeDirectoryName("outbox"))
+        for index in 0..<10 {
+            try Data([1, 2, 3]).write(
+                to: directory.appendingPathComponent("k_unparseable-\(index)")
+            )
+        }
+
+        let result = storage.enumerateKeys(keyType: "outbox", limit: 4)
+
+        XCTAssertEqual(result.examined, 4, "enumeration must stop at the bound it was given")
+        XCTAssertLessThanOrEqual(result.keys.count, 1)
+    }
+
+    /// A digest names exactly one record, so two names for one key id can only
+    /// come from a copy planted in the container. Restore must not walk the id
+    /// twice because of it.
+    func testListingDedupesARecordReachableUnderTwoNames() throws {
+        let root = temporaryRoot("duplicate-names")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let storage = try AppContainerProtocolStateStorage(root: root)
+
+        try storage.store(keyType: "outbox", keyId: "message-1", data: [1, 2, 3])
+
+        let directory = root
+            .appendingPathComponent(ProtocolStateRecord.typeDirectoryName("outbox"))
+        let original = directory.appendingPathComponent(
+            ProtocolStateRecord.entryName(keyType: "outbox", keyId: "message-1")
+        )
+        try Data(contentsOf: original).write(
+            to: directory.appendingPathComponent("k_copy-of-message-1")
+        )
+
+        XCTAssertEqual(try storage.listKeys(keyType: "outbox"), ["message-1"])
+    }
 }

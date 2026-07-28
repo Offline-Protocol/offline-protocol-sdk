@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -253,6 +254,49 @@ class ProtocolStateStorageTest {
         val directory = entryFile(account, "outbox", "message-1").parentFile!!
         File(directory, "k_not-a-record").writeBytes(byteArrayOf(1, 2, 3))
         File(directory, "unrelated.tmp").writeBytes(byteArrayOf(1, 2, 3))
+
+        assertEquals(listOf("message-1"), storage.listKeys("outbox"))
+    }
+
+    /**
+     * The bound exists for a tampered container, and there the entries are
+     * exactly the ones that yield no key. Counting keys collected would leave
+     * every one of these opened on every launch while the counter sat at zero.
+     */
+    @Test
+    fun enumerationBoundCountsEntriesExaminedNotKeysReturned() {
+        val account = namespace("bounded-listing")
+        val storage = AppContainerProtocolStateStorage(context, account)
+        storage.store("outbox", "message-1", listOf(1u))
+
+        val directory = entryFile(account, "outbox", "message-1").parentFile!!
+        for (index in 0 until 10) {
+            File(directory, "k_unparseable-$index").writeBytes(byteArrayOf(1, 2, 3))
+        }
+
+        val enumeration = storage.enumerateKeys("outbox", 4)
+
+        assertEquals(
+            "enumeration must stop at the bound it was given",
+            4,
+            enumeration.examined
+        )
+        assertTrue(enumeration.keys.size <= 1)
+    }
+
+    /**
+     * A digest names exactly one record, so two names for one key id can only
+     * come from an `AtomicFile` twin or a copy planted in the container.
+     * Restore must not walk the id twice because of it.
+     */
+    @Test
+    fun listingDedupesARecordReachableUnderTwoNames() {
+        val account = namespace("duplicate-names")
+        val storage = AppContainerProtocolStateStorage(context, account)
+        storage.store("outbox", "message-1", listOf(1u, 2u, 3u))
+
+        val original = entryFile(account, "outbox", "message-1")
+        File(original.parentFile!!, "k_copy-of-message-1").writeBytes(original.readBytes())
 
         assertEquals(listOf("message-1"), storage.listKeys("outbox"))
     }

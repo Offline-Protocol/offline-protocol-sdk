@@ -260,3 +260,34 @@ def test_unframed_stray_files_are_ignored_by_listing(tmp_path) -> None:
     (directory / "unrelated.tmp").write_bytes(b"\x01\x02\x03")
 
     assert storage.list_keys("outbox") == ["message-1"]
+
+
+def test_enumeration_bound_counts_entries_examined_not_keys_returned(tmp_path) -> None:
+    # The bound exists for a tampered container, and there the entries are
+    # exactly the ones that yield no key. Counting keys collected would leave
+    # every one of these opened on every launch while the counter sat at zero.
+    storage = AppStateStorage(tmp_path / "state")
+    storage.store("outbox", "message-1", [1])
+
+    directory = tmp_path / "state" / state_storage_module._type_directory_name("outbox")
+    for index in range(10):
+        (directory / f"k_unparseable-{index}").write_bytes(b"\x01\x02\x03")
+
+    keys, examined = storage.enumerate_keys("outbox", 4)
+
+    assert examined == 4, "enumeration must stop at the bound it was given"
+    assert len(keys) <= 1
+
+
+def test_listing_dedupes_a_record_reachable_under_two_names(tmp_path) -> None:
+    # A digest names exactly one record, so two names for one key id can only
+    # come from a copy planted in the container. Restore must not walk the id
+    # twice because of it.
+    storage = AppStateStorage(tmp_path / "state")
+    storage.store("outbox", "message-1", [1, 2, 3])
+
+    directory = tmp_path / "state" / state_storage_module._type_directory_name("outbox")
+    original = directory / state_storage_module._entry_name("outbox", "message-1")
+    (directory / "k_copy-of-message-1").write_bytes(original.read_bytes())
+
+    assert storage.list_keys("outbox") == ["message-1"]

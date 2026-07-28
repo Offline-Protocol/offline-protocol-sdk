@@ -56,6 +56,12 @@ internal object ProtocolStateRecord {
     /**
      * Ceiling on entries one `listKeys` will open. Core caps every category far
      * below this; a directory holding more has been tampered with.
+     *
+     * The bound counts entries *examined*, not keys returned. Counting the
+     * latter would not bound the tampered case at all — the case this exists
+     * for: an entry whose header does not parse yields no key, so a directory
+     * full of unparseable `k_` files would be opened in its entirety on every
+     * launch while the counter sat at zero.
      */
     const val MAX_LISTED_KEYS = 65_536
 
@@ -265,33 +271,55 @@ class AppContainerProtocolStateStorage(
         }
     }
 
-    override fun listKeys(keyType: String): List<String> {
+    override fun listKeys(keyType: String): List<String> =
+        enumerateKeys(keyType, ProtocolStateRecord.MAX_LISTED_KEYS).keys
+
+    /** A bounded enumeration and the number of entries it examined. */
+    internal data class Enumeration(val keys: List<String>, val examined: Int)
+
+    /**
+     * Enumerates one category, opening at most `limit` entries.
+     *
+     * `limit` bounds the entries *examined* rather than the keys collected,
+     * because opening a file is the cost and an entry that fails to parse
+     * yields no key: a directory of unparseable records must not be walked in
+     * full on every launch. Exposed with an explicit `limit` so the bound is
+     * testable without materializing tens of thousands of files.
+     *
+     * Key ids are deduped: a name that resolves to a record already seen (an
+     * `AtomicFile` `.bak` twin, or a copy planted in the container) must not
+     * make the same id appear twice.
+     */
+    internal fun enumerateKeys(keyType: String, limit: Int): Enumeration {
         synchronized(LOCK) {
             val directory = typeDirectory(keyType)
             if (!directory.exists()) {
-                return emptyList()
+                return Enumeration(emptyList(), 0)
             }
             return try {
                 // `Files.newDirectoryStream` needs API 26 and minSdk here is 24,
-                // so the name array is unavoidable — but names are a fixed 66
-                // characters and only MAX_LISTED_KEYS of them are ever opened,
-                // which is where the real cost would be.
-                val names = directory.list() ?: return emptyList()
-                val keys = ArrayList<String>()
+                // so materializing the name array is unavoidable. Every step
+                // after it — the stat and the open — is bounded by `limit`;
+                // rejecting a name is a string comparison against an array the
+                // filesystem already handed us.
+                val names = directory.list() ?: return Enumeration(emptyList(), 0)
+                val keys = LinkedHashSet<String>()
+                var examined = 0
                 for (name in names) {
-                    if (keys.size >= ProtocolStateRecord.MAX_LISTED_KEYS) {
+                    if (examined >= limit) {
                         break
                     }
                     if (!name.startsWith("k_") || name.endsWith(".new")) {
                         continue
                     }
+                    examined++
                     val header = readHeader(File(directory, name.removeSuffix(".bak")))
                         ?: continue
-                    if (header.keyType == keyType && !keys.contains(header.keyId)) {
+                    if (header.keyType == keyType) {
                         keys.add(header.keyId)
                     }
                 }
-                keys.sorted()
+                Enumeration(keys.sorted(), examined)
             } catch (error: Exception) {
                 throw MlsStorageException.LoadFailed(
                     "Failed to list protocol-state keys: ${error.message}"

@@ -63,6 +63,12 @@ MAX_HEADER_BYTES = 8 + 2 * MAX_COMPONENT_BYTES
 
 #: Ceiling on entries one ``list_keys`` will open. Core caps every category far
 #: below this; a directory holding more has been tampered with.
+#:
+#: The bound counts entries *examined*, not keys returned. Counting the latter
+#: would not bound the tampered case at all — the case this exists for: an entry
+#: whose header does not parse yields no key, so a directory full of unparseable
+#: ``k_`` files would be opened in its entirety on every launch while the counter
+#: sat at zero.
 MAX_LISTED_KEYS = 65_536
 
 
@@ -259,29 +265,49 @@ class AppStateStorage(ProtocolStateStorageProvider):
             _sync_directory(path.parent)
 
     def list_keys(self, key_type: str) -> list[str]:
+        return self.enumerate_keys(key_type, MAX_LISTED_KEYS)[0]
+
+    def enumerate_keys(self, key_type: str, limit: int) -> tuple[list[str], int]:
+        """Enumerate one category, opening at most ``limit`` entries.
+
+        ``limit`` bounds the entries *examined* rather than the keys collected,
+        because opening a file is the cost and an entry that fails to parse
+        yields no key: a directory of unparseable records must not be walked in
+        full on every launch. Exposed with an explicit ``limit`` so the bound is
+        testable without materializing tens of thousands of files.
+
+        Key ids are deduped: a name that resolves to a record already seen (a
+        copy planted in the container) must not make the same id appear twice.
+
+        Returns the sorted key ids and the number of entries examined.
+        """
         with self._lock:
             directory = self._type_directory(key_type)
             if not directory.exists():
-                return []
-            keys: list[str] = []
+                return [], 0
+            keys: set[str] = set()
+            examined = 0
             try:
                 # Stream the directory rather than materializing it, and read
                 # only each record's header: enumeration must stay bounded even
                 # when the container has been tampered with.
                 with os.scandir(directory) as entries:
                     for entry in entries:
-                        if len(keys) >= MAX_LISTED_KEYS:
+                        if examined >= limit:
                             break
-                        if not entry.name.startswith("k_") or not entry.is_file():
+                        if not entry.name.startswith("k_"):
+                            continue
+                        examined += 1
+                        if not entry.is_file():
                             continue
                         header = self._read_header(Path(entry.path))
                         if header is not None and header[0] == key_type:
-                            keys.append(header[1])
+                            keys.add(header[1])
             except OSError as exc:
                 raise MlsStorageError.LoadFailed(
                     f"failed to list protocol-state keys: {exc}"
                 ) from exc
-            return sorted(keys)
+            return sorted(keys), examined
 
     # -- internals -----------------------------------------------------------
 
