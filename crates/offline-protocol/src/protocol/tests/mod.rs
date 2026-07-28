@@ -8960,7 +8960,7 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
         .unwrap();
 
     // Queue a message — it should be pending because session is not confirmed
-    let msg_id = protocol
+    let _msg_id = protocol
         .send_message(
             "bob",
             "hello-over-ble",
@@ -15175,8 +15175,6 @@ fn test_ack_messages_bypass_security_gate() {
     // ACK messages do not start with any internal prefix (they have
     // empty or non-prefixed content), so the security gate must not
     // interfere with them — even if transport_peer_id mismatches.
-    let protocol = OfflineProtocol::new(create_test_config()).unwrap();
-
     // ACK-like message: content is just the acked message ID, not an
     // internal prefix.
     let msg = pending_test_message("alice", "some-message-id-being-acked");

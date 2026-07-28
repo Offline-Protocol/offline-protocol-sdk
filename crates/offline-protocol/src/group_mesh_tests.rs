@@ -6628,23 +6628,6 @@ fn test_welcome_payload_roles_stored_on_join() {
     roles.insert("alice".to_string(), GroupRole::Admin);
     roles.insert("bob".to_string(), GroupRole::Member);
 
-    let welcome_payload = GroupMlsWelcomePayload {
-        member_rich: HashMap::new(),
-        group_id: group_id.clone(),
-        group_name: Some("Welcome Roles Test".to_string()),
-        welcome_data: super::protocol::base64_encode(&welcome.welcome_data),
-        member_list: vec!["alice".to_string(), "bob".to_string()],
-        member_roles: roles.clone(),
-    };
-    let content = format!(
-        "{}{}",
-        super::protocol::internal_prefixes::GROUP_MLS_WELCOME,
-        serde_json::to_string(&welcome_payload).unwrap()
-    );
-
-    // Build a message from alice to bob
-    let msg = make_message("alice", "bob", &content);
-
     // Bob handles the welcome message. The MLS join will fail because
     // Bob already joined above, but the role storage happens before the
     // MLS join step. Instead, test the role storage directly by
@@ -6793,7 +6776,7 @@ fn test_self_removal_commit_from_non_admin_is_rejected() {
 
 #[test]
 fn test_plaintext_removal_notification_from_admin_cleans_up() {
-    let (alice, mut bob, group_id) = setup_alice_bob_group("Notify Test");
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Notify Test");
 
     // Ensure Bob's MLS state knows Alice is admin
     {
@@ -7192,7 +7175,7 @@ fn test_group_member_added_over_internet_accepted_regardless_of_sender_documents
 
 #[test]
 fn test_key_package_sent_to_cleared_after_invite_consumption() {
-    let (mut alice, _bob, group_id) = setup_alice_bob_group("KP Test");
+    let (mut alice, _bob, _group_id) = setup_alice_bob_group("KP Test");
 
     // Simulate that Alice has already sent a key package to Bob
     alice.key_package_sent_to.insert("bob".to_string());
@@ -7212,7 +7195,7 @@ fn test_key_package_sent_to_cleared_after_invite_consumption() {
 
 #[test]
 fn test_welcome_handler_clears_key_package_sent_to() {
-    let (alice, mut bob, group_id) = setup_alice_bob_group("Welcome KP Test");
+    let (_alice, mut bob, _group_id) = setup_alice_bob_group("Welcome KP Test");
 
     // Bob should have cleared key_package_sent_to for alice after
     // processing the Welcome (so he can send a fresh key package).
@@ -10180,7 +10163,7 @@ fn invite_omits_attestation_for_unknown_members() {
 fn commit_attestation_teaches_existing_member() {
     // Bob (an existing member) never exchanges key packages with carol; the
     // attested capability on alice's Add commit must open bob's group gate.
-    let (alice, mut bob, _carol, group_id) = setup_three_party_invite(true, true);
+    let (alice, mut bob, _carol, _group_id) = setup_three_party_invite(true, true);
     let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
     // Bob already knows alice via the Welcome self-attestation, but carol
     // is unknown until the commit lands.
