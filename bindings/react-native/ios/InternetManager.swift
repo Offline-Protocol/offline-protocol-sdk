@@ -227,40 +227,38 @@ public class InternetManager: NSObject, TransportManager {
         MonotonicClock.nowMs()
     }
 
-    /// The socket generation stamped on `task` at creation (see
-    /// SocketGenerationTracker / connect). Used to tag each watched write so a
-    /// stale completion can only ever retire its own generation's slot. 0 is an
-    /// unreachable sentinel (mint() starts at 1) for a task that somehow lost
-    /// its stamp — harmless, since arm and disarm read it from the same task.
-    private static func generation(of task: URLSessionWebSocketTask) -> Int {
-        task.taskDescription.flatMap { Int($0) } ?? 0
-    }
-
-    /// Sends `text` on `task` under write-stall-watchdog coverage: arms the
-    /// watchdog immediately before the send (the ONLY correct place — the slot
-    /// must exist the instant the write is outstanding) and forwards `completion`
-    /// unchanged to `task.send`. Every poll-path write that can pin the control
-    /// gate MUST go through here rather than calling `task.send` directly, so a
-    /// future send site cannot silently drop watchdog coverage. Disarm stays the
-    /// caller's job from inside `completion` (the completions differ too much to
-    /// centralize) — call `disarmWriteWatchdog(for:)` first, before any stale
-    /// guard. messageQueue only.
+    /// Sends `text` on `task` under write-stall-watchdog coverage, owning the
+    /// whole arm/send/disarm triple: arms immediately before the send (the ONLY
+    /// correct place — the slot must exist the instant the write is
+    /// outstanding), and retires THAT write's own slot from its completion
+    /// before forwarding `completion` on. Every poll-path write that can pin the
+    /// control gate MUST go through here rather than calling `task.send`
+    /// directly, so a future send site cannot silently drop coverage on either
+    /// end.
+    ///
+    /// The disarm hops to messageQueue because the completion lands on
+    /// URLSession's delegate queue and the watchdog is messageQueue-confined.
+    /// It is ENQUEUED before `completion` runs — that unconditional enqueue,
+    /// not its execution, is the guarantee: no early return inside a caller's
+    /// completion (a `guard let self`, a stale-task guard) can strand the slot,
+    /// which is what a cancelled post-teardown completion relies on to free it.
+    /// For the two callers that hop to messageQueue themselves it also EXECUTES
+    /// first, since a serial queue preserves the enqueue order; a caller that
+    /// stays on the delegate queue (sendMessage) simply sees it land later, so
+    /// no caller may read watchdog state expecting its own write to be gone.
+    /// messageQueue only.
     private func sendWatched(
         _ task: URLSessionWebSocketTask,
         _ text: String,
         completion: @escaping @Sendable (Error?) -> Void
     ) {
-        writeStallWatchdog.arm(nowMs: monotonicNowMs(), generation: Self.generation(of: task))
-        task.send(.string(text), completionHandler: completion)
-    }
-
-    /// Retires the oldest outstanding write for `task`'s generation from the
-    /// stall watchdog. Call from the send completion, before the stale-task
-    /// guard, so a cancelled (post-teardown) completion still frees its slot;
-    /// keying on the completing task's own generation means it can never pop a
-    /// live successor's freshly-armed write. messageQueue only.
-    private func disarmWriteWatchdog(for task: URLSessionWebSocketTask) {
-        writeStallWatchdog.disarm(generation: Self.generation(of: task))
+        let token = writeStallWatchdog.arm(nowMs: monotonicNowMs())
+        task.send(.string(text)) { [weak self] error in
+            if let self = self {
+                self.messageQueue.async { self.writeStallWatchdog.disarm(token) }
+            }
+            completion(error)
+        }
     }
 
     /// Control-op frames deferred by the rate limiter, drained (oldest
@@ -1865,11 +1863,13 @@ public class InternetManager: NSObject, TransportManager {
 
         sendWatched(task, jsonString) { [weak self] error in
             guard let self = self else { return }
-            // Retire this write from the stall watchdog first. This completion
-            // runs on URLSession's delegate queue, not messageQueue, so hop —
-            // the FIFO is messageQueue-confined. Before the stale-task guard so
-            // a cancelled (post-teardown) completion still frees its slot.
-            self.messageQueue.async { self.disarmWriteWatchdog(for: task) }
+            // (sendWatched already ENQUEUED this write's stall-watchdog disarm
+            // on messageQueue, unconditionally — so the guards below cannot
+            // strand its slot. Note it has not necessarily RUN yet: unlike the
+            // control paths, this body stays on URLSession's delegate queue, so
+            // the disarm typically lands after it. Don't read
+            // writeStallWatchdog state from here expecting this write to be
+            // gone from it.)
             // A stale task's send outcome must not increment the failure
             // counter, report internetSendFailed for the message (the
             // disconnect path's fail_all_pending already owned it), or
@@ -2004,9 +2004,15 @@ public class InternetManager: NSObject, TransportManager {
                 // and enqueueControlFrames are messageQueue-confined.
                 self.messageQueue.async {
                     self.inFlightControlPrimaries -= 1
-                    // Retire this write from the stall watchdog alongside the
-                    // primary counter, before the stale guard.
-                    self.disarmWriteWatchdog(for: task)
+                    // (sendWatched already retired this write's stall-watchdog
+                    // slot on an earlier-queued block — a SEPARATE one from
+                    // this, where in 0.16.5 the two travelled together. So a
+                    // poll tick can land between them and observe an empty
+                    // watchdog while this counter is still held. Harmless: that
+                    // tick early-returns on the control gate and the next 100ms
+                    // tick proceeds. The reverse — gate released while the slot
+                    // still stands — is what would matter, and is impossible:
+                    // the disarm is always enqueued first.)
                     // A stale task's send outcome must not touch failure
                     // counters, fail the message id (fail_all_pending owned
                     // it), or trigger teardown (see isStale); its deltas and
@@ -2117,9 +2123,14 @@ public class InternetManager: NSObject, TransportManager {
             guard let self = self else { return }
             self.messageQueue.async {
                 self.isDrainingControlFrames = false
-                // Retire this write from the stall watchdog alongside the
-                // drain flag, before the stale guard.
-                self.disarmWriteWatchdog(for: task)
+                // (sendWatched already retired this write's stall-watchdog
+                // slot on an earlier-queued block — separate from this one, so
+                // a poll tick between them sees an empty watchdog while the
+                // drain flag is still set. Harmless for the same reason as the
+                // primary path above; and the disarm being enqueued first is
+                // what keeps the next frame's arm — issued from
+                // drainPendingControlFrames below — from ever double-counting
+                // against this one.)
                 // Stale task: the disconnect path already cleared the queue
                 // and generation-killed the commits.
                 guard !self.isStale(task) else { return }
