@@ -2517,6 +2517,31 @@ impl OfflineProtocol {
             return Ok(());
         }
 
+        // A wire confirm for a reachability probe must not upgrade the
+        // record to `Sent`. With a live unreachable-park counter the send in
+        // flight IS the escalating probe — every reachability edge clears the
+        // counter before sending anything else — and the socket write
+        // succeeding adds nothing the park didn't already know. Whenever the
+        // relay's push fallback succeeds it returns no `DeliveryError` at
+        // all, so a probe marked `Sent` here would go quiet forever:
+        // `next_retry_at` cleared below, `Sent` outside every retry scan, and
+        // `rearm_welcome_for_peer` a no-op on it — the exact edge-only dead
+        // end the probe exists to close, reachable only through this bridge
+        // confirm (mesh carriers never wire-confirm). Leaving the record
+        // `SendAttempted` keeps the confirm deadline armed: a relay verdict
+        // re-parks it, and an accepted-but-unanswered frame resolves at the
+        // confirm timeout, which re-parks via
+        // `welcome_probe_repark_permitted`. Genuine delivery still converges
+        // regardless — the peer proving the session marks the welcome `Sent`
+        // through `confirm_session_state`. This also withholds the
+        // `welcome_send_succeeded` a probe's socket write would otherwise
+        // emit, which the next verdict or timeout would only have to correct.
+        if matches!(updated.state, WelcomeDeliveryState::SendAttempted)
+            && updated.unreachable_parks > 0
+        {
+            return Ok(());
+        }
+
         {
             let record = self.welcome_lifecycles.get_mut(&peer_id).ok_or_else(|| {
                 Error::Other(format!("Missing welcome lifecycle for {}", peer_id))

@@ -22743,6 +22743,119 @@ fn test_welcome_probe_confirm_timeout_reparks_instead_of_expiring() {
 }
 
 #[test]
+fn test_wire_confirmed_welcome_probe_reparks_instead_of_going_quiet() {
+    // The production internet sequence, which the mesh-driven tests above
+    // never exercise: the platform bridge calls internet_confirm_sent on
+    // socket-write success — before the relay can possibly answer. Left
+    // unguarded, that wire confirm upgrades the in-flight probe to `Sent`
+    // and clears next_retry_at; `Sent` sits outside every retry scan and
+    // even rearm_welcome_for_peer no-ops on it, so when the relay then
+    // ACCEPTS the frame (push fallback succeeded — no DeliveryError ever
+    // comes back) the welcome parks silently with no timer: the exact
+    // edge-only dead end this branch exists to close, re-opened through the
+    // confirm path. A wire confirm during a live probe round must leave the
+    // record SendAttempted with its confirm deadline armed, so the timeout
+    // can re-park it — and must not emit a welcome_send_succeeded the next
+    // verdict or timeout would only have to correct.
+    let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    protocol
+        .on_transport_send_failed(
+            &welcome_id,
+            Some("recipient_unreachable: Recipient is offline".to_string()),
+        )
+        .unwrap();
+    assert_eq!(
+        protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .unreachable_parks,
+        1
+    );
+
+    // The probe comes due and fires.
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
+    }
+    protocol.process_welcome_retry_queue().unwrap();
+    assert_eq!(
+        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        WelcomeDeliveryState::SendAttempted
+    );
+
+    // The bridge wire-confirms the socket write.
+    protocol.on_transport_send_confirmed(&welcome_id).unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.state,
+        WelcomeDeliveryState::SendAttempted,
+        "a wire confirm must not upgrade a live probe to Sent"
+    );
+    assert!(
+        lifecycle.next_retry_at.is_some(),
+        "the confirm deadline must stay armed so the timeout can resolve the probe"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::WelcomeSendSucceeded { .. })),
+        "a probe's socket write proves nothing; success must not be reported"
+    );
+
+    // The relay accepted the frame, so no verdict ever arrives; the confirm
+    // deadline lapses instead.
+    {
+        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
+    }
+    protocol.process_welcome_retry_queue().unwrap();
+
+    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    assert_eq!(
+        lifecycle.state,
+        WelcomeDeliveryState::Failed,
+        "the unanswered probe must land back on the parked ladder"
+    );
+    assert_eq!(
+        lifecycle.last_reason_code,
+        Some(crate::events::WelcomeReasonCode::PeerUnreachable)
+    );
+    assert_eq!(lifecycle.unreachable_parks, 2, "the re-park escalates");
+    assert_eq!(lifecycle.attempt, 0, "the probe refunds its attempt");
+    let next_retry = lifecycle
+        .next_retry_at
+        .expect("the ladder must stay armed past the wire confirm");
+    assert!(lifecycle.expires_at > next_retry);
+
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::WelcomeSendExpired { .. })),
+        "a wire-confirmed probe must never age the welcome out"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::SecureSessionFailed { .. })),
+        "a wire-confirmed probe must never abort the pending session"
+    );
+    drop(events);
+
+    protocol.stop().unwrap();
+}
+
+#[test]
 fn test_welcome_probe_repark_stops_shielding_once_the_record_ages_out() {
     // The re-park above must not make a welcome immortal: a peer that never
     // returns would otherwise keep one probing at the 600s cap forever, since
