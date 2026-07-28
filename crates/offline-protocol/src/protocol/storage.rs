@@ -103,17 +103,37 @@ enum PendingRestore {
     Restored(Vec<PendingMessage>),
 }
 
-/// Largest number of keys any single restore pass will process for one
-/// category.
+/// Largest number of keys any single restore pass will process for a category
+/// with no live insert-time cap of its own.
 ///
-/// Every category is capped far below this in normal operation (the biggest is
-/// the pending queue at [`MAX_PENDING_MESSAGES_GLOBAL`] recipients), so a store
-/// listing more has been tampered with or was written by a build with wildly
-/// different bounds. Restores stop there and delete the tail rather than walk
-/// an attacker-chosen number of entries during startup. Sealing already keeps a
-/// forged record from ever deserializing; this bounds the *work* as well as the
+/// The pending queue is the widest such category, at
+/// [`MAX_PENDING_MESSAGES_GLOBAL`] recipients, so a store listing more than a
+/// generous multiple of that has been tampered with or was written by a build
+/// with wildly different bounds. Restores stop there and *ignore* the tail —
+/// they do not delete it, and because `list_keys` order is backend-defined a
+/// later launch may walk a different subset. Sealing already keeps a forged
+/// record from ever deserializing; this bounds the *work* as well as the
 /// result.
+///
+/// Categories whose live insert path is capped get a tighter bound derived from
+/// that cap instead (see [`OUTBOX_RESTORE_KEY_CAP`]).
 const MAX_RESTORE_KEYS_PER_CATEGORY: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
+
+/// Restore-walk bound for the outbox.
+///
+/// The live insert path hard-caps the outbox at [`MAX_OUTBOX_ENTRIES`]
+/// (`ensure_outbox_entry` evicts before admitting), so a durable store can
+/// never legitimately hold more than that plus what a merge restored. Four
+/// times the cap is ample headroom and avoids walking — and transiently
+/// allocating up to [`MAX_PROTOCOL_STATE_RECORD_BYTES`] for — thirty times more
+/// entries than could ever be kept.
+///
+/// Media transfer descriptors deliberately keep the wider bound: unlike the
+/// outbox, `persist_media_descriptor` has no insert-time cap
+/// ([`MAX_MEDIA_DESCRIPTORS`] is applied only on restore), so a long-running
+/// session can legitimately leave more on disk than the restore cap. Walking
+/// only a tight prefix would keep the wrong ones and strand the rest forever.
+const OUTBOX_RESTORE_KEY_CAP: usize = 4 * MAX_OUTBOX_ENTRIES;
 
 impl OfflineProtocol {
     // ========================================================================
@@ -1541,7 +1561,7 @@ impl OfflineProtocol {
         // Unlike the pending queue, an outbox record is keyed *by* its message
         // id, so each loss is individually settleable without opening it.
         let mut unrecoverable: Vec<MessageId> = Vec::new();
-        for message_id in message_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+        for message_id in message_ids.into_iter().take(OUTBOX_RESTORE_KEY_CAP) {
             let loaded = self.protocol_state_storage.as_ref().map(|s| {
                 self.read_state_record_detailed(s.as_ref(), storage_keys::OUTBOX, &message_id)
             });
@@ -1648,10 +1668,10 @@ impl OfflineProtocol {
                 0,
             ));
         }
-        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+        if listed > OUTBOX_RESTORE_KEY_CAP {
             warn!(
                 listed,
-                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                cap = OUTBOX_RESTORE_KEY_CAP,
                 "Outbox store listed more entries than any legitimate run can produce; ignoring the tail"
             );
         }
@@ -1786,9 +1806,15 @@ impl OfflineProtocol {
         let now = Utc::now();
 
         let mut restored: Vec<MediaTransferDescriptor> = Vec::new();
-        // Bounded like the other restores. A descriptor loss is advisory (the
-        // app re-initiates the transfer), so there is nothing to settle here —
-        // only the walk itself needs a ceiling.
+        // Bounded, but deliberately by the wide ceiling rather than a multiple
+        // of `MAX_MEDIA_DESCRIPTORS`: that cap is applied here, on restore, and
+        // nowhere on the insert path, so a long session can legitimately leave
+        // more descriptors on disk than the cap. A tight prefix would keep the
+        // wrong ones (the survivors are chosen by `queued_at` among what was
+        // walked) and strand the rest forever, since nothing else deletes them.
+        // A descriptor loss is advisory anyway — the app re-initiates the
+        // transfer — so there is nothing to settle here; only the walk itself
+        // needs a ceiling.
         for file_id in file_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             let loaded = self.protocol_state_storage.as_ref().and_then(|s| {
                 self.read_state_record(s.as_ref(), storage_keys::MEDIA_DESCRIPTORS, &file_id)
