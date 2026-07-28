@@ -5101,6 +5101,87 @@ fn pending_queue_protocol() -> OfflineProtocol {
 }
 
 #[test]
+fn test_flush_requeue_preserves_the_original_queued_at() {
+    // The pending lifetime is absolute: it is measured from when the message
+    // FIRST entered the queue. A flush that finds the session still not ready
+    // puts the message back, and stamping a fresh `queued_at` there would hand
+    // it a new window on every reconciliation — so it could never expire.
+    let mut protocol = pending_queue_protocol();
+    let queued_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Age the queued entry (and its persisted copy) well past its first hour.
+    let first_queued_at = Utc::now() - ChronoDuration::hours(6);
+    protocol.pending_encrypted_messages.get_mut("bob").unwrap()[0].queued_at = first_queued_at;
+    protocol.persist_pending_messages_for_recipient("bob");
+
+    protocol.flush_pending_messages("bob").unwrap();
+
+    let pending = protocol.pending_encrypted_messages.get("bob").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].message_id, queued_id);
+    assert_eq!(
+        pending[0].queued_at, first_queued_at,
+        "A re-queue must carry the original queued_at forward, not restart the clock"
+    );
+
+    let persisted = protocol
+        .load_pending_messages_from_storage("bob")
+        .expect("the re-queued message must stay persisted");
+    assert_eq!(
+        persisted[0].queued_at, first_queued_at,
+        "The persisted snapshot must record the original queued_at too"
+    );
+}
+
+#[test]
+fn test_aged_message_still_expires_after_a_requeue() {
+    // The consequence of the fix above: an entry that was already past the
+    // configured lifetime when the flush re-queued it is expired by the very
+    // next cleanup, instead of surviving another full window.
+    let mut protocol = pending_queue_protocol();
+    protocol
+        .config
+        .reliability
+        .retry
+        .pending_message_max_lifetime_ms = 60_000;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let event_sink = events.clone();
+    protocol.on_event(move |event| event_sink.lock().unwrap().push(event));
+
+    let queued_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    protocol.pending_encrypted_messages.get_mut("bob").unwrap()[0].queued_at =
+        Utc::now() - ChronoDuration::milliseconds(60_001);
+
+    protocol.flush_pending_messages("bob").unwrap();
+    assert!(
+        protocol.pending_encrypted_messages.contains_key("bob"),
+        "sanity: the flush must have re-queued the message"
+    );
+
+    protocol.recompute_next_pending_message_expiry();
+    protocol.cleanup_expired_entries();
+
+    assert!(
+        !protocol.pending_encrypted_messages.contains_key("bob"),
+        "An aged message must still expire after a re-queue"
+    );
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id, reason, .. }
+                if message_id == &queued_id.as_str()
+                    && reason == "Pending session lifetime exceeded"
+        )),
+        "Expiry must settle the id the caller holds"
+    );
+}
+
+#[test]
 fn test_oversized_content_is_rejected_before_it_can_be_queued() {
     // The pending queue is durable and application-fed, and a message waiting
     // on session establishment never reaches the transport's own size check —

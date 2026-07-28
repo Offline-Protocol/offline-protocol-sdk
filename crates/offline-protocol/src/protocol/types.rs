@@ -909,7 +909,13 @@ pub(crate) struct PendingMessage {
     /// flush inside the sealed rich body or be dropped — never cleartext.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) rich: Option<RichSendExtras>,
-    /// When the message was queued (for future TTL/expiry support).
+    /// When the message *first* entered the pending queue.
+    ///
+    /// Drives `pending_message_max_lifetime_ms`, and is deliberately preserved
+    /// across a re-queue (see [`PendingProvenance`]): a flush that finds the
+    /// session still unavailable puts the entry back, and stamping a fresh
+    /// timestamp there would let repeated reconciliation renew an "absolute"
+    /// lifetime forever.
     pub(crate) queued_at: DateTime<Utc>,
     /// Serialized footprint of this entry, for the pending-queue byte budgets
     /// ([`MAX_PENDING_MESSAGE_BYTES_PER_PEER`] /
@@ -936,6 +942,42 @@ impl PendingMessage {
         self.serialized_bytes = serde_json::to_vec(self)
             .map(|encoded| encoded.len())
             .unwrap_or_else(|_| self.content.len());
+    }
+}
+
+/// Identity carried by an outbound message that is re-entering the
+/// pending-session queue rather than being queued for the first time.
+///
+/// Both fields exist to keep a re-queue from looking like a fresh send: the id
+/// so `MessageSent`/`MessageDelivered`/`MessageFailed` stay correlatable with
+/// what `send_message*` returned, and the timestamp so the absolute pending
+/// lifetime is measured from first entry.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingProvenance {
+    /// The id the caller already holds.
+    pub(crate) message_id: MessageId,
+    /// When the message first entered the pending queue, or `None` when the
+    /// re-queue does not come *from* that queue — the resend re-seal path
+    /// passes an outbox id, and an entry it (all but unreachably) enqueues is
+    /// starting its pending lifetime now.
+    pub(crate) first_queued_at: Option<DateTime<Utc>>,
+}
+
+impl PendingProvenance {
+    /// Provenance for a message being put back into the pending queue.
+    pub(crate) fn requeued(message: &PendingMessage) -> Self {
+        Self {
+            message_id: message.message_id.clone(),
+            first_queued_at: Some(message.queued_at),
+        }
+    }
+
+    /// Provenance for a known id with no pending-queue history.
+    pub(crate) fn for_id(message_id: MessageId) -> Self {
+        Self {
+            message_id,
+            first_queued_at: None,
+        }
     }
 }
 

@@ -4,9 +4,9 @@ use super::{
     base64_encode, internal_prefixes, lifetime_expired, lock_shared_state,
     ConnectionAcceptedPayload, ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions,
     MediaTransferDescriptor, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
-    OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PresencePayload,
-    ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras, SendMessageOptions,
-    TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
+    OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PendingProvenance,
+    PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras,
+    SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
     MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES, MAX_PENDING_CONNECTION_REQUESTS,
     MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
     MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
@@ -1076,7 +1076,7 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         rich: Option<&RichSendExtras>,
-        existing_id: Option<MessageId>,
+        provenance: Option<PendingProvenance>,
         reconciliation_reason: &'static str,
     ) -> Result<OutboundSendPreparation> {
         if self.should_auto_encrypt() {
@@ -1163,7 +1163,7 @@ impl OfflineProtocol {
                             content_type,
                             media_metadata,
                             rich_extras.cloned(),
-                            existing_id,
+                            provenance,
                             reconciliation_reason,
                         )?;
                         return Ok(OutboundSendPreparation::Queued(queued_id));
@@ -1188,7 +1188,7 @@ impl OfflineProtocol {
                         content_type,
                         media_metadata,
                         rich_extras.cloned(),
-                        existing_id,
+                        provenance,
                         reconciliation_reason,
                     )?;
                     Ok(OutboundSendPreparation::Queued(queued_id))
@@ -1264,21 +1264,26 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         rich: Option<RichSendExtras>,
-        existing_id: Option<MessageId>,
+        provenance: Option<PendingProvenance>,
         reconciliation_reason: &'static str,
     ) -> Result<MessageId> {
         // Fresh sends mint an ID without ticking the Lamport clock — the
         // real tick happens when flush_pending_messages re-sends after the
         // session is established. A flush-time re-queue passes the id the
-        // caller already holds so Deferred/Sent/Delivered stay correlatable.
-        let message_id = existing_id.unwrap_or_default();
+        // caller already holds so Deferred/Sent/Delivered stay correlatable,
+        // and the timestamp it first entered the queue so the absolute
+        // pending lifetime is not renewed by the round trip.
+        let (message_id, first_queued_at) = match provenance {
+            Some(provenance) => (provenance.message_id, provenance.first_queued_at),
+            None => (MessageId::default(), None),
+        };
 
         debug!(
             recipient = %recipient,
             message_id = %message_id,
             "Message queued pending session establishment"
         );
-        self.queue_pending_message(
+        self.queue_pending_message_at(
             recipient,
             content,
             priority,
@@ -1288,6 +1293,7 @@ impl OfflineProtocol {
             content_type,
             media_metadata,
             rich,
+            first_queued_at.unwrap_or_else(Utc::now),
         );
         self.kick_pending_session_reconciliation(reconciliation_reason);
         if self.has_terminal_welcome_failure(recipient) {
@@ -1304,13 +1310,15 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
-    /// Queues a message with a specific message ID for later sending when session is established.
+    /// Queues a message with a specific message ID for later sending when
+    /// session is established, starting a fresh pending lifetime.
     ///
-    /// Admission is bounded on two axes — entry count and serialized bytes,
-    /// per peer and globally — because message content is
-    /// application-supplied and a count alone bounds neither memory nor
-    /// durable storage. Both axes evict oldest-first and settle each evicted
-    /// message as failed.
+    /// A re-queue must go through [`Self::queue_pending_message_at`] with the
+    /// entry's original timestamp instead — which is why production code always
+    /// calls that one directly (through
+    /// `queue_message_for_session_establishment`, where the distinction is
+    /// made) and this convenience exists only for tests.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn queue_pending_message(
         &mut self,
@@ -1324,7 +1332,48 @@ impl OfflineProtocol {
         media_metadata: Option<MediaMetadata>,
         rich: Option<RichSendExtras>,
     ) {
-        let queued_at = Utc::now();
+        self.queue_pending_message_at(
+            recipient,
+            content,
+            priority,
+            message_id,
+            reply_to_msg,
+            forwarded_from,
+            content_type,
+            media_metadata,
+            rich,
+            Utc::now(),
+        );
+    }
+
+    /// Queues a message with an explicit first-queued timestamp.
+    ///
+    /// `queued_at` is the instant the message *first* entered the pending
+    /// queue, which is what `pending_message_max_lifetime_ms` is measured from.
+    /// Re-queueing an entry (a flush that found the session still unavailable)
+    /// must pass the original value: stamping `now()` there would hand the
+    /// message a fresh window on every failed reconciliation, so a message
+    /// could outlive an "absolute" lifetime indefinitely.
+    ///
+    /// Admission is bounded on two axes — entry count and serialized bytes,
+    /// per peer and globally — because message content is
+    /// application-supplied and a count alone bounds neither memory nor
+    /// durable storage. Both axes evict oldest-first and settle each evicted
+    /// message as failed.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn queue_pending_message_at(
+        &mut self,
+        recipient: &str,
+        content: &str,
+        priority: MessagePriority,
+        message_id: MessageId,
+        reply_to_msg: Option<MessageId>,
+        forwarded_from: Option<ForwardInfo>,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
+        rich: Option<RichSendExtras>,
+        queued_at: DateTime<Utc>,
+    ) {
         let message_id_str = message_id.as_str().to_string();
         let mut pending = PendingMessage {
             content: content.to_string(),
@@ -1609,7 +1658,7 @@ impl OfflineProtocol {
                     msg.content_type,
                     msg.media_metadata.clone(),
                     msg.rich.as_ref(),
-                    Some(msg.message_id.clone()),
+                    Some(PendingProvenance::requeued(&msg)),
                     "flush_pending",
                 ) {
                     Ok(OutboundSendPreparation::Ready(c)) => c,
@@ -2481,7 +2530,7 @@ impl OfflineProtocol {
             reseal.content_type,
             reseal.media_metadata.clone(),
             reseal.rich.as_ref(),
-            Some(message.id.clone()),
+            Some(PendingProvenance::for_id(message.id.clone())),
             "resend_reseal",
         ) {
             Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => Some(sealed),
