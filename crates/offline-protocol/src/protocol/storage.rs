@@ -1,12 +1,14 @@
 //! Storage persistence methods for protocol state.
 
-use super::state_crypto::{StateRecordCipher, STATE_RECORD_KEY_BYTES};
+use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECORD_KEY_BYTES};
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState,
     WelcomeLifecycleRecord, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
-    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
-    MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
+    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
+    MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
+    WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::{Error, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
@@ -50,11 +52,12 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Writes one protocol-state record, sealing it first when its category
-    /// requires that.
+    /// requires that, and refusing anything over
+    /// [`MAX_PROTOCOL_STATE_RECORD_BYTES`].
     ///
     /// Every value written to [`ProtocolStateStorage`] goes through here, so
-    /// confidentiality policy lives in one place rather than being re-decided
-    /// per call site.
+    /// confidentiality and size policy live in one place rather than being
+    /// re-decided per call site.
     pub(crate) fn write_state_record(
         &self,
         storage: &dyn ProtocolStateStorage,
@@ -62,6 +65,14 @@ impl OfflineProtocol {
         key_id: &str,
         data: &[u8],
     ) -> ProtocolStateResult<()> {
+        if data.len() > MAX_PROTOCOL_STATE_RECORD_BYTES {
+            return Err(ProtocolStateError::StoreFailed(format!(
+                "record is {} bytes, over the {} byte limit",
+                data.len(),
+                MAX_PROTOCOL_STATE_RECORD_BYTES
+            )));
+        }
+
         if !record_requires_sealing(key_type) {
             return storage.store(key_type, key_id, data);
         }
@@ -85,11 +96,12 @@ impl OfflineProtocol {
 
     /// Reads one protocol-state record, opening it when its category is sealed.
     ///
-    /// Returns `Ok(None)` — never raw bytes — for a record that will not open.
-    /// Such a record is corrupt or tampered, so it is also deleted, which keeps
-    /// a poison record from being re-examined on every boot. The one exception
-    /// is a missing record key: those records may be perfectly good and simply
-    /// unreadable *this session*, so they are left alone.
+    /// Returns `Ok(None)` — never raw bytes — for a record that is oversized or
+    /// will not open. Such a record is corrupt or tampered, so it is also
+    /// deleted, which keeps a poison record from being re-examined on every
+    /// boot. The one exception is a missing record key: those records may be
+    /// perfectly good and simply unreadable *this session*, so they are left
+    /// alone.
     pub(crate) fn read_state_record(
         &self,
         storage: &dyn ProtocolStateStorage,
@@ -100,7 +112,30 @@ impl OfflineProtocol {
             return Ok(None);
         };
 
-        if !record_requires_sealing(key_type) {
+        // Bound before deserialization: a corrupted or tampered record must not
+        // become an unbounded allocation while parsing during startup. The
+        // limit is on the *plaintext*, which is what the write side checks, so
+        // a sealed record is allowed its envelope on top — otherwise a record
+        // written at exactly the cap could never be read back.
+        let sealed = record_requires_sealing(key_type);
+        let limit = if sealed {
+            MAX_PROTOCOL_STATE_RECORD_BYTES.saturating_add(SEALED_RECORD_OVERHEAD)
+        } else {
+            MAX_PROTOCOL_STATE_RECORD_BYTES
+        };
+        if data.len() > limit {
+            warn!(
+                key_type = %key_type,
+                key_id = %key_id,
+                len = data.len(),
+                limit,
+                "Dropping oversized protocol state record"
+            );
+            let _ = storage.delete(key_type, key_id);
+            return Ok(None);
+        }
+
+        if !sealed {
             return Ok(Some(data));
         }
 
@@ -258,6 +293,10 @@ impl OfflineProtocol {
     }
 
     /// Loads pending messages for a recipient from storage.
+    ///
+    /// The derived `serialized_bytes` is recomputed here — it is deliberately
+    /// not persisted — so restored entries carry their real weight into the
+    /// queue byte budgets instead of reading as free.
     pub(crate) fn load_pending_messages_from_storage(
         &self,
         recipient: &str,
@@ -266,7 +305,11 @@ impl OfflineProtocol {
         let data = self
             .read_state_record(storage.as_ref(), storage_keys::PENDING_MESSAGES, recipient)
             .ok()??;
-        serde_json::from_slice(&data).ok()
+        let mut messages: Vec<PendingMessage> = serde_json::from_slice(&data).ok()?;
+        for message in &mut messages {
+            message.measure();
+        }
+        Some(messages)
     }
 
     /// Removes pending messages for a recipient from storage.
@@ -303,6 +346,31 @@ impl OfflineProtocol {
                         .extend(messages.drain(..overflow).map(|message| message.message_id));
                     changed_recipients.insert(recipient.clone());
                 }
+                // Bound the restored queue by bytes as well as by count,
+                // mirroring the live admission path: a record written by an
+                // older build (or hand-edited) can hold entries the current
+                // boundary cap would reject. Oldest-first, like every other
+                // eviction here.
+                let mut peer_bytes: usize = messages
+                    .iter()
+                    .map(|message| message.serialized_bytes)
+                    .sum();
+                let mut dropped_for_bytes = 0usize;
+                while peer_bytes > MAX_PENDING_MESSAGE_BYTES_PER_PEER && !messages.is_empty() {
+                    let message = messages.remove(0);
+                    peer_bytes = peer_bytes.saturating_sub(message.serialized_bytes);
+                    capacity_evicted.push(message.message_id);
+                    dropped_for_bytes += 1;
+                }
+                if dropped_for_bytes > 0 {
+                    changed_recipients.insert(recipient.clone());
+                    warn!(
+                        recipient = %recipient,
+                        dropped = dropped_for_bytes,
+                        limit = MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+                        "Restored pending queue exceeded the per-peer byte budget"
+                    );
+                }
                 if !messages.is_empty() {
                     info!(recipient = %recipient, count = messages.len(), "Restored pending messages from storage");
                     self.pending_encrypted_messages
@@ -311,7 +379,9 @@ impl OfflineProtocol {
                     let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
                 }
 
-                while self.total_pending_message_count() > MAX_PENDING_MESSAGES_GLOBAL {
+                while self.total_pending_message_count() > MAX_PENDING_MESSAGES_GLOBAL
+                    || self.total_pending_message_bytes() > MAX_PENDING_MESSAGE_BYTES_GLOBAL
+                {
                     let Some((evicted_recipient, message)) = self.evict_oldest_pending_message()
                     else {
                         break;

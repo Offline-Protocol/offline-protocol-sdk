@@ -7,8 +7,9 @@ use super::{
     OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PresencePayload,
     ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras, SendMessageOptions,
     TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS, MAX_PENDING_MESSAGES_GLOBAL,
-    MAX_PENDING_MESSAGES_PER_PEER, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES, MAX_PENDING_CONNECTION_REQUESTS,
+    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
     MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
     SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_UNREACHABLE_RETRY_CAP_SECS,
@@ -116,6 +117,8 @@ impl OfflineProtocol {
         if self.is_user_blocked(&recipient_str) {
             return Err(Error::UserBlocked(recipient_str));
         }
+
+        Self::check_content_size(&content_str)?;
 
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the public API.
@@ -296,9 +299,10 @@ impl OfflineProtocol {
             media_metadata: original_message.media_metadata.clone(),
             forward_info: Some(forward_info.clone()),
         };
-        // Same boundary cap as `send_message_with` — enforced here, not at
+        // Same boundary caps as `send_message_with` — enforced here, not at
         // seal time, so a forward queued behind session establishment is
-        // always known to seal at flush.
+        // always known to seal at flush and always fits the queue's budget.
+        Self::check_content_size(&original_message.content)?;
         rich.check_size()?;
 
         // Prepare content (may encrypt). ForwardInfo is threaded through so
@@ -1219,6 +1223,36 @@ impl OfflineProtocol {
     // PENDING / FLUSH
     // ========================================================================
 
+    /// Enforces [`MAX_MESSAGE_CONTENT_BYTES`] on application-supplied content.
+    ///
+    /// Enforced at the public send boundary rather than at transmit time,
+    /// because a message that has to wait for MLS session establishment is
+    /// queued — in memory and on disk — long before it ever reaches the
+    /// transport's own size check. Without this cap a handful of very large
+    /// sends could exhaust mobile memory and protocol-state storage while
+    /// still satisfying the pending queue's entry-count limits.
+    ///
+    /// Applies to the plaintext the app hands us. MLS ciphertext, base64, and
+    /// the JSON wire envelope expand it further, which is why the cap sits
+    /// well under the transport's 1 MiB ceiling: everything accepted here can
+    /// actually be delivered.
+    ///
+    /// Deliberately *not* applied to the group surface: a group send has no
+    /// durable pre-session queue behind it (there is no per-recipient MLS
+    /// session to wait on), so it is bounded by the transport alone — the
+    /// documented "no send-side limit" behavior that
+    /// `test_group_mls_send_large_content_no_send_side_limit` pins.
+    pub(crate) fn check_content_size(content: &str) -> Result<()> {
+        if content.len() > MAX_MESSAGE_CONTENT_BYTES {
+            return Err(Error::InvalidArgument(format!(
+                "Message content too large: {} bytes (max {}); use send_media for large payloads",
+                content.len(),
+                MAX_MESSAGE_CONTENT_BYTES
+            )));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn queue_message_for_session_establishment(
         &mut self,
@@ -1271,6 +1305,12 @@ impl OfflineProtocol {
     }
 
     /// Queues a message with a specific message ID for later sending when session is established.
+    ///
+    /// Admission is bounded on two axes — entry count and serialized bytes,
+    /// per peer and globally — because message content is
+    /// application-supplied and a count alone bounds neither memory nor
+    /// durable storage. Both axes evict oldest-first and settle each evicted
+    /// message as failed.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn queue_pending_message(
         &mut self,
@@ -1284,9 +1324,9 @@ impl OfflineProtocol {
         media_metadata: Option<MediaMetadata>,
         rich: Option<RichSendExtras>,
     ) {
-        let message_id_str = message_id.as_str().to_string();
         let queued_at = Utc::now();
-        let pending = PendingMessage {
+        let message_id_str = message_id.as_str().to_string();
+        let mut pending = PendingMessage {
             content: content.to_string(),
             priority,
             message_id,
@@ -1296,7 +1336,10 @@ impl OfflineProtocol {
             media_metadata,
             rich,
             queued_at,
+            serialized_bytes: 0,
         };
+        pending.measure();
+        let incoming_bytes = pending.serialized_bytes;
 
         let mut evicted = Vec::new();
         let mut changed_recipients = HashSet::new();
@@ -1314,10 +1357,33 @@ impl OfflineProtocol {
             }
         }
 
+        // The running totals are decremented as entries are evicted rather
+        // than recomputed each turn, so a queue at capacity does not make
+        // admission quadratic.
+        let mut peer_bytes = self.pending_message_bytes_for(recipient);
+        while peer_bytes.saturating_add(incoming_bytes) > MAX_PENDING_MESSAGE_BYTES_PER_PEER {
+            let Some(message) = self.evict_pending_message_at(recipient, 0) else {
+                break;
+            };
+            peer_bytes = peer_bytes.saturating_sub(message.serialized_bytes);
+            changed_recipients.insert(recipient.to_string());
+            evicted.push(message);
+        }
+
         while self.total_pending_message_count() >= MAX_PENDING_MESSAGES_GLOBAL {
             let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
                 break;
             };
+            changed_recipients.insert(evicted_recipient);
+            evicted.push(message);
+        }
+
+        let mut global_bytes = self.total_pending_message_bytes();
+        while global_bytes.saturating_add(incoming_bytes) > MAX_PENDING_MESSAGE_BYTES_GLOBAL {
+            let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
+                break;
+            };
+            global_bytes = global_bytes.saturating_sub(message.serialized_bytes);
             changed_recipients.insert(evicted_recipient);
             evicted.push(message);
         }
@@ -1349,6 +1415,30 @@ impl OfflineProtocol {
 
     pub(super) fn total_pending_message_count(&self) -> usize {
         self.pending_encrypted_messages.values().map(Vec::len).sum()
+    }
+
+    /// Total serialized footprint of the pending-session queue across all
+    /// peers. Summing precomputed per-entry sizes, so this stays a cheap
+    /// integer walk rather than re-serializing the queue.
+    pub(super) fn total_pending_message_bytes(&self) -> usize {
+        self.pending_encrypted_messages
+            .values()
+            .flatten()
+            .map(|message| message.serialized_bytes)
+            .sum()
+    }
+
+    /// Serialized footprint of one peer's pending-session queue.
+    pub(super) fn pending_message_bytes_for(&self, recipient: &str) -> usize {
+        self.pending_encrypted_messages
+            .get(recipient)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| message.serialized_bytes)
+                    .sum()
+            })
+            .unwrap_or(0)
     }
 
     fn evict_pending_message_at(

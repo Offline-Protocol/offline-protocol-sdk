@@ -40,6 +40,13 @@ const RECORD_MAGIC: [u8; 4] = *b"OPS1";
 /// ChaCha20-Poly1305 nonce length.
 const NONCE_BYTES: usize = 12;
 
+/// Poly1305 authentication tag length.
+const TAG_BYTES: usize = 16;
+
+/// Bytes a seal adds on top of the plaintext. Callers that bound a record's
+/// plaintext size need this to bound the stored form by the same amount.
+pub(crate) const SEALED_RECORD_OVERHEAD: usize = RECORD_MAGIC.len() + NONCE_BYTES + TAG_BYTES;
+
 /// Separator between the two associated-data components, chosen because it
 /// cannot appear in a `key_type` (a fixed SDK constant) and so cannot be used
 /// to make two different (`key_type`, `key_id`) pairs produce the same AAD.
@@ -184,6 +191,12 @@ mod tests {
         assert!(cipher().open("outbox", "msg-1", b"{\"a\":1}").is_none());
         assert!(!StateRecordCipher::looks_sealed(b"{\"a\":1}"));
         assert!(StateRecordCipher::looks_sealed(&sealed));
+    }
+
+    #[test]
+    fn sealed_overhead_matches_the_envelope() {
+        let sealed = cipher().seal("outbox", "msg-1", b"1234").unwrap();
+        assert_eq!(sealed.len(), 4 + SEALED_RECORD_OVERHEAD);
     }
 
     #[test]

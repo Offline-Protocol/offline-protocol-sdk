@@ -192,13 +192,58 @@ pub(crate) const MAX_PENDING_KEY_PACKAGES: usize = 1000;
 /// This queue is durable and accepts application-controlled content, so a peer
 /// that never completes session establishment must not grow it without bound.
 /// The limit matches the default inbound pending-decryption per-peer bound.
+///
+/// A count alone does not bound memory or durable storage — message content is
+/// application-supplied — so this cap works together with
+/// [`MAX_PENDING_MESSAGE_BYTES_PER_PEER`]; whichever binds first wins.
 pub(crate) const MAX_PENDING_MESSAGES_PER_PEER: usize = 64;
 
 /// Maximum outbound messages waiting for MLS sessions across all peers.
 ///
 /// At capacity the globally oldest message is settled as failed before the new
 /// message is admitted. The limit matches the default inbound pending queue.
+/// Paired with [`MAX_PENDING_MESSAGE_BYTES_GLOBAL`], as above.
 pub(crate) const MAX_PENDING_MESSAGES_GLOBAL: usize = 4096;
+
+/// Maximum size of application-supplied message content accepted at the public
+/// send boundary, in bytes.
+///
+/// Enforced at the boundary — not at transmit time — because a message queued
+/// behind MLS session establishment never reaches the transport's
+/// `DEFAULT_MAX_MESSAGE_SIZE` (1 MiB) check: it sits in the durable pending
+/// queue first. Without a boundary cap a handful of very large sends could
+/// exhaust mobile memory and protocol-state disk while still being formally
+/// "within" the count caps above.
+///
+/// 256 KiB leaves ample headroom under the 1 MiB transport ceiling for MLS
+/// ciphertext expansion, base64, and the JSON wire envelope, so anything this
+/// path accepts can actually be delivered. Larger payloads belong on the media
+/// path (`send_media`), which chunks.
+pub(crate) const MAX_MESSAGE_CONTENT_BYTES: usize = 256 * 1024;
+
+/// Maximum total serialized bytes of one peer's pending-session queue.
+///
+/// At capacity the peer's oldest entries are settled as failed until the
+/// incoming message fits, exactly like the count cap. Deliberately larger than
+/// [`MAX_MESSAGE_CONTENT_BYTES`] plus [`MAX_RICH_EXTRAS_BYTES`] so a single
+/// boundary-legal message always fits in an empty queue and admission can never
+/// livelock (pinned by `pending_queue_byte_budgets_admit_any_boundary_legal_message`).
+pub(crate) const MAX_PENDING_MESSAGE_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
+
+/// Maximum total serialized bytes of the pending-session queue across all
+/// peers. Bounds the whole feature's footprint on a mobile device regardless of
+/// how many peers are mid-establishment.
+pub(crate) const MAX_PENDING_MESSAGE_BYTES_GLOBAL: usize = 16 * 1024 * 1024;
+
+/// Maximum size of a single persisted protocol-state record, in bytes.
+///
+/// Enforced on both sides of [`crate::ProtocolStateStorage`]: the SDK refuses to
+/// write a larger record, and refuses to *deserialize* a larger one on restore
+/// (dropping it instead), so a corrupted or tampered state file cannot turn
+/// into an unbounded allocation during initialization. Sized above
+/// [`MAX_PENDING_MESSAGE_BYTES_PER_PEER`] — the largest legitimate record is one
+/// peer's full pending queue — with room for JSON and seal overhead.
+pub(crate) const MAX_PROTOCOL_STATE_RECORD_BYTES: usize = 4 * 1024 * 1024;
 
 /// Maximum number of peers remembered in `key_package_sent_to` (the "already
 /// sent our key package to this peer" set).
@@ -866,6 +911,32 @@ pub(crate) struct PendingMessage {
     pub(crate) rich: Option<RichSendExtras>,
     /// When the message was queued (for future TTL/expiry support).
     pub(crate) queued_at: DateTime<Utc>,
+    /// Serialized footprint of this entry, for the pending-queue byte budgets
+    /// ([`MAX_PENDING_MESSAGE_BYTES_PER_PEER`] /
+    /// [`MAX_PENDING_MESSAGE_BYTES_GLOBAL`]).
+    ///
+    /// Derived, so it is not persisted; it is (re)computed by
+    /// [`PendingMessage::measure`] at the two points an entry comes into
+    /// existence — admission and load-from-storage — and then simply travels
+    /// with the entry as it is moved between the queue, a flush, and a
+    /// re-queue.
+    #[serde(skip)]
+    pub(crate) serialized_bytes: usize,
+}
+
+impl PendingMessage {
+    /// Recomputes [`Self::serialized_bytes`] from the current field values.
+    ///
+    /// Measures what persistence actually costs (the serialized entry) rather
+    /// than estimating from `content.len()`, so rich extras and forward
+    /// attribution are counted. A serialization failure — which would also make
+    /// the entry unpersistable — falls back to the content length so the entry
+    /// still consumes budget rather than reading as free.
+    pub(crate) fn measure(&mut self) {
+        self.serialized_bytes = serde_json::to_vec(self)
+            .map(|encoded| encoded.len())
+            .unwrap_or_else(|_| self.content.len());
+    }
 }
 
 /// Durable state for a peer MLS session.

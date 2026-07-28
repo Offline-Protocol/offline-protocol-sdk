@@ -5101,6 +5101,193 @@ fn pending_queue_protocol() -> OfflineProtocol {
 }
 
 #[test]
+fn test_oversized_content_is_rejected_before_it_can_be_queued() {
+    // The pending queue is durable and application-fed, and a message waiting
+    // on session establishment never reaches the transport's own size check —
+    // so the boundary is where oversized content has to be refused.
+    let mut protocol = pending_queue_protocol();
+
+    let oversized = "A".repeat(MAX_MESSAGE_CONTENT_BYTES + 1);
+    let result = protocol.send_message("bob", &oversized, None::<MessagePriority>, None::<String>);
+    assert!(
+        matches!(result, Err(Error::InvalidArgument(ref msg)) if msg.contains("too large")),
+        "Oversized content must be rejected at the boundary, got {result:?}"
+    );
+    assert!(
+        !protocol.pending_encrypted_messages.contains_key("bob"),
+        "A rejected message must never reach the pending queue"
+    );
+
+    // Exactly at the cap is still accepted, and does queue.
+    let at_cap = "A".repeat(MAX_MESSAGE_CONTENT_BYTES);
+    protocol
+        .send_message("bob", &at_cap, None::<MessagePriority>, None::<String>)
+        .expect("content at exactly the cap must be accepted");
+    assert_eq!(
+        protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .map(Vec::len)
+            .unwrap_or(0),
+        1
+    );
+}
+
+#[test]
+fn test_pending_queue_enforces_the_per_peer_byte_budget() {
+    // Count alone does not bound memory or disk: 64 entries of
+    // application-chosen size can be arbitrarily heavy. The byte budget evicts
+    // oldest-first, exactly like the count cap, and settles what it drops.
+    let mut protocol = pending_queue_protocol();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let event_sink = events.clone();
+    protocol.on_event(move |event| event_sink.lock().unwrap().push(event));
+
+    // Each message is 1/8th of the per-peer budget, so the budget binds long
+    // before MAX_PENDING_MESSAGES_PER_PEER does.
+    let chunk = "A".repeat(MAX_PENDING_MESSAGE_BYTES_PER_PEER / 8);
+    let mut ids = Vec::new();
+    for _ in 0..12 {
+        ids.push(
+            protocol
+                .send_message("bob", &chunk, None::<MessagePriority>, None::<String>)
+                .unwrap(),
+        );
+    }
+
+    let queued = protocol.pending_encrypted_messages.get("bob").unwrap();
+    assert!(
+        queued.len() < MAX_PENDING_MESSAGES_PER_PEER,
+        "the byte budget, not the count cap, must be what bound this queue"
+    );
+    assert!(
+        protocol.pending_message_bytes_for("bob") <= MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+        "the per-peer queue must stay within its byte budget"
+    );
+    assert!(
+        queued.iter().all(|message| message.message_id != ids[0]),
+        "the oldest entry must be the first evicted"
+    );
+    assert!(
+        queued
+            .iter()
+            .any(|message| message.message_id == *ids.last().unwrap()),
+        "the newest entry must be admitted"
+    );
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id, reason, .. }
+                if message_id == &ids[0].as_str()
+                    && reason == "Pending session queue capacity exceeded"
+        )),
+        "a byte-budget eviction must settle the id the caller holds"
+    );
+}
+
+#[test]
+fn pending_queue_byte_budgets_admit_any_boundary_legal_message() {
+    // The relationship the eviction loops depend on: a single message that
+    // passed the send boundary always fits an empty queue, so admission can
+    // never evict everything and still not fit.
+    assert!(
+        MAX_MESSAGE_CONTENT_BYTES + MAX_RICH_EXTRAS_BYTES < MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+        "one boundary-legal message must fit the per-peer byte budget"
+    );
+    assert!(
+        MAX_PENDING_MESSAGE_BYTES_PER_PEER <= MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+        "the per-peer budget must not exceed the global one"
+    );
+    assert!(
+        MAX_PENDING_MESSAGE_BYTES_PER_PEER < MAX_PROTOCOL_STATE_RECORD_BYTES,
+        "a full per-peer queue must still be a writable protocol-state record"
+    );
+}
+
+#[test]
+fn test_oversized_persisted_pending_record_is_dropped_on_restore() {
+    // Restore must bound what it deserializes: a state file that grew past the
+    // record cap (an older build, a corrupted write, a tampered container) has
+    // to be dropped rather than parsed into an unbounded allocation during
+    // initialization.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    seed_sealed_state_record(
+        &storage,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &vec![b'x'; MAX_PROTOCOL_STATE_RECORD_BYTES + 1],
+    );
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    assert!(
+        !protocol.pending_encrypted_messages.contains_key("bob"),
+        "an oversized record must not be restored"
+    );
+    assert!(
+        storage
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "an oversized record must be deleted, not re-examined on every boot"
+    );
+}
+
+#[test]
+fn test_oversized_pending_record_is_refused_at_write_time() {
+    // The other half of the bound: the SDK never writes a record it would then
+    // refuse to read.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    let state_storage = protocol.protocol_state_storage.clone().unwrap();
+    let result = protocol.write_state_record(
+        state_storage.as_ref(),
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &vec![b'x'; MAX_PROTOCOL_STATE_RECORD_BYTES + 1],
+    );
+    assert!(
+        matches!(result, Err(crate::ProtocolStateError::StoreFailed(_))),
+        "an oversized record must be refused, got {result:?}"
+    );
+    assert!(storage
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .is_none());
+
+    // The write and read limits are both on the *plaintext*, so a record at
+    // exactly the cap must survive the round trip — the seal envelope pushes
+    // the stored form over the cap, and the read side has to allow for that.
+    let at_cap = vec![b'x'; MAX_PROTOCOL_STATE_RECORD_BYTES];
+    protocol
+        .write_state_record(
+            state_storage.as_ref(),
+            storage_keys::PENDING_MESSAGES,
+            "bob",
+            &at_cap,
+        )
+        .expect("a record at exactly the cap must be writable");
+    assert_eq!(
+        protocol
+            .read_state_record(
+                state_storage.as_ref(),
+                storage_keys::PENDING_MESSAGES,
+                "bob"
+            )
+            .unwrap(),
+        Some(at_cap),
+        "a record at exactly the cap must read back"
+    );
+}
+
+#[test]
 fn test_protocol_state_backing_bytes_hide_plaintext_and_media_keys() {
     // The install-scoped container gets the delivery state's LIFECYCLE, not a
     // free pass on its confidentiality: pending entries carry message
