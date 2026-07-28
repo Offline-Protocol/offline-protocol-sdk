@@ -2769,6 +2769,14 @@ impl OfflineProtocol {
     /// - the peer is back → the probe *is* the delivery, which beats waiting
     ///   for any presence edge.
     ///
+    /// The counter is per-*peer* while the probes are per-*message*: a burst
+    /// of N DMs to one offline peer escalates the shared ladder once per
+    /// park, so no individual message climbs 15s → 600s — the Nth already
+    /// starts high on it. The compensating edge is delivery: an ACK for any
+    /// one of the peer's DMs re-drives the rest immediately
+    /// ([`Self::handle_ack_message`]) instead of leaving them on their
+    /// escalated timers.
+    ///
     /// Relay traffic is bounded differently in each of those branches, and
     /// the difference matters for capacity planning now that the whole
     /// internet-only fleet is on this path:

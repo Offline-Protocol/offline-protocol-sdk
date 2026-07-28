@@ -1043,8 +1043,12 @@ export interface WelcomeSendSucceededEvent extends BaseEvent {
  * socket-write success, but the relay stores nothing for offline
  * recipients — its later `DeliveryError` corrects the earlier success
  * (reason_code `PEER_UNREACHABLE`, `retryable: true`). Recovery is
- * automatic (presence-driven re-send); treat this event as state, not as a
- * terminal verdict.
+ * automatic: the SDK keeps an escalating reachability probe running on
+ * every carrier (a `PEER_UNREACHABLE` failure therefore always carries
+ * `next_retry_at`), with presence-driven re-send as the faster edge when
+ * the platform polls presence. This event may repeat once per probe round
+ * while the peer stays offline; treat it as state, not as a terminal
+ * verdict.
  */
 export interface WelcomeSendFailedEvent extends BaseEvent {
   type: 'welcome_send_failed';
@@ -1520,9 +1524,16 @@ export interface MessageRetryingEvent extends BaseEvent {
  * peer discovery, presence-online; the SDK adds parked recipients to the
  * presence watchlist). It settles only via MessageDelivered or, at
  * outbox-lifetime expiry, MessageFailed. Media chunks are not parked and
- * keep the normal retry machinery. May fire multiple times for the same
- * message_id while the recipient remains offline (once per attempt that
- * reaches the relay, e.g. mesh-carrier reachability probes).
+ * keep the normal retry machinery. Fires repeatedly for the same message_id
+ * while the recipient remains offline: a parked DM keeps an escalating
+ * reachability probe on every carrier (15s doubling to a 600s cap, the
+ * ladder shared per recipient), and each probe that reaches the relay while
+ * the peer is still offline earns a fresh verdict and re-emits this event.
+ * Treat it as a repeatable status signal, never as a terminal one. Note the
+ * probes refresh the outbox entry's last-send timestamp, so a parked DM's
+ * terminal MessageFailed arrives at the absolute outbox cap (4x the
+ * configured lifetime, ~28 days on defaults) rather than the sliding ~7-day
+ * window — plan pending-message UI accordingly.
  */
 export interface MessageUndeliverableEvent extends BaseEvent {
   type: 'message_undeliverable';

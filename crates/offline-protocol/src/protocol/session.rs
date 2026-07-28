@@ -1253,9 +1253,12 @@ impl OfflineProtocol {
     /// (see [`Self::welcome_probe_repark_permitted`]) and instead charges an
     /// attempt and arms a plain data-plane retry — precisely the budget-burner
     /// this park exists to cancel, and left running it expires the welcome at
-    /// `max_retries`. Only `park_welcome_no_carrier` stamps `PeerUnreachable`;
-    /// a carrier-backed failure stamps `Timeout`/`SendFailed` and a successful
-    /// send clears the code entirely.
+    /// `max_retries`. Note `park_welcome_awaiting_peer` also stamps
+    /// `PeerUnreachable` but leaves `next_retry_at = None`, so the
+    /// `next_retry_at.is_some()` conjunct below is load-bearing, not
+    /// redundant: the reason code *and* a scheduled retry together are what
+    /// identify a live probe. A carrier-backed failure stamps
+    /// `Timeout`/`SendFailed` and a successful send clears the code entirely.
     fn park_welcome_peer_unreachable(&mut self, peer_id: &str) {
         if self.confirmed_sessions.contains(peer_id) {
             return;
