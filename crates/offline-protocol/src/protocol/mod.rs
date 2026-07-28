@@ -632,7 +632,6 @@ impl OfflineProtocol {
         let previous_state_record_cipher = self.state_record_cipher.take();
         let previous_pending_messages = self.pending_encrypted_messages.clone();
         let previous_pending_message_expiry = self.next_pending_message_expiry;
-        let previous_restore_settlements = self.deferred_restore_settlements.clone();
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
@@ -661,6 +660,16 @@ impl OfflineProtocol {
         if adopt_legacy_state {
             self.adopt_legacy_protocol_state();
         }
+
+        // Baseline the settlement queue *after* adoption, not with the other
+        // rollback captures above. A rolled-back restore never happened, so
+        // nothing it decided to settle happened either and a retry re-derives
+        // it — but adoption is deliberately outside that transaction: the
+        // records it moved are moved and the ones it had to destroy are
+        // destroyed. Rolling its settlements back would discard the only signal
+        // the app will ever get about them, because nothing can re-derive a
+        // settlement for a record that no longer exists.
+        let previous_restore_settlements = self.deferred_restore_settlements.clone();
 
         // Load the persistent scrub secret outside the transactional restore
         // below: it is independent of MLS state, and a later MLS-restore
@@ -698,7 +707,8 @@ impl OfflineProtocol {
             self.pending_encrypted_messages = previous_pending_messages;
             self.next_pending_message_expiry = previous_pending_message_expiry;
             // A rolled-back restore never happened, so neither did anything it
-            // decided to settle; a retry re-derives them.
+            // decided to settle; a retry re-derives them. Adoption's
+            // settlements are in the baseline (see above) and survive.
             self.deferred_restore_settlements = previous_restore_settlements;
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;

@@ -5949,10 +5949,356 @@ fn test_unreadable_pending_queue_is_surfaced_per_recipient() {
 }
 
 #[test]
+fn test_adoption_settles_legacy_records_too_large_to_migrate() {
+    // The pre-split build had neither a content cap nor a per-peer byte budget,
+    // only 64 entries per peer — so the installs this branch's budgets exist for
+    // are exactly the ones whose legacy records can exceed the record cap. The
+    // sweep has to delete them (nothing can ever write or restore them), but
+    // deleting them silently would leave the app holding ids that never resolve,
+    // which is the whole failure this restore work exists to end.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let oversized = vec![b'x'; MAX_PROTOCOL_STATE_RECORD_BYTES + 1];
+    let message_id = MessageId::new();
+    secure
+        .store(storage_keys::OUTBOX, &message_id.as_str(), &oversized)
+        .unwrap();
+    secure
+        .store(storage_keys::PENDING_MESSAGES, "bob", &oversized)
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    // Both legacy records are gone and neither reached protocol-state storage.
+    assert!(secure
+        .load(storage_keys::OUTBOX, &message_id.as_str())
+        .unwrap()
+        .is_none());
+    assert!(secure
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .is_none());
+    assert!(state
+        .load(storage_keys::OUTBOX, &message_id.as_str())
+        .unwrap()
+        .is_none());
+
+    let events = started_protocol_events(&mut protocol);
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id: id, .. } if *id == message_id.as_str()
+        )),
+        "an outbox record too large to migrate must be settled by id"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ConvergenceDiag { stage, peer_id, .. }
+                if stage == "pending_state_lost" && peer_id == "bob"
+        )),
+        "a pending queue too large to migrate must be surfaced per recipient"
+    );
+}
+
+#[test]
+fn test_unreadable_record_key_leaves_the_outbox_alone_instead_of_settling_it() {
+    // "Cannot be read this session" is not "destroyed". The record survives, so
+    // settling it would be a terminal answer the next launch overturns by
+    // restoring the entry and re-driving delivery — the app would see
+    // `message_failed` and then a delivery, plus a second copy if the user
+    // re-sent by hand (a new id, which dedup cannot collapse).
+    struct FailingRecordKeyLoadStorage {
+        inner: Arc<InMemoryStorage>,
+    }
+
+    impl MlsStorage for FailingRecordKeyLoadStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            if key_type == storage_keys::STATE_RECORD_KEY {
+                return Err(offline_protocol_mls::StorageError::LoadFailed(
+                    "forced record key load failure".to_string(),
+                ));
+            }
+            self.inner.load(key_type, key_id)
+        }
+
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    // A sealed outbox record written by a healthy earlier session.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let message_id = MessageId::new();
+    let cipher = state_record_cipher_for(&secure);
+    let sealed = cipher
+        .seal(storage_keys::OUTBOX, &message_id.as_str(), b"{}")
+        .unwrap();
+    state
+        .store(storage_keys::OUTBOX, &message_id.as_str(), &sealed)
+        .unwrap();
+
+    // This session cannot read the record key, but everything else works — so
+    // MLS still initializes and restore still runs.
+    let secure_handle: Arc<dyn MlsStorage> = Arc::new(FailingRecordKeyLoadStorage {
+        inner: secure.clone(),
+    });
+    let state_as_mls: Arc<dyn MlsStorage> = state.clone();
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
+        storage: state_as_mls,
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert!(
+        protocol.state_record_cipher.is_none(),
+        "the fixture must actually reproduce an unavailable record key"
+    );
+    assert!(
+        protocol.deferred_restore_settlements.is_empty(),
+        "a record that is merely unreadable this session must not be settled"
+    );
+    assert!(
+        state
+            .load(storage_keys::OUTBOX, &message_id.as_str())
+            .unwrap()
+            .is_some(),
+        "the record must be left on disk for a launch that can open it"
+    );
+
+    let events = started_protocol_events(&mut protocol);
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, Event::MessageFailed { .. })),
+        "no terminal failure may be emitted for a recoverable record"
+    );
+}
+
+#[test]
+fn test_not_found_from_a_provider_load_reads_as_absence() {
+    // The trait documents `NotFound` as the variant for backends that cannot
+    // express absence any other way. A provider that honors that must not have
+    // every record it holds read as an unrecoverable loss — and the adoption
+    // marker probe must not read "absent" as "unreadable" and skip the sweep.
+    struct NotFoundOnMissStorage {
+        inner: Arc<InMemoryStorage>,
+    }
+
+    impl crate::ProtocolStateStorage for NotFoundOnMissStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .store(key_type, key_id, data)
+                .map_err(crate::protocol::map_test_storage_error)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+            match self
+                .inner
+                .load(key_type, key_id)
+                .map_err(crate::protocol::map_test_storage_error)?
+            {
+                Some(data) => Ok(Some(data)),
+                None => Err(crate::ProtocolStateError::NotFound(key_id.to_string())),
+            }
+        }
+
+        fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .delete(key_type, key_id)
+                .map_err(crate::protocol::map_test_storage_error)
+        }
+
+        fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+            self.inner
+                .list_keys(key_type)
+                .map_err(crate::protocol::map_test_storage_error)
+        }
+    }
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    secure
+        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .unwrap();
+
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(NotFoundOnMissStorage {
+        inner: state.clone(),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert!(
+        protocol.deferred_restore_settlements.is_empty(),
+        "absence reported as NotFound must not settle anything as failed"
+    );
+    assert!(
+        protocol.is_user_blocked("mallory"),
+        "the adoption sweep must still run when the marker probe reports NotFound"
+    );
+    assert!(
+        state
+            .load(
+                storage_keys::STATE_ADOPTION,
+                storage_keys::STATE_ADOPTION_ID
+            )
+            .unwrap()
+            .is_some(),
+        "a completed sweep must still record its marker"
+    );
+}
+
+#[test]
+fn test_adoption_marker_is_withheld_when_a_category_cannot_be_listed() {
+    // "Partially adopted" must mean "retry next launch", not "give up forever":
+    // a credential store that is briefly unavailable for one category would
+    // otherwise strand every record in it.
+    struct FailingListStorage {
+        inner: Arc<InMemoryStorage>,
+        failing_type: &'static str,
+    }
+
+    impl MlsStorage for FailingListStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            self.inner.load(key_type, key_id)
+        }
+
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            if key_type == self.failing_type {
+                return Err(offline_protocol_mls::StorageError::LoadFailed(
+                    "forced list failure".to_string(),
+                ));
+            }
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    secure
+        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .unwrap();
+
+    let failing: Arc<dyn MlsStorage> = Arc::new(FailingListStorage {
+        inner: secure.clone(),
+        failing_type: storage_keys::SESSION_STATES,
+    });
+    let state_as_mls: Arc<dyn MlsStorage> = state.clone();
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
+        storage: state_as_mls,
+    });
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls(failing, state_handle).unwrap();
+
+    // What could be swept was swept, but the pass is not marked complete.
+    assert!(first.is_user_blocked("mallory"));
+    assert!(
+        state
+            .load(
+                storage_keys::STATE_ADOPTION,
+                storage_keys::STATE_ADOPTION_ID
+            )
+            .unwrap()
+            .is_none(),
+        "a partial sweep must not claim to be complete"
+    );
+
+    // A healthy launch finishes the job and only then marks it done.
+    secure
+        .store(storage_keys::BLOCKED_USERS, "trudy", &[])
+        .unwrap();
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls(secure_handle, state_handle).unwrap();
+    assert!(
+        second.is_user_blocked("trudy"),
+        "the sweep must re-run while the marker is absent"
+    );
+    assert!(state
+        .load(
+            storage_keys::STATE_ADOPTION,
+            storage_keys::STATE_ADOPTION_ID
+        )
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn test_pending_byte_budget_holds_for_worst_case_json_escaping() {
     // `MAX_MESSAGE_CONTENT_BYTES` bounds the *raw* content, but the queue
     // budgets and the record cap are measured on the serialized entry. NUL is
-    // the worst case: one byte in, six out (` `). The relationship the
+    // the worst case: one byte in, six out (`\0`). The relationship the
     // constants assert has to survive that expansion, or a single
     // boundary-legal message would fail to fit an empty queue.
     let (_, encoded) = pending_record(&"\0".repeat(MAX_MESSAGE_CONTENT_BYTES));

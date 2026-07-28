@@ -434,7 +434,9 @@ Consequences worth knowing:
 
 - **Fail closed.** If the per-install key cannot be read or written, those
   categories are not persisted at all for that session rather than written in the
-  clear. Delivery still works from memory; only crash recovery is lost.
+  clear. Delivery still works from memory; only crash recovery is lost. Records
+  already on disk are left alone, not deleted — a later launch that can read the
+  key recovers them.
 - **The key is the container's undo button.** Clearing the credential store
   without clearing the app container leaves records that no longer open; the SDK
   drops them on read. Clearing the app container alone is the normal uninstall
@@ -446,6 +448,13 @@ Consequences worth knowing:
   message ids are inside the record that would not open, so they cannot be named
   individually). These are emitted on `start()`, not during `initialize_mls`, so
   install your event callback before starting if you want to observe them.
+- **But only a record that is actually gone is settled.** A record that merely
+  could not be read *this session* — the seal key was unavailable, or the store
+  refused one read — stays on disk and produces no event. Settling it would be a
+  terminal answer the next launch overturns by restoring the entry and re-driving
+  delivery, so you would see `message_failed` and then a delivery. Do not treat a
+  quiet startup as proof that everything restored; treat `message_failed` as
+  proof that something did not.
 - **Records have a size ceiling.** The SDK refuses to write, and refuses to
   deserialize on restore, any single record over 4 MiB — a corrupted or tampered
   state file cannot become an unbounded allocation during startup.

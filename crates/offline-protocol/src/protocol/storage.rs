@@ -11,7 +11,7 @@ use super::{
     WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
-use crate::{Error, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
+use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{LamportClock, MessageId};
 use offline_protocol_mls::{MlsManager, MlsStorage};
@@ -48,39 +48,57 @@ fn record_requires_sealing(key_type: &str) -> bool {
 
 /// Outcome of reading one protocol-state record.
 ///
-/// The distinction that matters is [`Self::Missing`] versus
-/// [`Self::Unreadable`]: both yield no bytes, but the second means a record
-/// *was* there and its contents are now gone for good (oversized, tampered, or
-/// sealed under a key this install no longer has). Restore paths that own
-/// app-visible message state have to settle what they lost rather than skip it
-/// silently, and they cannot do that if absence and destruction look alike.
+/// Three states, not two, because "no bytes" has three very different causes
+/// and only one of them is a loss:
+///
+/// - [`Self::Missing`] — nothing was ever here.
+/// - [`Self::Unreadable`] — a record *was* here, was examined, and is gone for
+///   good (oversized, tampered, or sealed under a key this install no longer
+///   has). It has been deleted.
+/// - [`Self::Unavailable`] — a record is still here and may be perfectly good,
+///   but cannot be read *this session* (the record key is not loaded, or the
+///   backend refused the read). It is left on disk and a later launch may
+///   recover it.
+///
+/// Restore paths that own app-visible message state settle only
+/// [`Self::Unreadable`]. Settling [`Self::Unavailable`] would be wrong twice
+/// over: the record survives, so the next launch restores it and re-drives
+/// delivery — the app would have been told the message failed terminally and
+/// then have it delivered anyway, with a hand re-send (a *new* id, so dedup
+/// cannot collapse it) landing as a second copy.
 pub(crate) enum StateRecord {
     /// No record under this key.
     Missing,
-    /// A record existed but could not be returned; it has been deleted.
+    /// A record existed, could not be returned, and has been deleted.
     Unreadable,
+    /// A record exists but could not be read this session; it is still on disk.
+    Unavailable,
     /// The record's plaintext value.
     Present(Vec<u8>),
 }
 
 impl StateRecord {
-    /// The record's bytes, treating a destroyed record like an absent one.
+    /// The record's bytes, treating an unrecoverable record like an absent one.
     /// For callers whose category carries no app-visible commitment.
     fn into_bytes(self) -> Option<Vec<u8>> {
         match self {
             Self::Present(data) => Some(data),
-            Self::Missing | Self::Unreadable => None,
+            Self::Missing | Self::Unreadable | Self::Unavailable => None,
         }
     }
 }
 
-/// Outcome of restoring one recipient's pending queue.
+/// Outcome of restoring one recipient's pending queue. Mirrors
+/// [`StateRecord`]'s three-way split for the same reason.
 enum PendingRestore {
     /// Nothing was queued for this recipient.
     Absent,
     /// A queue existed but could not be recovered. Its message ids are inside
     /// the record that would not open, so they cannot be settled individually.
     Lost,
+    /// A queue exists but could not be read this session and is still on disk.
+    /// Reporting it as lost would be a lie a later launch contradicts.
+    Unavailable,
     /// The recovered queue (possibly empty).
     Restored(Vec<PendingMessage>),
 }
@@ -159,8 +177,27 @@ impl OfflineProtocol {
             .into_bytes())
     }
 
+    /// Loads one protocol-state entry, treating
+    /// [`ProtocolStateError::NotFound`] as absence.
+    ///
+    /// The trait documents `NotFound` as the variant for implementations whose
+    /// platform API cannot express absence any other way, so it has to be
+    /// *read* as absence here — otherwise a provider that honors that contract
+    /// turns every record it holds into a spurious unrecoverable loss.
+    fn load_state_bytes(
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+    ) -> ProtocolStateResult<Option<Vec<u8>>> {
+        match storage.load(key_type, key_id) {
+            Ok(data) => Ok(data),
+            Err(ProtocolStateError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Reads one protocol-state record, distinguishing an absent record from
-    /// one that existed but could not be returned.
+    /// one that was destroyed and from one that merely cannot be read now.
     ///
     /// Never yields raw bytes for a record that is oversized or will not open.
     /// Such a record is corrupt or tampered, so it is also deleted, which keeps
@@ -169,17 +206,18 @@ impl OfflineProtocol {
     /// promise about that record (an outbox entry the app was told was queued)
     /// has to settle it rather than let it evaporate.
     ///
-    /// The one exception is a missing record *key*: those records may be
-    /// perfectly good and simply unreadable *this session*, so they are left on
-    /// disk. That still reports `Unreadable` — nothing will be recovered from
-    /// them this run either way.
+    /// A missing record *key* is deliberately not that: those records may be
+    /// perfectly good, so they are left on disk and reported as
+    /// [`StateRecord::Unavailable`]. Nothing is recovered from them this run
+    /// either way, but a later launch can — which is exactly why they must not
+    /// be settled as failures now.
     pub(crate) fn read_state_record_detailed(
         &self,
         storage: &dyn ProtocolStateStorage,
         key_type: &str,
         key_id: &str,
     ) -> ProtocolStateResult<StateRecord> {
-        let Some(data) = storage.load(key_type, key_id)? else {
+        let Some(data) = Self::load_state_bytes(storage, key_type, key_id)? else {
             return Ok(StateRecord::Missing);
         };
 
@@ -211,12 +249,16 @@ impl OfflineProtocol {
         }
 
         let Some(cipher) = &self.state_record_cipher else {
+            // Left on disk on purpose: the record is very likely intact and the
+            // key may be back next launch. Reporting `Unavailable` is what stops
+            // restore from settling the whole outbox as failed and then
+            // re-delivering it on the next boot.
             warn!(
                 key_type = %key_type,
                 key_id = %key_id,
                 "Protocol state record key unavailable; skipping sealed record"
             );
-            return Ok(StateRecord::Unreadable);
+            return Ok(StateRecord::Unavailable);
         };
 
         match cipher.open(key_type, key_id, &data) {
@@ -273,6 +315,13 @@ impl OfflineProtocol {
     /// - **Sealing applies.** Records are written through
     ///   [`Self::write_state_record`], so categories that require sealing are
     ///   sealed on the way in and the legacy plaintext is then deleted.
+    /// - **Nothing app-visible vanishes quietly.** A legacy record too large to
+    ///   have any reachable destination is settled before it is deleted, the
+    ///   same way [`Self::restore_outbox`] settles one it cannot recover. This
+    ///   is not hypothetical: the pre-split build had neither a content cap nor
+    ///   a per-peer byte budget, only 64 entries per peer, so the installs this
+    ///   branch's budgets exist for are exactly the ones whose legacy records
+    ///   can exceed [`MAX_PROTOCOL_STATE_RECORD_BYTES`].
     pub(crate) fn adopt_legacy_protocol_state(&mut self) {
         let (Some(secure), Some(state)) = (
             self.secure_storage.clone(),
@@ -281,7 +330,8 @@ impl OfflineProtocol {
             return;
         };
 
-        match state.load(
+        match Self::load_state_bytes(
+            state.as_ref(),
             storage_keys::STATE_ADOPTION,
             storage_keys::STATE_ADOPTION_ID,
         ) {
@@ -299,6 +349,11 @@ impl OfflineProtocol {
 
         let mut adopted = 0usize;
         let mut failed = false;
+        // Settlements for records the sweep had to destroy. Collected rather
+        // than emitted inline because the per-record helper only holds `&self`,
+        // and because they belong on the same deferred path every other restore
+        // settlement uses.
+        let mut unadoptable: Vec<Event> = Vec::new();
         for key_type in storage_keys::ADOPTABLE_STATE_KEY_TYPES {
             let key_ids = match secure.list_keys(key_type) {
                 Ok(ids) => ids,
@@ -326,12 +381,20 @@ impl OfflineProtocol {
                     state.as_ref(),
                     key_type,
                     &key_id,
+                    &mut unadoptable,
                 ) {
                     Ok(true) => adopted += 1,
                     Ok(false) => {}
                     Err(()) => failed = true,
                 }
             }
+        }
+
+        // Settle before the early return below: these records are already gone,
+        // so a partial sweep must not also withhold the only signal the app will
+        // ever get about them.
+        for event in unadoptable {
+            self.settle_restored_message_failure(event);
         }
 
         if failed {
@@ -361,16 +424,18 @@ impl OfflineProtocol {
 
     /// Moves one legacy record. `Ok(true)` when it was adopted, `Ok(false)`
     /// when there was nothing to do, `Err(())` when a storage failure means the
-    /// sweep must be retried later.
+    /// sweep must be retried later. Settlements for records this had to destroy
+    /// are pushed onto `unadoptable` for the caller to emit.
     fn adopt_one_legacy_record(
         &self,
         secure: &dyn MlsStorage,
         state: &dyn ProtocolStateStorage,
         key_type: &str,
         key_id: &str,
+        unadoptable: &mut Vec<Event>,
     ) -> std::result::Result<bool, ()> {
         // Post-split state wins: never overwrite a record this build wrote.
-        match state.load(key_type, key_id) {
+        match Self::load_state_bytes(state, key_type, key_id) {
             Ok(Some(_)) => return Ok(false),
             Ok(None) => {}
             Err(e) => {
@@ -392,12 +457,15 @@ impl OfflineProtocol {
         if data.len() > MAX_PROTOCOL_STATE_RECORD_BYTES {
             // Over the record cap, so it could never be written or restored.
             // Delete it rather than retrying the sweep forever over a record
-            // that has no reachable destination.
+            // that has no reachable destination — but settle first: the app is
+            // holding ids from before the upgrade, and this is the last moment
+            // anything can name them.
             warn!(
                 key_type = %key_type,
                 len = data.len(),
                 "Dropping oversized legacy protocol state record"
             );
+            unadoptable.extend(Self::unadoptable_record_settlement(key_type, key_id));
             let _ = secure.delete(key_type, key_id);
             return Ok(false);
         }
@@ -416,6 +484,34 @@ impl OfflineProtocol {
             debug!(key_type = %key_type, error = %e, "Failed to delete adopted legacy protocol state record");
         }
         Ok(true)
+    }
+
+    /// The settlement owed for a legacy record that had to be destroyed rather
+    /// than adopted, or `None` for a category the app holds no promise about.
+    ///
+    /// Mirrors what [`Self::restore_outbox`] and [`Self::restore_pending_messages`]
+    /// emit for the same loss after the split: an outbox record is nameable
+    /// without opening it, because its record key *is* the message id, while a
+    /// pending queue's ids are inside the record — so the recipient is the most
+    /// that can be reported.
+    fn unadoptable_record_settlement(key_type: &str, key_id: &str) -> Option<Event> {
+        match key_type {
+            storage_keys::OUTBOX => MessageId::from_str(key_id).ok().map(|message_id| {
+                Event::message_failed(
+                    message_id,
+                    "Outbox entry from a previous version was too large to migrate".to_string(),
+                    0,
+                )
+            }),
+            storage_keys::PENDING_MESSAGES => Some(Event::convergence_diag(
+                "pending_state_lost".to_string(),
+                key_id.to_string(),
+                "Messages queued before the storage split exceeded the protocol-state record \
+                 limit and could not be migrated"
+                    .to_string(),
+            )),
+            _ => None,
+        }
     }
 
     // ========================================================================
@@ -574,12 +670,13 @@ impl OfflineProtocol {
     ) -> Option<Vec<PendingMessage>> {
         match self.load_pending_messages_detailed(recipient) {
             PendingRestore::Restored(messages) => Some(messages),
-            PendingRestore::Absent | PendingRestore::Lost => None,
+            PendingRestore::Absent | PendingRestore::Lost | PendingRestore::Unavailable => None,
         }
     }
 
     /// Loads a recipient's pending queue, distinguishing "nothing queued" from
-    /// "a queue existed and its contents are gone".
+    /// "a queue existed and its contents are gone" from "a queue exists and
+    /// cannot be read this session".
     fn load_pending_messages_detailed(&self, recipient: &str) -> PendingRestore {
         let Some(storage) = self.protocol_state_storage.as_ref() else {
             return PendingRestore::Absent;
@@ -592,9 +689,11 @@ impl OfflineProtocol {
         let data = match record {
             Ok(StateRecord::Present(data)) => data,
             Ok(StateRecord::Missing) => return PendingRestore::Absent,
-            // An unreadable record, or a load the backend refused: either way a
-            // queue that existed is not coming back this run.
-            Ok(StateRecord::Unreadable) | Err(_) => return PendingRestore::Lost,
+            // Examined and destroyed: the queue that existed is gone for good.
+            Ok(StateRecord::Unreadable) => return PendingRestore::Lost,
+            // Still on disk, just not readable now. Reporting it as lost would
+            // be contradicted by the next launch restoring it.
+            Ok(StateRecord::Unavailable) | Err(_) => return PendingRestore::Unavailable,
         };
         let Ok(mut messages) = serde_json::from_slice::<Vec<PendingMessage>>(&data) else {
             // Parsed-as-garbage is the same loss as failed-to-open. Drop the
@@ -631,6 +730,9 @@ impl OfflineProtocol {
         let listed = recipients.len();
 
         let mut capacity_evicted = Vec::new();
+        // Kept apart from `capacity_evicted` so the two reasons the app sees are
+        // the two things that actually happened.
+        let mut unaddressable = Vec::new();
         let mut lost_recipients = Vec::new();
         let mut changed_recipients = std::collections::HashSet::new();
         // Running totals, maintained rather than recomputed: the global caps
@@ -646,7 +748,7 @@ impl OfflineProtocol {
                 if let PendingRestore::Restored(messages) =
                     self.load_pending_messages_detailed(&recipient)
                 {
-                    capacity_evicted.extend(messages.into_iter().map(|m| m.message_id));
+                    unaddressable.extend(messages.into_iter().map(|m| m.message_id));
                 }
                 warn!(recipient = %recipient, "Dropping persisted pending queue for an invalid recipient");
                 let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
@@ -661,6 +763,16 @@ impl OfflineProtocol {
                 // letting it read as "there was nothing queued".
                 PendingRestore::Lost => {
                     lost_recipients.push(recipient);
+                    continue;
+                }
+                // Not readable this session, but still on disk. Say nothing: a
+                // later launch is expected to restore it, and a loss diagnostic
+                // now would be a claim the next launch contradicts.
+                PendingRestore::Unavailable => {
+                    warn!(
+                        recipient = %recipient,
+                        "Persisted pending queue could not be read this session; leaving it in place"
+                    );
                     continue;
                 }
             };
@@ -733,15 +845,22 @@ impl OfflineProtocol {
             self.persist_or_clear_pending_messages(&recipient);
         }
         for message_id in capacity_evicted {
-            self.settle_restored_message_failure(crate::Event::message_failed(
+            self.settle_restored_message_failure(Event::message_failed(
                 message_id,
                 "Pending session queue capacity exceeded".to_string(),
                 0,
             ));
         }
+        for message_id in unaddressable {
+            self.settle_restored_message_failure(Event::message_failed(
+                message_id,
+                "Recipient is not a valid user ID; queued message cannot be delivered".to_string(),
+                0,
+            ));
+        }
         for recipient in lost_recipients {
             warn!(recipient = %recipient, "Persisted pending queue was unreadable and has been dropped");
-            self.settle_restored_message_failure(crate::Event::convergence_diag(
+            self.settle_restored_message_failure(Event::convergence_diag(
                 "pending_state_lost".to_string(),
                 recipient,
                 "Queued messages awaiting session establishment could not be recovered \
@@ -1429,9 +1548,23 @@ impl OfflineProtocol {
             let data = match loaded {
                 Some(Ok(StateRecord::Present(data))) => data,
                 Some(Ok(StateRecord::Missing)) | None => continue,
-                Some(Ok(StateRecord::Unreadable)) | Some(Err(_)) => {
+                Some(Ok(StateRecord::Unreadable)) => {
                     warn!(message_id = %message_id, "Dropping unreadable outbox entry");
                     unrecoverable.extend(MessageId::from_str(&message_id));
+                    continue;
+                }
+                // Still on disk and probably intact — the record key is not
+                // loaded, or the backend refused this read. Settling it as
+                // failed would be a terminal answer the next launch overturns
+                // by restoring the entry and re-driving delivery, so the app
+                // would see `message_failed` and then a delivery (plus a second
+                // copy if the user re-sent by hand, which mints a new id that
+                // dedup cannot collapse). Leave it be.
+                Some(Ok(StateRecord::Unavailable)) | Some(Err(_)) => {
+                    warn!(
+                        message_id = %message_id,
+                        "Outbox entry could not be read this session; leaving it in place"
+                    );
                     continue;
                 }
             };
@@ -1482,7 +1615,7 @@ impl OfflineProtocol {
                 repair_action = "absolute_lifetime_exceeded",
                 "outbox_entry_dropped"
             );
-            self.settle_restored_message_failure(crate::events::Event::message_failed(
+            self.settle_restored_message_failure(Event::message_failed(
                 entry.message.id.clone(),
                 "Outbox lifetime exceeded".to_string(),
                 entry.attempt_count,
@@ -1500,7 +1633,7 @@ impl OfflineProtocol {
                 self.delete_outbox_key(&entry.message.id.as_str());
                 // Terminal, like the pending queue's capacity eviction: the app
                 // holds this id and nothing will ever resolve it otherwise.
-                self.settle_restored_message_failure(crate::events::Event::message_failed(
+                self.settle_restored_message_failure(Event::message_failed(
                     entry.message.id.clone(),
                     "Outbox capacity exceeded".to_string(),
                     entry.attempt_count,
@@ -1509,7 +1642,7 @@ impl OfflineProtocol {
         }
 
         for message_id in unrecoverable {
-            self.settle_restored_message_failure(crate::events::Event::message_failed(
+            self.settle_restored_message_failure(Event::message_failed(
                 message_id,
                 "Outbox entry could not be recovered from protocol-state storage".to_string(),
                 0,

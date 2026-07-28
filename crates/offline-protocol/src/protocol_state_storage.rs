@@ -34,9 +34,12 @@ use std::fmt;
 pub enum ProtocolStateError {
     /// The requested entry does not exist.
     ///
-    /// Callers treat an absent entry as `Ok(None)` from
-    /// [`ProtocolStateStorage::load`]; this variant exists for implementations
-    /// whose platform API cannot express absence any other way.
+    /// `Ok(None)` from [`ProtocolStateStorage::load`] is the preferred way to
+    /// report absence; this variant exists for implementations whose platform
+    /// API cannot express it any other way. The SDK reads the two identically —
+    /// a `load` that fails with `NotFound` is absence, not a lost record — so
+    /// an implementation that reports absence this way does **not** cause
+    /// spurious `message_failed` settlements on restore.
     NotFound(String),
     /// The entry exists but could not be decoded by the backing store.
     Corrupted(String),
