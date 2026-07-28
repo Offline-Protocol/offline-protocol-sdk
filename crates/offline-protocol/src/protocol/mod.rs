@@ -11,7 +11,7 @@ mod receive;
 mod security;
 mod send;
 mod session;
-mod state_crypto;
+pub(crate) mod state_crypto;
 mod storage;
 mod types;
 

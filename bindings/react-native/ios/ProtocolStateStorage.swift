@@ -10,6 +10,7 @@
 // or truncate them.
 //
 
+import CryptoKit
 import Foundation
 
 #if SWIFT_PACKAGE
@@ -35,6 +36,113 @@ protocol MlsStorageProvider {
     func listKeys(keyType: String) throws -> [String]
 }
 #endif
+
+/// On-disk record format shared by every built-in protocol-state provider.
+///
+/// Filenames are a fixed-length lowercase hex digest rather than an encoding of
+/// the key itself. An encoding cannot be a correct filesystem key: it is
+/// case-sensitive (so `AAG` and `AAa` name the same file on a case-insensitive
+/// volume, and one record silently overwrites the other) and its length grows
+/// with the key (so a long-but-valid protocol id overruns `NAME_MAX`). A digest
+/// is fixed-length, lowercase, and collision-free in practice.
+///
+/// Because a digest is one-way, the exact key cannot be recovered from the
+/// name, so each record carries it in a header instead. That also makes every
+/// file independently attributable and lets a read verify it opened the record
+/// it asked for.
+///
+///     bytes 0..<4   magic "OPS1"
+///     bytes 4..<6   key_type length, big-endian u16
+///     bytes 6..<8   key_id length, big-endian u16
+///     then          key_type UTF-8, key_id UTF-8, value bytes
+///
+/// Keep this format, its limits, and the golden vectors in
+/// `ProtocolStateStorageTests` in sync with the Android and Python providers.
+enum ProtocolStateRecord {
+    static let magic: [UInt8] = Array("OPS1".utf8)
+
+    /// Longest accepted `key_type` / `key_id`, in UTF-8 bytes. Core's own
+    /// identifiers are far shorter; this bounds what a header may claim.
+    static let maxComponentBytes = 4096
+
+    /// Provider ceiling on a record's value. Deliberately a generous superset
+    /// of core's `MAX_PROTOCOL_STATE_RECORD_BYTES` (4 MiB) plus its seal
+    /// envelope, so this never rejects a record the SDK legitimately wrote —
+    /// it exists to bound allocation for a file the SDK never wrote.
+    static let maxValueBytes = 8 * 1024 * 1024
+
+    /// Largest file the reader will pull into memory.
+    static let maxFileBytes = 8 + 2 * maxComponentBytes + maxValueBytes
+
+    /// Longest possible header, used to bound the partial read `listKeys` does.
+    static let maxHeaderBytes = 8 + 2 * maxComponentBytes
+
+    /// Ceiling on entries one `listKeys` will open. Core caps every category
+    /// far below this; a directory holding more has been tampered with.
+    static let maxListedKeys = 65_536
+
+    static func digest(_ components: [String]) -> String {
+        var hasher = SHA256()
+        for component in components {
+            hasher.update(data: Data(component.utf8))
+            hasher.update(data: Data([0]))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func typeDirectoryName(_ keyType: String) -> String {
+        "t_" + digest([keyType])
+    }
+
+    static func entryName(keyType: String, keyId: String) -> String {
+        "k_" + digest([keyType, keyId])
+    }
+
+    static func frame(keyType: String, keyId: String, value: [UInt8]) throws -> Data {
+        let typeBytes = Array(keyType.utf8)
+        let idBytes = Array(keyId.utf8)
+        guard typeBytes.count <= maxComponentBytes, idBytes.count <= maxComponentBytes else {
+            throw MlsStorageError.StoreFailed(
+                message: "protocol-state key exceeds \(maxComponentBytes) bytes"
+            )
+        }
+        guard value.count <= maxValueBytes else {
+            throw MlsStorageError.StoreFailed(
+                message: "protocol-state record is \(value.count) bytes, over the "
+                    + "\(maxValueBytes) byte limit"
+            )
+        }
+
+        var out = Data(capacity: 8 + typeBytes.count + idBytes.count + value.count)
+        out.append(contentsOf: magic)
+        out.append(UInt8(typeBytes.count >> 8))
+        out.append(UInt8(typeBytes.count & 0xff))
+        out.append(UInt8(idBytes.count >> 8))
+        out.append(UInt8(idBytes.count & 0xff))
+        out.append(contentsOf: typeBytes)
+        out.append(contentsOf: idBytes)
+        out.append(contentsOf: value)
+        return out
+    }
+
+    /// Header of a framed record: the key it belongs to and where its value
+    /// starts. `nil` means the bytes are not a record this SDK wrote.
+    static func parseHeader(_ bytes: [UInt8]) -> (keyType: String, keyId: String, valueOffset: Int)? {
+        guard bytes.count >= 8, Array(bytes[0..<4]) == magic else {
+            return nil
+        }
+        let typeLen = Int(bytes[4]) << 8 | Int(bytes[5])
+        let idLen = Int(bytes[6]) << 8 | Int(bytes[7])
+        guard typeLen <= maxComponentBytes, idLen <= maxComponentBytes,
+              bytes.count >= 8 + typeLen + idLen,
+              let keyType = String(bytes: bytes[8..<(8 + typeLen)], encoding: .utf8),
+              let keyId = String(bytes: bytes[(8 + typeLen)..<(8 + typeLen + idLen)], encoding: .utf8)
+        else {
+            return nil
+        }
+        return (keyType, keyId, 8 + typeLen + idLen)
+    }
+}
 
 /// File-backed protocol state whose lifecycle is tied to the app container.
 ///
@@ -65,7 +173,10 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         let root = applicationSupport
             .appendingPathComponent(bundleComponent, isDirectory: true)
             .appendingPathComponent(Self.schemaDirectory, isDirectory: true)
-            .appendingPathComponent(accountNamespace, isDirectory: true)
+            .appendingPathComponent(
+                try StorageNamespace.requireAccount(accountNamespace),
+                isDirectory: true
+            )
         try self.init(root: root, fileManager: fileManager)
     }
 
@@ -93,6 +204,12 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     }
 
     func store(keyType: String, keyId: String, data: [UInt8]) throws {
+        let framed = try ProtocolStateRecord.frame(
+            keyType: keyType,
+            keyId: keyId,
+            value: data
+        )
+
         lock.lock()
         defer { lock.unlock() }
 
@@ -102,7 +219,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
                 at: directory,
                 withIntermediateDirectories: true
             )
-            try Data(data).write(to: entryURL(keyType: keyType, keyId: keyId), options: .atomic)
+            try framed.write(to: entryURL(keyType: keyType, keyId: keyId), options: .atomic)
         } catch {
             throw MlsStorageError.StoreFailed(
                 message: "Failed to persist protocol state: \(error)"
@@ -118,13 +235,44 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         guard fileManager.fileExists(atPath: url.path) else {
             return nil
         }
+
+        // Stat before reading. A record over the ceiling cannot have been
+        // written through `store`, so it is corrupt or tampered — removing it
+        // keeps a poison file from being re-examined on every boot, and keeps
+        // the read itself from becoming an unbounded allocation.
+        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+        if let size = attributes?[.size] as? Int, size > ProtocolStateRecord.maxFileBytes {
+            try? fileManager.removeItem(at: url)
+            return nil
+        }
+
+        let raw: Data
         do {
-            return [UInt8](try Data(contentsOf: url))
+            raw = try Data(contentsOf: url)
         } catch {
             throw MlsStorageError.LoadFailed(
                 message: "Failed to load protocol state: \(error)"
             )
         }
+
+        // Re-check post-read: the stat can race a concurrent writer, and on a
+        // filesystem that refuses to report a size it is skipped entirely.
+        guard raw.count <= ProtocolStateRecord.maxFileBytes else {
+            try? fileManager.removeItem(at: url)
+            return nil
+        }
+
+        let bytes = [UInt8](raw)
+        guard let header = ProtocolStateRecord.parseHeader(bytes),
+              header.keyType == keyType,
+              header.keyId == keyId
+        else {
+            // Malformed framing, or a name that resolves to some other record:
+            // either way this is not the entry that was asked for.
+            try? fileManager.removeItem(at: url)
+            return nil
+        }
+        return Array(bytes[header.valueOffset...])
     }
 
     func delete(keyType: String, keyId: String) throws {
@@ -152,52 +300,57 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         guard fileManager.fileExists(atPath: directory.path) else {
             return []
         }
-        do {
-            return try fileManager
-                .contentsOfDirectory(
-                    at: directory,
-                    includingPropertiesForKeys: nil,
-                    options: [.skipsHiddenFiles]
-                )
-                .compactMap { decodeComponent($0.lastPathComponent) }
-                .sorted()
-        } catch {
-            throw MlsStorageError.LoadFailed(
-                message: "Failed to list protocol-state keys: \(error)"
-            )
+
+        // Stream the directory rather than materializing it, and read only each
+        // record's header: enumeration must stay bounded even when the
+        // container has been tampered with.
+        guard let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        ) else {
+            return []
         }
+
+        var keys: [String] = []
+        for case let url as URL in enumerator {
+            if keys.count >= ProtocolStateRecord.maxListedKeys {
+                break
+            }
+            guard url.lastPathComponent.hasPrefix("k_") else {
+                continue
+            }
+            guard let header = readHeader(at: url), header.keyType == keyType else {
+                continue
+            }
+            keys.append(header.keyId)
+        }
+        return keys.sorted()
+    }
+
+    private func readHeader(at url: URL) -> (keyType: String, keyId: String)? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer { handle.closeFile() }
+        let prefix = handle.readData(ofLength: ProtocolStateRecord.maxHeaderBytes)
+        guard let header = ProtocolStateRecord.parseHeader([UInt8](prefix)) else {
+            return nil
+        }
+        return (header.keyType, header.keyId)
     }
 
     private func typeDirectory(_ keyType: String) -> URL {
-        root.appendingPathComponent(encodeComponent(keyType), isDirectory: true)
+        root.appendingPathComponent(
+            ProtocolStateRecord.typeDirectoryName(keyType),
+            isDirectory: true
+        )
     }
 
     private func entryURL(keyType: String, keyId: String) -> URL {
-        typeDirectory(keyType).appendingPathComponent(encodeComponent(keyId), isDirectory: false)
-    }
-
-    private func encodeComponent(_ value: String) -> String {
-        let encoded = Data(value.utf8).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        return "k_\(encoded)"
-    }
-
-    private func decodeComponent(_ value: String) -> String? {
-        guard value.hasPrefix("k_") else {
-            return nil
-        }
-        var encoded = String(value.dropFirst(2))
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        let remainder = encoded.count % 4
-        if remainder != 0 {
-            encoded.append(String(repeating: "=", count: 4 - remainder))
-        }
-        guard let data = Data(base64Encoded: encoded) else {
-            return nil
-        }
-        return String(data: data, encoding: .utf8)
+        typeDirectory(keyType).appendingPathComponent(
+            ProtocolStateRecord.entryName(keyType: keyType, keyId: keyId),
+            isDirectory: false
+        )
     }
 }

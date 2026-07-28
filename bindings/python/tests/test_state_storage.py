@@ -9,6 +9,9 @@ import pytest
 from offline_protocol_sdk import state_storage as state_storage_module
 from offline_protocol_sdk.state_storage import AppStateStorage
 
+ALICE = "account-" + "a" * 64
+BOB = "account-" + "b" * 64
+
 
 def test_state_storage_round_trip_and_listing(tmp_path) -> None:
     storage = AppStateStorage(tmp_path / "state")
@@ -78,13 +81,20 @@ def test_sync_directory_is_best_effort_on_platforms_that_refuse_it(
 
 
 def test_state_storage_namespaces_accounts(tmp_path) -> None:
-    alice = AppStateStorage(tmp_path / "state", namespace="account-alice")
-    bob = AppStateStorage(tmp_path / "state", namespace="account-bob")
+    alice = AppStateStorage(tmp_path / "state", namespace=ALICE)
+    bob = AppStateStorage(tmp_path / "state", namespace=BOB)
 
     alice.store("outbox", "message-1", [1, 2, 3])
 
     assert alice.load("outbox", "message-1") == [1, 2, 3]
     assert bob.load("outbox", "message-1") is None
+
+
+def test_state_storage_rejects_a_malformed_namespace(tmp_path) -> None:
+    # The namespace becomes a directory component, so anything that could escape
+    # the account's own root must be refused at the door.
+    with pytest.raises(ValueError, match="Invalid protocol storage account"):
+        AppStateStorage(tmp_path / "state", namespace="../../other-account")
 
 
 def test_state_storage_requires_an_install_owned_root(monkeypatch) -> None:
@@ -98,13 +108,147 @@ def test_state_storage_uses_configured_install_root(monkeypatch, tmp_path) -> No
     install_root = tmp_path / "install-a" / "protocol-state"
     monkeypatch.setenv("OFFLINE_PROTOCOL_STATE_ROOT", str(install_root))
 
-    before_reinstall = AppStateStorage(namespace="account-alice")
+    before_reinstall = AppStateStorage(namespace=ALICE)
     before_reinstall.store("outbox", "message-1", [1, 2, 3])
 
     monkeypatch.setenv(
         "OFFLINE_PROTOCOL_STATE_ROOT",
         str(tmp_path / "install-b" / "protocol-state"),
     )
-    after_reinstall = AppStateStorage(namespace="account-alice")
+    after_reinstall = AppStateStorage(namespace=ALICE)
 
     assert after_reinstall.load("outbox", "message-1") is None
+
+
+# -- filesystem-key safety ---------------------------------------------------
+
+
+def test_case_folding_ids_are_distinct_records(tmp_path) -> None:
+    # "AAG" and "AAa" differ only in the case of one base64url character, so an
+    # encoding-based filename gives them the same name on a case-insensitive
+    # volume (macOS and Windows both default to one) and one record silently
+    # overwrites the other. A digest name cannot collide this way.
+    storage = AppStateStorage(tmp_path / "state")
+
+    storage.store("outbox", "AAG", [1])
+    storage.store("outbox", "AAa", [2])
+
+    assert storage.load("outbox", "AAG") == [1]
+    assert storage.load("outbox", "AAa") == [2]
+    assert storage.list_keys("outbox") == ["AAG", "AAa"]
+
+
+def test_maximum_length_ids_round_trip(tmp_path) -> None:
+    # Core accepts user ids up to 256 bytes. Base64 of 190 bytes already
+    # overruns the 255-byte NAME_MAX most filesystems enforce; a digest name is
+    # a fixed 66 characters no matter how long the key is.
+    storage = AppStateStorage(tmp_path / "state")
+    long_id = "u" * 256
+
+    storage.store("outbox", long_id, [9])
+
+    assert storage.load("outbox", long_id) == [9]
+    assert storage.list_keys("outbox") == [long_id]
+    assert len(state_storage_module._entry_name("outbox", long_id)) == 66
+
+
+def test_every_entry_name_is_fixed_length_and_lowercase() -> None:
+    for key_id in ("", "AAG", "x" * 4096, "péer/ id"):
+        name = state_storage_module._entry_name("outbox", key_id)
+        assert len(name) == 66
+        assert name == name.lower()
+
+
+# -- framing -----------------------------------------------------------------
+
+
+def test_framing_golden_vector() -> None:
+    # The iOS and Android providers must produce these exact bytes and names for
+    # the same input, or a record written by one platform is unreadable by
+    # another sharing a container.
+    framed = state_storage_module._frame("outbox", "m-1", b"\xaa\xbb")
+
+    assert framed == (
+        b"OPS1"
+        b"\x00\x06"  # key_type length
+        b"\x00\x03"  # key_id length
+        b"outbox"
+        b"m-1"
+        b"\xaa\xbb"
+    )
+    assert state_storage_module._type_directory_name("outbox") == (
+        "t_d5fac01c82279b8b061df80b3c312942e2ce27a41a48b1b7479ff07ad5a6198d"
+    )
+    assert state_storage_module._entry_name("outbox", "m-1") == (
+        "k_db5fcc2398ef2863d4269a61be6ea2de1f80d2889f34670c9a57c79cbe8058a1"
+    )
+    assert state_storage_module._parse_header(framed) == ("outbox", "m-1", 17)
+
+
+def test_empty_value_round_trips(tmp_path) -> None:
+    storage = AppStateStorage(tmp_path / "state")
+
+    storage.store("blocked_users", "peer-1", [])
+
+    assert storage.load("blocked_users", "peer-1") == []
+    assert storage.list_keys("blocked_users") == ["peer-1"]
+
+
+# -- bounded reads -----------------------------------------------------------
+
+
+def test_oversized_file_is_rejected_without_being_read(tmp_path) -> None:
+    # A record over the ceiling cannot have been written through store(), so it
+    # must be dropped by size alone — never read into memory first.
+    storage = AppStateStorage(tmp_path / "state")
+    storage.store("outbox", "message-1", [1, 2, 3])
+
+    path = (
+        tmp_path
+        / "state"
+        / state_storage_module._type_directory_name("outbox")
+        / state_storage_module._entry_name("outbox", "message-1")
+    )
+    # Sparse file: the ceiling is enforced on the *reported* size, so this never
+    # occupies real disk in CI.
+    with open(path, "r+b") as handle:
+        handle.truncate(state_storage_module.MAX_FILE_BYTES + 1)
+
+    assert storage.load("outbox", "message-1") is None
+    assert not path.exists()
+
+
+def test_store_refuses_values_over_the_ceiling() -> None:
+    with pytest.raises(Exception):
+        state_storage_module._frame(
+            "outbox", "m-1", b"\x00" * (state_storage_module.MAX_VALUE_BYTES + 1)
+        )
+
+
+def test_malformed_record_is_dropped_rather_than_returned(tmp_path) -> None:
+    # A file whose framing does not name the key that was asked for is not that
+    # record — return absence rather than someone else's bytes.
+    storage = AppStateStorage(tmp_path / "state")
+    storage.store("outbox", "message-1", [1, 2, 3])
+
+    path = (
+        tmp_path
+        / "state"
+        / state_storage_module._type_directory_name("outbox")
+        / state_storage_module._entry_name("outbox", "message-1")
+    )
+    path.write_bytes(bytes(range(9)))
+
+    assert storage.load("outbox", "message-1") is None
+    assert storage.list_keys("outbox") == []
+
+
+def test_unframed_stray_files_are_ignored_by_listing(tmp_path) -> None:
+    storage = AppStateStorage(tmp_path / "state")
+    storage.store("outbox", "message-1", [1])
+
+    directory = tmp_path / "state" / state_storage_module._type_directory_name("outbox")
+    (directory / "k_not-a-record").write_bytes(b"\x01\x02\x03")
+    (directory / "unrelated.tmp").write_bytes(b"\x01\x02\x03")
+
+    assert storage.list_keys("outbox") == ["message-1"]

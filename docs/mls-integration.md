@@ -369,6 +369,25 @@ Do not implement the protocol-state provider with Keychain,
 EncryptedSharedPreferences backed by a surviving Keystore namespace, or any
 other store that can outlive the app container. State writes must be atomic.
 
+**`load` must bound its read.** Check the stored entry's size *before*
+materializing it and never allocate — or hand back across the FFI — more than
+8 MiB. The SDK refuses to write anything near that, so a larger entry is corrupt
+or tampered: drop it and report absence, which is what the SDK does with an
+oversized record it manages to see. This obligation cannot live in the SDK,
+because by the time it can check a length the provider has already allocated the
+bytes. `listKeys` should stay bounded for the same reason; the SDK caps every
+category well below any sane ceiling.
+
+**If you address entries by filename, do not encode the key into the name.**
+Key ids are peer and message ids, so an encoding is both case-sensitive (`AAG`
+and `AAa` become the same file on a case-insensitive volume — APFS's macOS
+default — and one record silently overwrites the other) and unbounded (a
+long-but-valid id overruns the 255-byte `NAME_MAX`). Use a fixed-length
+lowercase digest and record the exact key inside the entry. The built-in
+providers do exactly this, in a format shared across iOS, Android, and Python:
+a `"OPS1"` magic, big-endian `u16` lengths for `keyType` and `keyId`, both keys
+in UTF-8, then the value bytes.
+
 ### Protocol-State Confidentiality
 
 A protocol-state provider is a byte store, not a trusted one. Store and return
