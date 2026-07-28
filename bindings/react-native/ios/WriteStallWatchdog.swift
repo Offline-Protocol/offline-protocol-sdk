@@ -78,6 +78,9 @@ final class WriteStallWatchdog {
     /// write's own send completion to `disarm`. Opaque and never reused, so a
     /// completion can only ever retire the slot it created — a late completion
     /// whose slot `reset` already dropped names nothing and disarms nothing.
+    /// Uniqueness is per-watchdog-instance (the counter is instance state); the
+    /// bridge owns exactly one watchdog per connection manager and never
+    /// replaces it, so tokens never cross instances.
     struct WriteToken: Equatable {
         fileprivate let id: UInt64
     }

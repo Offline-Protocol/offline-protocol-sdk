@@ -238,10 +238,15 @@ public class InternetManager: NSObject, TransportManager {
     ///
     /// The disarm hops to messageQueue because the completion lands on
     /// URLSession's delegate queue and the watchdog is messageQueue-confined.
-    /// It is enqueued BEFORE `completion` runs, so on a serial queue it always
-    /// lands ahead of whatever the caller's own messageQueue hop does — keeping
-    /// the "disarm before any stale-task guard" ordering a cancelled
-    /// post-teardown completion relies on to free its slot. messageQueue only.
+    /// It is ENQUEUED before `completion` runs — that unconditional enqueue,
+    /// not its execution, is the guarantee: no early return inside a caller's
+    /// completion (a `guard let self`, a stale-task guard) can strand the slot,
+    /// which is what a cancelled post-teardown completion relies on to free it.
+    /// For the two callers that hop to messageQueue themselves it also EXECUTES
+    /// first, since a serial queue preserves the enqueue order; a caller that
+    /// stays on the delegate queue (sendMessage) simply sees it land later, so
+    /// no caller may read watchdog state expecting its own write to be gone.
+    /// messageQueue only.
     private func sendWatched(
         _ task: URLSessionWebSocketTask,
         _ text: String,
@@ -1858,8 +1863,13 @@ public class InternetManager: NSObject, TransportManager {
 
         sendWatched(task, jsonString) { [weak self] error in
             guard let self = self else { return }
-            // (sendWatched already queued this write's stall-watchdog disarm,
-            // ahead of anything below.)
+            // (sendWatched already ENQUEUED this write's stall-watchdog disarm
+            // on messageQueue, unconditionally — so the guards below cannot
+            // strand its slot. Note it has not necessarily RUN yet: unlike the
+            // control paths, this body stays on URLSession's delegate queue, so
+            // the disarm typically lands after it. Don't read
+            // writeStallWatchdog state from here expecting this write to be
+            // gone from it.)
             // A stale task's send outcome must not increment the failure
             // counter, report internetSendFailed for the message (the
             // disconnect path's fail_all_pending already owned it), or
@@ -1995,7 +2005,14 @@ public class InternetManager: NSObject, TransportManager {
                 self.messageQueue.async {
                     self.inFlightControlPrimaries -= 1
                     // (sendWatched already retired this write's stall-watchdog
-                    // slot on an earlier-queued block.)
+                    // slot on an earlier-queued block — a SEPARATE one from
+                    // this, where in 0.16.5 the two travelled together. So a
+                    // poll tick can land between them and observe an empty
+                    // watchdog while this counter is still held. Harmless: that
+                    // tick early-returns on the control gate and the next 100ms
+                    // tick proceeds. The reverse — gate released while the slot
+                    // still stands — is what would matter, and is impossible:
+                    // the disarm is always enqueued first.)
                     // A stale task's send outcome must not touch failure
                     // counters, fail the message id (fail_all_pending owned
                     // it), or trigger teardown (see isStale); its deltas and
@@ -2107,7 +2124,13 @@ public class InternetManager: NSObject, TransportManager {
             self.messageQueue.async {
                 self.isDrainingControlFrames = false
                 // (sendWatched already retired this write's stall-watchdog
-                // slot on an earlier-queued block.)
+                // slot on an earlier-queued block — separate from this one, so
+                // a poll tick between them sees an empty watchdog while the
+                // drain flag is still set. Harmless for the same reason as the
+                // primary path above; and the disarm being enqueued first is
+                // what keeps the next frame's arm — issued from
+                // drainPendingControlFrames below — from ever double-counting
+                // against this one.)
                 // Stale task: the disconnect path already cleared the queue
                 // and generation-killed the commits.
                 guard !self.isStale(task) else { return }
