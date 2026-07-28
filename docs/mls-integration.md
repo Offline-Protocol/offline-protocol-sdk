@@ -367,7 +367,16 @@ class MyCustomMlsStorage : MlsStorageProvider {
 
 Do not implement the protocol-state provider with Keychain,
 EncryptedSharedPreferences backed by a surviving Keystore namespace, or any
-other store that can outlive the app container. State writes must be atomic.
+other store that can outlive the app container.
+
+**Writes must be atomic *and* durable before `store` returns.** The SDK treats a
+successful `store` as persisted and immediately writes state that depends on it
+— most sharply the per-install record-sealing key, after which sealed records
+start landing in the protocol-state container. A rename that commits ahead of
+its data blocks, or an `apply()` that only staged the write in memory, can crash
+into a container full of records whose key was never written. The built-in
+providers use `AtomicFile` on Android, `commit()` for encrypted preferences, and
+an fsync of the file *and* its parent directory on iOS and Python.
 
 **`load` must bound its read.** Check the stored entry's size *before*
 materializing it and never allocate — or hand back across the FFI — more than

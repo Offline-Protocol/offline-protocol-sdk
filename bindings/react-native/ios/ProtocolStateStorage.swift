@@ -215,17 +215,20 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         defer { lock.unlock() }
 
         let directory = typeDirectory(keyType)
+        let url = entryURL(keyType: keyType, keyId: keyId)
         do {
             try fileManager.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true
             )
-            try framed.write(to: entryURL(keyType: keyType, keyId: keyId), options: .atomic)
+            try framed.write(to: url, options: .atomic)
         } catch {
             throw MlsStorageError.StoreFailed(
                 message: "Failed to persist protocol state: \(error)"
             )
         }
+        flushFile(at: url)
+        flushDirectory(at: directory)
     }
 
     func load(keyType: String, keyId: String) throws -> [UInt8]? {
@@ -288,6 +291,9 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
                 message: "Failed to delete protocol state: \(error)"
             )
         }
+        // The unlink lives in the parent directory, so it needs its own flush
+        // or a crash can resurrect an entry the SDK has already settled.
+        flushDirectory(at: typeDirectory(keyType))
     }
 
     func listKeys(keyType: String) throws -> [String] {
@@ -346,10 +352,48 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     /// application is holding the message id `send_message` returned for it —
     /// while absence is simply nothing to restore, reported to no one.
     private func discard(_ url: URL, reason: String) -> MlsStorageError {
+        let directory = url.deletingLastPathComponent()
         try? fileManager.removeItem(at: url)
+        flushDirectory(at: directory)
         return MlsStorageError.CorruptedData(
             message: "Dropped unreadable protocol-state record: \(reason)"
         )
+    }
+
+    /// Flushes a written entry to stable storage.
+    ///
+    /// `Data.write(options: .atomic)` is rename-*atomic*, not durable: the
+    /// rename's directory entry can commit ahead of the new file's data
+    /// blocks, so a power loss can leave the record present and zero-filled.
+    /// That file then fails to frame and is dropped — and core treats a
+    /// returned success as persisted, most sharply for the records it seals
+    /// under a key it just stored. Android's `AtomicFile` and Python's
+    /// fsync-file-then-directory both flush; this is the same guarantee.
+    ///
+    /// `F_FULLFSYNC` rather than `fsync(2)`: on Apple platforms `fsync` only
+    /// hands the blocks to the drive, which may still buffer them.
+    ///
+    /// Best effort. A filesystem that refuses the flush leaves the atomic
+    /// rename as the strongest guarantee available, which is what every write
+    /// had before.
+    private func flushFile(at url: URL) {
+        let descriptor = open(url.path, O_WRONLY)
+        guard descriptor >= 0 else { return }
+        defer { close(descriptor) }
+        if fcntl(descriptor, F_FULLFSYNC) == -1 {
+            _ = fsync(descriptor)
+        }
+    }
+
+    /// Flushes a directory entry so a rename or unlink in it survives a crash.
+    /// A directory cannot be opened for writing, so this reads.
+    private func flushDirectory(at url: URL) {
+        let descriptor = open(url.path, O_RDONLY)
+        guard descriptor >= 0 else { return }
+        defer { close(descriptor) }
+        if fcntl(descriptor, F_FULLFSYNC) == -1 {
+            _ = fsync(descriptor)
+        }
     }
 
     private func typeDirectory(_ keyType: String) -> URL {
