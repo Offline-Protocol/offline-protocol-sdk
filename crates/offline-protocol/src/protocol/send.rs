@@ -580,7 +580,7 @@ impl OfflineProtocol {
     }
 
     /// Creates a new message from the given parameters.
-    pub(super) fn validate_outbound_recipient(recipient: &str) -> Result<()> {
+    pub(crate) fn validate_outbound_recipient(recipient: &str) -> Result<()> {
         UserId::new(recipient)
             .map(|_| ())
             .map_err(|error| Error::InvalidArgument(format!("Invalid recipient user ID: {error}")))

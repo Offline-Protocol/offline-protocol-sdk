@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **Malformed or unresolved recipient tokens are rejected before any queue, outbox, clock, or transport side effect.** All outbound user-targeted APIs now validate the recipient at the SDK boundary, preventing app-owned unresolved identifiers such as `unresolved:token` from becoming indefinitely retried protocol state.
+- **Malformed or unresolved recipient tokens are rejected before any queue, outbox, group mutation, clock, or transport side effect.** All outbound user-targeted APIs, including group invite/removal/role mutation, now validate the recipient at the SDK boundary, preventing app-owned unresolved identifiers such as `unresolved:token` from becoming indefinitely retried protocol state.
 
 ## [0.16.6] — 2026-07-28
 

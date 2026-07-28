@@ -275,6 +275,26 @@ fn test_group_mls_invite_requires_key_package() {
 }
 
 #[test]
+fn test_group_mls_invite_rejects_invalid_user_before_side_effects() {
+    let (mut protocol, events) = setup_started_with_events();
+    let info = protocol.create_group("Validation Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    let before = protocol.get_group_info(&group_id).unwrap().unwrap();
+    assert!(protocol.pending_key_packages.is_empty());
+    events.lock().unwrap().clear();
+
+    let result = protocol.invite_to_group(&group_id, "unresolved:token");
+
+    assert!(matches!(result, Err(crate::Error::InvalidArgument(_))));
+    let after = protocol.get_group_info(&group_id).unwrap().unwrap();
+    assert_eq!(after.epoch, before.epoch);
+    assert_eq!(after.members, before.members);
+    assert_eq!(after.members_count, before.members_count);
+    assert!(protocol.pending_key_packages.is_empty());
+    assert!(events.lock().unwrap().is_empty());
+}
+
+#[test]
 fn test_group_mls_dedup_cache() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 

@@ -2061,6 +2061,8 @@ impl OfflineProtocol {
     /// Requires the invitee's key package to be available in `pending_key_packages`.
     /// Sends a Welcome to the invitee and a Commit to all existing members.
     pub fn invite_to_group(&mut self, group_id: &str, invitee_user_id: &str) -> Result<()> {
+        Self::validate_outbound_recipient(invitee_user_id)?;
+
         // Admin check
         let self_id = self.config.user_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
@@ -2259,6 +2261,8 @@ impl OfflineProtocol {
     ///
     /// Sends a Commit to all remaining members.
     pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
+        Self::validate_outbound_recipient(member_id)?;
+
         let self_id = self.config.user_id.clone();
 
         // Admin check + last-admin guard (single metadata load)
@@ -3069,6 +3073,8 @@ impl OfflineProtocol {
         target_user_id: &str,
         role: GroupRole,
     ) -> Result<()> {
+        Self::validate_outbound_recipient(target_user_id)?;
+
         let self_id = self.config.user_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
             return Err(Error::PermissionDenied(
