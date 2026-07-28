@@ -121,6 +121,14 @@ pub struct OfflineProtocol {
     /// Pending messages waiting for session establishment (recipient -> messages).
     pending_encrypted_messages: HashMap<String, Vec<PendingMessage>>,
 
+    /// Earliest wall-clock expiry in `pending_encrypted_messages`.
+    ///
+    /// `process()` consults this before scanning the bounded queue, avoiding an
+    /// O(N) walk on every 100 ms tick while preserving exact configured expiry.
+    /// A stale early deadline is harmless: it causes one extra scan, which then
+    /// recomputes the real minimum.
+    next_pending_message_expiry: Option<DateTime<Utc>>,
+
     /// Key packages received but not yet used (sender_id -> package).
     pub(crate) pending_key_packages: HashMap<String, ReceivedKeyPackage>,
 
@@ -474,6 +482,7 @@ impl OfflineProtocol {
             dm_unreachable_parks: HashMap::new(),
             mls_manager: None,
             pending_encrypted_messages: HashMap::new(),
+            next_pending_message_expiry: None,
             pending_key_packages: HashMap::new(),
             key_package_sent_to: std::collections::HashSet::new(),
             known_peers: HashMap::new(),
@@ -568,6 +577,7 @@ impl OfflineProtocol {
         let previous_secure_storage = self.secure_storage.clone();
         let previous_protocol_state_storage = self.protocol_state_storage.clone();
         let previous_pending_messages = self.pending_encrypted_messages.clone();
+        let previous_pending_message_expiry = self.next_pending_message_expiry;
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
@@ -614,6 +624,7 @@ impl OfflineProtocol {
             self.secure_storage = previous_secure_storage;
             self.protocol_state_storage = previous_protocol_state_storage;
             self.pending_encrypted_messages = previous_pending_messages;
+            self.next_pending_message_expiry = previous_pending_message_expiry;
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);

@@ -7,9 +7,10 @@ use super::{
     OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PresencePayload,
     ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras, SendMessageOptions,
     TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS,
-    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_CONNECTION_REQUESTS, MAX_PENDING_MESSAGES_GLOBAL,
+    MAX_PENDING_MESSAGES_PER_PEER, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
+    MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use crate::constants::{
@@ -1284,6 +1285,7 @@ impl OfflineProtocol {
         rich: Option<RichSendExtras>,
     ) {
         let message_id_str = message_id.as_str().to_string();
+        let queued_at = Utc::now();
         let pending = PendingMessage {
             content: content.to_string(),
             priority,
@@ -1293,8 +1295,32 @@ impl OfflineProtocol {
             content_type,
             media_metadata,
             rich,
-            queued_at: Utc::now(),
+            queued_at,
         };
+
+        let mut evicted = Vec::new();
+        let mut changed_recipients = HashSet::new();
+
+        while self
+            .pending_encrypted_messages
+            .get(recipient)
+            .is_some_and(|messages| messages.len() >= MAX_PENDING_MESSAGES_PER_PEER)
+        {
+            if let Some(message) = self.evict_pending_message_at(recipient, 0) {
+                evicted.push(message);
+                changed_recipients.insert(recipient.to_string());
+            } else {
+                break;
+            }
+        }
+
+        while self.total_pending_message_count() >= MAX_PENDING_MESSAGES_GLOBAL {
+            let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
+                break;
+            };
+            changed_recipients.insert(evicted_recipient);
+            evicted.push(message);
+        }
 
         // Push to in-memory queue first, then persist (the in-memory queue
         // is the source of truth; storage is a crash-recovery backup).
@@ -1302,10 +1328,110 @@ impl OfflineProtocol {
             .entry(recipient.to_string())
             .or_default()
             .push(pending);
+        self.note_pending_message_expiry(queued_at);
 
+        changed_recipients.remove(recipient);
+        for changed_recipient in changed_recipients {
+            self.persist_or_clear_pending_messages(&changed_recipient);
+        }
         self.persist_pending_messages_for_recipient(recipient);
 
+        for message in evicted {
+            self.emit_event(Event::message_failed(
+                message.message_id,
+                "Pending session queue capacity exceeded".to_string(),
+                0,
+            ));
+        }
+
         debug!(recipient = %recipient, message_id = %message_id_str, "Queued message pending session establishment");
+    }
+
+    pub(super) fn total_pending_message_count(&self) -> usize {
+        self.pending_encrypted_messages.values().map(Vec::len).sum()
+    }
+
+    fn evict_pending_message_at(
+        &mut self,
+        recipient: &str,
+        index: usize,
+    ) -> Option<PendingMessage> {
+        let (message, remove_recipient) = {
+            let messages = self.pending_encrypted_messages.get_mut(recipient)?;
+            if index >= messages.len() {
+                return None;
+            }
+            let message = messages.remove(index);
+            (message, messages.is_empty())
+        };
+        if remove_recipient {
+            self.pending_encrypted_messages.remove(recipient);
+        }
+        Some(message)
+    }
+
+    pub(super) fn evict_oldest_pending_message(&mut self) -> Option<(String, PendingMessage)> {
+        let (recipient, index) = self
+            .pending_encrypted_messages
+            .iter()
+            .flat_map(|(recipient, messages)| {
+                messages
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, message)| (recipient, index, message))
+            })
+            .min_by(|left, right| {
+                left.2
+                    .queued_at
+                    .cmp(&right.2.queued_at)
+                    .then_with(|| left.2.message_id.as_str().cmp(&right.2.message_id.as_str()))
+            })
+            .map(|(recipient, index, _)| (recipient.clone(), index))?;
+        let message = self.evict_pending_message_at(&recipient, index)?;
+        Some((recipient, message))
+    }
+
+    pub(super) fn persist_or_clear_pending_messages(&self, recipient: &str) {
+        if self.pending_encrypted_messages.contains_key(recipient) {
+            self.persist_pending_messages_for_recipient(recipient);
+        } else {
+            self.clear_pending_messages_from_storage(recipient);
+        }
+    }
+
+    fn pending_message_expiry(queued_at: DateTime<Utc>, lifetime_ms: u64) -> Option<DateTime<Utc>> {
+        let lifetime_ms = i64::try_from(lifetime_ms).ok()?;
+        queued_at.checked_add_signed(chrono::Duration::milliseconds(lifetime_ms))
+    }
+
+    fn note_pending_message_expiry(&mut self, queued_at: DateTime<Utc>) {
+        let Some(expiry) = Self::pending_message_expiry(
+            queued_at,
+            self.config
+                .reliability
+                .retry
+                .pending_message_max_lifetime_ms,
+        ) else {
+            return;
+        };
+        self.next_pending_message_expiry = Some(
+            self.next_pending_message_expiry
+                .map_or(expiry, |current| current.min(expiry)),
+        );
+    }
+
+    pub(super) fn recompute_next_pending_message_expiry(&mut self) {
+        let lifetime_ms = self
+            .config
+            .reliability
+            .retry
+            .pending_message_max_lifetime_ms;
+        self.next_pending_message_expiry = self
+            .pending_encrypted_messages
+            .values()
+            .flat_map(|messages| messages.iter())
+            .filter_map(|message| Self::pending_message_expiry(message.queued_at, lifetime_ms))
+            .min();
     }
 
     /// Flushes pending messages for a recipient after session is established.
@@ -2329,12 +2455,29 @@ impl OfflineProtocol {
     /// establishment. This gives the pre-outbox queue the same bounded
     /// lifecycle guarantee as dispatched messages.
     pub(super) fn cleanup_expired_pending_messages(&mut self) {
+        self.cleanup_expired_pending_messages_at(Utc::now());
+    }
+
+    /// Runs pending-message expiry only when the earliest queued deadline is
+    /// due. Bindings call `process()` every 100 ms, so blindly scanning the
+    /// entire queue there wastes CPU and battery for almost the whole default
+    /// seven-day lifetime.
+    pub(super) fn cleanup_expired_pending_messages_if_due(&mut self) {
+        let now = Utc::now();
+        if self
+            .next_pending_message_expiry
+            .is_some_and(|expiry| now >= expiry)
+        {
+            self.cleanup_expired_pending_messages_at(now);
+        }
+    }
+
+    fn cleanup_expired_pending_messages_at(&mut self, now: DateTime<Utc>) {
         let lifetime_ms = self
             .config
             .reliability
             .retry
             .pending_message_max_lifetime_ms;
-        let now = Utc::now();
         let mut changed_recipients = Vec::new();
         let mut expired_ids = Vec::new();
 
@@ -2365,6 +2508,7 @@ impl OfflineProtocol {
                 self.persist_pending_messages_for_recipient(&recipient);
             }
         }
+        self.recompute_next_pending_message_expiry();
 
         for message_id in expired_ids {
             self.emit_event(Event::message_failed(

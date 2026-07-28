@@ -4,8 +4,8 @@ use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState,
     WelcomeLifecycleRecord, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
-    MAX_PERSISTED_CAPABILITY_VERSIONS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
-    WELCOME_LIFECYCLE_TTL_SECS,
+    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
+    MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::{Error, Result};
@@ -89,7 +89,7 @@ impl OfflineProtocol {
     /// This should be called after initializing storage to recover
     /// any messages that were pending when the app was terminated.
     pub(crate) fn restore_pending_messages(&mut self) -> Result<()> {
-        let Some(storage) = &self.protocol_state_storage else {
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return Ok(());
         };
 
@@ -97,15 +97,51 @@ impl OfflineProtocol {
             .list_keys(storage_keys::PENDING_MESSAGES)
             .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
 
+        let mut capacity_evicted = Vec::new();
+        let mut changed_recipients = std::collections::HashSet::new();
         for recipient in recipients {
-            if let Some(messages) = self.load_pending_messages_from_storage(&recipient) {
+            if Self::validate_outbound_recipient(&recipient).is_err() {
+                let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
+                continue;
+            }
+            if let Some(mut messages) = self.load_pending_messages_from_storage(&recipient) {
+                let overflow = messages.len().saturating_sub(MAX_PENDING_MESSAGES_PER_PEER);
+                if overflow > 0 {
+                    capacity_evicted
+                        .extend(messages.drain(..overflow).map(|message| message.message_id));
+                    changed_recipients.insert(recipient.clone());
+                }
                 if !messages.is_empty() {
                     info!(recipient = %recipient, count = messages.len(), "Restored pending messages from storage");
-                    self.pending_encrypted_messages.insert(recipient, messages);
+                    self.pending_encrypted_messages
+                        .insert(recipient.clone(), messages);
+                } else {
+                    let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
+                }
+
+                while self.total_pending_message_count() > MAX_PENDING_MESSAGES_GLOBAL {
+                    let Some((evicted_recipient, message)) = self.evict_oldest_pending_message()
+                    else {
+                        break;
+                    };
+                    changed_recipients.insert(evicted_recipient);
+                    capacity_evicted.push(message.message_id);
                 }
             }
         }
 
+        for recipient in changed_recipients {
+            self.persist_or_clear_pending_messages(&recipient);
+        }
+        for message_id in capacity_evicted {
+            self.emit_event(crate::Event::message_failed(
+                message_id,
+                "Pending session queue capacity exceeded".to_string(),
+                0,
+            ));
+        }
+
+        self.recompute_next_pending_message_expiry();
         self.cleanup_expired_pending_messages();
         Ok(())
     }

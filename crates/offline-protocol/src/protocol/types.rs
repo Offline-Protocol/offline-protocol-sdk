@@ -187,6 +187,19 @@ pub(crate) const MAX_PLAINTEXT_RECEIVE_WARNED_PEERS: usize = 1000;
 /// its persisted copy; the restore-on-boot loop is capped the same way.
 pub(crate) const MAX_PENDING_KEY_PACKAGES: usize = 1000;
 
+/// Maximum outbound messages waiting for one peer's MLS session.
+///
+/// This queue is durable and accepts application-controlled content, so a peer
+/// that never completes session establishment must not grow it without bound.
+/// The limit matches the default inbound pending-decryption per-peer bound.
+pub(crate) const MAX_PENDING_MESSAGES_PER_PEER: usize = 64;
+
+/// Maximum outbound messages waiting for MLS sessions across all peers.
+///
+/// At capacity the globally oldest message is settled as failed before the new
+/// message is admitted. The limit matches the default inbound pending queue.
+pub(crate) const MAX_PENDING_MESSAGES_GLOBAL: usize = 4096;
+
 /// Maximum number of peers remembered in `key_package_sent_to` (the "already
 /// sent our key package to this peer" set).
 ///

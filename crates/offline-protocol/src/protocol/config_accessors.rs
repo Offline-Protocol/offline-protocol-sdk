@@ -103,6 +103,8 @@ impl OfflineProtocol {
         candidate.validate()?;
         self.retry_queue = RetryQueue::with_config(config.clone());
         self.config.reliability.retry = config;
+        self.recompute_next_pending_message_expiry();
+        self.cleanup_expired_pending_messages();
         Ok(())
     }
 
@@ -157,7 +159,7 @@ impl OfflineProtocol {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.prune_stale_known_peers(std::time::Instant::now());
-        self.cleanup_expired_pending_messages();
+        self.cleanup_expired_pending_messages_if_due();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
         self.cleanup_group_message_dedup();

@@ -4366,6 +4366,128 @@ fn test_pending_message_queue() {
 }
 
 #[test]
+fn test_outbound_pending_queue_evicts_oldest_at_per_peer_limit() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let event_sink = events.clone();
+    protocol.on_event(move |event| event_sink.lock().unwrap().push(event));
+    let first_id = MessageId::new();
+
+    for index in 0..=MAX_PENDING_MESSAGES_PER_PEER {
+        protocol.queue_pending_message(
+            "bob",
+            &format!("message-{index}"),
+            MessagePriority::Medium,
+            if index == 0 {
+                first_id.clone()
+            } else {
+                MessageId::new()
+            },
+            None,
+            None,
+            ContentType::default(),
+            None,
+            None,
+        );
+    }
+
+    let queued = protocol.pending_encrypted_messages.get("bob").unwrap();
+    assert_eq!(queued.len(), MAX_PENDING_MESSAGES_PER_PEER);
+    assert!(queued.iter().all(|message| message.message_id != first_id));
+    assert!(events.lock().unwrap().iter().any(|event| matches!(
+        event,
+        Event::MessageFailed {
+            message_id,
+            reason,
+            retry_count: 0,
+        } if message_id == &first_id.as_str()
+            && reason == "Pending session queue capacity exceeded"
+    )));
+}
+
+#[test]
+fn test_outbound_pending_queue_enforces_global_limit() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut original_ids = std::collections::HashSet::new();
+
+    for index in 0..MAX_PENDING_MESSAGES_GLOBAL {
+        let message_id = MessageId::new();
+        original_ids.insert(message_id.as_str().to_string());
+        protocol.queue_pending_message(
+            &format!("peer-{}", index / MAX_PENDING_MESSAGES_PER_PEER),
+            "queued",
+            MessagePriority::Medium,
+            message_id,
+            None,
+            None,
+            ContentType::default(),
+            None,
+            None,
+        );
+    }
+    let newest_id = MessageId::new();
+    protocol.queue_pending_message(
+        "overflow-peer",
+        "newest",
+        MessagePriority::Medium,
+        newest_id.clone(),
+        None,
+        None,
+        ContentType::default(),
+        None,
+        None,
+    );
+
+    assert_eq!(
+        protocol.total_pending_message_count(),
+        MAX_PENDING_MESSAGES_GLOBAL
+    );
+    let queued_ids: std::collections::HashSet<_> = protocol
+        .pending_encrypted_messages
+        .values()
+        .flatten()
+        .map(|message| message.message_id.as_str().to_string())
+        .collect();
+    assert!(queued_ids.contains(&newest_id.as_str()));
+    assert_eq!(
+        queued_ids.intersection(&original_ids).count(),
+        MAX_PENDING_MESSAGES_GLOBAL - 1
+    );
+}
+
+#[test]
+fn test_periodic_pending_cleanup_waits_for_earliest_deadline() {
+    let mut config = create_test_config();
+    config.reliability.retry.pending_message_max_lifetime_ms = 10_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.queue_pending_message(
+        "bob",
+        "queued",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::default(),
+        None,
+        None,
+    );
+
+    assert!(protocol
+        .next_pending_message_expiry
+        .is_some_and(|expiry| expiry > Utc::now()));
+    protocol.cleanup_expired_entries();
+    assert!(protocol.pending_encrypted_messages.contains_key("bob"));
+
+    protocol.pending_encrypted_messages.get_mut("bob").unwrap()[0].queued_at =
+        Utc::now() - ChronoDuration::milliseconds(10_001);
+    protocol.next_pending_message_expiry = Some(Utc::now() - ChronoDuration::milliseconds(1));
+    protocol.cleanup_expired_entries();
+
+    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(protocol.next_pending_message_expiry.is_none());
+}
+
+#[test]
 fn test_encryption_builder_methods() {
     // Disabling encryption without also opting out of require_encryption
     // (true by default since SEC-M3) must fail validation — plaintext

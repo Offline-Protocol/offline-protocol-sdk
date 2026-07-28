@@ -203,6 +203,12 @@ const config = {
 };
 ```
 
+The outbound queue waiting for MLS session establishment is also hard-bounded
+at 64 messages per peer and 4096 messages globally. At capacity the oldest
+entry is settled with `message_failed` before the new message is admitted.
+Expiry work is scheduled from the earliest queued deadline rather than scanning
+the queue on every `process()` tick.
+
 ### Tuning for Different Scenarios
 
 **High-reliability (field operations, disaster response)**:

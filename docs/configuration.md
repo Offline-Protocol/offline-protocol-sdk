@@ -415,7 +415,7 @@ disabled fleet interoperates with an enabled one automatically.
 | `maxDelayMs` | number | 300000 | Max retry delay (5 min) |
 | `backoffMultiplier` | number | 2.0 | Backoff multiplier |
 | `outboxMaxLifetimeMs` | number | 604800000 | Max message lifetime (7 days) |
-| `pendingMessageMaxLifetimeMs` | number | 604800000 | Max lifetime while waiting for MLS session establishment (7 days) |
+| `pendingMessageMaxLifetimeMs` | number | 604800000 | Max lifetime while waiting for MLS session establishment (7 days); the outbound queue is also fixed at 64 messages per peer and 4096 globally |
 
 **Dedup Config**:
 | Parameter | Type | Default | Description |
