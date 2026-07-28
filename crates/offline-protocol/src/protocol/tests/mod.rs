@@ -5511,11 +5511,12 @@ fn test_delivery_ack_redrives_the_peers_other_parked_dms() {
     }
 
     // Message 0's probe fires and registers its ACK (what the retry queue does
-    // on a probe send); the peer answers it. Deliberately WITHOUT an
-    // ACK_TRANSPORT_KEY label — that field is peer-supplied and decodes to BLE
-    // when absent, so pinning the re-drive to it unconditionally would fail
-    // every sibling send against this internet-only device and silently strand
-    // them. The re-drive must fall back to DORS instead.
+    // on a probe send); the peer answers it. The ACK deliberately carries no
+    // ACK_TRANSPORT_KEY label: the re-drive override must come from the
+    // sender's own record of the delivered send's transport
+    // (`OutboxEntry::last_transport` — Internet here, and available), never
+    // from the peer-supplied label, which decodes any absent or unknown value
+    // to BLE and would let a peer steer the sibling sends.
     let probed = protocol.outbox.get(&ids[0]).unwrap().message.clone();
     protocol.ensure_ack_registration(&probed).unwrap();
     let sends_before = internet_handle.sent_messages().len();
@@ -5549,6 +5550,76 @@ fn test_delivery_ack_redrives_the_peers_other_parked_dms() {
             "re-driving must not settle the sibling"
         );
     }
+}
+
+#[test]
+fn test_delivery_ack_redrive_ignores_peer_label_and_falls_back_to_dors() {
+    // Two hostile-to-override conditions at once: the delivering transport
+    // recorded on the outbox entry is gone by ACK time (last_transport = BLE,
+    // never attached), and the ACK carries a garbage ACK_TRANSPORT_KEY label
+    // (peer-supplied; decodes to BLE). The re-drive must ignore the label
+    // entirely and, with its own last_transport unavailable, fall back to
+    // DORS — a missing carrier costs routing freedom, never the re-drive.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    let internet_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let ids: Vec<_> = (0..2)
+        .map(|i| {
+            protocol
+                .send_message(
+                    "bob",
+                    &format!("hello {}", i),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap()
+        })
+        .collect();
+    for id in &ids {
+        protocol
+            .on_transport_send_failed(
+                &id.as_str(),
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
+    }
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), Some(&2));
+
+    // The carrier that delivered message 0 has since dropped.
+    protocol.outbox.get_mut(&ids[0]).unwrap().last_transport = Some(TransportType::BLE);
+
+    let probed = protocol.outbox.get(&ids[0]).unwrap().message.clone();
+    protocol.ensure_ack_registration(&probed).unwrap();
+    let sends_before = internet_handle.sent_messages().len();
+
+    let ack = Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .metadata(ACK_FOR_KEY, ids[0].as_str())
+    .metadata(crate::constants::ACK_TRANSPORT_KEY, "garbage")
+    .build();
+    protocol.handle_ack_message(&ack);
+
+    assert_eq!(protocol.dm_unreachable_parks.get("bob"), None);
+    assert!(
+        internet_handle.sent_messages().len() > sends_before,
+        "the sibling must be re-driven over DORS's pick, not stranded on a \
+         carrier this device does not have"
+    );
+    assert!(
+        protocol.ack_manager.is_waiting_for_ack(&ids[1]),
+        "the sibling must be re-driven with a fresh ACK budget"
+    );
 }
 
 #[test]

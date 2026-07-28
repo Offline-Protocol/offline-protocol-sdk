@@ -3262,21 +3262,26 @@ impl OfflineProtocol {
                         // counter reset — including restoring it when every
                         // re-drive fails — so this must not pre-clear it.
                         //
-                        // The ACK's transport is genuine per-transport
-                        // reachability proof, so it overrides DORS the way
-                        // presence-online pins Internet — but only when it is
-                        // actually available: ACK_TRANSPORT_KEY is
-                        // peer-supplied and falls back to BLE when absent, and
-                        // forcing a carrier this device does not have would
-                        // fail every sibling send and silently strand them on
-                        // the timers this exists to skip.
+                        // The override is our own record of the transport the
+                        // delivered send went out on (`last_transport`), which
+                        // this ACK just proved reaches the peer — genuine
+                        // per-transport reachability, pinning the re-drive the
+                        // way presence-online pins Internet. Deliberately NOT
+                        // the ACK's `transport` above: ACK_TRANSPORT_KEY is
+                        // peer-supplied, and `from_label` maps any absent,
+                        // stale, or hostile label to BLE — pinning a burst of
+                        // sibling sends to a carrier chosen by the peer.
+                        // Filtered on local availability (the transport may
+                        // have dropped since the send); `None` falls back to
+                        // DORS, so a missing carrier costs routing freedom,
+                        // never the re-drive itself.
                         let recipient = entry.message.recipient.as_str().to_string();
                         if self.dm_unreachable_parks.contains_key(&recipient) {
-                            let redrive_via = self
-                                .transport_manager
-                                .get_available_transports()
-                                .contains_key(&transport)
-                                .then_some(transport);
+                            let redrive_via = entry.last_transport.filter(|t| {
+                                self.transport_manager
+                                    .get_available_transports()
+                                    .contains_key(t)
+                            });
                             self.flush_outbox_for_peer_via(&recipient, redrive_via);
                         }
                     }
