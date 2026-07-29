@@ -369,6 +369,19 @@ Do not implement the protocol-state provider with Keychain,
 EncryptedSharedPreferences backed by a surviving Keystore namespace, or any
 other store that can outlive the app container.
 
+**If you supply your own `MlsStorageProvider`, upgrading installs will not
+inherit their pre-split delivery state.** On first launch the SDK sweeps
+outbox entries, pending messages, lifecycles, the Lamport clock, and the block
+list out of secure storage and into protocol-state storage — but it enumerates
+them through the `MlsStorageProvider` it is given. The built-in providers find
+them because they read through to the pre-namespace store they replaced; a
+custom provider has no such fallback, so the sweep finds nothing and that state
+stays where it is. It is not lost — it is simply never picked up, and the
+install comes up with an empty outbox, an empty pending queue, and an **empty
+block list**. If you have shipped a custom provider and are upgrading across
+this release, have it read through to wherever your previous version wrote, or
+migrate that data yourself before calling `initializeMls`.
+
 **Protocol-state values are `ByteArray` / `Data` / `bytes`**, not the
 element-wise sequence `MlsStorageProvider` uses. That interface carries key
 material a few hundred bytes at a time; these records reach megabytes, where a
@@ -456,6 +469,34 @@ into one sealed record. Sealing fails closed, and a block list that silently
 stops persisting whenever the record key is unavailable is a worse failure than
 a readable one: blocking is a safety control, and it must survive every state in
 which the SDK still runs.
+
+**Sealing is confidentiality, not integrity — and only the sealed categories get
+even that.** A sealed record is authenticated: its AEAD tag covers the value and
+its associated data binds it to its `(keyType, keyId)` slot, so an edited or
+relocated record does not open and is dropped. The categories in the table above
+carry no such protection. They are written in the clear and read back at face
+value, so an attacker who can *write* the app container of an unlocked device
+gets more than the peer graph:
+
+| Category | What a write buys | Consequence |
+| --- | --- | --- |
+| `blocked_users` | delete a marker | that peer is silently unblocked on the next launch |
+| `both_create_awaiting_decrypt` | delete a marker | the owner gate that requires a group-aware decrypt before confirming a peer is gone, so a stale plaintext probe can confirm a session the handshake never converged |
+| `session_states` | write `Confirmed` | a peer whose session was still pending is treated as confirmed |
+| `welcome_lifecycles` | edit state or retry schedule | Welcome delivery can be stalled or forced to retry |
+
+None of this forges or reads message content — that is MLS, and MLS keys never
+leave the credential store — but it does mean **container write access degrades
+safety and liveness controls, not just privacy.** Before the storage split these
+records sat behind the OS keystore, so the same attacker could do none of it.
+
+On stock iOS and Android the app container is writable only by the app itself,
+so this matters on a rooted or jailbroken device, or wherever else your threat
+model grants an attacker filesystem write. If it does, do not treat
+`blocked_users` or session confirmation as durable security state: re-derive them
+from a source you do trust. Sealing these categories instead is *not* the fix —
+it would make the block list fail closed, which is strictly worse (see the
+paragraph above).
 
 Consequences worth knowing:
 

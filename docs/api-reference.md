@@ -257,6 +257,23 @@ pub fn send_message(
 Sends a message. Returns `Ok(message_id)` when the message is accepted for send
 or queued for retry/pending-session delivery, or `Err` for policy and setup failures.
 
+Two boundary rules reject the call with `Error::InvalidArgument` before anything
+is queued, clocked, or persisted:
+
+- **`recipient` must be a well-formed `UserId`.** `UserId` rejects `:`, so
+  namespaced placeholder forms (`unresolved:token`, `did:key:…`, `npub:…`) must
+  be resolved before they reach the SDK.
+- **`content` must be at most 256 KiB.** The cap is enforced here rather than at
+  transmit time, because a message waiting on MLS session establishment is
+  queued in memory and on disk long before it reaches the transport's own 1 MiB
+  check. Use [`send_media_with`](#rich-messaging-sealed-extras) for anything
+  larger — it chunks, and is not subject to this limit.
+
+The pending-session queue behind this call is additionally bounded at 64
+messages / 2 MiB per peer and 4096 messages / 16 MiB globally; at capacity the
+oldest entry is settled with `message_failed` before the new one is admitted.
+See [Configuration](configuration.md#reliability-configuration).
+
 **Example**:
 ```rust
 match protocol.send_message("user456", "Hello!", Some(MessagePriority::High), None::<String>) {

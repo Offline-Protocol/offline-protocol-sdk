@@ -415,7 +415,22 @@ disabled fleet interoperates with an enabled one automatically.
 | `maxDelayMs` | number | 300000 | Max retry delay (5 min) |
 | `backoffMultiplier` | number | 2.0 | Backoff multiplier |
 | `outboxMaxLifetimeMs` | number | 604800000 | Max message lifetime (7 days) |
-| `pendingMessageMaxLifetimeMs` | number | 604800000 | Max lifetime while waiting for MLS session establishment (7 days); the outbound queue is also fixed at 64 messages per peer and 4096 globally |
+| `pendingMessageMaxLifetimeMs` | number | 604800000 | Max lifetime while waiting for MLS session establishment (7 days) |
+
+**Fixed (not configurable) message-plane limits**, listed here because they can
+surface as errors or as `message_failed` events:
+
+| Limit | Value | Effect when exceeded |
+|-------|-------|----------------------|
+| `sendMessage` content size | 256 KiB | call fails with `InvalidArgument` — use `sendMedia`, which chunks |
+| Pending queue, per peer | 64 messages / 2 MiB | oldest evicted with `message_failed` |
+| Pending queue, global | 4096 messages / 16 MiB | globally oldest evicted with `message_failed` |
+| Single protocol-state record | 4 MiB | refused on write, dropped on read |
+
+Group sends have no durable pre-session queue and are exempt from the queue
+bounds and the content cap; they remain bounded by the transport alone. See
+[Message Delivery](message-delivery.md#reliability-parameters) for the
+reasoning behind each.
 
 **Dedup Config**:
 | Parameter | Type | Default | Description |
