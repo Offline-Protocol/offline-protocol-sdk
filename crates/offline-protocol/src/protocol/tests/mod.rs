@@ -29050,6 +29050,68 @@ fn test_legacy_pending_queue_is_migrated_to_per_message_records() {
 }
 
 #[test]
+fn test_migration_does_not_resurrect_an_id_the_first_pass_settled() {
+    // The two passes agree through one set: pass 1 claims the ids it accounts
+    // for and pass 2 skips them. "Accounts for" has to include the ids pass 1
+    // examined and *settled* — a destroyed record still names its message — or
+    // a legacy queue left on disk by an interrupted migration re-files an id the
+    // application was already told had failed, and the message goes out on the
+    // wire after its own terminal event.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (ids, queue) = legacy_pending_queue(2, Utc::now() - ChronoDuration::minutes(5));
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    // The interrupted migration got as far as writing the first entry, and that
+    // record is now unopenable — examined, unrecoverable, settled.
+    state
+        .store(
+            storage_keys::PENDING_MESSAGE_ENTRIES,
+            &ids[0].as_str(),
+            b"not sealed under this install's record key",
+        )
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+    let events = started_protocol_events(&mut protocol);
+
+    let settled: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        settled.contains(&ids[0].as_str()),
+        "the destroyed record must settle its own id; got {settled:?}"
+    );
+
+    let queued: Vec<String> = protocol
+        .pending_encrypted_messages
+        .get("bob")
+        .map(|messages| messages.iter().map(|m| m.message_id.as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        queued,
+        vec![ids[1].as_str()],
+        "the legacy copy must not re-queue an id that was already settled"
+    );
+}
+
+#[test]
 fn test_migration_that_died_before_its_delete_does_not_double_restore() {
     // The migration writes the new records before dropping the legacy one, so a
     // crash in between leaves a queue present in *both* layouts. The next launch

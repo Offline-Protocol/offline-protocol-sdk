@@ -476,11 +476,14 @@ struct PendingRestoreWalk {
     /// Recovered entries, grouped by recipient but **not yet ordered** — see
     /// [`sort_pending_queue`], which the caller applies before the trims.
     grouped: HashMap<String, Vec<PendingMessage>>,
-    /// Ids recovered from the per-message layout.
+    /// Ids the per-message pass has already accounted for — recovered, or
+    /// examined and settled as destroyed.
     ///
-    /// The migration pass skips these: it writes the new records before deleting
-    /// the legacy one, so a crash in between leaves a queue present in both
-    /// layouts, and the migrated copy is the one to keep.
+    /// The migration pass skips these. Recovered ones because it writes the new
+    /// records before deleting the legacy one, so a crash in between leaves a
+    /// queue present in both layouts and the migrated copy is the one to keep;
+    /// settled ones because re-filing an id the application was just told had
+    /// failed would deliver a message after its own terminal event.
     seen: HashSet<String>,
     /// Ids of per-message records that were examined and destroyed. Settleable
     /// individually, because the key is the id.
@@ -1850,6 +1853,7 @@ impl OfflineProtocol {
                 // own without having opened the record.
                 Ok(StateRecord::Unreadable) => {
                     warn!(message_id = %key, "Dropping unreadable pending message");
+                    walk.seen.insert(key.clone());
                     walk.lost_ids.push(key);
                     continue;
                 }
@@ -1875,6 +1879,7 @@ impl OfflineProtocol {
                     // owed, so the record has to go with it.
                     budget.claim();
                     let _ = storage.delete(storage_keys::PENDING_MESSAGE_ENTRIES, &key);
+                    walk.seen.insert(key.clone());
                     walk.lost_ids.push(key);
                     continue;
                 }
@@ -1892,6 +1897,7 @@ impl OfflineProtocol {
                 );
                 budget.claim();
                 let _ = storage.delete(storage_keys::PENDING_MESSAGE_ENTRIES, &key);
+                walk.seen.insert(key.clone());
                 walk.lost_ids.push(key);
                 continue;
             }
@@ -1906,6 +1912,7 @@ impl OfflineProtocol {
                 );
                 budget.claim();
                 let _ = storage.delete(storage_keys::PENDING_MESSAGE_ENTRIES, &key);
+                walk.seen.insert(key);
                 walk.unaddressable.push(record.message.message_id);
                 continue;
             }
@@ -2034,9 +2041,11 @@ impl OfflineProtocol {
             for message in messages {
                 let message_id = message.message_id.as_str();
                 if walk.seen.contains(&message_id) {
-                    // Already recovered from the per-message layout by the pass
-                    // before this one — a previous launch migrated this queue and
-                    // died before the delete below.
+                    // Already accounted for by the pass before this one — either
+                    // a previous launch migrated this queue and died before the
+                    // delete below, or the per-message record was examined and
+                    // settled. Re-filing a settled id would put a message on the
+                    // wire after the app was told it failed.
                     continue;
                 }
                 self.persist_pending_message(&recipient, &message);
