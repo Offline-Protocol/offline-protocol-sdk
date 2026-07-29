@@ -58,7 +58,7 @@ jobs:
         run: bash scripts/build-uniffi-ios.sh
 
       - name: Upload iOS Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ios-libs
           path: |
@@ -137,7 +137,7 @@ jobs:
             "jniLibs/${{ matrix.abi }}/libuniffi_offline_protocol.so"
 
       - name: Upload ${{ matrix.abi }} library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-jniLibs-${{ matrix.abi }}
           path: jniLibs/
@@ -169,7 +169,7 @@ jobs:
           uniffi-bindgen generate src/offline_protocol.udl --language kotlin --out-dir ../../android-bindings
 
       - name: Upload Android Bindings
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-uniffi-bindings
           path: android-bindings/
@@ -218,7 +218,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-macos-${{ matrix.arch }}
           path: desktop-libs/
@@ -277,7 +277,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-linux-${{ matrix.arch }}
           path: desktop-libs/
@@ -315,7 +315,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-windows-x86_64
           path: desktop-libs/
@@ -349,7 +349,7 @@ jobs:
           cd crates/offline-protocol-uniffi
           uniffi-bindgen generate src/offline_protocol.udl --language python --out-dir ../../bindings/python/offline_protocol_sdk/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: python-bindings
           path: bindings/python/offline_protocol_sdk/offline_protocol.py
@@ -465,7 +465,7 @@ jobs:
               print(f'Built: {whl}')
           "
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: python-wheel-${{ matrix.platform }}
           path: bindings/python/dist/*.whl
