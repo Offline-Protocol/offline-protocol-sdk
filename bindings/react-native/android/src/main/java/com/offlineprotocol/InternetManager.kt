@@ -59,6 +59,12 @@ class InternetManager(
         // recorded to keep the per-recipient FIFO honest, never reported to
         // the core. Mirrors InternetManager.swift — keep in sync.
         private const val RAW_SEND_SENTINEL_PREFIX = "raw:"
+        // Body-only `sender` placeholder for bridge-synthesized relay frames
+        // that name no real actor. The Rust `UserId` rejects an empty string,
+        // so the serialized Message needs *something*; it must never be handed
+        // to the FFI as a senderId. See injectGroupInternalMessage. Mirrors
+        // InternetManager.swift — keep in sync.
+        private const val RELAY_PLACEHOLDER_SENDER = "relay"
     }
     
     // MARK: - Properties
@@ -1062,7 +1068,7 @@ class InternetManager(
                 json = json,
                 rawText = rawText,
                 emitTyped = { prefix, payload ->
-                    injectGroupInternalMessage("relay", prefix, payload)
+                    injectGroupInternalMessage(null, prefix, payload)
                 },
                 emitRaw = { frame -> serverMessageEmitter?.invoke(frame) }
             )
@@ -1318,7 +1324,7 @@ class InternetManager(
                     put("group_id", groupId)
                     put("name", name)
                 }
-                injectGroupInternalMessage("relay", "__GROUP_CREATED__", payloadJson)
+                injectGroupInternalMessage(null, "__GROUP_CREATED__", payloadJson)
             }
             
             "GroupMessageReceived" -> {
@@ -1337,7 +1343,7 @@ class InternetManager(
                     put("message_id", messageId)
                     if (replyToMsg != null && replyToMsg.isNotEmpty()) put("reply_to_msg", replyToMsg)
                 }
-                injectGroupInternalMessage(if (sender.isNotEmpty()) sender else "relay", "__GROUP_MSG__", payloadJson)
+                injectGroupInternalMessage(sender.ifEmpty { null }, "__GROUP_MSG__", payloadJson)
             }
             
             "GroupMemberAdded" -> {
@@ -1351,7 +1357,7 @@ class InternetManager(
                     put("user_id", userId)
                     put("added_by", addedBy)
                 }
-                injectGroupInternalMessage(if (addedBy.isNotEmpty()) addedBy else "relay", "__GROUP_MEMBER_ADDED__", payloadJson)
+                injectGroupInternalMessage(addedBy.ifEmpty { null }, "__GROUP_MEMBER_ADDED__", payloadJson)
             }
             
             "GroupMemberRemoved" -> {
@@ -1365,7 +1371,7 @@ class InternetManager(
                     put("user_id", userId)
                     put("removed_by", removedBy)
                 }
-                injectGroupInternalMessage(if (removedBy.isNotEmpty()) removedBy else "relay", "__GROUP_MEMBER_REMOVED__", payloadJson)
+                injectGroupInternalMessage(removedBy.ifEmpty { null }, "__GROUP_MEMBER_REMOVED__", payloadJson)
             }
             
             "GroupError" -> {
@@ -1387,7 +1393,7 @@ class InternetManager(
                     // sends fall back to per-member delivery.
                     if (groupId.isNotEmpty()) put("group_id", groupId)
                 }
-                injectGroupInternalMessage("relay", "__GROUP_ERROR__", payloadJson)
+                injectGroupInternalMessage(null, "__GROUP_ERROR__", payloadJson)
                 // Dual-emit: apps correlating request_id-carrying errors
                 // (invite-link ops ride the raw channel) need the full frame.
                 serverMessageEmitter?.invoke(rawText)
@@ -1518,15 +1524,37 @@ class InternetManager(
             senderId = senderId,
             recipientId = deviceId,
             content = content,
-            timestampMs = System.currentTimeMillis()
+            timestampMs = System.currentTimeMillis(),
+            // Nothing transmitted this frame, so no sender is awaiting a
+            // delivery confirmation — and the core addresses that ACK to the
+            // frame's `sender`. See injectGroupInternalMessage.
+            requiresAck = false
         ).toString().toByteArray(Charsets.UTF_8)
-    
-    /** Inject a group (relay) internal message into the protocol so it emits the corresponding event. */
-    private fun injectGroupInternalMessage(senderId: String, prefix: String, payloadJson: org.json.JSONObject) {
+
+    /**
+     * Inject a group (relay) internal message into the protocol so it emits
+     * the corresponding event.
+     *
+     * INVARIANT: a synthesized frame's identity is either a real
+     * relay-reported actor or nothing — never a fabricated string. The FFI
+     * `senderId` is a *reachability assertion*: `internet_message_received`
+     * routes it into `notify_neighbor_reachable`, so a placeholder there makes
+     * the core track it as a live peer (auto key-package DM,
+     * NeighborDiscovered, service-discovery fan-out), whose undeliverable DMs
+     * then pin it in the presence-watch set forever. Passing `null` selects
+     * unattributed ingest, which the core supports and tests explicitly
+     * (`test_internet_message_received_empty_sender_*`).
+     *
+     * The message *body* still needs a non-empty `sender` (Rust `UserId`
+     * rejects empty), so it keeps the "relay" placeholder — inert, because no
+     * reachability or ACK path acts on it once the two changes above are in
+     * place.
+     */
+    private fun injectGroupInternalMessage(actorId: String?, prefix: String, payloadJson: org.json.JSONObject) {
         try {
             val content = prefix + payloadJson.toString()
-            val messageBytes = buildInternalMessageBytes(senderId, content)
-            protocol.internetMessageReceived(senderId, messageBytes.map { it.toUByte() })
+            val messageBytes = buildInternalMessageBytes(actorId ?: RELAY_PLACEHOLDER_SENDER, content)
+            protocol.internetMessageReceived(actorId ?: "", messageBytes.map { it.toUByte() })
         } catch (e: Exception) {
             emitDiagnostic("error", "Error injecting group message", mapOf(
                 "prefix" to prefix,

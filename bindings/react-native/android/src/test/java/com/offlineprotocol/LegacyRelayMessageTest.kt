@@ -107,4 +107,31 @@ class LegacyRelayMessageTest {
         assertEquals(8, json.getInt("ttl"))
         assertTrue(json.getBoolean("requires_ack"))
     }
+
+    /**
+     * Bridge-synthesized frames (injectGroupInternalMessage) opt out of the
+     * ACK: nothing transmitted them, so no sender awaits a delivery
+     * confirmation — and the core addresses that ACK to the frame's `sender`,
+     * which for a relay answer is a placeholder, not a reachable peer.
+     * Regression pin for the phantom-peer bug, where every injected frame
+     * produced an undeliverable outbound DM to "relay".
+     */
+    @Test
+    fun requiresAckIsOptOutForSynthesizedFrames() {
+        val json = LegacyRelayMessage.buildJson(
+            senderId = "relay",
+            recipientId = "bob",
+            content = "__GROUP_CREATED__{}",
+            timestampMs = 1_700_000_000_000L,
+            requiresAck = false
+        )
+        assertFalse(json.getBoolean("requires_ack"))
+        // The opt-out must not disturb the required-field set.
+        for (key in listOf(
+            "id", "sender", "recipient", "content", "app_id",
+            "priority", "ttl", "hop_count", "requires_ack", "timestamp"
+        )) {
+            assertTrue("required field '$key' missing", json.has(key))
+        }
+    }
 }

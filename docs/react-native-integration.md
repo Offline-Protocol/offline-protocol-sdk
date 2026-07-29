@@ -383,7 +383,7 @@ Connection-request failure contract: recipient offline emits `connection_request
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | **internetStatusChanged** | `internetStatusChanged(isConnected: boolean): Promise<void>` | Notifies protocol of internet connection state. |
-| **internetMessageReceived** | `internetMessageReceived(senderId, data: number[]): Promise<void>` | Incoming internet message. |
+| **internetMessageReceived** | `internetMessageReceived(senderId, data: number[]): Promise<void>` | Incoming internet message. `senderId` asserts the peer is *reachable* (it drives outbox flush, Welcome re-arm, auto key exchange, and `neighbor_discovered`), so pass `""` for locally synthesized frames that no peer transmitted, and build those with `requires_ack: false`. A placeholder id here becomes a phantom peer the SDK repeatedly tries to message. |
 | **internetGetNextMessage** | `internetGetNextMessage(): Promise<{messageId, recipientId, data} \| null>` | Next outgoing internet message. Use `messageId` to confirm or report failure. |
 | **internetConfirmSent** | `internetConfirmSent(messageId: string): Promise<void>` | Confirms a message was sent over the wire. Call after WebSocket send succeeds. |
 | **internetSendFailed** | `internetSendFailed(messageId: string): Promise<void>` | Reports a message failed to send. Call when WebSocket send fails. |

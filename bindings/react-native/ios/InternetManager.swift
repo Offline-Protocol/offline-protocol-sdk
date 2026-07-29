@@ -39,6 +39,12 @@ public class InternetManager: NSObject, TransportManager {
     // recorded to keep the per-recipient FIFO honest, never reported to the
     // core. Mirrors InternetManager.kt — keep in sync.
     private static let rawSendSentinelPrefix = "raw:"
+    // Body-only `sender` placeholder for bridge-synthesized relay frames that
+    // name no real actor. The Rust `UserId` rejects an empty string, so the
+    // serialized Message needs *something*; it must never be handed to the
+    // FFI as a senderId. See injectGroupInternalMessage. Mirrors
+    // InternetManager.kt — keep in sync.
+    private static let relayPlaceholderSender = "relay"
     
     // MARK: - Properties
     
@@ -1219,7 +1225,7 @@ public class InternetManager: NSObject, TransportManager {
             rawText: rawText,
             emitTyped: { prefix, payload in
                 self.injectGroupInternalMessage(
-                    senderId: "relay",
+                    actorId: nil,
                     prefix: prefix,
                     payload: payload
                 )
@@ -1468,7 +1474,7 @@ public class InternetManager: NSObject, TransportManager {
             // close it, and it would stay armed for the rest of the
             // connection after a successful register.
             controlOpTranslator.onGroupAnswered(groupId: groupId)
-            injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_CREATED__", payload: ["group_id": groupId, "name": name])
+            injectGroupInternalMessage(actorId: nil, prefix: "__GROUP_CREATED__", payload: ["group_id": groupId, "name": name])
             
         case "GroupMessageReceived":
             guard let groupId = json["group_id"] as? String,
@@ -1479,21 +1485,21 @@ public class InternetManager: NSObject, TransportManager {
             let replyToMsg = json["reply_to_msg"] as? String
             var payload: [String: Any] = ["group_id": groupId, "sender": sender, "content": content, "timestamp": timestamp, "message_id": messageId]
             if let r = replyToMsg, !r.isEmpty { payload["reply_to_msg"] = r }
-            injectGroupInternalMessage(senderId: sender.isEmpty ? "relay" : sender, prefix: "__GROUP_MSG__", payload: payload)
+            injectGroupInternalMessage(actorId: sender.isEmpty ? nil : sender, prefix: "__GROUP_MSG__", payload: payload)
             
         case "GroupMemberAdded":
             guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
             controlOpTranslator.onGroupAnswered(groupId: groupId)
             let userId = json["user_id"] as? String ?? ""
             let addedBy = json["added_by"] as? String ?? ""
-            injectGroupInternalMessage(senderId: addedBy.isEmpty ? "relay" : addedBy, prefix: "__GROUP_MEMBER_ADDED__", payload: ["group_id": groupId, "user_id": userId, "added_by": addedBy])
+            injectGroupInternalMessage(actorId: addedBy.isEmpty ? nil : addedBy, prefix: "__GROUP_MEMBER_ADDED__", payload: ["group_id": groupId, "user_id": userId, "added_by": addedBy])
             
         case "GroupMemberRemoved":
             guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
             controlOpTranslator.onGroupAnswered(groupId: groupId)
             let userId = json["user_id"] as? String ?? ""
             let removedBy = json["removed_by"] as? String ?? ""
-            injectGroupInternalMessage(senderId: removedBy.isEmpty ? "relay" : removedBy, prefix: "__GROUP_MEMBER_REMOVED__", payload: ["group_id": groupId, "user_id": userId, "removed_by": removedBy])
+            injectGroupInternalMessage(actorId: removedBy.isEmpty ? nil : removedBy, prefix: "__GROUP_MEMBER_REMOVED__", payload: ["group_id": groupId, "user_id": userId, "removed_by": removedBy])
             
         case "GroupError":
             let reason = json["reason"] as? String ?? "Unknown error"
@@ -1513,7 +1519,7 @@ public class InternetManager: NSObject, TransportManager {
             if !groupId.isEmpty {
                 payload["group_id"] = groupId
             }
-            injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_ERROR__", payload: payload)
+            injectGroupInternalMessage(actorId: nil, prefix: "__GROUP_ERROR__", payload: payload)
             // Dual-emit: apps correlating request_id-carrying errors
             // (invite-link ops ride the raw channel) need the full frame.
             emitServerMessage(rawText)
@@ -1607,22 +1613,45 @@ public class InternetManager: NSObject, TransportManager {
             senderId: senderId,
             recipientId: deviceId,
             content: content,
-            timestampMs: Int64(Date().timeIntervalSince1970 * 1000)
+            timestampMs: Int64(Date().timeIntervalSince1970 * 1000),
+            // Nothing transmitted this frame, so no sender is awaiting a
+            // delivery confirmation — and the core addresses that ACK to the
+            // frame's `sender`. See injectGroupInternalMessage.
+            requiresAck: false
         )
         return try JSONSerialization.data(withJSONObject: messageDict)
     }
-    
-    /// Inject a group (relay) internal message into the protocol so it emits the corresponding event.
-    private func injectGroupInternalMessage(senderId: String, prefix: String, payload: [String: Any]) {
+
+    /// Inject a group (relay) internal message into the protocol so it emits
+    /// the corresponding event.
+    ///
+    /// INVARIANT: a synthesized frame's identity is either a real
+    /// relay-reported actor or nothing — never a fabricated string. The FFI
+    /// `senderId` is a *reachability assertion*: `internet_message_received`
+    /// routes it into `notify_neighbor_reachable`, so a placeholder there
+    /// makes the core track it as a live peer (auto key-package DM,
+    /// NeighborDiscovered, service-discovery fan-out), whose undeliverable
+    /// DMs then pin it in the presence-watch set forever. Passing `nil`
+    /// selects unattributed ingest, which the core supports and tests
+    /// explicitly (`test_internet_message_received_empty_sender_*`).
+    ///
+    /// The message *body* still needs a non-empty `sender` (Rust `UserId`
+    /// rejects empty), so it keeps the "relay" placeholder — inert, because
+    /// no reachability or ACK path acts on it once the two changes above are
+    /// in place.
+    private func injectGroupInternalMessage(actorId: String?, prefix: String, payload: [String: Any]) {
         messageQueue.async { [weak self] in
             guard let self = self else { return }
             do {
                 let payloadData = try JSONSerialization.data(withJSONObject: payload)
                 guard let payloadStr = String(data: payloadData, encoding: .utf8) else { return }
                 let content = prefix + payloadStr
-                let messageData = try self.buildInternalMessageData(senderId: senderId, content: content)
+                let messageData = try self.buildInternalMessageData(
+                    senderId: actorId ?? Self.relayPlaceholderSender,
+                    content: content
+                )
                 let bytes = [UInt8](messageData)
-                try self.protocolInstance.internetMessageReceived(senderId: senderId, data: bytes)
+                try self.protocolInstance.internetMessageReceived(senderId: actorId ?? "", data: bytes)
             } catch {
                 self.emitDiagnostic("error", "Error injecting group message", context: [
                     "prefix": prefix,
