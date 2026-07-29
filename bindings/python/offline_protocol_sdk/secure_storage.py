@@ -76,8 +76,12 @@ class SecureStorage(MlsStorageProvider):
                 "SecureStorage built without an account namespace: the "
                 "pre-namespace store cannot be adopted, so an upgraded install "
                 "starts from a fresh MLS identity and cannot decrypt its old "
-                "sessions. Pass namespace=account_storage_namespace(app_id, "
-                "user_id), or let ProtocolManager build the provider."
+                "sessions. Its pre-split delivery state is unreachable too — "
+                "the SDK's protocol-state adoption sweep reads it through this "
+                "provider — so the install also comes up with an empty outbox "
+                "and an empty block list. Pass "
+                "namespace=account_storage_namespace(app_id, user_id), or let "
+                "ProtocolManager build the provider."
             )
 
         # Warn if keyring resolved to a plaintext or null backend — MLS key

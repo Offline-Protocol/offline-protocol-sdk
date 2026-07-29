@@ -79,6 +79,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **The built-in Android provider now flushes the directory entry after a store and a delete.** `AtomicFile.finishWrite` fsyncs a record's contents, but the link it renames into place — and the one `delete` removes — lives in the parent directory and needs its own flush; without it a power loss can lose a store the SDK was told succeeded (sharpest for records sealed under a key it just persisted) or resurrect an entry the SDK has already settled. The iOS and Python providers already did this. Best effort, as on the other two.
 
+- **The legacy-store conflict diagnostic now names everything a conflicting account loses.** It reported only that the account starts from a fresh MLS identity. Since delivery state moved into the same read-through path, such an account also comes up with an empty outbox, an empty pending queue, and an empty **block list** — the outcome the downgrade warning at the top of this section exists for. Python's no-namespace warning says the same.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed

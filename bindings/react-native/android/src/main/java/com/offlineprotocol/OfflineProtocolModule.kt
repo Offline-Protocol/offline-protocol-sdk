@@ -2808,7 +2808,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     "error",
                     "Legacy secure store belongs to another account; this " +
                         "account starts from a fresh MLS identity and cannot " +
-                        "decrypt its previous sessions"
+                        "decrypt its previous sessions. Its pre-split delivery " +
+                        "state is unreachable too, so it also comes up with an " +
+                        "empty outbox and an empty block list — every " +
+                        "previously blocked peer is unblocked"
                 )
             }
             emitDiagnostic(

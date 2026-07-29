@@ -28,6 +28,13 @@ import Foundation
 /// store never held a separable identity for it — but must say so out loud
 /// rather than rotate silently.
 ///
+/// Read-through is also what the SDK's *protocol-state* adoption sweep rides
+/// on: pre-split delivery state sits in this same un-namespaced store, and the
+/// sweep enumerates the namespaced handle. So a conflict costs more than the
+/// MLS identity — that account also comes up with an empty outbox, an empty
+/// pending queue, and an empty **block list**, every previously blocked peer
+/// unblocked. Say all of it, not just the identity.
+///
 /// Keep this policy in sync with `LegacyStoreAdoption.kt` and
 /// `legacy_store_adoption.py`.
 enum LegacyStoreAdoption {
