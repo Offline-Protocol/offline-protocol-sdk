@@ -298,7 +298,20 @@ impl OfflineProtocol {
                 // Skipping is what leaves the record recoverable: the peer is
                 // simply absent from `confirmed_sessions`, and the send path's
                 // own strict loader (`is_session_confirmed`) still fails closed
-                // for it.
+                // for it — and re-reads the record, so a transient failure
+                // heals the moment the store answers again.
+                //
+                // One consequence worth naming rather than rediscovering: the
+                // Welcome machinery gates on `!confirmed_sessions.contains(peer)`
+                // *plus* a live `welcome_lifecycles` entry (`welcome_pending_peers`,
+                // `resend_unconfirmed_sent_welcome`, the retry ladder). So a peer
+                // whose lifecycle restored as `Sent` while its session state did
+                // not can draw a redundant Welcome re-send this session. That is
+                // wasted bandwidth on an already-degraded store, and strictly
+                // better than the alternative this replaced — propagating, which
+                // failed `initialize_mls` on every launch for as long as the one
+                // record stayed unreadable, on an install that could then send
+                // nothing at all.
                 RestorableRecord::Unavailable => {
                     warn!(
                         session_or_group_id = %peer_id,

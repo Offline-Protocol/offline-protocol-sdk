@@ -16748,6 +16748,159 @@ fn test_restore_outbox_delete_budget_bounds_a_launch_and_drains() {
 }
 
 #[test]
+fn test_outbox_capacity_prune_stays_inside_the_launch_budget() {
+    // The read walk is not the only thing in `restore_outbox` that deletes.
+    // Its two post-walk prunes act on entries the walk *admitted*, so a store
+    // whose records all open cleanly — every record valid, nothing to drop
+    // while reading — reaches them with the pool completely untouched and
+    // `restored` bounded only by `OUTBOX_RESTORE_KEY_CAP`.
+    //
+    // Ungated, the capacity drain alone issues
+    // `OUTBOX_RESTORE_KEY_CAP - MAX_OUTBOX_ENTRIES` deletes in one launch:
+    // 1500 device barriers on the synchronous boot path. That is the *ordinary*
+    // over-capacity case rather than the tampered one, and it is the very
+    // figure this walk's original budget exemption was argued from — so a
+    // budget that covers only the walk leaves the argued-about case uncovered.
+    //
+    // Both halves are asserted, because either alone passes against the broken
+    // code: the launch stops at the pool, *and* the tail drains to the cap over
+    // later launches instead of stranding.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+    use crate::constants::MAX_OUTBOX_ENTRIES;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let base = Utc::now();
+    // Over the cap by two full pools, and deliberately under
+    // `OUTBOX_RESTORE_KEY_CAP` so the walk bound never binds and this test
+    // isolates the drain. Strictly increasing `last_sent_at` so "newest kept"
+    // is unambiguous.
+    let total = MAX_OUTBOX_ENTRIES + 2 * MAX_RESTORE_PRUNE_DELETES;
+    for i in 0..total {
+        store_outbox_entry(
+            &storage,
+            &OutboxEntry {
+                message: test_message("bob", &format!("m{i}")),
+                attempt_count: 0,
+                first_sent_at: base,
+                last_sent_at: base + ChronoDuration::seconds(i as i64),
+                last_transport: None,
+                reseal: None,
+            },
+        );
+    }
+
+    let remaining =
+        |storage: &Arc<InMemoryStorage>| storage.list_keys(storage_keys::OUTBOX).unwrap().len();
+    assert_eq!(remaining(&storage), total, "precondition");
+
+    let mut first = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+    first
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert_eq!(
+        remaining(&storage),
+        total - MAX_RESTORE_PRUNE_DELETES,
+        "one launch must spend exactly its delete budget on the capacity drain, \
+         not the whole overflow"
+    );
+    // Deferring a *delete* must never defer the cap itself: an entry the pool
+    // could not fund still leaves memory, it is simply left on disk unsettled
+    // for a later launch to own both halves of.
+    assert_eq!(
+        first.outbox_entry_count(),
+        MAX_OUTBOX_ENTRIES,
+        "the in-memory cap is absolute regardless of what the budget funded"
+    );
+
+    let mut launches = 1;
+    while remaining(&storage) > MAX_OUTBOX_ENTRIES {
+        let mut next = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+        next.enable_message_persistence_for_test(storage.clone())
+            .unwrap();
+        launches += 1;
+        assert!(launches < 8, "the prune must converge, not stall");
+    }
+    assert_eq!(
+        remaining(&storage),
+        MAX_OUTBOX_ENTRIES,
+        "the tail drains to the cap over later launches rather than stranding"
+    );
+}
+
+#[test]
+fn test_outbox_absolute_expiry_prune_stays_inside_the_launch_budget() {
+    // The other post-walk prune, and the same hazard by a different route: a
+    // device that has been offline past the absolute lifetime with a full
+    // outbox reaches this loop with the pool untouched and every admitted entry
+    // due for a terminal drop.
+    //
+    // Each drop is a durable delete *and* a `message_failed`, and that pairing
+    // is exactly why an individual one may never be refused — refusing the
+    // delete while settling would settle an id the next launch restores and
+    // re-drives. So the loop stops *between* entries instead, leaving the rest
+    // on disk and, crucially, **unsettled**: nothing has been claimed about
+    // them, so a later launch owns both halves.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let lifetime_ms = outbox_persistence_config()
+        .reliability
+        .retry
+        .outbox_max_lifetime_ms;
+    let absolute_ms =
+        lifetime_ms.saturating_mul(crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as u64);
+    // Well past the absolute cap on both clocks, so every entry is terminal.
+    let stale = Utc::now() - ChronoDuration::milliseconds(absolute_ms as i64 * 2);
+
+    let beyond_budget = 40;
+    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+    for i in 0..total {
+        store_outbox_entry(
+            &storage,
+            &OutboxEntry {
+                message: test_message("bob", &format!("m{i}")),
+                attempt_count: 0,
+                first_sent_at: stale,
+                last_sent_at: stale,
+                last_transport: None,
+                reseal: None,
+            },
+        );
+    }
+
+    let remaining =
+        |storage: &Arc<InMemoryStorage>| storage.list_keys(storage_keys::OUTBOX).unwrap().len();
+    assert_eq!(remaining(&storage), total, "precondition");
+
+    let mut first = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+    first
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert_eq!(
+        remaining(&storage),
+        beyond_budget,
+        "one launch must spend exactly its delete budget on the expiry drop, \
+         not the whole store"
+    );
+    assert_eq!(
+        first.outbox_entry_count(),
+        0,
+        "an expired entry leaves memory whether or not the pool funded its \
+         delete — it is the settlement that is deferred with the record"
+    );
+
+    let mut second = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+    second
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert_eq!(
+        remaining(&storage),
+        0,
+        "the remainder is under the budget, so the second launch finishes"
+    );
+}
+
+#[test]
 fn test_unreadable_welcome_lifecycle_record_does_not_fail_initialization() {
     // A record the *store* could not read this session is not a record that
     // decoded to nothing. Propagating it failed `initialize_mls` outright — and

@@ -365,21 +365,32 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 ///
 /// # The derived launch ceiling
 ///
-/// Three pools, so `3 × MAX_RESTORE_PRUNE_DELETES` deletes may be *refused or
-/// counted* in one launch. All three are constructed side by side by
-/// `initialize_mls` — see [`PruneAllowance::pool`] for why none of them may be
-/// allocated inside the walk that spends it — and
+/// Three pools, so `3 × MAX_RESTORE_PRUNE_DELETES` is the whole launch's
+/// allowance. All three are constructed side by side by `initialize_mls` — see
+/// [`PruneAllowance::pool`] for why none of them may be allocated inside the
+/// walk that spends it — and
 /// `test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling` pins the
 /// total against a provider that counts deletes, which is the invariant a
-/// per-walk regression breaks and a per-pool test does not see. Two caveats it
-/// also documents, because neither can be budgeted away:
+/// per-walk regression breaks and a per-pool test does not see.
 ///
-/// - a settlement-paired walk stops *between* records, so the record it is
-///   already inside may push a little past its pool;
-/// - `restore_outbox`'s post-walk absolute-expiry and capacity prunes act on
-///   what the walk already admitted and are each paired with a terminal
-///   `message_failed`, so they are counted but never refused. They are bounded
-///   transitively by [`OUTBOX_RESTORE_KEY_CAP`].
+/// The ceiling covers every durable delete on the path, not only the ones a
+/// walk issues while it reads. [`OfflineProtocol::restore_outbox`]'s two
+/// post-walk prunes — the absolute-lifetime drop and the capacity drain — act
+/// on entries the walk already *admitted*, so a store whose records all open
+/// cleanly reaches them with the pool untouched and its working set bounded
+/// only by [`OUTBOX_RESTORE_KEY_CAP`]. Left ungated they cost up to
+/// `OUTBOX_RESTORE_KEY_CAP - MAX_OUTBOX_ENTRIES` deletes in one launch — the
+/// ordinary over-capacity case rather than the tampered one, and the figure
+/// that walk's original budget exemption was argued from. Both are
+/// settlement-paired, so neither may refuse an individual delete; both stop
+/// *between* entries instead, and an entry the pool cannot fund is dropped from
+/// memory and left on disk **unsettled**, so a later launch owns both halves.
+/// `test_outbox_capacity_prune_stays_inside_the_launch_budget` and
+/// `test_outbox_absolute_expiry_prune_stays_inside_the_launch_budget` pin them.
+///
+/// One caveat remains, because it cannot be budgeted away: a settlement-paired
+/// walk stops *between* records, so the record it is already inside may push a
+/// little past its pool.
 ///
 /// # This bounds deletes, and deletes are not the only durable cost
 ///
@@ -2303,8 +2314,17 @@ impl OfflineProtocol {
             Ok(StateRecord::Missing | StateRecord::Unreadable) => return RestorableRecord::Absent,
             // Still on disk and quite possibly intact.
             Ok(StateRecord::Unavailable) => return RestorableRecord::Unavailable,
+            // `debug`, not `warn`: a store failing systemically fails *every*
+            // read, and this reader runs once per record on a walk bounded at
+            // `MAX_RESTORE_KEYS_PER_CATEGORY`. A warn here is up to that many
+            // lines on the synchronous boot path, in exactly the degraded state
+            // this three-way answer exists to survive. Each caller emits the
+            // operator-facing signal itself and aggregates it:
+            // `restore_welcome_lifecycles` counts them into one warn, and
+            // `restore_session_states_from_manager` walks the far smaller MLS
+            // session list and can afford one per peer.
             Err(e) => {
-                warn!(
+                debug!(
                     key_type = %key_type,
                     key_id = %key_id,
                     error = %e,
@@ -2762,15 +2782,21 @@ impl OfflineProtocol {
     /// settle an id whose record the next launch restores and re-drives, and
     /// skipping both would drop the entry from memory while leaving the
     /// application holding an id nothing ever resolves. What the pairing does
-    /// not forbid is **stopping between records**, which is what this walk does.
+    /// not forbid is **stopping between records**, which is what this walk does
+    /// — and what its two post-walk prunes do between *entries*.
     ///
     /// [`OUTBOX_RESTORE_KEY_CAP`] alone was once argued to be enough here, on
-    /// the grounds that it caps the walk near 1.5k deletes. That number came
-    /// from the capacity prune. The outbox is a *sealed* category, so the
-    /// wrong-length record-key branch of
-    /// [`Self::restore_or_init_state_record_key`] makes every entry on the
+    /// the grounds that it caps the walk near 1.5k deletes. Two things were
+    /// wrong with that. The number came from the capacity prune, not the walk:
+    /// the outbox is a *sealed* category, so the wrong-length record-key branch
+    /// of [`Self::restore_or_init_state_record_key`] makes every entry on the
     /// install unopenable at once and each one takes the reader's drop — the
-    /// full walk bound, in device barriers, on the synchronous boot path.
+    /// full walk bound, in device barriers, on the synchronous boot path. And
+    /// the number it *did* describe was never bounded either: the capacity
+    /// drain and the absolute-lifetime drop run after the walk, on entries it
+    /// admitted, so a store whose records all open cleanly reaches them with
+    /// the pool untouched. All three now draw on the same pool and stop at an
+    /// entry boundary; see [`MAX_RESTORE_PRUNE_DELETES`].
     ///
     /// It draws on its **own** pool rather than the launch-wide advisory one:
     /// an outbox record left unwalked is one the application holds a *live* id
@@ -2900,11 +2926,29 @@ impl OfflineProtocol {
             }
             true
         });
+        // Counted and never refused *mid-entry* — this delete is inseparable
+        // from the `message_failed` that pairs with it — but stopped *between*
+        // entries, exactly as the walk stops between records.
+        //
+        // The gate is load-bearing rather than tidy. This loop and the capacity
+        // drain below act on entries the walk *admitted*, so a store whose
+        // records all open cleanly reaches them with the pool untouched and
+        // `restored` bounded only by `OUTBOX_RESTORE_KEY_CAP`. Ungated, that is
+        // up to that many device barriers in a single launch — a device offline
+        // past the absolute lifetime with a full outbox, which is the *ordinary*
+        // over-capacity case rather than the tampered one.
+        //
+        // An entry the pool cannot fund is dropped from memory and left on disk
+        // **unsettled**. That is what makes stopping safe: nothing has told the
+        // application anything about it, so a later launch restores it, re-ages
+        // it, and owns both halves of the settlement then — the same deferral
+        // the walk's own early break relies on.
+        let mut expiry_settlements: Vec<Event> = Vec::new();
         for entry in &absolutely_expired {
-            // Counted, never refused, and deliberately not gated on the budget:
-            // this delete is inseparable from the `message_failed` below, and it
-            // acts on an entry the walk already admitted, so it is bounded
-            // transitively by `OUTBOX_RESTORE_KEY_CAP` rather than here.
+            if budget.is_spent() {
+                prune_bound_reached = true;
+                break;
+            }
             budget.claim();
             self.delete_outbox_key(&entry.message.id.as_str());
             info!(
@@ -2913,12 +2957,16 @@ impl OfflineProtocol {
                 repair_action = "absolute_lifetime_exceeded",
                 "outbox_entry_dropped"
             );
-            self.settle_restored_message_failure(Event::message_failed(
+            expiry_settlements.push(Event::message_failed(
                 entry.message.id.clone(),
                 "Outbox lifetime exceeded".to_string(),
                 entry.attempt_count,
             ));
         }
+        // Batched: this is one of the two loops `settle_restored_message_failures`
+        // exists for. A store past its cap drives it into the hundreds, and the
+        // per-event form takes the shared-state lock once each.
+        self.settle_restored_message_failures(expiry_settlements);
 
         // Prune to capacity BEFORE refreshing TTLs, keeping the newest by
         // last_sent_at. Delete the pruned overflow from storage so it can't
@@ -2927,19 +2975,37 @@ impl OfflineProtocol {
         // newest and crowd genuinely-fresh entries out of the kept set.
         if restored.len() > MAX_OUTBOX_ENTRIES {
             restored.sort_by_key(|e| std::cmp::Reverse(e.last_sent_at));
+            // `drain` removes its whole range when the iterator is dropped, so
+            // breaking early still takes every over-cap entry out of memory.
+            // That is what keeps the cap absolute: deferring a *delete* must
+            // never defer the cap itself, or an over-cap store would re-inflate
+            // memory on boot. The entries the pool could not fund are left on
+            // disk unsettled and re-capped by a later launch, exactly like the
+            // tail the walk never reached.
+            //
+            // Unbudgeted, this drain alone issues
+            // `OUTBOX_RESTORE_KEY_CAP - MAX_OUTBOX_ENTRIES` deletes in one
+            // launch — the very figure this walk's old budget exemption was
+            // argued from. Counted, never refused mid-entry, stopped between
+            // entries: see the absolute-expiry drop above.
+            let mut capacity_settlements: Vec<Event> = Vec::new();
             for entry in restored.drain(MAX_OUTBOX_ENTRIES..) {
-                // Counted for the same reason as the absolute-expiry drop above,
-                // and un-refusable for the same reason.
+                if budget.is_spent() {
+                    prune_bound_reached = true;
+                    break;
+                }
                 budget.claim();
                 self.delete_outbox_key(&entry.message.id.as_str());
                 // Terminal, like the pending queue's capacity eviction: the app
                 // holds this id and nothing will ever resolve it otherwise.
-                self.settle_restored_message_failure(Event::message_failed(
+                capacity_settlements.push(Event::message_failed(
                     entry.message.id.clone(),
                     "Outbox capacity exceeded".to_string(),
                     entry.attempt_count,
                 ));
             }
+            // Batched for the same reason as the expiry settlements above.
+            self.settle_restored_message_failures(capacity_settlements);
         }
 
         self.settle_restored_message_failures(unrecoverable.iter().map(|key| {
@@ -2956,7 +3022,12 @@ impl OfflineProtocol {
                 "Outbox store listed more entries than any legitimate run can produce; ignoring the tail"
             );
         }
-        if prune_bound_reached {
+        // Covers all three places this walk can stop: the read loop, the
+        // absolute-expiry drop, and the capacity drain. `budget.exhausted` is
+        // unreachable while each of those checks `is_spent()` before claiming —
+        // it is ORed in so a future ungated claim still surfaces rather than
+        // spending the pool in silence.
+        if prune_bound_reached || budget.exhausted {
             warn!(
                 deleted = budget.spent,
                 budget = MAX_RESTORE_PRUNE_DELETES,
