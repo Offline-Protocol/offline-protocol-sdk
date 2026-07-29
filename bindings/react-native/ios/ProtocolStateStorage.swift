@@ -88,6 +88,11 @@ enum ProtocolStateRecord {
     /// launch while the counter sat at zero.
     static let maxListedKeys = 65_536
 
+    /// Ceiling on entries one stale-temporary sweep examines, so a tampered
+    /// directory cannot turn the first store of a session into an unbounded
+    /// scan.
+    static let maxSweepEntries = 4_096
+
     static func digest(_ components: [String]) -> String {
         var hasher = SHA256()
         for component in components {
@@ -170,6 +175,10 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     private let fileManager: FileManager
     private let lock = NSLock()
 
+    /// Type directories whose stale temporaries have already been swept this
+    /// process. One sweep per category per process, off the restore path.
+    private var swept = Set<URL>()
+
     convenience init(
         accountNamespace: String,
         fileManager: FileManager = .default
@@ -234,6 +243,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
                 at: directory,
                 withIntermediateDirectories: true
             )
+            sweepTemporaries(in: directory)
             try framed.write(to: url, options: .atomic)
         } catch {
             throw MlsStorageError.StoreFailed(
@@ -242,6 +252,57 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         }
         flushFile(at: url)
         flushDirectory(at: directory)
+    }
+
+    /// Removes temporaries a previous process died before renaming.
+    ///
+    /// `Data.write(options: .atomic)` writes to a temporary in the same
+    /// directory and renames it into place, so a crash in between orphans that
+    /// file permanently — and enumeration filters on the `k_` prefix, so
+    /// nothing ever looks at it again. Left alone they accumulate for the life
+    /// of the install, in a container the application cannot reasonably be
+    /// asked to clean itself. The Python provider sweeps for exactly this; the
+    /// three built-in stores are meant to be one implementation in three
+    /// languages.
+    ///
+    /// Safe to unlink unconditionally: `store` holds the instance lock for the
+    /// whole write, so no temporary this instance is using can be visible here.
+    /// Runs once per type directory per process — the caller is the first store
+    /// into that category, which keeps it off the restore path — and is best
+    /// effort, since losing the race with another writer's rename costs
+    /// nothing.
+    private func sweepTemporaries(in directory: URL) {
+        if swept.contains(directory) {
+            return
+        }
+        swept.insert(directory)
+
+        guard let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsSubdirectoryDescendants]
+        ) else {
+            return
+        }
+        var examined = 0
+        for case let url as URL in enumerator {
+            if examined >= ProtocolStateRecord.maxSweepEntries {
+                break
+            }
+            examined += 1
+            // A regular file that is not a record is a half-written temporary:
+            // `Data.write(.atomic)` names them with a leading dot, and nothing
+            // else in this container creates files. Directories are left alone
+            // — this store never makes one here, so one that exists is not ours
+            // to remove.
+            guard !url.lastPathComponent.hasPrefix("k_"),
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]))?
+                      .isRegularFile == true
+            else {
+                continue
+            }
+            try? fileManager.removeItem(at: url)
+        }
     }
 
     func load(keyType: String, keyId: String) throws -> Data? {

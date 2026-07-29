@@ -314,4 +314,38 @@ final class ProtocolStateStorageTests: XCTestCase {
 
         XCTAssertEqual(try storage.listKeys(keyType: "outbox"), ["message-1"])
     }
+
+    /// `Data.write(.atomic)` writes a temporary in the same directory and
+    /// renames it into place, so a crash in between orphans that file forever:
+    /// enumeration filters on the `k_` prefix, so nothing ever looks at it
+    /// again. The Python provider sweeps for exactly this; the three built-in
+    /// stores are meant to be one implementation in three languages.
+    func testStoreSweepsTemporariesLeftByAnInterruptedWrite() throws {
+        let root = temporaryRoot("stale-temporaries")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
+        let storage = try AppContainerProtocolStateStorage(root: root)
+
+        try storage.store(keyType: "outbox", keyId: "message-1", data: Data([1, 2, 3]))
+
+        let directory = root
+            .appendingPathComponent(ProtocolStateRecord.typeDirectoryName("outbox"))
+        let orphan = directory.appendingPathComponent(".dat.nosync-interrupted")
+        try Data([9, 9, 9]).write(to: orphan)
+
+        // A second instance: the sweep runs once per type directory per
+        // process, and the first store above already consumed this one's.
+        let restarted = try AppContainerProtocolStateStorage(root: root)
+        try restarted.store(keyType: "outbox", keyId: "message-2", data: Data([4, 5, 6]))
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: orphan.path),
+            "a store into the category must remove temporaries a previous process orphaned"
+        )
+        XCTAssertEqual(
+            try restarted.listKeys(keyType: "outbox"),
+            ["message-1", "message-2"],
+            "the sweep must not touch real records"
+        )
+        XCTAssertEqual(try restarted.load(keyType: "outbox", keyId: "message-1"), Data([1, 2, 3]))
+    }
 }
