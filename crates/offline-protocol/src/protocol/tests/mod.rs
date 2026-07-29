@@ -7056,6 +7056,10 @@ struct ReportingStorage {
     inner: Arc<InMemoryStorage>,
     /// `(key_type, key_id)` whose `load` reports permanent corruption.
     corrupt: Option<(&'static str, String)>,
+    /// Category whose *every* `load` reports permanent corruption — the shape a
+    /// tampered or half-restored container takes, where the interesting
+    /// question is how much work one launch does about it.
+    corrupt_category: Option<&'static str>,
     /// Category whose `list_keys` reports `NotFound` instead of an empty list.
     empty_as_not_found: Option<&'static str>,
 }
@@ -7072,6 +7076,7 @@ impl crate::ProtocolStateStorage for ReportingStorage {
             .corrupt
             .as_ref()
             .is_some_and(|(t, id)| *t == key_type && id == key_id)
+            || self.corrupt_category == Some(key_type)
         {
             return Err(crate::ProtocolStateError::Corrupted(
                 "framing does not parse".to_string(),
@@ -7118,6 +7123,7 @@ fn test_corrupted_from_a_provider_load_is_settled_and_deleted() {
     let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(ReportingStorage {
         inner: state.clone(),
         corrupt: Some((storage_keys::OUTBOX, message_id.as_str())),
+        corrupt_category: None,
         empty_as_not_found: None,
     });
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -7158,6 +7164,7 @@ fn test_not_found_from_a_provider_list_reads_as_an_empty_category() {
     let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(ReportingStorage {
         inner: state.clone(),
         corrupt: None,
+        corrupt_category: None,
         empty_as_not_found: Some(storage_keys::OUTBOX),
     });
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -16009,6 +16016,240 @@ fn test_restore_media_descriptor_drop_is_bounded_per_launch() {
     second.initialize_mls_for_test(storage.clone()).unwrap();
     assert_eq!(
         remaining_after(&storage),
+        0,
+        "the remainder is under the budget, so the second launch finishes"
+    );
+}
+
+#[test]
+fn test_restore_pending_delete_budget_freezes_the_tail_and_drains_over_launches() {
+    // The pending walk is the widest in the module — its record bound is the
+    // same `MAX_RESTORE_KEYS_PER_CATEGORY` the budgeted cache walks use, eight
+    // times looser than the outbox's — and it can delete once per record. It
+    // was left out of the budget on the grounds that its deletes are paired
+    // with a terminal settlement, which is true, and which is why it cannot
+    // *refuse* one. It can still stop between records.
+    //
+    // Pending messages are sealed, so a regenerated record key makes every
+    // record on the install unreadable at once. Nothing else bounds that: a
+    // queue lost this way contributes no entries, so `MAX_PENDING_RESTORE_ENTRIES`
+    // never binds here, leaving only the 16384-record bound between the
+    // synchronous boot path and 16384 device barriers.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    // Mint the record key the way a first launch does, then write records that
+    // are *not* sealed under it — what a regenerated key leaves behind, without
+    // having to corrupt the key entry itself.
+    let _ = state_record_cipher_for(&secure);
+
+    let beyond_budget = 10;
+    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+    for index in 0..total {
+        // Valid `UserId`s, so these take the ordinary restore path rather than
+        // the unaddressable one. Zero-padded because providers list sorted.
+        state
+            .store(
+                storage_keys::PENDING_MESSAGES,
+                &format!("peer{index:05}"),
+                b"not sealed under this install's record key",
+            )
+            .unwrap();
+    }
+
+    let remaining = |state: &Arc<InMemoryStorage>| {
+        state
+            .list_keys(storage_keys::PENDING_MESSAGES)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(remaining(&state), total, "precondition");
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls(secure_handle, state_handle).unwrap();
+
+    assert!(
+        first.pending_encrypted_messages.is_empty(),
+        "a record that will not open restores nothing, budget or no budget"
+    );
+    assert_eq!(
+        remaining(&state),
+        beyond_budget,
+        "one launch must spend exactly its delete budget, not empty the store"
+    );
+    // Stopping is only safe if the untouched tail cannot then be destroyed by
+    // an ordinary enqueue — a pending record holds a recipient's whole queue,
+    // so a one-message snapshot written over it would take the rest with it.
+    assert_eq!(
+        first.pending_queues_unreadable_this_session.len(),
+        beyond_budget,
+        "every recipient the walk did not reach must be frozen for the session"
+    );
+    // Which recipients land in the tail depends on the backend's listing order,
+    // so pick one out of the freeze set rather than assuming.
+    let untouched = first
+        .pending_queues_unreadable_this_session
+        .iter()
+        .next()
+        .cloned()
+        .expect("the walk must stop before the end of the listing");
+    first.queue_pending_message(
+        &untouched,
+        "written after the walk stopped",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+    );
+    assert_eq!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, &untouched)
+            .unwrap()
+            .as_deref(),
+        Some(b"not sealed under this install's record key".as_slice()),
+        "a frozen recipient's record must survive an enqueue untouched"
+    );
+
+    // Spared, not stranded.
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls(secure_handle, state_handle).unwrap();
+    assert_eq!(
+        remaining(&state),
+        0,
+        "the remainder is under the budget, so the second launch finishes"
+    );
+    assert!(
+        second.pending_queues_unreadable_this_session.is_empty(),
+        "a completed walk freezes nothing"
+    );
+}
+
+#[test]
+fn test_restore_peer_capability_reader_drop_is_bounded_per_launch() {
+    // `restore_peer_capabilities` budgets three of its four delete sources: the
+    // over-cap prune, the unparseable record, and the empty one. The fourth
+    // happens inside the reader when the store itself calls a record corrupt,
+    // and it reached that reader through the unbudgeted `read_state_record` —
+    // the same gap `restore_media_descriptors` had.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let beyond_budget = 10;
+    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+    for index in 0..total {
+        // Well under `MAX_KEY_PACKAGE_SENT_TO`, so nothing here can reach the
+        // over-cap branch that was already budgeted.
+        state
+            .store(
+                storage_keys::PEER_CAPABILITIES,
+                &format!("peer{index:05}"),
+                b"whatever the provider refuses to hand back",
+            )
+            .unwrap();
+    }
+
+    let remaining = |state: &Arc<InMemoryStorage>| {
+        state
+            .list_keys(storage_keys::PEER_CAPABILITIES)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(remaining(&state), total, "precondition");
+
+    let launch = |secure: &Arc<InMemoryStorage>, state: &Arc<InMemoryStorage>| {
+        let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+        let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(ReportingStorage {
+            inner: state.clone(),
+            corrupt: None,
+            corrupt_category: Some(storage_keys::PEER_CAPABILITIES),
+            empty_as_not_found: None,
+        });
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol
+            .initialize_mls(secure_handle, state_handle)
+            .unwrap();
+        protocol
+    };
+
+    let first = launch(&secure, &state);
+    assert!(
+        first.peer_compact_envelope.is_empty() && first.peer_rich_payload.is_empty(),
+        "a record the store calls corrupt restores no capability, budget or no budget"
+    );
+    assert_eq!(
+        remaining(&state),
+        beyond_budget,
+        "the reader's own drop must be charged to the walk's budget"
+    );
+
+    let _second = launch(&secure, &state);
+    assert_eq!(
+        remaining(&state),
+        0,
+        "the remainder is under the budget, so the second launch finishes"
+    );
+}
+
+#[test]
+fn test_restore_welcome_lifecycle_drop_is_bounded_per_launch() {
+    // `load_restorable_state_record` drops a record whose bytes are not its
+    // category's type, and that drop is a provider delete with a directory
+    // flush behind it like any other. The Welcome-lifecycle restore walks up to
+    // `MAX_RESTORE_KEYS_PER_CATEGORY` container-listed keys, so nothing else
+    // bounded how many of those one launch could issue.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let beyond_budget = 10;
+    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+    for index in 0..total {
+        // Unsealed category, so the bytes reach serde exactly as written — and
+        // these are not a `WelcomeLifecycleRecord`.
+        state
+            .store(
+                storage_keys::WELCOME_LIFECYCLES,
+                &format!("peer{index:05}"),
+                b"not a welcome lifecycle",
+            )
+            .unwrap();
+    }
+
+    let remaining = |state: &Arc<InMemoryStorage>| {
+        state
+            .list_keys(storage_keys::WELCOME_LIFECYCLES)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(remaining(&state), total, "precondition");
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls(secure_handle, state_handle).unwrap();
+    assert!(
+        first.welcome_lifecycles.is_empty(),
+        "a record that will not decode restores nothing, budget or no budget"
+    );
+    assert_eq!(
+        remaining(&state),
+        beyond_budget,
+        "one launch must spend exactly its delete budget"
+    );
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls(secure_handle, state_handle).unwrap();
+    assert_eq!(
+        remaining(&state),
         0,
         "the remainder is under the budget, so the second launch finishes"
     );

@@ -296,17 +296,51 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 ///
 /// Safe to stop early precisely because pruning is *idempotent and resumable*:
 /// an over-cap record left on disk is walked again next launch and pruned then,
-/// exactly as `adopt_legacy_protocol_state` drains its own truncated pass. The
-/// budget only applies to categories whose records are caches or advisory
-/// signals, where dropping one costs a recoverable re-exchange and nothing is
-/// owed to the application. [`OfflineProtocol::restore_outbox`] is deliberately
-/// **not** budgeted: each of its deletes is paired with a terminal
-/// `message_failed`, and decoupling the two would either settle an id whose
-/// record a later launch restores and re-drives — the exact contradiction
-/// [`StateRecord`] exists to prevent — or drop an entry from memory while
-/// leaving the app holding an id nothing resolves. Its walk bound is
-/// [`OUTBOX_RESTORE_KEY_CAP`], thirty times tighter, so the volume never gets
-/// close.
+/// exactly as `adopt_legacy_protocol_state` drains its own truncated pass.
+///
+/// # Two ways to spend it, because two kinds of walk owe the application
+/// different things
+///
+/// A **cache or advisory** walk ([`PruneBudget::refusing`]) may simply refuse a
+/// delete once the allowance is gone: dropping a cached key package or a media
+/// descriptor costs a recoverable re-exchange, so the record is left on disk and
+/// nothing is owed to anyone.
+///
+/// A **settlement-paired** walk ([`PruneBudget::counting`]) cannot. Refusing an
+/// individual delete there would either settle an id whose record a later launch
+/// restores and re-drives — the exact contradiction [`StateRecord`] exists to
+/// prevent — or drop an entry from memory while leaving the app holding an id
+/// nothing resolves. So it *counts* what it spends, never refuses a delete
+/// mid-record, and stops at the next **record boundary**, where stopping is
+/// safe because the untouched remainder is exactly what a later launch reads.
+/// [`OfflineProtocol::restore_pending_messages`] spends it that way, and freezes
+/// the recipients it did not reach for the session, the same way it freezes the
+/// tail of its two walk bounds.
+///
+/// [`OfflineProtocol::restore_outbox`] is deliberately **not** budgeted at all.
+/// It is settlement-paired like the pending walk, but its walk bound is
+/// [`OUTBOX_RESTORE_KEY_CAP`] — eight times tighter, capping it near 1.5k
+/// deletes rather than 16k — and, unlike a pending record, an outbox record left
+/// unwalked is one the app is still holding a live id for, so deferring it
+/// defers delivery rather than only deferring a diagnostic.
+///
+/// # This bounds deletes, and deletes are not the only durable cost
+///
+/// A *write* flushes the record **and** its directory, so it is strictly more
+/// expensive than a delete. Two write paths on the restore walk are unbounded
+/// on purpose, for the same reason `restore_outbox`'s deletes are: each is
+/// paired with a settlement that cannot be separated from it.
+///
+/// - `restore_pending_messages` re-persists every recipient whose queue lost
+///   entries to a capacity cap. Skipping one would leave its durable record
+///   listing messages already settled as `message_failed`, which the next launch
+///   would restore and deliver.
+/// - `restore_outbox` re-persists refreshed and orphaned entries for the same
+///   reason.
+///
+/// Both are bounded transitively — by [`MAX_PENDING_RESTORE_ENTRIES`] and
+/// [`OUTBOX_RESTORE_KEY_CAP`] respectively — not by this constant. Tightening
+/// the write volume means tightening those, not budgeting here.
 pub(super) const MAX_RESTORE_PRUNE_DELETES: usize = 512;
 
 /// Everything one pending-queue restore walk accumulates across recipients.
@@ -334,21 +368,63 @@ struct RestoredPendingAdmission {
 
 /// Per-launch allowance for the durable deletes a restore path issues while
 /// pruning, and whether it ran out. See [`MAX_RESTORE_PRUNE_DELETES`].
-#[derive(Default)]
+///
+/// Deliberately has no `Default`: whether a walk may *refuse* a delete or only
+/// *count* it is the whole safety question, so it has to be answered at the
+/// construction site rather than inherited from whichever answer happened to be
+/// the zero value.
 struct PruneBudget {
     spent: usize,
     exhausted: bool,
+    /// Whether [`Self::claim`] may turn a delete down once the allowance is
+    /// gone. False for settlement-paired walks — see
+    /// [`MAX_RESTORE_PRUNE_DELETES`].
+    refusable: bool,
 }
 
 impl PruneBudget {
-    /// Claims one delete, or records that the budget is gone and refuses.
+    /// A budget for a walk whose records are caches or advisory signals, which
+    /// may refuse a delete outright and leave the record for a later launch.
+    fn refusing() -> Self {
+        Self {
+            spent: 0,
+            exhausted: false,
+            refusable: true,
+        }
+    }
+
+    /// A budget for a settlement-paired walk, which counts every delete but
+    /// never refuses one.
+    ///
+    /// Refusing mid-record would break the pairing between a delete and the
+    /// terminal event that names what it destroyed. The caller instead polls
+    /// [`Self::is_spent`] between records and stops there.
+    fn counting() -> Self {
+        Self {
+            spent: 0,
+            exhausted: false,
+            refusable: false,
+        }
+    }
+
+    /// Claims one delete. Refuses — and records that the budget is gone — only
+    /// for a [`Self::refusing`] budget; a [`Self::counting`] one always allows
+    /// the delete and just charges for it.
     fn claim(&mut self) -> bool {
         if self.spent >= MAX_RESTORE_PRUNE_DELETES {
             self.exhausted = true;
-            return false;
+            if self.refusable {
+                return false;
+            }
         }
-        self.spent += 1;
+        self.spent = self.spent.saturating_add(1);
         true
+    }
+
+    /// Whether the allowance is used up. A [`Self::counting`] caller checks this
+    /// at each record boundary to decide whether to walk any further.
+    fn is_spent(&self) -> bool {
+        self.spent >= MAX_RESTORE_PRUNE_DELETES
     }
 }
 
@@ -525,12 +601,17 @@ impl OfflineProtocol {
     /// the install unopenable) would otherwise issue one per record with
     /// nothing counting them.
     ///
-    /// Only walks that owe the application nothing for a dropped record pass a
-    /// budget. The settlement-paired walks ([`Self::restore_outbox`],
-    /// [`Self::restore_pending_messages`]) deliberately pass `None`: postponing
-    /// their unlink would either settle an id whose record a later launch
-    /// restores and re-drives, or drop an entry while the app still holds an id
-    /// nothing resolves.
+    /// A [`PruneBudget::refusing`] budget may turn the unlink down and leave the
+    /// record for a later launch; the record is reported
+    /// [`StateRecord::Unreadable`] either way, since nothing is ever recovered
+    /// from it. A [`PruneBudget::counting`] one always performs the unlink and
+    /// merely charges for it, so a settlement-paired caller
+    /// ([`Self::restore_pending_messages`]) keeps its delete and its terminal
+    /// event together and stops at its next record boundary instead.
+    ///
+    /// `None` is for the runtime callers and for [`Self::restore_outbox`],
+    /// whose walk bound already caps the volume — see
+    /// [`MAX_RESTORE_PRUNE_DELETES`].
     fn read_state_record_detailed_budgeted(
         &self,
         storage: &dyn ProtocolStateStorage,
@@ -1135,7 +1216,7 @@ impl OfflineProtocol {
         &self,
         recipient: &str,
     ) -> Option<Vec<PendingMessage>> {
-        match self.load_pending_messages_detailed(recipient) {
+        match self.load_pending_messages_detailed(recipient, None) {
             PendingRestore::Restored(mut messages) => {
                 for message in &mut messages {
                     message.measure();
@@ -1156,14 +1237,27 @@ impl OfflineProtocol {
     /// entries the per-peer count trim is about to drop. Anything that enters
     /// `pending_encrypted_messages` must be measured first or it reads as free
     /// against the queue byte budgets.
-    fn load_pending_messages_detailed(&self, recipient: &str) -> PendingRestore {
+    ///
+    /// `budget` counts the durable deletes this read causes — the reader's own
+    /// drop of a record that will not open, and the drop below of one whose
+    /// bytes will not parse. It must be a [`PruneBudget::counting`] budget, so
+    /// neither delete is ever refused: both are paired with the
+    /// `pending_state_lost` the caller emits, and settling a record still
+    /// sitting on disk is a claim the next launch contradicts. The caller stops
+    /// walking once the budget reads spent instead.
+    fn load_pending_messages_detailed(
+        &self,
+        recipient: &str,
+        mut budget: Option<&mut PruneBudget>,
+    ) -> PendingRestore {
         let Some(storage) = self.protocol_state_storage.as_ref() else {
             return PendingRestore::Absent;
         };
-        let record = self.read_state_record_detailed(
+        let record = self.read_state_record_detailed_budgeted(
             storage.as_ref(),
             storage_keys::PENDING_MESSAGES,
             recipient,
+            budget.as_deref_mut(),
         );
         let data = match record {
             Ok(StateRecord::Present(data)) => data,
@@ -1178,6 +1272,12 @@ impl OfflineProtocol {
             // Parsed-as-garbage is the same loss as failed-to-open. Drop the
             // record so it is not re-parsed on every boot.
             warn!(recipient = %recipient, "Dropping corrupted pending message record");
+            // Charged, and the answer deliberately not honoured: this delete is
+            // paired with the caller's `pending_state_lost`, so a budget that
+            // refused it would leave a settled record on disk. A `counting`
+            // budget never refuses; ignoring the answer is what keeps a
+            // mistakenly-`refusing` one failing in the safe direction.
+            claim_prune(&mut budget);
             let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
             return PendingRestore::Lost;
         };
@@ -1330,8 +1430,26 @@ impl OfflineProtocol {
         // see [`MAX_PENDING_RESTORE_ENTRIES`].
         let mut examined_entries = 0usize;
         let mut entry_bound_reached = false;
-        // How far the walk got. Everything from here on is the tail neither
-        // bound below let this pass reach, and is frozen for the session — see
+        // The third bound, and the one that counts *durable deletes* rather
+        // than reads. This walk is the widest in the module — its record bound
+        // is the same `MAX_RESTORE_KEYS_PER_CATEGORY` the budgeted cache walks
+        // use, eight times looser than the outbox's — and every record it
+        // cannot open costs a provider delete that flushes the containing
+        // directory (`F_FULLFSYNC` on iOS, a full device barrier). A
+        // regenerated record key makes *every* pending record unreadable at
+        // once, since this is a sealed category, and a queue lost that way
+        // contributes no entries, so `MAX_PENDING_RESTORE_ENTRIES` never binds
+        // in exactly that case.
+        //
+        // Counting rather than refusing: each of those deletes is paired with
+        // the `pending_state_lost` emitted below, and a settlement for a record
+        // still on disk is a claim the next launch contradicts. So the walk
+        // spends its allowance, then stops at the next *record boundary* — the
+        // one place stopping is safe — and freezes the rest.
+        let mut budget = PruneBudget::counting();
+        let mut prune_bound_reached = false;
+        // How far the walk got. Everything from here on is the tail none of the
+        // bounds below let this pass reach, and is frozen for the session — see
         // the freeze right after the loop.
         let mut walked = 0usize;
         while walked < recipients.len() {
@@ -1342,6 +1460,10 @@ impl OfflineProtocol {
                 entry_bound_reached = true;
                 break;
             }
+            if budget.is_spent() {
+                prune_bound_reached = true;
+                break;
+            }
             let recipient = recipients[walked].clone();
             walked += 1;
             if Self::validate_outbound_recipient(&recipient).is_err() {
@@ -1350,7 +1472,7 @@ impl OfflineProtocol {
                 // ids from `send_message*` that must be settled. The record has
                 // to be read *before* deleting it to recover them, and the read
                 // gets the same three-way treatment as every other restore.
-                match self.load_pending_messages_detailed(&recipient) {
+                match self.load_pending_messages_detailed(&recipient, Some(&mut budget)) {
                     PendingRestore::Restored(messages) => {
                         examined_entries = examined_entries.saturating_add(messages.len());
                         unaddressable.extend(messages.into_iter().map(|m| m.message_id));
@@ -1380,10 +1502,14 @@ impl OfflineProtocol {
                     }
                 }
                 warn!(recipient = %recipient, "Dropping persisted pending queue for an invalid recipient");
+                // Charged, never refused: the settlement this delete pairs with
+                // was already recorded above, so the record has to go with it.
+                budget.claim();
                 let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
                 continue;
             }
-            let messages = match self.load_pending_messages_detailed(&recipient) {
+            let messages = match self.load_pending_messages_detailed(&recipient, Some(&mut budget))
+            {
                 PendingRestore::Restored(messages) => messages,
                 PendingRestore::Absent => continue,
                 // A queue existed and its contents are gone. The ids are inside
@@ -1454,6 +1580,15 @@ impl OfflineProtocol {
                 frozen = unwalked,
                 "Pending message store held more queued entries than one restore may walk; \
                  the remaining recipients are left on disk and frozen for this session"
+            );
+        }
+        if prune_bound_reached {
+            warn!(
+                deleted = budget.spent,
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                frozen = unwalked,
+                "Pending message restore spent its per-launch delete budget; the remaining \
+                 recipients are left on disk and frozen for this session"
             );
         }
 
@@ -1547,20 +1682,25 @@ impl OfflineProtocol {
     fn load_peer_key_package_bounded(
         &self,
         peer_id: &str,
-        budget: Option<&mut PruneBudget>,
+        mut budget: Option<&mut PruneBudget>,
     ) -> Option<ReceivedKeyPackage> {
         let storage = self.protocol_state_storage.as_ref()?;
+        // The reader deletes what it cannot return, so it gets the budget too —
+        // that delete is as durable as the expiry one below and was the last
+        // one on this walk that nothing counted.
         let data = self
-            .read_state_record(storage.as_ref(), storage_keys::PEER_KEY_PACKAGES, peer_id)
-            .ok()??;
+            .read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                storage_keys::PEER_KEY_PACKAGES,
+                peer_id,
+                budget.as_deref_mut(),
+            )
+            .ok()?
+            .into_bytes()?;
         let pkg: ReceivedKeyPackage = serde_json::from_slice(&data).ok()?;
         let now_ms = Utc::now().timestamp_millis() as u64;
         if now_ms >= pkg.local_expires_at_ms {
-            let may_delete = match budget {
-                Some(budget) => budget.claim(),
-                None => true,
-            };
-            if may_delete {
+            if claim_prune(&mut budget) {
                 let _ = storage.delete(storage_keys::PEER_KEY_PACKAGES, peer_id);
             }
             return None;
@@ -1608,7 +1748,7 @@ impl OfflineProtocol {
         };
         let session_set: std::collections::HashSet<_> = sessions.into_iter().collect();
 
-        let mut budget = PruneBudget::default();
+        let mut budget = PruneBudget::refusing();
         let mut over_cap_pruned = 0usize;
         // Bounded like every other category walk, and the prune inside it is
         // bounded again by `MAX_RESTORE_PRUNE_DELETES` — the walk bounds reads,
@@ -1661,12 +1801,15 @@ impl OfflineProtocol {
         }
         // Routine, unlike the over-cap prune above: cached packages expire and
         // nothing else collects them, so this is the ordinary way the store
-        // shrinks. Reported at debug so a normal launch stays quiet.
-        let expired_pruned = budget.spent.saturating_sub(over_cap_pruned);
-        if expired_pruned > 0 {
+        // shrinks. Reported at debug so a normal launch stays quiet. Folded in
+        // with the reader's own drops, which are neither routine nor a flood —
+        // separating a third counter would say more about the log line than
+        // about the store.
+        let dropped = budget.spent.saturating_sub(over_cap_pruned);
+        if dropped > 0 {
             debug!(
-                pruned = expired_pruned,
-                "Dropped expired peer key packages from durable storage on restore"
+                pruned = dropped,
+                "Dropped expired or unreadable peer key packages from durable storage on restore"
             );
         }
         if budget.exhausted {
@@ -1856,12 +1999,19 @@ impl OfflineProtocol {
         peer_ids.extend(non_session_ids);
 
         let mut kept = 0usize;
-        let mut budget = PruneBudget::default();
+        let mut over_cap_pruned = 0usize;
+        let mut budget = PruneBudget::refusing();
         // Bounded like `restore_peer_key_packages`, for the same reason: the
         // prune below is a provider delete per over-cap entry, and those are
         // budgeted separately from the read walk. The take comes *after* the
         // session-peer partition, so the records this restore exists for are
         // always inside the prefix however the backend ordered its listing.
+        //
+        // *Every* kind of delete this walk causes shares that budget, including
+        // the one it does not issue itself: a record the store reports corrupt,
+        // or one over the record cap, is dropped inside the reader. Handing the
+        // budget to the reader is the only way to count those — the same
+        // correction `restore_media_descriptors` needed, for the same reason.
         for peer_id in peer_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if kept >= MAX_KEY_PACKAGE_SENT_TO {
                 if !budget.claim() {
@@ -1871,11 +2021,15 @@ impl OfflineProtocol {
                     break;
                 }
                 self.delete_peer_capabilities_from_storage(&peer_id);
+                over_cap_pruned += 1;
                 continue;
             }
-            let Ok(Some(data)) =
-                self.read_state_record(storage.as_ref(), storage_keys::PEER_CAPABILITIES, &peer_id)
-            else {
+            let Ok(StateRecord::Present(data)) = self.read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                storage_keys::PEER_CAPABILITIES,
+                &peer_id,
+                Some(&mut budget),
+            ) else {
                 continue;
             };
             let Ok(caps) = serde_json::from_slice::<PeerCapabilities>(&data) else {
@@ -1920,11 +2074,22 @@ impl OfflineProtocol {
                 "Restored peer capability records from storage"
             );
         }
-        if budget.spent > 0 {
+        if over_cap_pruned > 0 {
             warn!(
                 cap = MAX_KEY_PACKAGE_SENT_TO,
-                pruned = budget.spent,
+                pruned = over_cap_pruned,
                 "Peer capability store exceeded the cap on restore; pruned overflow from durable storage"
+            );
+        }
+        // Reported apart from the over-cap prune, like `restore_peer_key_packages`
+        // separates its expiry drops: a corrupt, empty, or unreadable record is
+        // not a store that outgrew its cap, and attributing it to one sends
+        // whoever reads this log looking for a flood that never happened.
+        let unreadable_pruned = budget.spent.saturating_sub(over_cap_pruned);
+        if unreadable_pruned > 0 {
+            debug!(
+                pruned = unreadable_pruned,
+                "Dropped unreadable peer capability records from durable storage on restore"
             );
         }
         if budget.exhausted {
@@ -1973,20 +2138,36 @@ impl OfflineProtocol {
     /// Storage failures still propagate: a read that failed is not a record
     /// that decoded to nothing, and restore rolls initialization back for it
     /// exactly as before.
+    ///
+    /// `budget` bounds the durable deletes this causes — the drop below, and the
+    /// reader's own drop of a record that will not open. Both categories reached
+    /// through here are unsealed and advisory-to-restore, so a
+    /// [`PruneBudget::refusing`] budget is right: a record the budget spares is
+    /// simply re-walked and dropped on a later launch, exactly like the cache
+    /// prunes. Callers whose walk is bounded by something other than the store
+    /// (`restore_session_states_from_manager` iterates the MLS session list)
+    /// pass `None`.
     fn load_restorable_state_record<T: DeserializeOwned>(
         &self,
         key_type: &str,
         key_id: &str,
+        mut budget: Option<&mut PruneBudget>,
     ) -> Result<Option<T>> {
         let Some(storage) = &self.protocol_state_storage else {
             return Ok(None);
         };
 
         let Some(data) = self
-            .read_state_record(storage.as_ref(), key_type, key_id)
+            .read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                key_type,
+                key_id,
+                budget.as_deref_mut(),
+            )
             .map_err(|e| {
                 Error::Other(format!("Failed to load {} for {}: {}", key_type, key_id, e))
             })?
+            .into_bytes()
         else {
             return Ok(None);
         };
@@ -2001,7 +2182,9 @@ impl OfflineProtocol {
                     "Dropping a protocol-state record whose bytes are not the type \
                      its category holds"
                 );
-                let _ = storage.delete(key_type, key_id);
+                if claim_prune(&mut budget) {
+                    let _ = storage.delete(key_type, key_id);
+                }
                 Ok(None)
             }
         }
@@ -2010,11 +2193,15 @@ impl OfflineProtocol {
     /// Restore-path read of a peer's session state. See
     /// [`Self::load_restorable_state_record`] for why this is separate from
     /// [`Self::load_session_state_entry`].
+    ///
+    /// Unbudgeted: its caller walks the *MLS session list*, not a
+    /// protocol-state category, so the volume is bounded by sessions this
+    /// install actually has rather than by whatever the container holds.
     pub(crate) fn load_session_state_for_restore(
         &self,
         peer_id: &str,
     ) -> Result<Option<SessionState>> {
-        self.load_restorable_state_record(storage_keys::SESSION_STATES, peer_id)
+        self.load_restorable_state_record(storage_keys::SESSION_STATES, peer_id, None)
     }
 
     /// Reads a peer's Welcome lifecycle. See
@@ -2023,12 +2210,14 @@ impl OfflineProtocol {
     /// Unlike session states, this category has no strict twin: restore is its
     /// only reader (`welcome_lifecycles` is an in-memory map from then on), so
     /// there is no send-path decision that has to fail closed on a record that
-    /// will not decode.
+    /// will not decode. It *is* walked by container-listed key, though, so its
+    /// deletes are budgeted like every other such walk.
     fn load_welcome_lifecycle_for_restore(
         &self,
         peer_id: &str,
+        budget: Option<&mut PruneBudget>,
     ) -> Result<Option<WelcomeLifecycleRecord>> {
-        self.load_restorable_state_record(storage_keys::WELCOME_LIFECYCLES, peer_id)
+        self.load_restorable_state_record(storage_keys::WELCOME_LIFECYCLES, peer_id, budget)
     }
 
     // ========================================================================
@@ -2177,8 +2366,16 @@ impl OfflineProtocol {
             .map_err(|e| Error::Other(format!("Failed to list welcome lifecycles: {}", e)))?;
         let listed = peers.len();
 
+        // Bounded like every other container-listed walk: a record that will not
+        // decode is dropped, and that drop is a provider delete with a directory
+        // flush behind it. The tail waits for a later launch, which is safe for
+        // the same reason it is safe for the cache prunes — dropping a Welcome
+        // lifecycle is recoverable, and re-reading one costs a parse.
+        let mut budget = PruneBudget::refusing();
         for peer_id in peers.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
-            if let Some(mut record) = self.load_welcome_lifecycle_for_restore(&peer_id)? {
+            if let Some(mut record) =
+                self.load_welcome_lifecycle_for_restore(&peer_id, Some(&mut budget))?
+            {
                 if matches!(
                     record.state,
                     WelcomeDeliveryState::Created | WelcomeDeliveryState::SendAttempted
@@ -2281,6 +2478,12 @@ impl OfflineProtocol {
                 "Welcome lifecycle store listed more peers than any legitimate run can produce; ignoring the tail"
             );
         }
+        if budget.exhausted {
+            warn!(
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Welcome lifecycle restore hit its per-launch delete budget; the rest is left on disk for a later launch"
+            );
+        }
 
         Ok(())
     }
@@ -2364,14 +2567,21 @@ impl OfflineProtocol {
     /// - pre-existing in-memory entries not yet in storage are persisted, so
     ///   memory and storage are consistent once restore returns.
     ///
-    /// Deliberately **not** subject to [`MAX_RESTORE_PRUNE_DELETES`], unlike the
-    /// cache and media walks. Every delete here is paired with a terminal
-    /// `message_failed`, and the two cannot be separated: skipping the delete
-    /// while settling would settle an id whose record the next launch restores
-    /// and re-drives, and skipping both would drop the entry from memory while
-    /// leaving the application holding an id nothing ever resolves.
-    /// [`OUTBOX_RESTORE_KEY_CAP`] already bounds the volume thirty times more
-    /// tightly than the walks that are budgeted.
+    /// Deliberately **not** subject to [`MAX_RESTORE_PRUNE_DELETES`] in any
+    /// form. Every delete here is paired with a terminal `message_failed`, and
+    /// the two cannot be separated: skipping the delete while settling would
+    /// settle an id whose record the next launch restores and re-drives, and
+    /// skipping both would drop the entry from memory while leaving the
+    /// application holding an id nothing ever resolves.
+    ///
+    /// [`Self::restore_pending_messages`] is settlement-paired too and *is*
+    /// budgeted, by counting its deletes and stopping at a record boundary — so
+    /// the pairing alone is not what exempts this walk. Two things do.
+    /// [`OUTBOX_RESTORE_KEY_CAP`] bounds it eight times more tightly than the
+    /// pending walk's record bound, capping it near 1.5k deletes rather than
+    /// 16k; and an outbox record left unwalked is one the application holds a
+    /// *live* id for, so deferring it defers delivery, where deferring a pending
+    /// record only defers a diagnostic about messages already lost.
     pub(crate) fn restore_outbox(&mut self) -> Result<()> {
         // Cloned rather than borrowed: the loop below both reads through this
         // handle and calls `&mut self` settlement paths, so holding a borrow of
@@ -2663,7 +2873,7 @@ impl OfflineProtocol {
         // re-walked next launch and dropped then. "Causes" rather than
         // "issues": the first of the four happens inside the reader, which is
         // why the budget is handed to it below.
-        let mut budget = PruneBudget::default();
+        let mut budget = PruneBudget::refusing();
         // Bounded, but deliberately by the wide ceiling rather than a multiple
         // of `MAX_MEDIA_DESCRIPTORS`: that cap is applied here, on restore, and
         // nowhere on the insert path, so a long session can legitimately leave
