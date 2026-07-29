@@ -711,6 +711,22 @@ impl OfflineProtocol {
             return;
         };
 
+        // One record holds this recipient's *whole* queue, so writing the
+        // in-memory view over a record restore could not read would destroy
+        // every message in it — ids the app is still holding, settled to no
+        // one. Behave as if no storage were configured for this recipient
+        // until a later launch can read the record and settle it properly.
+        if self
+            .pending_queues_unreadable_this_session
+            .contains(recipient)
+        {
+            warn!(
+                recipient = %recipient,
+                "Not persisting pending messages over a queue that could not be read this session"
+            );
+            return;
+        }
+
         if messages.is_empty() {
             if let Err(e) = storage.delete(storage_keys::PENDING_MESSAGES, recipient) {
                 warn!(
@@ -794,7 +810,22 @@ impl OfflineProtocol {
     }
 
     /// Removes pending messages for a recipient from storage.
+    ///
+    /// Refuses for a recipient whose queue could not be read this session: the
+    /// delete would destroy messages nothing has been able to name yet, which
+    /// is the same unsettled loss [`Self::persist_pending_messages_snapshot`]
+    /// refuses to cause by overwriting.
     pub(crate) fn clear_pending_messages_from_storage(&self, recipient: &str) {
+        if self
+            .pending_queues_unreadable_this_session
+            .contains(recipient)
+        {
+            warn!(
+                recipient = %recipient,
+                "Not clearing a persisted pending queue that could not be read this session"
+            );
+            return;
+        }
         if let Some(storage) = &self.protocol_state_storage {
             let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
         }
@@ -812,6 +843,10 @@ impl OfflineProtocol {
         let recipients = Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_MESSAGES)
             .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
         let listed = recipients.len();
+
+        // Rebuilt from this pass: a recipient is frozen on disk only while
+        // *this* restore could not read its record.
+        self.pending_queues_unreadable_this_session.clear();
 
         let mut capacity_evicted = Vec::new();
         // Kept apart from `capacity_evicted` so the two reasons the app sees are
@@ -853,6 +888,8 @@ impl OfflineProtocol {
                             recipient = %recipient,
                             "Pending queue for an invalid recipient could not be read this session; leaving it in place"
                         );
+                        self.pending_queues_unreadable_this_session
+                            .insert(recipient);
                         continue;
                     }
                 }
@@ -879,6 +916,11 @@ impl OfflineProtocol {
                         recipient = %recipient,
                         "Persisted pending queue could not be read this session; leaving it in place"
                     );
+                    // Leaving the record on disk only helps if nothing
+                    // overwrites it before a later launch can read it. This
+                    // recipient's record is frozen for the session.
+                    self.pending_queues_unreadable_this_session
+                        .insert(recipient);
                     continue;
                 }
             };

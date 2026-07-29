@@ -5609,6 +5609,145 @@ fn test_unaddressable_pending_queue_is_kept_when_its_ids_cannot_be_read() {
 }
 
 #[test]
+fn test_unreadable_pending_queue_is_not_overwritten_or_cleared_by_later_writes() {
+    // Leaving an unreadable queue on disk only protects it while nothing
+    // writes over it. The record holds the recipient's *whole* queue, so the
+    // next enqueue for that peer persists the in-memory view — one message —
+    // straight over the messages the app is still holding ids for, settled to
+    // no one. Honoring `Unavailable` at restore and then clobbering it at
+    // runtime is the same silent loss, one layer down. `block_user` and the
+    // aborted-session path delete the record outright, which is worse.
+    //
+    // Reachable while the record key loads perfectly well: this is a per-record
+    // provider failure, not a locked credential store (that case fails closed
+    // on write and cannot clobber anything).
+    struct FailingPendingLoadStorage {
+        inner: Arc<InMemoryStorage>,
+        recipient: String,
+    }
+
+    impl crate::ProtocolStateStorage for FailingPendingLoadStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .store(key_type, key_id, data)
+                .map_err(map_test_storage_error)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+            if key_type == storage_keys::PENDING_MESSAGES && key_id == self.recipient {
+                // Transient: the record is intact, this read is not.
+                return Err(crate::ProtocolStateError::LoadFailed(
+                    "forced pending-record read failure".to_string(),
+                ));
+            }
+            self.inner
+                .load(key_type, key_id)
+                .map_err(map_test_storage_error)
+        }
+
+        fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .delete(key_type, key_id)
+                .map_err(map_test_storage_error)
+        }
+
+        fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+            self.inner
+                .list_keys(key_type)
+                .map_err(map_test_storage_error)
+        }
+    }
+
+    let backing = Arc::new(InMemoryStorage::new());
+    let (_id, queued) = pending_record("queued before the restart");
+    seed_sealed_state_record(&backing, storage_keys::PENDING_MESSAGES, "bob", &queued);
+    let sealed_before = backing
+        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .expect("fixture must seed a queue");
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.secure_storage = Some(backing.clone());
+    protocol.protocol_state_storage = Some(Arc::new(FailingPendingLoadStorage {
+        inner: backing.clone(),
+        recipient: "bob".to_string(),
+    }));
+
+    protocol.restore_or_init_state_record_key();
+    assert!(
+        protocol.state_record_cipher.is_some(),
+        "the fixture must reproduce a per-record failure, not a missing key"
+    );
+
+    protocol.restore_pending_messages().unwrap();
+    assert!(
+        protocol.pending_encrypted_messages.get("bob").is_none(),
+        "the unreadable queue must not be restored into memory"
+    );
+
+    // A fresh send to the same peer while the session is still unavailable.
+    protocol.queue_pending_message(
+        "bob",
+        "queued after the restart",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+    );
+    assert_eq!(
+        protocol.pending_encrypted_messages.get("bob").map(Vec::len),
+        Some(1),
+        "the new message still queues in memory and flushes from there"
+    );
+    assert_eq!(
+        backing.load(storage_keys::PENDING_MESSAGES, "bob").unwrap(),
+        Some(sealed_before.clone()),
+        "an enqueue must not persist over a queue that could not be read"
+    );
+
+    // The delete paths (block_user, aborted pending session) must not destroy
+    // it either — those ids have still never been named.
+    protocol.clear_pending_messages_from_storage("bob");
+    assert_eq!(
+        backing.load(storage_keys::PENDING_MESSAGES, "bob").unwrap(),
+        Some(sealed_before),
+        "clearing must not destroy a queue that could not be read"
+    );
+
+    // A readable peer is unaffected: the freeze is per recipient, not global.
+    protocol.queue_pending_message(
+        "carol",
+        "ordinary",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+    );
+    assert!(
+        backing
+            .load(storage_keys::PENDING_MESSAGES, "carol")
+            .unwrap()
+            .is_some(),
+        "an unrelated recipient must still persist normally"
+    );
+}
+
+#[test]
 fn test_blocked_user_listing_failure_fails_init_rather_than_unblocking_everyone() {
     // A listing failure is indistinguishable from an empty store, so swallowing
     // it comes up with an empty block list and tells no one — every blocked

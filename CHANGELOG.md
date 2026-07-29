@@ -73,6 +73,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **The built-in iOS provider now reports a failed directory enumeration instead of an empty category.** Android and Python already threw; iOS returned no keys, which core reads as "nothing is filed here" — so the records were restored by nobody and settled to nobody. The three built-in providers are meant to be the same implementation in three languages, and this was the one that answered silently.
 
+- **A pending queue that could not be read this session is now frozen on disk, not just skipped on restore.** Restore correctly left an unreadable queue in place — but the pending queue is persisted as one record per recipient holding the *whole* queue, and nothing remembered that it had been skipped. The next enqueue for that peer wrote a snapshot of the in-memory view (one message) straight over messages the application is still holding ids for, settled to no one; `block_user` and the aborted-session path deleted the record outright. Honoring the three-state read at restore and then clobbering the record at runtime is the same silent loss, one layer down. Such a recipient is now refused both writes and deletes for the rest of the session, behaving exactly as it does when no storage is configured, so a later launch can settle or restore the record properly. Reachable while the record key loads perfectly well: it is a *per-record* provider failure, not a locked credential store — that case already fails closed on write and cannot clobber anything. The outbox needs no equivalent, being keyed per message id.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed

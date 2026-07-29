@@ -122,6 +122,26 @@ pub struct OfflineProtocol {
     /// Pending messages waiting for session establishment (recipient -> messages).
     pending_encrypted_messages: HashMap<String, Vec<PendingMessage>>,
 
+    /// Recipients whose persisted pending queue could not be read *this
+    /// session* and is still on disk (`PendingRestore::Unavailable`).
+    ///
+    /// The pending queue is persisted as one record per recipient holding the
+    /// whole queue, so honoring `Unavailable` at restore is not enough on its
+    /// own: the record is left in place, nothing is in memory for that
+    /// recipient, and the very next enqueue would write a snapshot of that
+    /// empty-plus-one view straight over it — destroying queued messages the
+    /// app is still holding ids for, with no settlement at all. That is the
+    /// silent loss the three-state read exists to prevent, arriving through
+    /// the runtime path instead of the restore path.
+    ///
+    /// So a recipient recorded here is *frozen on disk* for the rest of the
+    /// session: writes and deletes for its record are refused, and the
+    /// in-memory queue is used exactly as it is when no storage is configured
+    /// at all. A later launch reads the record and settles or restores it
+    /// properly. The outbox needs no equivalent — it is keyed per message id,
+    /// so an unreadable entry cannot be overwritten by an unrelated write.
+    pending_queues_unreadable_this_session: HashSet<String>,
+
     /// Terminal message settlements produced while restoring, held until the
     /// event pipeline is live.
     ///
@@ -516,6 +536,7 @@ impl OfflineProtocol {
             dm_unreachable_parks: HashMap::new(),
             mls_manager: None,
             pending_encrypted_messages: HashMap::new(),
+            pending_queues_unreadable_this_session: HashSet::new(),
             deferred_restore_settlements: Vec::new(),
             next_pending_message_expiry: None,
             pending_key_packages: HashMap::new(),
@@ -631,6 +652,8 @@ impl OfflineProtocol {
         // the rolled-back handles, and restored below alongside them.
         let previous_state_record_cipher = self.state_record_cipher.take();
         let previous_pending_messages = self.pending_encrypted_messages.clone();
+        let previous_unreadable_pending_queues =
+            self.pending_queues_unreadable_this_session.clone();
         let previous_pending_message_expiry = self.next_pending_message_expiry;
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
@@ -705,6 +728,7 @@ impl OfflineProtocol {
             self.protocol_state_storage = previous_protocol_state_storage;
             self.state_record_cipher = previous_state_record_cipher;
             self.pending_encrypted_messages = previous_pending_messages;
+            self.pending_queues_unreadable_this_session = previous_unreadable_pending_queues;
             self.next_pending_message_expiry = previous_pending_message_expiry;
             // A rolled-back restore never happened, so neither did anything it
             // decided to settle; a retry re-derives them. Adoption's
