@@ -6531,6 +6531,50 @@ fn test_adoption_settles_legacy_records_too_large_to_migrate() {
 }
 
 #[test]
+fn test_adoption_settles_an_oversized_outbox_record_whose_key_is_not_a_message_id() {
+    // The sweep deletes an oversized legacy record either way, so the only
+    // question is whether the application hears about it. An outbox key that is
+    // not a parseable MessageId cannot be named in a `message_failed` — and
+    // reporting nothing at all was the last silent-destruction path left in
+    // this module. It should not exist (the outbox has only ever been keyed by
+    // message id), but "should not exist" describes every record this path
+    // handles.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let oversized = vec![b'x'; MAX_PROTOCOL_STATE_RECORD_BYTES + 1];
+    let bogus_key = "not-a-uuid";
+    secure
+        .store(storage_keys::OUTBOX, bogus_key, &oversized)
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert!(
+        secure
+            .load(storage_keys::OUTBOX, bogus_key)
+            .unwrap()
+            .is_none(),
+        "the sweep must still delete a record with no reachable destination"
+    );
+
+    let events = started_protocol_events(&mut protocol);
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ConvergenceDiag { stage, peer_id, .. }
+                if stage == "pending_state_lost" && peer_id == bogus_key
+        )),
+        "an unnameable outbox record must still be surfaced, not destroyed in silence"
+    );
+}
+
+#[test]
 fn test_unreadable_record_key_leaves_the_outbox_alone_instead_of_settling_it() {
     // "Cannot be read this session" is not "destroyed". The record survives, so
     // settling it would be a terminal answer the next launch overturns by

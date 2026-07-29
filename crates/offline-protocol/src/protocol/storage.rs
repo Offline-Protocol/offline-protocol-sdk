@@ -626,15 +626,34 @@ impl OfflineProtocol {
     /// without opening it, because its record key *is* the message id, while a
     /// pending queue's ids are inside the record — so the recipient is the most
     /// that can be reported.
+    ///
+    /// An outbox key that does not parse as a [`MessageId`] falls back to the
+    /// same diagnostic the pending queue uses rather than to silence. It should
+    /// not exist — this SDK has only ever keyed the outbox by message id — but
+    /// "should not exist" is exactly the class of record this whole path is for,
+    /// and the sweep deletes it either way. A settlement nobody can act on still
+    /// beats a destruction nobody is told about, which is the invariant the rest
+    /// of this module spends its time enforcing.
     fn unadoptable_record_settlement(key_type: &str, key_id: &str) -> Option<Event> {
         match key_type {
-            storage_keys::OUTBOX => MessageId::from_str(key_id).ok().map(|message_id| {
-                Event::message_failed(
-                    message_id,
-                    "Outbox entry from a previous version was too large to migrate".to_string(),
-                    0,
-                )
-            }),
+            storage_keys::OUTBOX => Some(MessageId::from_str(key_id).map_or_else(
+                |_| {
+                    Event::convergence_diag(
+                        "pending_state_lost".to_string(),
+                        key_id.to_string(),
+                        "An outbox record from a previous version was too large to migrate and \
+                         its message id could not be recovered from the record key"
+                            .to_string(),
+                    )
+                },
+                |message_id| {
+                    Event::message_failed(
+                        message_id,
+                        "Outbox entry from a previous version was too large to migrate".to_string(),
+                        0,
+                    )
+                },
+            )),
             storage_keys::PENDING_MESSAGES => Some(Event::convergence_diag(
                 "pending_state_lost".to_string(),
                 key_id.to_string(),
