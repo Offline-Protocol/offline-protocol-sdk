@@ -171,6 +171,13 @@ mod tests {
     /// stores enforce before reading a file. If core's own cap ever grew past
     /// it, those providers would start dropping records the SDK legitimately
     /// wrote — silent data loss that only shows up on a device.
+    ///
+    /// This is one half of that guarantee.
+    /// [`built_in_providers_mirror_the_transfer_ceiling`] is the other: this
+    /// test relates core's cap to the constant, and that one relates the
+    /// constant to the three literals the providers actually enforce. Neither
+    /// is sufficient alone — the ceiling lives in four places, and only the
+    /// pair covers the path from "core writes it" to "a provider accepts it".
     #[test]
     fn bounded_load_ceiling_is_a_superset_of_the_record_cap() {
         assert!(
@@ -182,5 +189,68 @@ mod tests {
             MAX_PROTOCOL_STATE_RECORD_BYTES,
             SEALED_RECORD_OVERHEAD,
         );
+    }
+
+    /// The ceiling is enforced *inside* each provider — it has to be, since
+    /// core can only check a length a provider has already handed it — so the
+    /// number exists in four places: this constant and three hand-written
+    /// literals. Nothing related them, and the drift is invisible: raise
+    /// [`MAX_PROTOCOL_STATE_RECORD_BYTES`] past a provider's literal and core
+    /// keeps writing records that provider then rejects as corrupt, which core
+    /// dutifully settles as a terminal `message_failed`. No CI job can see
+    /// that; it shows up as messages failing on a device.
+    ///
+    /// Same shape as the RN bridge fallback guard in
+    /// `offline_protocol_reliability::constants`: read the binding sources and
+    /// assert the literal, so changing the Rust constant fails here until all
+    /// three are updated with it.
+    #[test]
+    fn built_in_providers_mirror_the_transfer_ceiling() {
+        let mib = MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES / (1024 * 1024);
+        assert_eq!(
+            mib * 1024 * 1024,
+            MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES,
+            "all three providers spell this ceiling `N * 1024 * 1024`, so a \
+             value that is not a whole number of MiB cannot be matched here — \
+             respell the provider literals and this test together rather than \
+             letting the guard silently stop covering them"
+        );
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let sources = [
+            (
+                repo.join("bindings/react-native/ios/ProtocolStateStorage.swift"),
+                format!("static let maxValueBytes = {mib} * 1024 * 1024"),
+            ),
+            (
+                repo.join(
+                    "bindings/react-native/android/src/main/java/com/offlineprotocol/\
+                     ProtocolStateStorage.kt",
+                ),
+                format!("const val MAX_VALUE_BYTES = {mib} * 1024 * 1024"),
+            ),
+            (
+                repo.join("bindings/python/offline_protocol_sdk/state_storage.py"),
+                format!("MAX_VALUE_BYTES = {mib} * 1024 * 1024"),
+            ),
+        ];
+
+        for (path, expected) in &sources {
+            // The guard only applies in the repo checkout; skip when the
+            // bindings tree isn't present (e.g. a vendored crate).
+            let Ok(source) = std::fs::read_to_string(path) else {
+                eprintln!(
+                    "bindings tree not present, skipping ceiling drift check for {}",
+                    path.display()
+                );
+                continue;
+            };
+            assert!(
+                source.contains(expected.as_str()),
+                "built-in provider record ceiling drifted from \
+                 MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES: expected `{expected}` in {}",
+                path.display()
+            );
+        }
     }
 }
