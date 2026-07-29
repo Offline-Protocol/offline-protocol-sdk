@@ -378,6 +378,17 @@ impl OfflineProtocol {
     /// arbitrary labels to the MLS keyspace. Enumeration therefore terminates,
     /// which read-through can never guarantee.
     ///
+    /// **This sweep depends on that other adoption.** On a pre-upgrade install
+    /// the records it is looking for sit in the *un-namespaced* credential
+    /// store, and the handle it enumerates is the namespaced one — so the only
+    /// reason `secure.list_keys` and `secure.load` reach them at all is that
+    /// the built-in providers union in, and read through to, the legacy store
+    /// (`MlsSecureStorage` / `SecureStorage`, see `LegacyStoreAdoption`). Two
+    /// independently-designed mechanisms, one silently load-bearing for the
+    /// other: a provider built without a namespace has no read-through, so this
+    /// sweep finds nothing and the pre-split state stays where it is. Python
+    /// warns about exactly that case at construction.
+    ///
     /// Properties worth keeping if this is ever touched:
     ///
     /// - **Resumable.** Each record is deleted from secure storage only once it
@@ -520,19 +531,43 @@ impl OfflineProtocol {
         unadoptable: &mut Vec<Event>,
     ) -> std::result::Result<bool, ()> {
         // Post-split state wins: never overwrite a record this build wrote.
-        match Self::load_state_bytes(state, key_type, key_id) {
-            Ok(Some(_)) => return Ok(false),
-            Ok(None) => {}
+        //
+        // The probe gets the same three-way treatment as every other read, for
+        // the same reason. A destination the store itself destroyed is not
+        // absent — the app holds ids for it — so the sweep proceeds but owes a
+        // settlement, which the legacy record only discharges by replacing it.
+        // A destination that is merely unreadable *this session* is left alone
+        // entirely: adopting over it would overwrite a record a later launch
+        // can still read.
+        let destination_destroyed = match self.read_state_record_detailed(state, key_type, key_id) {
+            Ok(StateRecord::Present(_)) => return Ok(false),
+            Ok(StateRecord::Missing) => false,
+            Ok(StateRecord::Unreadable) => true,
+            Ok(StateRecord::Unavailable) => {
+                warn!(
+                    key_type = %key_type,
+                    "Protocol state record unreadable this session; deferring adoption of its legacy twin"
+                );
+                return Err(());
+            }
             Err(e) => {
                 warn!(key_type = %key_type, error = %e, "Failed to probe protocol state during adoption");
                 return Err(());
             }
-        }
+        };
 
         let data = match secure.load(key_type, key_id) {
             Ok(Some(data)) => data,
             // A key that listed but no longer loads was deleted underneath us.
-            Ok(None) => return Ok(false),
+            Ok(None) => {
+                // Nothing left to inherit *and* the destination was destroyed
+                // by the probe, so this is the last moment anything can name
+                // what the app is still holding.
+                if destination_destroyed {
+                    unadoptable.extend(Self::unadoptable_record_settlement(key_type, key_id));
+                }
+                return Ok(false);
+            }
             Err(e) => {
                 warn!(key_type = %key_type, error = %e, "Failed to read legacy protocol state");
                 return Err(());

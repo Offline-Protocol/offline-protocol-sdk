@@ -6270,6 +6270,199 @@ fn test_unreadable_pending_queue_is_surfaced_per_recipient() {
 }
 
 #[test]
+fn test_adoption_defers_when_the_destination_record_is_unreadable_this_session() {
+    // The "post-split state wins" probe reads a destination record, so it owes
+    // the same three-way answer as every other read. A destination that is
+    // merely unreadable *this session* must not be adopted over: the legacy
+    // copy would overwrite a record a later launch can still read. Defer, and
+    // withhold the marker so the sweep retries.
+    struct UnreadableDestinationStorage {
+        inner: Arc<InMemoryStorage>,
+        key_id: String,
+    }
+
+    impl crate::ProtocolStateStorage for UnreadableDestinationStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .store(key_type, key_id, data)
+                .map_err(map_test_storage_error)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+            if key_type == storage_keys::OUTBOX && key_id == self.key_id {
+                return Err(crate::ProtocolStateError::LoadFailed(
+                    "forced destination read failure".to_string(),
+                ));
+            }
+            self.inner
+                .load(key_type, key_id)
+                .map_err(map_test_storage_error)
+        }
+
+        fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .delete(key_type, key_id)
+                .map_err(map_test_storage_error)
+        }
+
+        fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+            self.inner
+                .list_keys(key_type)
+                .map_err(map_test_storage_error)
+        }
+    }
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let message_id = MessageId::new();
+    secure
+        .store(storage_keys::OUTBOX, &message_id.as_str(), b"legacy")
+        .unwrap();
+    state
+        .store(storage_keys::OUTBOX, &message_id.as_str(), b"post-split")
+        .unwrap();
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            secure.clone(),
+            Arc::new(UnreadableDestinationStorage {
+                inner: state.clone(),
+                key_id: message_id.as_str(),
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        state
+            .load(storage_keys::OUTBOX, &message_id.as_str())
+            .unwrap()
+            .as_deref(),
+        Some(&b"post-split"[..]),
+        "an unreadable destination must not be adopted over"
+    );
+    assert!(
+        secure
+            .load(storage_keys::OUTBOX, &message_id.as_str())
+            .unwrap()
+            .is_some(),
+        "the legacy record must survive for the retried sweep"
+    );
+    assert!(
+        state
+            .load(
+                storage_keys::STATE_ADOPTION,
+                storage_keys::STATE_ADOPTION_ID
+            )
+            .unwrap()
+            .is_none(),
+        "a deferred record means the sweep did not complete; withhold the marker"
+    );
+}
+
+#[test]
+fn test_adoption_settles_a_destination_its_probe_destroyed() {
+    // A destination the store itself reports as permanently corrupt is deleted
+    // by the read — so the ids inside it are gone. Normally the legacy twin
+    // replaces it and there is nothing to report; when the twin has vanished
+    // too, the probe is the last moment anything can name what the app is
+    // still holding.
+    struct VanishingLegacyStorage {
+        inner: Arc<InMemoryStorage>,
+        key_id: String,
+    }
+
+    impl MlsStorage for VanishingLegacyStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            if key_type == storage_keys::OUTBOX && key_id == self.key_id {
+                // Listed, then deleted underneath the sweep.
+                return Ok(None);
+            }
+            self.inner.load(key_type, key_id)
+        }
+
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let message_id = MessageId::new();
+    secure
+        .store(storage_keys::OUTBOX, &message_id.as_str(), b"legacy")
+        .unwrap();
+    // A destination record sealed under a key that is not this install's: the
+    // read cannot open it, deletes it, and reports it destroyed.
+    let foreign = state_crypto::StateRecordCipher::new(&[9u8; 32]);
+    state
+        .store(
+            storage_keys::OUTBOX,
+            &message_id.as_str(),
+            &foreign
+                .seal(storage_keys::OUTBOX, &message_id.as_str(), b"unopenable")
+                .unwrap(),
+        )
+        .unwrap();
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            Arc::new(VanishingLegacyStorage {
+                inner: secure.clone(),
+                key_id: message_id.as_str(),
+            }),
+            Arc::new(TestProtocolStateStorage {
+                storage: state.clone(),
+            }),
+        )
+        .unwrap();
+
+    let events = started_protocol_events(&mut protocol);
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id: id, .. } if *id == message_id.as_str()
+        )),
+        "a destination the probe destroyed with nothing left to inherit must be settled"
+    );
+}
+
+#[test]
 fn test_adoption_settles_legacy_records_too_large_to_migrate() {
     // The pre-split build had neither a content cap nor a per-peer byte budget,
     // only 64 entries per peer — so the installs this branch's budgets exist for
