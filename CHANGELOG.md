@@ -65,6 +65,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **A blocked-user listing failure now fails initialization instead of coming up unblocked.** A listing error is indistinguishable from an empty store, so swallowing it started the SDK with an empty block list and told no one — every blocked peer silently unblocked, from a transient error, which is the same outcome the downgrade warning above exists for. This state also just moved from the credential store into the app container, where a read can fail for far more ordinary reasons. `restore_blocked_users` now propagates like every other category walk, so `initialize_mls` rolls back and the application finds out rather than running unprotected.
 
+- **An unaddressable pending queue is no longer destroyed while its ids are unreadable.** A persisted queue whose recipient does not validate is dropped, but the ids the application is holding live *inside* the record — so the drop was reading it first. When that read reported the record as intact-but-unreadable-this-session (a launch that could not load the per-install record key), the queue was deleted anyway and the ids went with it, unsettled: the exact silent loss the three-state read exists to prevent. Both halves are reachable on the same launch — recipient validation is new here, so the queues that fail it are the pre-upgrade ones, and that first post-upgrade launch is also the one most likely to find the credential store locked. The record is now left in place for a later launch to settle properly, and one that was examined and destroyed reports `pending_state_lost` like any other unrecoverable queue.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed

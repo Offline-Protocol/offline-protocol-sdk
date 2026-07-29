@@ -5521,6 +5521,94 @@ fn test_sealed_records_do_not_open_under_a_rotated_record_key() {
 }
 
 #[test]
+fn test_unaddressable_pending_queue_is_kept_when_its_ids_cannot_be_read() {
+    // Dropping a queue whose recipient can never be addressed is right; doing
+    // it while the record is merely unreadable *this session* is not. The ids
+    // live inside the record, so deleting it now destroys them with no
+    // settlement at all — the exact silent loss the three-state read exists to
+    // prevent. Both halves are reachable together on the first launch after an
+    // upgrade: recipient validation is new, so the queues that fail it are the
+    // pre-upgrade ones, and that same launch may find the credential store
+    // still locked.
+    struct FailingRecordKeyLoadStorage {
+        inner: Arc<crate::mls::InMemoryStorage>,
+    }
+
+    impl MlsStorage for FailingRecordKeyLoadStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            if key_type == storage_keys::STATE_RECORD_KEY {
+                return Err(offline_protocol_mls::StorageError::LoadFailed(
+                    "credential store locked".to_string(),
+                ));
+            }
+            self.inner.load(key_type, key_id)
+        }
+
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let backing = Arc::new(crate::mls::InMemoryStorage::new());
+    // A queue an older build happily accepted, under a recipient this build
+    // rejects at the send boundary.
+    seed_sealed_state_record(
+        &backing,
+        storage_keys::PENDING_MESSAGES,
+        "unresolved:token",
+        b"[]",
+    );
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let secure: Arc<dyn MlsStorage> = Arc::new(FailingRecordKeyLoadStorage {
+        inner: backing.clone(),
+    });
+    protocol.secure_storage = Some(secure.clone());
+    protocol.protocol_state_storage = Some(Arc::new(TestProtocolStateStorage { storage: secure }));
+
+    protocol.restore_or_init_state_record_key();
+    assert!(
+        protocol.state_record_cipher.is_none(),
+        "the fixture must reproduce a launch with no record key"
+    );
+
+    protocol.restore_pending_messages().unwrap();
+
+    assert!(
+        backing
+            .load(storage_keys::PENDING_MESSAGES, "unresolved:token")
+            .unwrap()
+            .is_some(),
+        "an unreadable queue must be left on disk so a later launch can name \
+         the ids before destroying them"
+    );
+}
+
+#[test]
 fn test_blocked_user_listing_failure_fails_init_rather_than_unblocking_everyone() {
     // A listing failure is indistinguishable from an empty store, so swallowing
     // it comes up with an empty block list and tells no one — every blocked

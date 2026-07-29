@@ -828,11 +828,33 @@ impl OfflineProtocol {
                 // The queue is unaddressable — nothing can ever be sent to this
                 // recipient again — so it is dropped, but the app still holds
                 // ids from `send_message*` that must be settled. The record has
-                // to be read *before* deleting it to recover them.
-                if let PendingRestore::Restored(messages) =
-                    self.load_pending_messages_detailed(&recipient)
-                {
-                    unaddressable.extend(messages.into_iter().map(|m| m.message_id));
+                // to be read *before* deleting it to recover them, and the read
+                // gets the same three-way treatment as every other restore.
+                match self.load_pending_messages_detailed(&recipient) {
+                    PendingRestore::Restored(messages) => {
+                        unaddressable.extend(messages.into_iter().map(|m| m.message_id));
+                    }
+                    PendingRestore::Absent => {}
+                    // Already examined and destroyed by the read; the ids went
+                    // with it, so report the loss per recipient rather than
+                    // letting an unaddressable queue vanish more quietly than
+                    // an addressable one would.
+                    PendingRestore::Lost => {
+                        lost_recipients.push(recipient);
+                        continue;
+                    }
+                    // Intact on disk, just unreadable this session. Deleting it
+                    // now would destroy ids nothing can name; a later launch
+                    // reads the record and settles them properly. Being
+                    // unaddressable is not urgent — nothing will be sent from
+                    // this queue either way.
+                    PendingRestore::Unavailable => {
+                        warn!(
+                            recipient = %recipient,
+                            "Pending queue for an invalid recipient could not be read this session; leaving it in place"
+                        );
+                        continue;
+                    }
                 }
                 warn!(recipient = %recipient, "Dropping persisted pending queue for an invalid recipient");
                 let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
