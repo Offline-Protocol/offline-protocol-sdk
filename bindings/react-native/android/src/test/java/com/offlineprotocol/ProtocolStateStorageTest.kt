@@ -297,4 +297,29 @@ class ProtocolStateStorageTest {
 
         assertEquals(listOf("message-1"), storage.listKeys("outbox"))
     }
+
+    /**
+     * `AtomicFile` on API < 30 renames the base to `.bak` and then writes the
+     * base, so a crash mid-write leaves a torn base next to an intact `.bak` —
+     * and `openRead` deliberately prefers the `.bak`. Enumeration has to agree
+     * with it: reading the torn base drops a key that [load] recovers perfectly
+     * well, and the record is then listed by nobody, restored by nobody, and
+     * deleted by nobody.
+     */
+    @Test
+    fun listingPrefersTheBackupTwinOverATornWrite() {
+        val account = namespace("torn-write")
+        val storage = AppContainerProtocolStateStorage(context, account)
+        storage.store("outbox", "message-1", byteArrayOf(1, 2, 3))
+
+        // Stage exactly what a crash between startWrite() and finishWrite()
+        // leaves behind.
+        val base = entryFile(account, "outbox", "message-1")
+        val backup = File("${base.path}.bak")
+        base.copyTo(backup, overwrite = true)
+        base.writeBytes(byteArrayOf(0x4F, 0x50))
+
+        assertEquals(listOf("message-1"), storage.listKeys("outbox"))
+        assertEquals(listOf(1, 2, 3), loadedBytes(storage, "outbox", "message-1"))
+    }
 }

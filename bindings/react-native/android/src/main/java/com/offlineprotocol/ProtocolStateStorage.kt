@@ -327,9 +327,17 @@ class AppContainerProtocolStateStorage(
     /**
      * Reads only a record's header. Enumeration must stay bounded even when the
      * container has been tampered with, so this never pulls in a whole file.
+     *
+     * A `.bak` twin *outranks* the base file, exactly as `AtomicFile.openRead`
+     * treats it. On API < 30 `startWrite` renames the base to `.bak` and then
+     * writes the base, so a `.bak` on disk means the base is a torn write —
+     * reading it here would fail to parse and silently drop a key that `load`
+     * recovers perfectly well, leaving the record listed by nobody, restored by
+     * nobody, and deleted by nobody.
      */
     private fun readHeader(file: File): ProtocolStateRecord.Header? {
-        val target = if (file.exists()) file else File("${file.path}.bak")
+        val backup = File("${file.path}.bak")
+        val target = if (backup.isFile) backup else file
         if (!target.isFile) {
             return null
         }

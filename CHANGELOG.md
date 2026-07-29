@@ -69,6 +69,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **An unaddressable pending queue is no longer destroyed while its ids are unreadable.** A persisted queue whose recipient does not validate is dropped, but the ids the application is holding live *inside* the record — so the drop was reading it first. When that read reported the record as intact-but-unreadable-this-session (a launch that could not load the per-install record key), the queue was deleted anyway and the ids went with it, unsettled: the exact silent loss the three-state read exists to prevent. Both halves are reachable on the same launch — recipient validation is new here, so the queues that fail it are the pre-upgrade ones, and that first post-upgrade launch is also the one most likely to find the credential store locked. The record is now left in place for a later launch to settle properly, and one that was examined and destroyed reports `pending_state_lost` like any other unrecoverable queue.
 
+- **The built-in Android provider's key enumeration now prefers an `AtomicFile` backup over a torn write.** On API < 30 `startWrite` renames the base entry to `.bak` and then writes the base, so a `.bak` on disk means the base is a partial write — which is why `openRead` discards it. Enumeration did the opposite, parsing the torn base, so a crash mid-`store` could drop the key from `listKeys` even though `load` recovered the record perfectly well. The entry was then listed by nobody, restored by nobody, and deleted by nobody — stranded for the life of the install, in precisely the crash the atomic write exists to survive.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed
