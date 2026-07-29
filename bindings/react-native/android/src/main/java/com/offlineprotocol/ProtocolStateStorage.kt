@@ -285,8 +285,23 @@ class AppContainerProtocolStateStorage(
 
     override fun delete(keyType: String, keyId: String) {
         synchronized(LOCK) {
+            val file = entryFile(keyType, keyId)
+            // Nothing to unlink means nothing to make durable, and the flush is
+            // the expensive half of this call — a directory fsync per delete,
+            // on paths that delete speculatively (clearing a pending queue for
+            // a peer that has no record, dropping a key package already
+            // consumed, removing a descriptor a transfer never wrote). iOS and
+            // Python both return before their flush for exactly this; the three
+            // providers are meant to be one implementation in three languages.
+            //
+            // All three of `AtomicFile`'s names are checked because all three
+            // are what its own `delete` removes, and which of them exists
+            // depends on the API level and on whether a write was interrupted.
+            if (!hasStoredEntry(keyType, keyId)) {
+                return
+            }
             try {
-                AtomicFile(entryFile(keyType, keyId)).delete()
+                AtomicFile(file).delete()
             } catch (error: Exception) {
                 throw MlsStorageException.DeleteFailed(
                     "Failed to delete protocol state: ${error.message}"
@@ -294,6 +309,21 @@ class AppContainerProtocolStateStorage(
             }
             syncDirectory(typeDirectory(keyType))
         }
+    }
+
+    /**
+     * Whether anything exists to unlink for this key — the guard [delete] uses
+     * to skip a flush that would make nothing durable.
+     *
+     * All three of `AtomicFile`'s names are checked because all three are what
+     * its own `delete` removes, and which of them exists depends on the API
+     * level and on whether a write was interrupted.
+     */
+    internal fun hasStoredEntry(keyType: String, keyId: String): Boolean {
+        val file = entryFile(keyType, keyId)
+        return file.exists() ||
+            File("${file.path}.bak").exists() ||
+            File("${file.path}.new").exists()
     }
 
     /**

@@ -67,6 +67,39 @@ class ProtocolStateStorageTest {
     }
 
     @Test
+    fun deleteSkipsItsFlushWhenThereIsNothingToUnlink() {
+        // The flush is the expensive half of `delete` — a directory fsync per
+        // call — and paths that delete speculatively (clearing a pending queue
+        // for a peer with no record, dropping an already-consumed key package)
+        // hit it constantly. iOS and Python both return before their flush when
+        // the entry is absent; this provider used to flush regardless. The
+        // guard is asserted directly because `android.system.Os` is not a real
+        // syscall under this harness, so the flush itself is unobservable here.
+        val account = namespace("absent-delete")
+        val storage = AppContainerProtocolStateStorage(context, account)
+
+        assertFalse(
+            "a key that was never written has nothing to unlink",
+            storage.hasStoredEntry("outbox", "never-written")
+        )
+        // Also covers the case where the type directory itself does not exist.
+        storage.delete("outbox", "never-written")
+
+        storage.store("outbox", "message-1", byteArrayOf(7))
+        assertTrue(
+            "a stored key does have something to unlink, so its delete must flush",
+            storage.hasStoredEntry("outbox", "message-1")
+        )
+
+        storage.delete("outbox", "message-1")
+        assertFalse(
+            "a second delete of the same key has nothing left to unlink",
+            storage.hasStoredEntry("outbox", "message-1")
+        )
+        assertNull(loadedBytes(storage, "outbox", "message-1"))
+    }
+
+    @Test
     fun accountNamespacesDoNotShareState() {
         val alice = AppContainerProtocolStateStorage(context, namespace("alice"))
         val bob = AppContainerProtocolStateStorage(context, namespace("bob"))

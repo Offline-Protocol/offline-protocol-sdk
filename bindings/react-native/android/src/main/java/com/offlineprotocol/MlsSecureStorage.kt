@@ -83,6 +83,21 @@ class MlsSecureStorage(
      * Loads data, falling through to the adopted legacy store on a miss and
      * promoting what it finds, so an upgraded install keeps its identity,
      * sessions, and TOFU pins without a bulk migration pass.
+     *
+     * Each primitive below takes the lock, but this *compound* read-then-promote
+     * is not atomic against [delete], and deliberately so. Interleaved, they
+     * would resurrect key material: this method could observe a miss in the
+     * namespaced store, read the legacy value, and then promote it after a
+     * concurrent delete had already removed both copies — defeating the very
+     * guarantee [delete] documents.
+     *
+     * That is unreachable because the SDK is the only caller and serialises
+     * every storage operation behind its own mutex: `OfflineProtocol`'s methods
+     * take `&mut self` and the UniFFI wrapper holds them under one lock, so no
+     * two provider calls overlap. Widening the lock to cover the whole compound
+     * operation would mean holding it across a legacy-store read on every miss,
+     * which is the common path during an upgrade. If a second caller is ever
+     * given this provider, that trade has to be revisited.
      */
     override fun load(keyType: String, keyId: String): List<UByte>? {
         // No lock needed for simple reads of the namespaced store; the

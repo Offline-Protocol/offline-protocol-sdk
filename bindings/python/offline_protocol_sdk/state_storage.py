@@ -80,6 +80,22 @@ TEMP_PREFIX = ".write-"
 #: directory cannot turn the first store of a session into an unbounded scan.
 MAX_SWEEP_ENTRIES = 4_096
 
+#: Serialises every store, load, delete, and enumeration in the process.
+#:
+#: Deliberately module-level, matching the Android provider's companion-object
+#: lock rather than the per-instance lock this used to be. Two providers over
+#: one root are not hypothetical, and a per-instance lock cannot order them by
+#: construction. That matters most for :meth:`AppStateStorage._sweep_temporaries`,
+#: whose whole safety argument is that no temporary another writer is using can
+#: be visible while the lock is held: with an instance lock, one provider's
+#: sweep can unlink the ``mkstemp`` file another provider's ``os.replace`` is
+#: about to rename into place, turning a store that would have succeeded into a
+#: ``StoreFailed``.
+#:
+#: Contention across accounts is not a concern: these are short file operations,
+#: and the SDK already serialises storage access behind its own mutex.
+_STORE_LOCK = threading.RLock()
+
 
 def _digest(*components: str) -> str:
     sha = hashlib.sha256()
@@ -226,9 +242,11 @@ class AppStateStorage(ProtocolStateStorageProvider):
             if namespace is not None
             else base_root
         )
-        self._lock = threading.RLock()
-        #: Type directories whose stale temporaries have already been swept this
-        #: process. One sweep per category per process, off the restore path.
+        #: Type directories whose stale temporaries have already been swept by
+        #: this provider. Kept per instance rather than module-level because the
+        #: sweep is idempotent, so a second provider repeating it once costs one
+        #: bounded scan and nothing else — while the *safety* of that scan comes
+        #: from ``_STORE_LOCK``, not from this set.
         self._swept: set[Path] = set()
         try:
             _private_mkdir(self._root)
@@ -239,7 +257,7 @@ class AppStateStorage(ProtocolStateStorageProvider):
 
     def store(self, key_type: str, key_id: str, data: bytes) -> None:
         framed = _frame(key_type, key_id, data)
-        with self._lock:
+        with _STORE_LOCK:
             directory = self._type_directory(key_type)
             try:
                 _private_mkdir(directory)
@@ -264,7 +282,7 @@ class AppStateStorage(ProtocolStateStorageProvider):
                 ) from exc
 
     def load(self, key_type: str, key_id: str) -> bytes | None:
-        with self._lock:
+        with _STORE_LOCK:
             path = self._entry_path(key_type, key_id)
             try:
                 # Stat before reading. A record over the ceiling cannot have
@@ -299,7 +317,7 @@ class AppStateStorage(ProtocolStateStorageProvider):
             return raw[header[2] :]
 
     def delete(self, key_type: str, key_id: str) -> None:
-        with self._lock:
+        with _STORE_LOCK:
             path = self._entry_path(key_type, key_id)
             try:
                 path.unlink()
@@ -328,7 +346,7 @@ class AppStateStorage(ProtocolStateStorageProvider):
 
         Returns the sorted key ids and the number of entries examined.
         """
-        with self._lock:
+        with _STORE_LOCK:
             directory = self._type_directory(key_type)
             if not directory.exists():
                 return [], 0

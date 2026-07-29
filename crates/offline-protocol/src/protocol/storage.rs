@@ -205,13 +205,13 @@ enum PendingRestore {
 ///   the rest" argument over to a tighter bound.
 /// - The two **cache** categories (`restore_peer_key_packages`,
 ///   `restore_peer_capabilities`) prune the overflow *inside* the prefix down
-///   to their own much smaller live caps, so each launch shrinks the store by
-///   up to this bound minus that cap and the tail drains over a handful of
-///   launches. Losing a cached key package or capability record only costs a
-///   recoverable re-exchange, which is what makes deleting the overflow the
-///   right policy there — but the *walk* still has to stop, because every
-///   pruned entry is a synchronous provider delete (a directory fsync on all
-///   three built-in providers) on the boot path.
+///   to their own much smaller live caps. Losing a cached key package or
+///   capability record only costs a recoverable re-exchange, which is what
+///   makes deleting the overflow the right policy there. How much they prune
+///   per launch is bounded separately by [`MAX_RESTORE_PRUNE_DELETES`],
+///   because this bound limits *reads* and a prune is a synchronous provider
+///   delete — so the store shrinks by that budget per launch and the tail
+///   drains over successive launches.
 /// - **Adoption** treats hitting this bound as an incomplete pass instead: it
 ///   deletes each record it moves, so withholding its completion marker drains
 ///   the remainder over successive launches rather than abandoning it in the
@@ -275,6 +275,79 @@ const OUTBOX_RESTORE_KEY_CAP: usize = 4 * MAX_OUTBOX_ENTRIES;
 /// equivalent: those are keyed per message and per file, so a later write only
 /// ever touches a different key.
 pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
+
+/// Durable deletes one restore path may issue in a single launch.
+///
+/// [`MAX_RESTORE_KEYS_PER_CATEGORY`] bounds how many records a walk *reads*.
+/// It does not bound how many it *deletes*, and those are not the same cost: a
+/// delete is a synchronous provider round trip that flushes the containing
+/// directory on all three built-in providers — `F_FULLFSYNC` on iOS, which is a
+/// full device barrier rather than a hint. Pruning every over-cap record in one
+/// pass therefore costs, in the worst case, tens of thousands of device
+/// barriers on the *synchronous* `initialize_mls` path: not a slow launch, a
+/// launch the platform watchdog kills.
+///
+/// So the walk bound and the prune bound are separate numbers, because they
+/// bound separate resources. The same lesson as the providers' `list_keys`
+/// bound and [`MAX_PENDING_RESTORE_ENTRIES`], applied to the write side.
+///
+/// Safe to stop early precisely because pruning is *idempotent and resumable*:
+/// an over-cap record left on disk is walked again next launch and pruned then,
+/// exactly as `adopt_legacy_protocol_state` drains its own truncated pass. The
+/// budget only applies to categories whose records are caches or advisory
+/// signals, where dropping one costs a recoverable re-exchange and nothing is
+/// owed to the application. [`OfflineProtocol::restore_outbox`] is deliberately
+/// **not** budgeted: each of its deletes is paired with a terminal
+/// `message_failed`, and decoupling the two would either settle an id whose
+/// record a later launch restores and re-drives — the exact contradiction
+/// [`StateRecord`] exists to prevent — or drop an entry from memory while
+/// leaving the app holding an id nothing resolves. Its walk bound is
+/// [`OUTBOX_RESTORE_KEY_CAP`], thirty times tighter, so the volume never gets
+/// close.
+pub(super) const MAX_RESTORE_PRUNE_DELETES: usize = 512;
+
+/// Everything one pending-queue restore walk accumulates across recipients.
+///
+/// The running totals are maintained rather than recomputed: the global caps
+/// would otherwise re-walk the whole in-memory queue once per eviction, and the
+/// walk can admit up to [`MAX_PENDING_RESTORE_ENTRIES`] entries.
+///
+/// They start at zero rather than from the in-memory queue because that queue is
+/// necessarily empty at this point: `queue_message_for_session_establishment` is
+/// gated on `should_auto_encrypt()`, which requires an MLS manager, and
+/// `initialize_mls` returns early once one is published — so nothing can have
+/// been queued before the restore that publishes it.
+#[derive(Default)]
+struct RestoredPendingAdmission {
+    /// Entries admitted into `pending_encrypted_messages` so far.
+    global_count: usize,
+    /// Their total serialized footprint.
+    global_bytes: usize,
+    /// Ids dropped by a count or byte cap, to settle as failed.
+    capacity_evicted: Vec<MessageId>,
+    /// Recipients whose persisted record no longer matches memory.
+    changed_recipients: std::collections::HashSet<String>,
+}
+
+/// Per-launch allowance for the durable deletes a restore path issues while
+/// pruning, and whether it ran out. See [`MAX_RESTORE_PRUNE_DELETES`].
+#[derive(Default)]
+struct PruneBudget {
+    spent: usize,
+    exhausted: bool,
+}
+
+impl PruneBudget {
+    /// Claims one delete, or records that the budget is gone and refuses.
+    fn claim(&mut self) -> bool {
+        if self.spent >= MAX_RESTORE_PRUNE_DELETES {
+            self.exhausted = true;
+            return false;
+        }
+        self.spent += 1;
+        true
+    }
+}
 
 impl OfflineProtocol {
     // ========================================================================
@@ -846,6 +919,32 @@ impl OfflineProtocol {
     /// nothing here (records written under the new store's key are deleted as
     /// unauthentic on read) and would seal records the next launch cannot
     /// find a key for.
+    ///
+    /// # A present-but-wrong-length key is the destructive case
+    ///
+    /// The two failure branches below are deliberately asymmetric, and it is
+    /// worth being explicit about why, because the asymmetry looks like an
+    /// oversight and is not.
+    ///
+    /// A *failed load* leaves the cipher uninstalled. Sealed records then read
+    /// as [`StateRecord::Unavailable`]: they stay on disk, nothing is settled,
+    /// and a launch that can read the key recovers them. That is the recoverable
+    /// case, and it is treated as one.
+    ///
+    /// A blob of the *wrong length* is not the key and never will be — no
+    /// process can recover the original from it — so everything sealed under
+    /// that key is already unrecoverable by the time this function runs.
+    /// Regenerating is therefore not what destroys those records; it is what
+    /// lets the install seal again. The visible consequence is still large: the
+    /// records fail to open on the next read, are reported
+    /// [`StateRecord::Unreadable`], and restore settles the whole outbox and
+    /// pending queue as terminal `message_failed`. That is the honest answer —
+    /// the alternative, refusing to regenerate, would preserve ciphertext
+    /// nobody can ever open while permanently disabling persistence for every
+    /// sensitive category.
+    ///
+    /// What it must not do is look like routine key generation in the log, so
+    /// the warning names the consequence rather than the symptom.
     pub(crate) fn restore_or_init_state_record_key(&mut self) {
         self.state_record_cipher = None;
 
@@ -865,12 +964,20 @@ impl OfflineProtocol {
                 key
             }
             Ok(other) => {
-                // A wrong-length blob is a corrupt write, not a usable key.
-                // Replacing it abandons whatever it sealed — those records fail
-                // to open and are dropped on read — but the alternative is
-                // never sealing again.
-                if other.is_some() {
-                    warn!("Protocol state record key had unexpected length; regenerating");
+                // A wrong-length blob is a corrupt write, not a usable key, and
+                // nothing can recover the original from it — so whatever it
+                // sealed is already lost before this runs. Regenerating is what
+                // lets the install seal again; see the note on this function
+                // for why refusing to is worse.
+                if let Some(bytes) = &other {
+                    warn!(
+                        len = bytes.len(),
+                        expected = STATE_RECORD_KEY_BYTES,
+                        "Protocol state record key is not a key and cannot be recovered; \
+                         regenerating. Every record sealed under the old key is \
+                         unrecoverable and will be settled as failed on restore — this is \
+                         not routine key generation"
+                    );
                 }
                 let fresh = StateRecordCipher::generate_key();
                 if let Err(e) = storage.store(
@@ -1046,7 +1153,104 @@ impl OfflineProtocol {
             return;
         }
         if let Some(storage) = &self.protocol_state_storage {
-            let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
+            // Logged, not swallowed, like every other persistence failure in
+            // this module. A clear that silently failed leaves a record the
+            // next launch restores and re-flushes: the messages carry their
+            // original ids so receivers dedup them, but the sender re-emits
+            // `MessageSent` for traffic it already delivered, and nothing
+            // would say why.
+            if let Err(e) = storage.delete(storage_keys::PENDING_MESSAGES, recipient) {
+                warn!(
+                    recipient = %recipient,
+                    error = %e,
+                    "Failed to clear persisted pending messages"
+                );
+            }
+        }
+    }
+
+    /// Admits one recipient's recovered queue, holding it to the same caps the
+    /// live admission path enforces.
+    ///
+    /// Split out of [`Self::restore_pending_messages`] because it is the one
+    /// part of that walk with its own invariants rather than its own control
+    /// flow: a record written by an older build — or by a build with no caps at
+    /// all, which is every pre-split build — can hold entries the current
+    /// boundary would reject, so restore has to re-apply four bounds in a fixed
+    /// order.
+    ///
+    /// The order is load-bearing:
+    ///
+    /// 1. **Count trim first**, so the measure below is not paid for entries
+    ///    that are about to be dropped anyway.
+    /// 2. **Measure the survivors.** `serialized_bytes` is derived and not
+    ///    persisted, and everything after this point — both byte budgets and the
+    ///    map insert — reads an unmeasured entry as free.
+    /// 3. **Per-peer byte trim**, oldest-first like every other eviction here.
+    /// 4. **Global count and byte trim**, which can evict from a recipient
+    ///    admitted on an earlier iteration, hence the shared accumulator.
+    fn admit_restored_pending_queue(
+        &mut self,
+        recipient: &str,
+        mut messages: Vec<PendingMessage>,
+        admission: &mut RestoredPendingAdmission,
+    ) {
+        let overflow = messages.len().saturating_sub(MAX_PENDING_MESSAGES_PER_PEER);
+        if overflow > 0 {
+            admission
+                .capacity_evicted
+                .extend(messages.drain(..overflow).map(|message| message.message_id));
+            admission.changed_recipients.insert(recipient.to_string());
+        }
+        for message in &mut messages {
+            message.measure();
+        }
+
+        let mut peer_bytes: usize = messages
+            .iter()
+            .map(|message| message.serialized_bytes)
+            .sum();
+        let mut dropped_for_bytes = 0usize;
+        while peer_bytes > MAX_PENDING_MESSAGE_BYTES_PER_PEER && !messages.is_empty() {
+            let message = messages.remove(0);
+            peer_bytes = peer_bytes.saturating_sub(message.serialized_bytes);
+            admission.capacity_evicted.push(message.message_id);
+            dropped_for_bytes += 1;
+        }
+        if dropped_for_bytes > 0 {
+            admission.changed_recipients.insert(recipient.to_string());
+            warn!(
+                recipient = %recipient,
+                dropped = dropped_for_bytes,
+                limit = MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+                "Restored pending queue exceeded the per-peer byte budget"
+            );
+        }
+
+        if !messages.is_empty() {
+            info!(recipient = %recipient, count = messages.len(), "Restored pending messages from storage");
+            admission.global_count += messages.len();
+            admission.global_bytes += peer_bytes;
+            self.pending_encrypted_messages
+                .insert(recipient.to_string(), messages);
+        } else {
+            // Trimmed to nothing. The recipient was just read successfully, so
+            // it is not frozen and this clear cannot be the destructive kind.
+            self.clear_pending_messages_from_storage(recipient);
+        }
+
+        while admission.global_count > MAX_PENDING_MESSAGES_GLOBAL
+            || admission.global_bytes > MAX_PENDING_MESSAGE_BYTES_GLOBAL
+        {
+            let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
+                break;
+            };
+            admission.global_count = admission.global_count.saturating_sub(1);
+            admission.global_bytes = admission
+                .global_bytes
+                .saturating_sub(message.serialized_bytes);
+            admission.changed_recipients.insert(evicted_recipient);
+            admission.capacity_evicted.push(message.message_id);
         }
     }
 
@@ -1068,22 +1272,11 @@ impl OfflineProtocol {
         // *this* restore could not read — or did not reach — its record.
         self.pending_queues_unreadable_this_session.clear();
 
-        let mut capacity_evicted = Vec::new();
-        // Kept apart from `capacity_evicted` so the two reasons the app sees are
-        // the two things that actually happened.
+        // Kept apart from the admission accumulator's `capacity_evicted` so the
+        // two reasons the app sees are the two things that actually happened.
         let mut unaddressable = Vec::new();
         let mut lost_recipients = Vec::new();
-        let mut changed_recipients = std::collections::HashSet::new();
-        // Running totals, maintained rather than recomputed: the global caps
-        // below would otherwise re-walk the whole queue once per eviction.
-        //
-        // They start at zero rather than from the in-memory queue because that
-        // queue is necessarily empty here: `queue_message_for_session_establishment`
-        // is gated on `should_auto_encrypt()`, which requires an MLS manager,
-        // and `initialize_mls` returns early once one is published — so nothing
-        // can have been queued before the restore that publishes it.
-        let mut global_count = 0usize;
-        let mut global_bytes = 0usize;
+        let mut admission = RestoredPendingAdmission::default();
         // Entries opened so far, which is what actually bounds the work here —
         // see [`MAX_PENDING_RESTORE_ENTRIES`].
         let mut examined_entries = 0usize;
@@ -1141,7 +1334,7 @@ impl OfflineProtocol {
                 let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
                 continue;
             }
-            let mut messages = match self.load_pending_messages_detailed(&recipient) {
+            let messages = match self.load_pending_messages_detailed(&recipient) {
                 PendingRestore::Restored(messages) => messages,
                 PendingRestore::Absent => continue,
                 // A queue existed and its contents are gone. The ids are inside
@@ -1168,71 +1361,15 @@ impl OfflineProtocol {
                     continue;
                 }
             };
-            {
-                examined_entries = examined_entries.saturating_add(messages.len());
-                let overflow = messages.len().saturating_sub(MAX_PENDING_MESSAGES_PER_PEER);
-                if overflow > 0 {
-                    capacity_evicted
-                        .extend(messages.drain(..overflow).map(|message| message.message_id));
-                    changed_recipients.insert(recipient.clone());
-                }
-                // Measure only the survivors: `serialized_bytes` is derived, and
-                // deriving it re-serializes the entry, so the entries the count
-                // trim just dropped must not be paid for. Everything below —
-                // the byte budgets and the map insert — depends on this having
-                // run, since an unmeasured entry reads as free.
-                for message in &mut messages {
-                    message.measure();
-                }
-                // Bound the restored queue by bytes as well as by count,
-                // mirroring the live admission path: a record written by an
-                // older build (or hand-edited) can hold entries the current
-                // boundary cap would reject. Oldest-first, like every other
-                // eviction here.
-                let mut peer_bytes: usize = messages
-                    .iter()
-                    .map(|message| message.serialized_bytes)
-                    .sum();
-                let mut dropped_for_bytes = 0usize;
-                while peer_bytes > MAX_PENDING_MESSAGE_BYTES_PER_PEER && !messages.is_empty() {
-                    let message = messages.remove(0);
-                    peer_bytes = peer_bytes.saturating_sub(message.serialized_bytes);
-                    capacity_evicted.push(message.message_id);
-                    dropped_for_bytes += 1;
-                }
-                if dropped_for_bytes > 0 {
-                    changed_recipients.insert(recipient.clone());
-                    warn!(
-                        recipient = %recipient,
-                        dropped = dropped_for_bytes,
-                        limit = MAX_PENDING_MESSAGE_BYTES_PER_PEER,
-                        "Restored pending queue exceeded the per-peer byte budget"
-                    );
-                }
-                if !messages.is_empty() {
-                    info!(recipient = %recipient, count = messages.len(), "Restored pending messages from storage");
-                    global_count += messages.len();
-                    global_bytes += peer_bytes;
-                    self.pending_encrypted_messages
-                        .insert(recipient.clone(), messages);
-                } else {
-                    let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
-                }
-
-                while global_count > MAX_PENDING_MESSAGES_GLOBAL
-                    || global_bytes > MAX_PENDING_MESSAGE_BYTES_GLOBAL
-                {
-                    let Some((evicted_recipient, message)) = self.evict_oldest_pending_message()
-                    else {
-                        break;
-                    };
-                    global_count = global_count.saturating_sub(1);
-                    global_bytes = global_bytes.saturating_sub(message.serialized_bytes);
-                    changed_recipients.insert(evicted_recipient);
-                    capacity_evicted.push(message.message_id);
-                }
-            }
+            examined_entries = examined_entries.saturating_add(messages.len());
+            self.admit_restored_pending_queue(&recipient, messages, &mut admission);
         }
+
+        let RestoredPendingAdmission {
+            capacity_evicted,
+            changed_recipients,
+            ..
+        } = admission;
 
         // Leaving the tail on disk is only worth anything if nothing this
         // session can then destroy it. A pending record holds a recipient's
@@ -1390,14 +1527,13 @@ impl OfflineProtocol {
         };
         let session_set: std::collections::HashSet<_> = sessions.into_iter().collect();
 
-        let mut pruned = 0usize;
-        // Bounded like every other category walk. The prune below deletes each
-        // over-cap entry, and a delete is a synchronous provider round trip
-        // that fsyncs a directory on all three built-in stores — so an
-        // unbounded walk over a tampered container would turn tens of
-        // thousands of those into boot-path latency. Stopping at the bound
-        // still shrinks the store by `bound - cap` per launch, so the tail
-        // drains over a handful of launches instead of stranding.
+        let mut budget = PruneBudget::default();
+        // Bounded like every other category walk, and the prune inside it is
+        // bounded again by `MAX_RESTORE_PRUNE_DELETES` — the walk bounds reads,
+        // the budget bounds deletes, and a delete is the far more expensive of
+        // the two (a synchronous provider round trip that flushes a directory
+        // on all three built-in stores). Both tails drain over successive
+        // launches rather than stranding.
         for peer_id in peer_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if session_set.contains(&peer_id) {
                 continue;
@@ -1407,13 +1543,18 @@ impl OfflineProtocol {
             // before the cap existed) cannot re-inflate memory on boot. Rather
             // than leaving the overflow to linger on disk forever — where it
             // would re-inflate memory on a future boot and waste durable
-            // storage — prune it so the store shrinks to the cap in a single
-            // boot. Dropping a cached package only costs a recoverable
-            // re-exchange, exactly like the live eviction path. Overflow is
-            // deleted without loading it, so peak memory stays cap-bounded.
+            // storage — prune it so the store shrinks toward the cap. Dropping
+            // a cached package only costs a recoverable re-exchange, exactly
+            // like the live eviction path. Overflow is deleted without loading
+            // it, so peak memory stays cap-bounded.
             if self.pending_key_packages.len() >= MAX_PENDING_KEY_PACKAGES {
+                if !budget.claim() {
+                    // The map only grows and the cap only binds harder, so
+                    // every remaining key would take this same branch. Nothing
+                    // is left to restore and nothing more may be deleted.
+                    break;
+                }
                 self.delete_peer_key_package_from_storage(&peer_id);
-                pruned += 1;
                 continue;
             }
             if let Some(pkg) = self.load_peer_key_package_from_storage(&peer_id) {
@@ -1421,11 +1562,17 @@ impl OfflineProtocol {
                 self.pending_key_packages.insert(peer_id, pkg);
             }
         }
-        if pruned > 0 {
+        if budget.spent > 0 {
             warn!(
                 cap = MAX_PENDING_KEY_PACKAGES,
-                pruned,
+                pruned = budget.spent,
                 "Peer key package store exceeded the cap on restore; pruned overflow from durable storage"
+            );
+        }
+        if budget.exhausted {
+            warn!(
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Peer key package prune hit its per-launch delete budget; the rest is left on disk for a later launch"
             );
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
@@ -1609,16 +1756,21 @@ impl OfflineProtocol {
         peer_ids.extend(non_session_ids);
 
         let mut kept = 0usize;
-        let mut pruned = 0usize;
+        let mut budget = PruneBudget::default();
         // Bounded like `restore_peer_key_packages`, for the same reason: the
-        // prune below is a provider delete per over-cap entry. The take comes
-        // *after* the session-peer partition, so the records this restore
-        // exists for are always inside the prefix however the backend ordered
-        // its listing.
+        // prune below is a provider delete per over-cap entry, and those are
+        // budgeted separately from the read walk. The take comes *after* the
+        // session-peer partition, so the records this restore exists for are
+        // always inside the prefix however the backend ordered its listing.
         for peer_id in peer_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if kept >= MAX_KEY_PACKAGE_SENT_TO {
+                if !budget.claim() {
+                    // `kept` only grows, so every remaining key would take this
+                    // same branch: nothing left to restore, nothing more that
+                    // may be deleted.
+                    break;
+                }
                 self.delete_peer_capabilities_from_storage(&peer_id);
-                pruned += 1;
                 continue;
             }
             let Ok(Some(data)) =
@@ -1627,15 +1779,22 @@ impl OfflineProtocol {
                 continue;
             };
             let Ok(caps) = serde_json::from_slice::<PeerCapabilities>(&data) else {
-                // Corrupt record: drop it rather than re-parsing it forever.
+                // Corrupt record: drop it rather than re-parsing it forever —
+                // unless the delete budget is gone, in which case a later
+                // launch drops it instead. Re-parsing one record is cheap; the
+                // device barrier a delete costs is not.
                 warn!(peer_id = %peer_id, "Corrupt peer capability record, deleting");
-                self.delete_peer_capabilities_from_storage(&peer_id);
+                if budget.claim() {
+                    self.delete_peer_capabilities_from_storage(&peer_id);
+                }
                 continue;
             };
             if !caps.is_any() {
                 // Empty records are deleted at persist time; clean up any
                 // that predate that rule.
-                self.delete_peer_capabilities_from_storage(&peer_id);
+                if budget.claim() {
+                    self.delete_peer_capabilities_from_storage(&peer_id);
+                }
                 continue;
             }
             if self.config.encryption.compact_envelope_enabled
@@ -1661,11 +1820,17 @@ impl OfflineProtocol {
                 "Restored peer capability records from storage"
             );
         }
-        if pruned > 0 {
+        if budget.spent > 0 {
             warn!(
                 cap = MAX_KEY_PACKAGE_SENT_TO,
-                pruned,
+                pruned = budget.spent,
                 "Peer capability store exceeded the cap on restore; pruned overflow from durable storage"
+            );
+        }
+        if budget.exhausted {
+            warn!(
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Peer capability prune hit its per-launch delete budget; the rest is left on disk for a later launch"
             );
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
@@ -2098,6 +2263,15 @@ impl OfflineProtocol {
     ///   of the kept set;
     /// - pre-existing in-memory entries not yet in storage are persisted, so
     ///   memory and storage are consistent once restore returns.
+    ///
+    /// Deliberately **not** subject to [`MAX_RESTORE_PRUNE_DELETES`], unlike the
+    /// cache and media walks. Every delete here is paired with a terminal
+    /// `message_failed`, and the two cannot be separated: skipping the delete
+    /// while settling would settle an id whose record the next launch restores
+    /// and re-drives, and skipping both would drop the entry from memory while
+    /// leaving the application holding an id nothing ever resolves.
+    /// [`OUTBOX_RESTORE_KEY_CAP`] already bounds the volume thirty times more
+    /// tightly than the walks that are budgeted.
     pub(crate) fn restore_outbox(&mut self) -> Result<()> {
         // Cloned rather than borrowed: the loop below both reads through this
         // handle and calls `&mut self` settlement paths, so holding a borrow of
@@ -2349,6 +2523,10 @@ impl OfflineProtocol {
     /// - the total is pruned to `MAX_MEDIA_DESCRIPTORS`, keeping the newest
     ///   by `queued_at` (overflow deleted from storage).
     ///
+    /// All three of those deletes share one [`MAX_RESTORE_PRUNE_DELETES`]
+    /// budget. A descriptor is advisory, so a record the budget spared is
+    /// simply re-walked and dropped on a later launch.
+    ///
     /// The survivors are parked in `restored_media_descriptors`; `start()`
     /// emits one `MediaResendRequired` each once the event pipeline is live,
     /// leaving entries parked until a same-`file_id` resend consumes them or
@@ -2365,6 +2543,13 @@ impl OfflineProtocol {
         let now = Utc::now();
 
         let mut restored: Vec<MediaTransferDescriptor> = Vec::new();
+        // Every delete below — corrupt, expired, over-cap — is budgeted
+        // together: a descriptor is purely advisory (the app re-initiates the
+        // transfer), so a record left on disk one launch longer costs nothing,
+        // while the device barrier each delete carries is the most expensive
+        // thing this walk can do. Skipped records are simply re-walked next
+        // launch and dropped then.
+        let mut budget = PruneBudget::default();
         // Bounded, but deliberately by the wide ceiling rather than a multiple
         // of `MAX_MEDIA_DESCRIPTORS`: that cap is applied here, on restore, and
         // nowhere on the insert path, so a long session can legitimately leave
@@ -2388,14 +2573,18 @@ impl OfflineProtocol {
                 Ok(descriptor) => descriptor,
                 Err(e) => {
                     warn!(file_id = %file_id, error = %e, "Dropping corrupted media descriptor");
-                    self.delete_media_descriptor_key(&file_id);
+                    if budget.claim() {
+                        self.delete_media_descriptor_key(&file_id);
+                    }
                     continue;
                 }
             };
 
             if lifetime_expired(now, descriptor.queued_at, lifetime_ms) {
                 debug!(file_id = %file_id, "Dropping expired media descriptor");
-                self.delete_media_descriptor_key(&file_id);
+                if budget.claim() {
+                    self.delete_media_descriptor_key(&file_id);
+                }
                 continue;
             }
 
@@ -2405,8 +2594,20 @@ impl OfflineProtocol {
         if restored.len() > MAX_MEDIA_DESCRIPTORS {
             restored.sort_by_key(|d| std::cmp::Reverse(d.queued_at));
             for descriptor in restored.drain(MAX_MEDIA_DESCRIPTORS..) {
-                self.delete_media_descriptor_key(&descriptor.file_id);
+                // Dropped from the parked set either way: the cap is what this
+                // build will announce, and a record the budget spared is
+                // re-walked (and re-capped) on the next launch.
+                if budget.claim() {
+                    self.delete_media_descriptor_key(&descriptor.file_id);
+                }
             }
+        }
+
+        if budget.exhausted {
+            warn!(
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Media descriptor prune hit its per-launch delete budget; the rest is left on disk for a later launch"
+            );
         }
 
         let count = restored.len();

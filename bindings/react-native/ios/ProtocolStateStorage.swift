@@ -173,10 +173,30 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
 
     private let root: URL
     private let fileManager: FileManager
-    private let lock = NSLock()
 
-    /// Type directories whose stale temporaries have already been swept this
-    /// process. One sweep per category per process, off the restore path.
+    /// Serialises every store, load, delete, and enumeration in the process.
+    ///
+    /// Deliberately `static`, matching the Android provider's
+    /// `companion object` lock rather than the per-instance lock this used to
+    /// be. Two instances over one root are not hypothetical — the React Native
+    /// bridge constructs a fresh provider on every `initializeMls` call — and a
+    /// per-instance lock cannot order them by construction. That matters most
+    /// for `sweepTemporaries`, whose whole safety argument is that no temporary
+    /// another writer is using can be visible while the lock is held: with an
+    /// instance lock, one instance's sweep can unlink the file another
+    /// instance's `Data.write(options: .atomic)` is about to rename into place,
+    /// turning a store that would have succeeded into a `StoreFailed`.
+    ///
+    /// Contention across accounts is not a concern: these are short file
+    /// operations, and the SDK already serialises storage access behind its own
+    /// mutex.
+    private static let lock = NSLock()
+
+    /// Type directories whose stale temporaries have already been swept by this
+    /// instance. Kept per instance rather than static because the sweep is
+    /// idempotent, so a second instance repeating it once costs one bounded
+    /// scan and nothing else — while the *safety* of that scan comes from the
+    /// shared lock above, not from this set.
     private var swept = Set<URL>()
 
     convenience init(
@@ -233,8 +253,8 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
             value: data
         )
 
-        lock.lock()
-        defer { lock.unlock() }
+        Self.lock.lock()
+        defer { Self.lock.unlock() }
 
         let directory = typeDirectory(keyType)
         let url = entryURL(keyType: keyType, keyId: keyId)
@@ -306,8 +326,8 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     }
 
     func load(keyType: String, keyId: String) throws -> Data? {
-        lock.lock()
-        defer { lock.unlock() }
+        Self.lock.lock()
+        defer { Self.lock.unlock() }
 
         let url = entryURL(keyType: keyType, keyId: keyId)
         guard fileManager.fileExists(atPath: url.path) else {
@@ -350,8 +370,8 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     }
 
     func delete(keyType: String, keyId: String) throws {
-        lock.lock()
-        defer { lock.unlock() }
+        Self.lock.lock()
+        defer { Self.lock.unlock() }
 
         let url = entryURL(keyType: keyType, keyId: keyId)
         guard fileManager.fileExists(atPath: url.path) else {
@@ -390,8 +410,8 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     /// restored by nobody and settled to nobody — the silent answer, from the
     /// one provider of three that used to give it.
     func enumerateKeys(keyType: String, limit: Int) throws -> (keys: [String], examined: Int) {
-        lock.lock()
-        defer { lock.unlock() }
+        Self.lock.lock()
+        defer { Self.lock.unlock() }
 
         let directory = typeDirectory(keyType)
         guard fileManager.fileExists(atPath: directory.path) else {

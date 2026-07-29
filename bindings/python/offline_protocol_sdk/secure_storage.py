@@ -123,6 +123,24 @@ class SecureStorage(MlsStorageProvider):
             self._store(self._service, key_type, key_id, bytes(data))
 
     def load(self, key_type: str, key_id: str) -> list[int] | None:
+        """Load one entry, falling through to the adopted legacy store on a miss.
+
+        Each primitive below takes ``self._lock``, but this *compound*
+        read-then-promote is not atomic against :meth:`delete`, and deliberately
+        so. Interleaved, they would resurrect key material: this method could
+        observe a miss in the namespaced store, read the legacy value, and then
+        promote it after a concurrent delete had already removed both copies —
+        defeating the very guarantee :meth:`delete` documents.
+
+        That is unreachable because the SDK is the only caller and serialises
+        every storage operation behind its own mutex: ``OfflineProtocol``'s
+        methods take ``&mut self`` and the UniFFI wrapper holds them under one
+        lock, so no two provider calls overlap. Widening the lock to cover the
+        whole compound operation would mean holding it across a keyring read on
+        every miss, which is the common path during an upgrade. If a second
+        caller is ever given this provider, that trade has to be revisited.
+        """
+
         current = self._read(self._service, key_type, key_id)
         if current is not None:
             return list(current)

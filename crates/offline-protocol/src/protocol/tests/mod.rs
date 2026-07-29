@@ -15807,6 +15807,76 @@ fn test_restore_peer_key_packages_prunes_overflow_from_storage() {
 }
 
 #[test]
+fn test_restore_prune_is_bounded_per_launch_and_drains_over_launches() {
+    // The walk bound limits how many records a restore *reads*. It does not
+    // limit how many it *deletes*, and a delete is the far more expensive of
+    // the two: every built-in provider flushes the containing directory, which
+    // on iOS is `F_FULLFSYNC` — a full device barrier, not a hint. Pruning a
+    // whole over-cap category in one pass would put tens of thousands of those
+    // on the synchronous `initialize_mls` path, which is not a slow launch but
+    // a launch the platform watchdog kills.
+    //
+    // So the prune has its own budget. Verified in both directions, because
+    // either half alone is worthless: a budget that never binds does not bound
+    // anything, and one that binds without draining strands the tail forever.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let beyond_budget = 10;
+    let total = MAX_PENDING_KEY_PACKAGES + MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+
+    {
+        let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
+        writer.initialize_mls_for_test(storage.clone()).unwrap();
+        let pkg = ReceivedKeyPackage {
+            key_package_data: vec![0],
+            local_expires_at_ms: u64::MAX,
+        };
+        for i in 0..total {
+            // Zero-padded so the providers' sorted listing order is the same
+            // one this test reasons about.
+            writer.persist_peer_key_package(&format!("peer_{i:05}"), &pkg);
+        }
+    }
+
+    let remaining_after = |storage: &Arc<InMemoryStorage>| {
+        storage
+            .list_keys(storage_keys::PEER_KEY_PACKAGES)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        remaining_after(&storage),
+        total,
+        "precondition: durable store holds more than one launch may prune"
+    );
+
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls_for_test(storage.clone()).unwrap();
+    assert_eq!(
+        first.pending_key_packages.len(),
+        MAX_PENDING_KEY_PACKAGES,
+        "memory is still bounded to the live cap on the first launch"
+    );
+    assert_eq!(
+        remaining_after(&storage),
+        total - MAX_RESTORE_PRUNE_DELETES,
+        "one launch must prune exactly its budget, not the whole overflow"
+    );
+
+    // The tail is not stranded: pruning is idempotent and resumable, so the
+    // next launch picks up where this one stopped.
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls_for_test(storage.clone()).unwrap();
+    assert_eq!(
+        remaining_after(&storage),
+        MAX_PENDING_KEY_PACKAGES,
+        "the remaining overflow is under the budget, so the second launch \
+         finishes the job"
+    );
+}
+
+#[test]
 fn test_establishment_state_returns_correct_states() {
     let storage = Arc::new(InMemoryStorage::new());
     let bob_storage = Arc::new(InMemoryStorage::new());
