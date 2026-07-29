@@ -404,7 +404,7 @@ Parse the raw event and check the server frame's `type` before consuming extensi
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| **initializeMlsWithSecureStorage** | `initializeMlsWithSecureStorage(): Promise<void>` | Initialises MLS with iOS Keychain / Android EncryptedSharedPreferences. Called automatically by `start()` when encryption enabled. |
+| **initializeMlsWithSecureStorage** | `initializeMlsWithSecureStorage(): Promise<void>` | Initialises MLS key material in iOS Keychain / Android EncryptedSharedPreferences and message-plane state in the app container. Called automatically by `start()` when encryption enabled. |
 | **isMlsInitialized** | `isMlsInitialized(): Promise<boolean>` | Whether MLS is ready. |
 | **mlsGenerateKeyPackage** | `mlsGenerateKeyPackage(): Promise<MlsKeyPackage>` | Generates a new key package. |
 | **mlsGetOrCreateKeyPackage** | `mlsGetOrCreateKeyPackage(): Promise<MlsKeyPackage>` | Gets or creates key package. |

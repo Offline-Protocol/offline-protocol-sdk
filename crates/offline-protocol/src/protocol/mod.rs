@@ -11,6 +11,7 @@ mod receive;
 mod security;
 mod send;
 mod session;
+pub(crate) mod state_crypto;
 mod storage;
 mod types;
 
@@ -29,7 +30,10 @@ use crate::telemetry::aggregator::{
 use crate::telemetry::{
     dispatch_record, Scrubber, TelemetryConfig, TelemetryContext, TelemetryRecord, TelemetrySink,
 };
-use crate::{Error, EstablishmentState, Event, ProtocolConfig, Result, TransportManager};
+use crate::{
+    Error, EstablishmentState, Event, ProtocolConfig, ProtocolStateStorage, Result,
+    TransportManager,
+};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{LamportClock, Message, MessageId, MutexExt};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
@@ -45,6 +49,19 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
+
+/// Returns whether `timestamp` is at least `lifetime_ms` old without relying
+/// on Chrono's panicking `DateTime - Duration` operator.
+///
+/// A lifetime too large to represent, or whose cutoff predates Chrono's
+/// calendar range, cannot expire a representable timestamp.
+fn lifetime_expired(now: DateTime<Utc>, timestamp: DateTime<Utc>, lifetime_ms: u64) -> bool {
+    let Ok(lifetime_ms) = i64::try_from(lifetime_ms) else {
+        return false;
+    };
+    now.checked_sub_signed(chrono::Duration::milliseconds(lifetime_ms))
+        .is_some_and(|cutoff| timestamp <= cutoff)
+}
 
 /// Main entry point for the Offline Protocol SDK.
 ///
@@ -104,6 +121,59 @@ pub struct OfflineProtocol {
 
     /// Pending messages waiting for session establishment (recipient -> messages).
     pending_encrypted_messages: HashMap<String, Vec<PendingMessage>>,
+
+    /// Recipients whose persisted pending queue was not read *this session* and
+    /// is still on disk: either the read failed (`PendingRestore::Unavailable`)
+    /// or the restore walk stopped at one of its bounds before reaching it.
+    ///
+    /// The pending queue is persisted as one record per recipient holding the
+    /// whole queue, so honoring `Unavailable` at restore is not enough on its
+    /// own: the record is left in place, nothing is in memory for that
+    /// recipient, and the very next enqueue would write a snapshot of that
+    /// empty-plus-one view straight over it — destroying queued messages the
+    /// app is still holding ids for, with no settlement at all. That is the
+    /// silent loss the three-state read exists to prevent, arriving through
+    /// the runtime path instead of the restore path. A record the walk simply
+    /// never opened is the same record in the same state, so it is frozen for
+    /// the same reason — a bound that promises to leave the tail "for a later
+    /// launch" has to mean it for the whole session, not just until the next
+    /// send.
+    ///
+    /// So a recipient recorded here is *frozen on disk* for the rest of the
+    /// session: writes and deletes for its record are refused, and the
+    /// in-memory queue is used exactly as it is when no storage is configured
+    /// at all. A later launch reads the record and settles or restores it
+    /// properly. The outbox needs no equivalent — it is keyed per message id,
+    /// so an unreadable entry cannot be overwritten by an unrelated write.
+    pending_queues_unreadable_this_session: HashSet<String>,
+
+    /// Terminal message settlements produced while restoring, held until the
+    /// event pipeline is live.
+    ///
+    /// Restore runs inside `initialize_mls`, which apps routinely call before
+    /// installing an event callback — so a `message_failed` emitted there would
+    /// be dropped, and the app would keep an id that never resolves. `start()`
+    /// drains this, mirroring how restored media descriptors already wait to be
+    /// announced.
+    ///
+    /// Explicitly capped at [`MAX_DEFERRED_RESTORE_SETTLEMENTS`] rather than
+    /// left to the restore caps that feed it. Those caps do bound it, but they
+    /// bound it as a *sum* across every category, and nothing drains this until
+    /// `start()` — which an app that only ever calls `initialize_mls`, or that
+    /// retries it against a failing store, may never reach.
+    deferred_restore_settlements: Vec<Event>,
+
+    /// Number of settlements suppressed by the cap above, so the count is
+    /// reported even though the individual events are not.
+    suppressed_restore_settlements: usize,
+
+    /// Earliest wall-clock expiry in `pending_encrypted_messages`.
+    ///
+    /// `process()` consults this before scanning the bounded queue, avoiding an
+    /// O(N) walk on every 100 ms tick while preserving exact configured expiry.
+    /// A stale early deadline is harmless: it causes one extra scan, which then
+    /// recomputes the real minimum.
+    next_pending_message_expiry: Option<DateTime<Utc>>,
 
     /// Key packages received but not yet used (sender_id -> package).
     pub(crate) pending_key_packages: HashMap<String, ReceivedKeyPackage>,
@@ -176,9 +246,24 @@ pub struct OfflineProtocol {
     /// the MLS session is ready.
     pub(crate) pending_queue: PendingDecryptionQueue,
 
-    /// Storage for persisting pending messages (reuses MLS storage).
-    /// When set, pending messages survive app crashes/restarts.
-    message_storage: Option<Arc<dyn MlsStorage>>,
+    /// Secure storage for MLS/key material and SDK-owned secrets.
+    secure_storage: Option<Arc<dyn MlsStorage>>,
+
+    /// Install-scoped storage for restartable message-plane and protocol state.
+    protocol_state_storage: Option<Arc<dyn ProtocolStateStorage>>,
+
+    /// Seals sensitive protocol-state records before they reach the
+    /// install-scoped store, with a per-install key held in `secure_storage`.
+    ///
+    /// `None` until that key is available (and if it never becomes available,
+    /// for the whole session). Sealed categories then fail *closed*: they are
+    /// not persisted at all rather than written in the clear, since losing
+    /// crash recovery is recoverable and losing at-rest confidentiality is not.
+    /// See `state_crypto` and `restore_or_init_state_record_key`.
+    ///
+    /// Always belongs to the currently attached `secure_storage` — it is
+    /// re-derived, never carried across a storage swap.
+    state_record_cipher: Option<state_crypto::StateRecordCipher>,
 
     /// Lamport logical clock for causal message ordering.
     /// Ticked on send, merged on receive.
@@ -336,7 +421,7 @@ pub struct OfflineProtocol {
     known_peer_public_keys: HashMap<String, TofuEntry>,
 
     /// Set of blocked user IDs. Messages from blocked users are silently
-    /// dropped (no ACK, no event). Persisted via `MlsStorage`.
+    /// dropped (no ACK, no event). Persisted via `ProtocolStateStorage`.
     blocked_users: HashSet<String>,
 
     /// Timestamp of the last `kick_pending_session_reconciliation` execution.
@@ -371,6 +456,56 @@ impl Drop for OfflineProtocol {
         // Flush debounced Lamport clock so no ticks are lost when the
         // protocol is dropped without an explicit stop() call.
         self.flush_lamport_clock();
+    }
+}
+
+#[cfg(test)]
+struct TestProtocolStateStorage {
+    storage: Arc<dyn MlsStorage>,
+}
+
+/// Maps the fixture's MLS-storage failures onto the protocol-state contract,
+/// mirroring what the UniFFI adapter does for real providers.
+#[cfg(test)]
+pub(crate) fn map_test_storage_error(
+    error: offline_protocol_mls::StorageError,
+) -> crate::ProtocolStateError {
+    use crate::ProtocolStateError as P;
+    use offline_protocol_mls::StorageError as S;
+    match error {
+        S::KeyNotFound(detail) => P::NotFound(detail),
+        S::CorruptedData(detail) => P::Corrupted(detail),
+        S::StoreFailed(detail) => P::StoreFailed(detail),
+        S::LoadFailed(detail) => P::LoadFailed(detail),
+        S::DeleteFailed(detail) => P::DeleteFailed(detail),
+        S::Unavailable(detail) => P::LoadFailed(detail),
+    }
+}
+
+#[cfg(test)]
+impl ProtocolStateStorage for TestProtocolStateStorage {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        self.storage
+            .store(key_type, key_id, data)
+            .map_err(map_test_storage_error)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        self.storage
+            .load(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        self.storage
+            .delete(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        self.storage
+            .list_keys(key_type)
+            .map_err(map_test_storage_error)
     }
 }
 
@@ -416,6 +551,10 @@ impl OfflineProtocol {
             dm_unreachable_parks: HashMap::new(),
             mls_manager: None,
             pending_encrypted_messages: HashMap::new(),
+            pending_queues_unreadable_this_session: HashSet::new(),
+            deferred_restore_settlements: Vec::new(),
+            suppressed_restore_settlements: 0,
+            next_pending_message_expiry: None,
             pending_key_packages: HashMap::new(),
             key_package_sent_to: std::collections::HashSet::new(),
             known_peers: HashMap::new(),
@@ -426,7 +565,9 @@ impl OfflineProtocol {
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
             pending_queue: PendingDecryptionQueue::default(),
-            message_storage: None,
+            secure_storage: None,
+            protocol_state_storage: None,
+            state_record_cipher: None,
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
@@ -473,11 +614,12 @@ impl OfflineProtocol {
         })
     }
 
-    /// Initializes MLS encryption with the provided storage backend.
+    /// Initializes MLS encryption and protocol persistence.
     ///
     /// This must be called before encryption can be used. The storage
-    /// backend should be a platform-native secure storage implementation
-    /// (iOS Keychain, Android EncryptedSharedPreferences, etc.).
+    /// `secure_storage` must be a platform-native credential store.
+    /// `protocol_state_storage` must be scoped to the app container and is
+    /// removed when that container is deleted.
     ///
     /// Ownership model:
     /// - `OfflineProtocol` is the single authoritative owner of `MlsManager`
@@ -486,27 +628,64 @@ impl OfflineProtocol {
     /// - manager publication is transactional: restore must succeed before
     ///   `mls_manager` becomes visible to callers
     ///
-    /// The same storage is also used for persisting pending messages and the
-    /// store-and-forward outbox (under the `outbox` key type), ensuring both
-    /// survive app crashes/restarts. The media (file-chunk) outbox is not
-    /// persisted — file transfers must be re-initiated after a restart.
-    pub fn initialize_mls(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
+    /// The two storage domains are intentionally different trait objects. This
+    /// prevents message-plane state from inheriting the lifecycle of Keychain
+    /// or another credential store.
+    pub fn initialize_mls(
+        &mut self,
+        secure_storage: Arc<dyn MlsStorage>,
+        protocol_state_storage: Arc<dyn ProtocolStateStorage>,
+    ) -> Result<()> {
+        self.initialize_mls_inner(secure_storage, protocol_state_storage, true)
+    }
+
+    /// `adopt_legacy_state` exists only so test fixtures can point both handles
+    /// at one backend. Adoption moves records *between* the two stores, which
+    /// on a shared backend would mean deleting a record through the same store
+    /// it was just read from.
+    fn initialize_mls_inner(
+        &mut self,
+        secure_storage: Arc<dyn MlsStorage>,
+        protocol_state_storage: Arc<dyn ProtocolStateStorage>,
+        adopt_legacy_state: bool,
+    ) -> Result<()> {
         if self.mls_manager.is_some() {
             return Ok(());
         }
 
         let manager = Arc::new(RwLock::new(MlsManager::new(
             &self.config.user_id,
-            storage.clone(),
+            secure_storage.clone(),
         )?));
 
         // Keep initialization transactional so a restore failure cannot leave
         // partially-initialized MLS state visible and then permanently block retries.
-        let previous_message_storage = self.message_storage.clone();
+        let previous_secure_storage = self.secure_storage.clone();
+        let previous_protocol_state_storage = self.protocol_state_storage.clone();
+        // The record cipher belongs to the secure store it was loaded from, so
+        // it is part of the same transaction as the storage handles: taken here
+        // so a failed init cannot leave the new store's key installed next to
+        // the rolled-back handles, and restored below alongside them.
+        let previous_state_record_cipher = self.state_record_cipher.take();
         let previous_pending_messages = self.pending_encrypted_messages.clone();
+        let previous_unreadable_pending_queues =
+            self.pending_queues_unreadable_this_session.clone();
+        let previous_pending_message_expiry = self.next_pending_message_expiry;
+        // Populated by restore steps that run before other fallible ones, so
+        // they belong in the transaction like everything else: a failed init
+        // must not leave a key-package cache, parked media descriptors, or an
+        // owner gate sourced from a store the rollback has just detached.
+        let previous_pending_key_packages = self.pending_key_packages.clone();
+        let previous_restored_media_descriptors = self.restored_media_descriptors.clone();
+        let previous_both_create_awaiting_decrypt = self.both_create_awaiting_decrypt.clone();
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
+        // The debounce watermark travels with the clock: `restore_lamport_clock`
+        // sets both, so rolling back only the clock leaves a watermark ahead of
+        // it and `persist_lamport_clock`'s `wrapping_sub` reads that as an
+        // enormous delta — writing on every tick instead of every interval.
+        let previous_last_persisted_lamport = self.last_persisted_lamport;
         let previous_tofu_keys = self.known_peer_public_keys.clone();
         let previous_blocked_users = self.blocked_users.clone();
         let previous_outbox = self.outbox.clone();
@@ -514,9 +693,45 @@ impl OfflineProtocol {
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
 
-        // Also use this storage for pending message persistence
-        self.message_storage = Some(storage);
+        self.secure_storage = Some(secure_storage);
+        self.protocol_state_storage = Some(protocol_state_storage);
 
+        // Must precede every restore below: sealed protocol-state records
+        // (pending messages, outbox, media descriptors) are unreadable without
+        // this key, so restoring first would silently start from empty and then
+        // overwrite durable state with that empty view.
+        self.restore_or_init_state_record_key();
+
+        // Then adopt anything the pre-split build left in secure storage, so
+        // the restores below see one complete view. Must follow the record key
+        // (adoption seals what it moves) and precede every restore (a restore
+        // that ran first would find nothing and then overwrite the legacy state
+        // with that empty view). Best-effort and resumable: a failure here
+        // leaves the legacy records in place for the next launch.
+        if adopt_legacy_state {
+            self.adopt_legacy_protocol_state();
+        }
+
+        // The settlement queue is deliberately NOT captured for rollback, and
+        // that is the whole point rather than an omission.
+        //
+        // The rollback below restores *in-memory* state. It restores no storage
+        // state, because restore has none to give back: by the time a later
+        // step fails, an earlier one has already deleted an unaddressable
+        // pending queue, dropped a record its store reported corrupt, and
+        // rewritten a peer's snapshot without the entries it evicted for
+        // capacity. Those records are gone. So the invariant adoption is
+        // documented with — nothing can re-derive a settlement for a record
+        // that no longer exists — is not special to adoption; it holds for
+        // every settlement produced under this transaction, and rolling any of
+        // them back means the application keeps an id that resolves to nothing,
+        // on this launch and on every launch after it.
+        //
+        // The cost of not rolling back is that a retry which re-examines a
+        // still-present record can settle the same id twice. `message_failed`
+        // is terminal and idempotent for any reasonable consumer, and a
+        // duplicate terminal event is a far smaller lie than silence.
+        //
         // Load the persistent scrub secret outside the transactional restore
         // below: it is independent of MLS state, and a later MLS-restore
         // rollback must not undo it (the secret is idempotent and reused on
@@ -532,7 +747,7 @@ impl OfflineProtocol {
             self.restore_pending_messages()?;
             self.restore_lamport_clock();
             self.restore_tofu_keys();
-            self.restore_blocked_users();
+            self.restore_blocked_users()?;
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
             // Must precede start(): flush_restored_confirmed_pending_messages
@@ -547,11 +762,21 @@ impl OfflineProtocol {
         })();
 
         if let Err(err) = restore_result {
-            self.message_storage = previous_message_storage;
+            self.secure_storage = previous_secure_storage;
+            self.protocol_state_storage = previous_protocol_state_storage;
+            self.state_record_cipher = previous_state_record_cipher;
             self.pending_encrypted_messages = previous_pending_messages;
+            self.pending_queues_unreadable_this_session = previous_unreadable_pending_queues;
+            self.next_pending_message_expiry = previous_pending_message_expiry;
+            // `deferred_restore_settlements` is deliberately left alone — see
+            // the comment where the other baselines are captured.
+            self.pending_key_packages = previous_pending_key_packages;
+            self.restored_media_descriptors = previous_restored_media_descriptors;
+            self.both_create_awaiting_decrypt = previous_both_create_awaiting_decrypt;
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
+            self.last_persisted_lamport = previous_last_persisted_lamport;
             self.known_peer_public_keys = previous_tofu_keys;
             self.blocked_users = previous_blocked_users;
             self.outbox = previous_outbox;
@@ -564,31 +789,38 @@ impl OfflineProtocol {
         self.mls_manager = Some(manager);
         self.emit_mls_initialized();
 
-        info!(user_id = %self.config.user_id, "MLS encryption initialized with message persistence");
+        info!(user_id = %self.config.user_id, "MLS encryption initialized with split secure and protocol-state storage");
         Ok(())
     }
 
-    /// Enables message persistence using the provided storage backend.
-    ///
-    /// This allows pending messages and the store-and-forward outbox to
-    /// survive app crashes/restarts even when MLS encryption is not used. The
-    /// storage backend should be a platform-native secure storage
-    /// implementation. The media (file-chunk) outbox is not persisted — file
-    /// transfers must be re-initiated after a restart.
-    ///
-    /// Note: If you call `initialize_mls()`, message persistence is
-    /// automatically enabled using the same storage.
-    pub fn enable_message_persistence(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
-        self.message_storage = Some(storage);
+    /// Test-only adapter for fixtures that intentionally use one
+    /// in-memory/fault-injection backend to observe both storage domains.
+    #[cfg(test)]
+    pub(crate) fn initialize_mls_for_test(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
+        let protocol_state_storage = Arc::new(TestProtocolStateStorage {
+            storage: storage.clone(),
+        });
+        self.initialize_mls_inner(storage, protocol_state_storage, false)
+    }
+
+    /// Test-only storage initialization for persistence-focused fixtures that
+    /// do not need an MLS manager.
+    #[cfg(test)]
+    pub(crate) fn enable_message_persistence_for_test(
+        &mut self,
+        storage: Arc<dyn MlsStorage>,
+    ) -> Result<()> {
+        self.secure_storage = Some(storage.clone());
+        self.protocol_state_storage = Some(Arc::new(TestProtocolStateStorage { storage }));
+        self.restore_or_init_state_record_key();
         self.restore_or_init_scrub_secret();
         self.restore_or_init_nostr_signing_secret();
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
         self.restore_tofu_keys();
-        self.restore_blocked_users();
+        self.restore_blocked_users()?;
         self.restore_outbox()?;
         self.restore_media_descriptors()?;
-        info!("Message persistence enabled");
         Ok(())
     }
 
@@ -785,6 +1017,13 @@ impl OfflineProtocol {
         state.state = ProtocolState::Running;
         drop(state);
 
+        // Settle what restore could not recover, now that the event pipeline is
+        // live. These ids were handed to the app by `send_message*` before the
+        // process died; without this they would never resolve to anything.
+        // Drained before the flush below so an app sees the failures first and
+        // cannot mistake a restored send for the settlement of a lost one.
+        self.drain_deferred_restore_settlements();
+
         self.flush_restored_confirmed_pending_messages();
         self.kick_pending_session_reconciliation("start");
         self.process_welcome_retry_queue()?;
@@ -867,16 +1106,48 @@ impl OfflineProtocol {
 
     /// Resumes the protocol from pause.
     pub fn resume(&mut self) -> Result<()> {
-        let mut state = lock_shared_state(&self.shared_state)?;
+        {
+            let mut state = lock_shared_state(&self.shared_state)?;
 
-        if state.state != ProtocolState::Paused {
-            return Err(Error::InvalidConfiguration(
-                "Protocol is not paused".to_string(),
-            ));
+            if state.state != ProtocolState::Paused {
+                return Err(Error::InvalidConfiguration(
+                    "Protocol is not paused".to_string(),
+                ));
+            }
+
+            state.state = ProtocolState::Running;
         }
 
-        state.state = ProtocolState::Running;
+        // A pause is the other edge back into a live event pipeline, so it owes
+        // the same drain `start()` does. `settle_restored_message_failure` parks
+        // anything it produces while the protocol is not `Running`, and
+        // `update_retry_config` reaches it at runtime: shortening
+        // `pending_message_max_lifetime_ms` in the background expires queued
+        // messages and parks their terminal `message_failed`. Without this the
+        // app would hold those ids until a `start()` that may never come again.
+        self.drain_deferred_restore_settlements();
         Ok(())
+    }
+
+    /// Emits every terminal settlement parked while the event pipeline was not
+    /// live, and reports the count of any the cap dropped.
+    ///
+    /// Called from both edges into `Running` ([`Self::start`] and
+    /// [`Self::resume`]) so a parked settlement has no state to be stranded in.
+    /// Idempotent: draining an empty queue emits nothing.
+    fn drain_deferred_restore_settlements(&mut self) {
+        for event in std::mem::take(&mut self.deferred_restore_settlements) {
+            self.emit_event(event);
+        }
+        let suppressed = std::mem::take(&mut self.suppressed_restore_settlements);
+        if suppressed > 0 {
+            warn!(
+                suppressed,
+                cap = MAX_DEFERRED_RESTORE_SETTLEMENTS,
+                "Restore produced more terminal settlements than any legitimate run can produce; \
+                 the ids past the cap were not reported individually"
+            );
+        }
     }
 
     /// Called when a new neighbor is discovered.
@@ -2148,6 +2419,57 @@ impl OfflineProtocol {
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(event);
         }
+    }
+
+    /// Emits a terminal settlement, or parks it until `start()` if the event
+    /// pipeline is not live yet.
+    ///
+    /// Restore paths settle messages the app is still holding ids for. They run
+    /// from `initialize_mls`, before `start()` and often before the app has
+    /// installed its event callback, so emitting directly there would silently
+    /// discard exactly the signals that exist to stop an id from hanging
+    /// forever. Once running, this is a plain emit — the same call is used from
+    /// `process()`-driven expiry, where no deferral is wanted.
+    pub(crate) fn settle_restored_message_failure(&mut self, event: Event) {
+        let running = self.event_pipeline_is_live();
+        self.settle_one_restored_message_failure(event, running);
+    }
+
+    /// Settles a batch, taking the shared-state lock once rather than once per
+    /// event. Restore emits these in loops that a tampered or pre-split store
+    /// can drive into the thousands.
+    pub(crate) fn settle_restored_message_failures(
+        &mut self,
+        events: impl IntoIterator<Item = Event>,
+    ) {
+        let running = self.event_pipeline_is_live();
+        for event in events {
+            self.settle_one_restored_message_failure(event, running);
+        }
+    }
+
+    fn event_pipeline_is_live(&self) -> bool {
+        lock_shared_state(&self.shared_state)
+            .map(|state| state.state == ProtocolState::Running)
+            .unwrap_or(false)
+    }
+
+    fn settle_one_restored_message_failure(&mut self, event: Event, running: bool) {
+        if running {
+            self.emit_event(event);
+            return;
+        }
+        // Every other accumulation on the restore path has an explicit ceiling
+        // and logs what it dropped; this one is retained until `start()`, which
+        // may never come, so it gets the same treatment. Keeping the *oldest*
+        // is deliberate: the settlements a restore produces first are the ones
+        // for records it examined first, and dropping those in favour of later
+        // ones would bias the survivors by backend listing order.
+        if self.deferred_restore_settlements.len() >= MAX_DEFERRED_RESTORE_SETTLEMENTS {
+            self.suppressed_restore_settlements += 1;
+            return;
+        }
+        self.deferred_restore_settlements.push(event);
     }
 
     /// Returns an iterator over outbox messages (test-only).

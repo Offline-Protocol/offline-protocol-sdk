@@ -257,6 +257,23 @@ pub fn send_message(
 Sends a message. Returns `Ok(message_id)` when the message is accepted for send
 or queued for retry/pending-session delivery, or `Err` for policy and setup failures.
 
+Two boundary rules reject the call with `Error::InvalidArgument` before anything
+is queued, clocked, or persisted:
+
+- **`recipient` must be a well-formed `UserId`.** `UserId` rejects `:`, so
+  namespaced placeholder forms (`unresolved:token`, `did:key:…`, `npub:…`) must
+  be resolved before they reach the SDK.
+- **`content` must be at most 256 KiB.** The cap is enforced here rather than at
+  transmit time, because a message waiting on MLS session establishment is
+  queued in memory and on disk long before it reaches the transport's own 1 MiB
+  check. Use [`send_media_with`](#rich-messaging-sealed-extras) for anything
+  larger — it chunks, and is not subject to this limit.
+
+The pending-session queue behind this call is additionally bounded at 64
+messages / 2 MiB per peer and 4096 messages / 16 MiB globally; at capacity the
+oldest entry is settled with `message_failed` before the new one is admitted.
+See [Configuration](configuration.md#reliability-configuration).
+
 **Example**:
 ```rust
 match protocol.send_message("user456", "Hello!", Some(MessagePriority::High), None::<String>) {
@@ -410,10 +427,17 @@ protocol.on_event(|event| {
 #### Encryption (Auto-Encryption)
 
 ```rust
-pub fn initialize_mls(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()>
+pub fn initialize_mls(
+    &mut self,
+    secure_storage: Arc<dyn MlsStorage>,
+    protocol_state_storage: Arc<dyn ProtocolStateStorage>,
+) -> Result<()>
 ```
 
-Initializes MLS encryption with the provided storage backend. Required before encryption can be used.
+Initializes MLS encryption with two lifecycle-separated backends. `secure_storage`
+holds cryptographic and install-secret material. `protocol_state_storage` holds
+restartable message-plane state and must live inside the app container so app
+deletion removes pending messages, outbox entries, and retry lifecycles.
 
 ```rust
 pub fn is_mls_initialized(&self) -> bool

@@ -126,6 +126,34 @@ await protocol.stop();
 await protocol.destroy();
 ```
 
+Built-in secure and restartable-state stores are isolated by both `appId` and
+`userId`. Changing either value selects a fresh storage namespace.
+
+Upgrading an install that predates namespacing keeps both halves of its state,
+by two different mechanisms.
+
+Its **MLS identity** is adopted by read-through: the first account to launch
+claims the old, unscoped secure store and inherits its identity, sessions, and
+TOFU pins on demand. That store was shared by every account on the install, so
+only one can inherit it — a second account starts from a fresh identity and
+reports it as an `error` diagnostic
+(`Legacy secure store belongs to another account…`).
+
+Its **restartable delivery state** — outbox, pending queue, session and Welcome
+lifecycles, peer key packages and capabilities, media descriptors, blocked
+users, the Lamport clock — is swept out of the credential store into the app
+container on the first launch of this release, and the credential-store copy is
+deleted once the move is durable. The sweep is resumable and one-shot.
+
+An account that loses the claim above gets neither: no identity *and* no
+delivery state, so it comes up with an empty outbox and an empty block list,
+every previously blocked peer unblocked. That is what the `error` diagnostic is
+telling you.
+
+Because the sweep deletes the credential-store copy, **downgrading is not a
+rollback** — an older build reads the old location and finds none of it. Roll
+forward, not back.
+
 ### End-to-End Encryption
 
 The SDK provides automatic end-to-end encryption using MLS (RFC 9420):
@@ -496,9 +524,10 @@ interface ReliabilityConfig {
   retry?: {
     maxRetries?: number;         // default: 10
     initialDelayMs?: number;     // default: 1000
-    maxDelayMs?: number;         // default: 30000
+    maxDelayMs?: number;         // default: 300000
     backoffMultiplier?: number;  // default: 2.0
-    outboxMaxLifetimeMs?: number; // default: 3600000
+    outboxMaxLifetimeMs?: number; // default: 604800000
+    pendingMessageMaxLifetimeMs?: number; // default: 604800000
   };
   dedup?: {
     maxTrackedMessages?: number; // default: 1000

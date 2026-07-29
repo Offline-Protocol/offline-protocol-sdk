@@ -1407,6 +1407,7 @@ name = "offline-protocol"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "chacha20poly1305",
  "chrono",
  "offline-protocol-core",
  "offline-protocol-mls",
@@ -1414,6 +1415,7 @@ dependencies = [
  "offline-protocol-router",
  "offline-protocol-services",
  "offline-protocol-transport",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",

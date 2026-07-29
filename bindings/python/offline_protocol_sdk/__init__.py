@@ -5,6 +5,8 @@ from .offline_protocol import *  # noqa: F401, F403
 
 # Platform managers
 from .secure_storage import SecureStorage  # noqa: F401
+from .state_storage import AppStateStorage  # noqa: F401
+from .storage_namespace import account_storage_namespace  # noqa: F401
 from .transport_manager import TransportManager, TransportState  # noqa: F401
 from .internet_manager import InternetManager  # noqa: F401
 from .ble_manager import BleManager  # noqa: F401

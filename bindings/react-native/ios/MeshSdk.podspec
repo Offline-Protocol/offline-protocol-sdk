@@ -26,6 +26,7 @@ Pod::Spec.new do |s|
     "RelayGroupSnapshotBridge.swift",
     "RelayRateLimiter.swift",
     "LegacyRelayMessage.swift",
+    "LegacyStoreAdoption.swift",
     "ForegroundReconnectPolicy.swift",
     "MonotonicClock.swift",
     "PresenceWatchPolicy.swift",
@@ -38,6 +39,8 @@ Pod::Spec.new do |s|
     "NostrManager.swift",
     "ReticulumManager.swift",
     "MlsSecureStorage.swift",
+    "ProtocolStateStorage.swift",
+    "StorageNamespace.swift",
     "ble/**/*.swift",
     "mesh/**/*.swift",
     "Generated/offline_protocol.swift",  # UniFFI generated Swift file

@@ -2,7 +2,12 @@ apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
 def reactNative = new File("$projectDir/../node_modules/react-native")
-def reactNativeExists = reactNative.exists()
+// Only use the legacy local Maven repository when it actually exists.
+// Newer React Native packages keep sources under ReactAndroid/ and do not
+// publish an `android/` Maven repo, so checking only the package directory
+// produces an unversioned `react-android` dependency in the standalone
+// harness.
+def reactNativeExists = new File(reactNative, "android").exists()
 
 android {
     namespace 'com.offlineprotocol'
@@ -80,6 +85,7 @@ dependencies {
     }
 
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.16'
     // Real org.json for JVM unit tests (the android.jar org.json is a stub
     // that throws) — needed by RelayControlOpTranslatorTest.
     testImplementation 'org.json:json:20260719'

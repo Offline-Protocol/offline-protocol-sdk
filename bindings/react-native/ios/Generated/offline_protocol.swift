@@ -599,6 +599,24 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
 
 
 
@@ -884,7 +902,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func hasRoute(destination: String)  -> Bool
     
-    func initializeMls(storage: MlsStorageProvider) throws 
+    func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage: ProtocolStateStorageProvider) throws 
     
     func installTelemetrySink(sink: TelemetrySink, config: TelemetryConfig) throws 
     
@@ -1062,13 +1080,13 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func uninstallTelemetrySink() throws 
     
-    func updateAckConfig(config: AckConfig) 
+    func updateAckConfig(config: AckConfig) throws 
     
     func updateDedupConfig(config: DedupConfig) 
     
     func updateDorsConfig(config: DorsConfig) throws 
     
-    func updateRetryConfig(config: RetryConfig) 
+    func updateRetryConfig(config: RetryConfig) throws 
     
     func updateRoutingConfig(config: GradientRoutingConfig) 
     
@@ -1605,10 +1623,11 @@ open func hasRoute(destination: String) -> Bool  {
 })
 }
     
-open func initializeMls(storage: MlsStorageProvider)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+open func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage: ProtocolStateStorageProvider)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(
             self.uniffiCloneHandle(),
-        FfiConverterCallbackInterfaceMlsStorageProvider_lower(storage),$0
+        FfiConverterCallbackInterfaceMlsStorageProvider_lower(secureStorage),
+        FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(protocolStateStorage),$0
     )
 }
 }
@@ -2387,7 +2406,7 @@ open func uninstallTelemetrySink()throws   {try rustCallWithError(FfiConverterTy
 }
 }
     
-open func updateAckConfig(config: AckConfig)  {try! rustCall() {
+open func updateAckConfig(config: AckConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(
             self.uniffiCloneHandle(),
         FfiConverterTypeAckConfig_lower(config),$0
@@ -2411,7 +2430,7 @@ open func updateDorsConfig(config: DorsConfig)throws   {try rustCallWithError(Ff
 }
 }
     
-open func updateRetryConfig(config: RetryConfig)  {try! rustCall() {
+open func updateRetryConfig(config: RetryConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config(
             self.uniffiCloneHandle(),
         FfiConverterTypeRetryConfig_lower(config),$0
@@ -4857,15 +4876,17 @@ public struct RetryConfig: Equatable, Hashable {
     public var maxDelayMs: UInt64
     public var backoffMultiplier: Float
     public var outboxMaxLifetimeMs: UInt64
+    public var pendingMessageMaxLifetimeMs: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(maxRetries: UInt32, initialDelayMs: UInt64, maxDelayMs: UInt64, backoffMultiplier: Float, outboxMaxLifetimeMs: UInt64) {
+    public init(maxRetries: UInt32, initialDelayMs: UInt64, maxDelayMs: UInt64, backoffMultiplier: Float, outboxMaxLifetimeMs: UInt64, pendingMessageMaxLifetimeMs: UInt64) {
         self.maxRetries = maxRetries
         self.initialDelayMs = initialDelayMs
         self.maxDelayMs = maxDelayMs
         self.backoffMultiplier = backoffMultiplier
         self.outboxMaxLifetimeMs = outboxMaxLifetimeMs
+        self.pendingMessageMaxLifetimeMs = pendingMessageMaxLifetimeMs
     }
 
     
@@ -4886,7 +4907,8 @@ public struct FfiConverterTypeRetryConfig: FfiConverterRustBuffer {
                 initialDelayMs: FfiConverterUInt64.read(from: &buf), 
                 maxDelayMs: FfiConverterUInt64.read(from: &buf), 
                 backoffMultiplier: FfiConverterFloat.read(from: &buf), 
-                outboxMaxLifetimeMs: FfiConverterUInt64.read(from: &buf)
+                outboxMaxLifetimeMs: FfiConverterUInt64.read(from: &buf), 
+                pendingMessageMaxLifetimeMs: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -4896,6 +4918,7 @@ public struct FfiConverterTypeRetryConfig: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.maxDelayMs, into: &buf)
         FfiConverterFloat.write(value.backoffMultiplier, into: &buf)
         FfiConverterUInt64.write(value.outboxMaxLifetimeMs, into: &buf)
+        FfiConverterUInt64.write(value.pendingMessageMaxLifetimeMs, into: &buf)
     }
 }
 
@@ -7787,6 +7810,220 @@ public func FfiConverterCallbackInterfaceNostrTransportCallback_lower(_ v: Nostr
 
 
 
+public protocol ProtocolStateStorageProvider: AnyObject, Sendable {
+    
+    func store(keyType: String, keyId: String, data: Data) throws 
+    
+    func load(keyType: String, keyId: String) throws  -> Data?
+    
+    func delete(keyType: String, keyId: String) throws 
+    
+    func listKeys(keyType: String) throws  -> [String]
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceProtocolStateStorageProvider] = [UniffiVTableCallbackInterfaceProtocolStateStorageProvider(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceProtocolStateStorageProvider.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface ProtocolStateStorageProvider: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceProtocolStateStorageProvider.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface ProtocolStateStorageProvider: handle missing in uniffiClone")
+            }
+        },
+        store: { (
+            uniffiHandle: UInt64,
+            keyType: RustBuffer,
+            keyId: RustBuffer,
+            data: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceProtocolStateStorageProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.store(
+                     keyType: try FfiConverterString.lift(keyType),
+                     keyId: try FfiConverterString.lift(keyId),
+                     data: try FfiConverterData.lift(data)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMlsStorageError_lower
+            )
+        },
+        load: { (
+            uniffiHandle: UInt64,
+            keyType: RustBuffer,
+            keyId: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceProtocolStateStorageProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.load(
+                     keyType: try FfiConverterString.lift(keyType),
+                     keyId: try FfiConverterString.lift(keyId)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMlsStorageError_lower
+            )
+        },
+        delete: { (
+            uniffiHandle: UInt64,
+            keyType: RustBuffer,
+            keyId: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceProtocolStateStorageProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.delete(
+                     keyType: try FfiConverterString.lift(keyType),
+                     keyId: try FfiConverterString.lift(keyId)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMlsStorageError_lower
+            )
+        },
+        listKeys: { (
+            uniffiHandle: UInt64,
+            keyType: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [String] in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceProtocolStateStorageProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.listKeys(
+                     keyType: try FfiConverterString.lift(keyType)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMlsStorageError_lower
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitProtocolStateStorageProvider() {
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider(UniffiCallbackInterfaceProtocolStateStorageProvider.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceProtocolStateStorageProvider {
+    fileprivate static let handleMap = UniffiHandleMap<ProtocolStateStorageProvider>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceProtocolStateStorageProvider : FfiConverter {
+    typealias SwiftType = ProtocolStateStorageProvider
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceProtocolStateStorageProvider_lift(_ handle: UInt64) throws -> ProtocolStateStorageProvider {
+    return try FfiConverterCallbackInterfaceProtocolStateStorageProvider.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(_ v: ProtocolStateStorageProvider) -> UInt64 {
+    return FfiConverterCallbackInterfaceProtocolStateStorageProvider.lower(v)
+}
+
+
+
+
 public protocol ReticulumTransportCallback: AnyObject, Sendable {
     
     func onMessagesAvailable() 
@@ -8521,6 +8758,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -9425,7 +9686,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 44869) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 29008) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink() != 18166) {
@@ -9692,7 +9953,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink() != 481) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 58995) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 52736) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 4301) {
@@ -9701,7 +9962,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 2649) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 19988) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 27543) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config() != 61324) {
@@ -9758,6 +10019,18 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available() != 5919) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store() != 46080) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load() != 11563) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete() != 43686) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_list_keys() != 44296) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available() != 48810) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9790,6 +10063,7 @@ private let initializationResult: InitializationResult = {
     uniffiCallbackInitEventCallback()
     uniffiCallbackInitMlsStorageProvider()
     uniffiCallbackInitNostrTransportCallback()
+    uniffiCallbackInitProtocolStateStorageProvider()
     uniffiCallbackInitReticulumTransportCallback()
     uniffiCallbackInitTelemetrySink()
     uniffiCallbackInitWifiDirectTransportCallback()

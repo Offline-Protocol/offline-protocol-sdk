@@ -197,10 +197,43 @@ const config = {
       maxDelayMs: 300000,          // Backoff ceiling (5 min)
       backoffMultiplier: 2.0,      // Exponential factor
       outboxMaxLifetimeMs: 604800000, // 7 day outbox lifetime
+      pendingMessageMaxLifetimeMs: 604800000, // 7 days awaiting MLS session
     },
   },
 };
 ```
+
+The outbound queue waiting for MLS session establishment is also hard-bounded,
+on entry count *and* on bytes — a count alone bounds neither memory nor durable
+storage, because message content is application-supplied and four very large
+messages sit there reporting 4/64 and looking fine:
+
+| Bound | Value | Behaviour at capacity |
+| --- | --- | --- |
+| Messages per peer | 64 | oldest settled with `message_failed`, then the new message is admitted |
+| Messages globally | 4096 | globally oldest settled the same way |
+| Bytes per peer | 2 MiB | oldest evicted until the new message fits |
+| Bytes globally | 16 MiB | globally oldest evicted until it fits |
+
+These are fixed, not configurable; only the lifetime above is. All four evict
+oldest-first and emit the same terminal `message_failed`, and restore applies
+them too, so a queue written by an older build cannot re-inflate memory on boot.
+
+**`sendMessage` rejects content over 256 KiB** with an `InvalidArgument` error
+(`send_message`, `send_message_with`, and `forward_message` in Rust). The cap is
+enforced at the send boundary rather than at transmit time because a message
+waiting on session establishment is queued — in memory and on disk — long before
+it reaches the transport's own 1 MiB check, so a transmit-time cap would never
+run for exactly the messages that accumulate. It sits well under that 1 MiB
+ceiling to leave room for MLS ciphertext expansion, base64, and the JSON wire
+envelope, so anything accepted here can actually be delivered. **Large payloads
+belong on `sendMedia`**, which chunks them and is not subject to this limit.
+
+Group sends are deliberately exempt from all of the above: a group send has no
+durable pre-session queue behind it, so it stays bounded by the transport alone.
+
+Expiry work is scheduled from the earliest queued deadline rather than scanning
+the queue on every `process()` tick.
 
 ### Tuning for Different Scenarios
 

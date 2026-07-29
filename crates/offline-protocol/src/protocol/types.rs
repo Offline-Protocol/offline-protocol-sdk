@@ -187,6 +187,92 @@ pub(crate) const MAX_PLAINTEXT_RECEIVE_WARNED_PEERS: usize = 1000;
 /// its persisted copy; the restore-on-boot loop is capped the same way.
 pub(crate) const MAX_PENDING_KEY_PACKAGES: usize = 1000;
 
+/// Maximum outbound messages waiting for one peer's MLS session.
+///
+/// This queue is durable and accepts application-controlled content, so a peer
+/// that never completes session establishment must not grow it without bound.
+/// The limit matches the default inbound pending-decryption per-peer bound.
+///
+/// A count alone does not bound memory or durable storage — message content is
+/// application-supplied — so this cap works together with
+/// [`MAX_PENDING_MESSAGE_BYTES_PER_PEER`]; whichever binds first wins.
+pub(crate) const MAX_PENDING_MESSAGES_PER_PEER: usize = 64;
+
+/// Maximum outbound messages waiting for MLS sessions across all peers.
+///
+/// At capacity the globally oldest message is settled as failed before the new
+/// message is admitted. The limit matches the default inbound pending queue.
+/// Paired with [`MAX_PENDING_MESSAGE_BYTES_GLOBAL`], as above.
+pub(crate) const MAX_PENDING_MESSAGES_GLOBAL: usize = 4096;
+
+/// Maximum terminal settlements parked by restore for `start()` to drain.
+///
+/// The restore caps already bound how many can be produced, but they bound it
+/// as a sum across every category, and nothing drains this queue until
+/// `start()` — which an application that only calls `initialize_mls`, or that
+/// retries it against a store that keeps failing, may never reach. Sized above
+/// the largest single-category restore ([`MAX_PENDING_MESSAGES_GLOBAL`], the
+/// pending queue's own global cap) so no legitimate restore is ever truncated;
+/// past that point the count is reported instead of the events.
+pub(crate) const MAX_DEFERRED_RESTORE_SETTLEMENTS: usize = 2 * MAX_PENDING_MESSAGES_GLOBAL;
+
+/// Maximum size of application-supplied message content accepted at the public
+/// send boundary, in bytes.
+///
+/// Enforced at the boundary — not at transmit time — because a message queued
+/// behind MLS session establishment never reaches the transport's
+/// `DEFAULT_MAX_MESSAGE_SIZE` (1 MiB) check: it sits in the durable pending
+/// queue first. Without a boundary cap a handful of very large sends could
+/// exhaust mobile memory and protocol-state disk while still being formally
+/// "within" the count caps above.
+///
+/// 256 KiB leaves ample headroom under the 1 MiB transport ceiling for MLS
+/// ciphertext expansion, base64, and the JSON wire envelope, so anything this
+/// path accepts can actually be delivered. Larger payloads belong on the media
+/// path (`send_media`), which chunks.
+pub(crate) const MAX_MESSAGE_CONTENT_BYTES: usize = 256 * 1024;
+
+/// Maximum total serialized bytes of one peer's pending-session queue.
+///
+/// At capacity the peer's oldest entries are settled as failed until the
+/// incoming message fits, exactly like the count cap. Deliberately larger than
+/// [`MAX_MESSAGE_CONTENT_BYTES`] plus [`MAX_RICH_EXTRAS_BYTES`] so a single
+/// boundary-legal message always fits in an empty queue and admission can never
+/// livelock (pinned by `pending_queue_byte_budgets_admit_any_boundary_legal_message`).
+///
+/// # Write amplification
+///
+/// Pending messages are persisted as one record *per recipient*, so every
+/// enqueue rewrites that peer's whole queue: filling one peer to this budget
+/// costs on the order of `budget × entries / 2` bytes written in total, not
+/// `budget`. The crossing itself is cheap — `ProtocolStateStorageProvider`
+/// declares its values as `bytes`, so a record reaches Kotlin as a `ByteArray`
+/// and Swift as `Data` with no per-element cost — but the write volume is not.
+///
+/// That is why this budget is sized to bound a pathological queue rather than
+/// to describe a normal one — real queues hold a handful of short messages
+/// waiting on a handshake. Raising it raises the write cost quadratically;
+/// lowering it below `MAX_MESSAGE_CONTENT_BYTES + MAX_RICH_EXTRAS_BYTES` breaks
+/// admission outright. Making large queues genuinely cheap needs a per-message
+/// record layout, which is a storage-format change and deliberately not part of
+/// the split.
+pub(crate) const MAX_PENDING_MESSAGE_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
+
+/// Maximum total serialized bytes of the pending-session queue across all
+/// peers. Bounds the whole feature's footprint on a mobile device regardless of
+/// how many peers are mid-establishment.
+pub(crate) const MAX_PENDING_MESSAGE_BYTES_GLOBAL: usize = 16 * 1024 * 1024;
+
+/// Maximum size of a single persisted protocol-state record, in bytes.
+///
+/// Enforced on both sides of [`crate::ProtocolStateStorage`]: the SDK refuses to
+/// write a larger record, and refuses to *deserialize* a larger one on restore
+/// (dropping it instead), so a corrupted or tampered state file cannot turn
+/// into an unbounded allocation during initialization. Sized above
+/// [`MAX_PENDING_MESSAGE_BYTES_PER_PEER`] — the largest legitimate record is one
+/// peer's full pending queue — with room for JSON and seal overhead.
+pub(crate) const MAX_PROTOCOL_STATE_RECORD_BYTES: usize = 4 * 1024 * 1024;
+
 /// Maximum number of peers remembered in `key_package_sent_to` (the "already
 /// sent our key package to this peer" set).
 ///
@@ -851,8 +937,76 @@ pub(crate) struct PendingMessage {
     /// flush inside the sealed rich body or be dropped — never cleartext.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) rich: Option<RichSendExtras>,
-    /// When the message was queued (for future TTL/expiry support).
+    /// When the message *first* entered the pending queue.
+    ///
+    /// Drives `pending_message_max_lifetime_ms`, and is deliberately preserved
+    /// across a re-queue (see [`PendingProvenance`]): a flush that finds the
+    /// session still unavailable puts the entry back, and stamping a fresh
+    /// timestamp there would let repeated reconciliation renew an "absolute"
+    /// lifetime forever.
     pub(crate) queued_at: DateTime<Utc>,
+    /// Serialized footprint of this entry, for the pending-queue byte budgets
+    /// ([`MAX_PENDING_MESSAGE_BYTES_PER_PEER`] /
+    /// [`MAX_PENDING_MESSAGE_BYTES_GLOBAL`]).
+    ///
+    /// Derived, so it is not persisted; it is (re)computed by
+    /// [`PendingMessage::measure`] at the two points an entry comes into
+    /// existence — admission and load-from-storage — and then simply travels
+    /// with the entry as it is moved between the queue, a flush, and a
+    /// re-queue.
+    #[serde(skip)]
+    pub(crate) serialized_bytes: usize,
+}
+
+impl PendingMessage {
+    /// Recomputes [`Self::serialized_bytes`] from the current field values.
+    ///
+    /// Measures what persistence actually costs (the serialized entry) rather
+    /// than estimating from `content.len()`, so rich extras and forward
+    /// attribution are counted. A serialization failure — which would also make
+    /// the entry unpersistable — falls back to the content length so the entry
+    /// still consumes budget rather than reading as free.
+    pub(crate) fn measure(&mut self) {
+        self.serialized_bytes = serde_json::to_vec(self)
+            .map(|encoded| encoded.len())
+            .unwrap_or_else(|_| self.content.len());
+    }
+}
+
+/// Identity carried by an outbound message that is re-entering the
+/// pending-session queue rather than being queued for the first time.
+///
+/// Both fields exist to keep a re-queue from looking like a fresh send: the id
+/// so `MessageSent`/`MessageDelivered`/`MessageFailed` stay correlatable with
+/// what `send_message*` returned, and the timestamp so the absolute pending
+/// lifetime is measured from first entry.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingProvenance {
+    /// The id the caller already holds.
+    pub(crate) message_id: MessageId,
+    /// When the message first entered the pending queue, or `None` when the
+    /// re-queue does not come *from* that queue — the resend re-seal path
+    /// passes an outbox id, and an entry it (all but unreachably) enqueues is
+    /// starting its pending lifetime now.
+    pub(crate) first_queued_at: Option<DateTime<Utc>>,
+}
+
+impl PendingProvenance {
+    /// Provenance for a message being put back into the pending queue.
+    pub(crate) fn requeued(message: &PendingMessage) -> Self {
+        Self {
+            message_id: message.message_id.clone(),
+            first_queued_at: Some(message.queued_at),
+        }
+    }
+
+    /// Provenance for a known id with no pending-queue history.
+    pub(crate) fn for_id(message_id: MessageId) -> Self {
+        Self {
+            message_id,
+            first_queued_at: None,
+        }
+    }
 }
 
 /// Durable state for a peer MLS session.
@@ -969,12 +1123,65 @@ pub(crate) mod storage_keys {
     pub const NOSTR_SIGNING_SECRET: &str = "nostr_signing_secret";
     /// Key ID for the single Nostr signing-secret entry.
     pub const NOSTR_SIGNING_SECRET_ID: &str = "current";
+    /// Key type for the per-install key that seals sensitive protocol-state
+    /// records at rest.
+    ///
+    /// Lives in *secure* storage — it is the one piece of the protocol-state
+    /// domain that must be credential-backed, because it is what gives the
+    /// install-scoped container's contents their confidentiality (see
+    /// [`crate::protocol::state_crypto`]).
+    pub const STATE_RECORD_KEY: &str = "protocol_state_record_key";
+    /// Key ID for the single protocol-state record key entry.
+    pub const STATE_RECORD_KEY_ID: &str = "current";
     /// Key type for peers we are the both-create "owner" of and are awaiting a
     /// group-aware decrypt from before confirming (see
     /// [`crate::protocol::OfflineProtocol`]'s `both_create_awaiting_decrypt`).
     /// Persisted so an owner restart mid-convergence cannot let a stale plaintext
     /// probe/ack prematurely confirm and strand the peer on a divergent group.
     pub const BOTH_CREATE_AWAITING_DECRYPT: &str = "both_create_awaiting_decrypt";
+    /// Key type for the marker recording that pre-split protocol state has been
+    /// adopted out of secure storage (see
+    /// `OfflineProtocol::adopt_legacy_protocol_state`). Lives in *protocol
+    /// state* storage, so a reinstall — which drops that container — correctly
+    /// re-runs the sweep against whatever the credential store still holds.
+    pub const STATE_ADOPTION: &str = "protocol_state_adoption";
+    /// Key ID for the single state-adoption marker entry.
+    pub const STATE_ADOPTION_ID: &str = "v1";
+
+    /// Every key type that moved from secure storage into protocol-state
+    /// storage when the two domains were split.
+    ///
+    /// Unlike the MLS key-type set — which is open, because OpenMLS contributes
+    /// its own labels through `storage_adapter.rs` — this set is closed and
+    /// declared right here, which is what makes a one-shot bulk adoption
+    /// possible at all (see `OfflineProtocol::adopt_legacy_protocol_state`).
+    /// A new protocol-state category added *after* the split must NOT be added
+    /// here: there is no pre-split data for it to inherit, and listing it would
+    /// only cost a pointless enumeration of the credential store.
+    ///
+    /// # Removal
+    ///
+    /// This list, `OfflineProtocol::adopt_legacy_protocol_state`, and the
+    /// `STATE_ADOPTION` marker are one-shot migration scaffolding for installs
+    /// upgrading *across* the storage split. They stop doing anything once no
+    /// supported install can still be running a pre-split build — an install
+    /// that skips the split release entirely still needs them, so the trigger
+    /// is not "one release later". Delete them only when the oldest supported
+    /// upgrade path starts at or after the release that introduced the split,
+    /// and delete all three together: leaving the marker behind without the
+    /// sweep would make a later re-introduction silently skip itself.
+    pub const ADOPTABLE_STATE_KEY_TYPES: &[&str] = &[
+        BLOCKED_USERS,
+        OUTBOX,
+        PENDING_MESSAGES,
+        SESSION_STATES,
+        WELCOME_LIFECYCLES,
+        PEER_KEY_PACKAGES,
+        PEER_CAPABILITIES,
+        MEDIA_DESCRIPTORS,
+        BOTH_CREATE_AWAITING_DECRYPT,
+        LAMPORT_CLOCK,
+    ];
 }
 
 /// Protocol state.

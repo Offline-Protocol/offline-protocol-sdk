@@ -85,6 +85,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 **Key Components**:
 - `MlsManager` - Session, group, key-package, encryption, and decryption lifecycle
 - `MlsStorage` - Storage-agnostic interface for platform secure storage
+- `ProtocolStateStorage` - App-container storage for restartable outbox, pending-message, and delivery state
 - `GroupId`, `GroupInfo`, `EncryptedMessage`, and `WelcomeMessage`
 
 **Safety**: `#![deny(unsafe_code)]` - 100% safe Rust

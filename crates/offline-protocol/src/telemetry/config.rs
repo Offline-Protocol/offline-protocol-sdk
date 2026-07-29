@@ -124,9 +124,9 @@ impl TelemetryConfig {
     ///
     /// Supplying `None` (the default) leaves the secret unset in the config.
     /// In that case the SDK manages the fallback for you: the first time
-    /// secure storage is provided (via `OfflineProtocol::initialize_mls` or
-    /// `enable_message_persistence`), the SDK loads — or, on first run,
-    /// generates and persists — a stable **per-install** secret. This makes
+    /// secure storage is provided via `OfflineProtocol::initialize_mls`, the
+    /// SDK loads — or, on first run, generates and persists — a stable
+    /// **per-install** secret. This makes
     /// opaque identifiers survive process restarts, so backend telemetry can
     /// count distinct devices across sessions. Until storage is available (or
     /// if storage is never provided), the SDK uses a random per-instance

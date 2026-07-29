@@ -1,22 +1,1143 @@
 //! Storage persistence methods for protocol state.
 
+use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECORD_KEY_BYTES};
 use super::{
-    storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry, PeerCapabilities,
-    PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES, MAX_PERSISTED_CAPABILITY_VERSIONS,
-    MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
+    lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
+    PeerCapabilities, PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState,
+    WelcomeLifecycleRecord, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
+    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
+    MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
+    WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
-use crate::{Error, Result};
+use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{LamportClock, MessageId};
-use offline_protocol_mls::MlsManager;
+use offline_protocol_mls::{MlsManager, MlsStorage};
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
+use serde::de::DeserializeOwned;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
+/// Every protocol-state category the SDK writes through
+/// [`OfflineProtocol::write_state_record`].
+///
+/// The enum exists for [`Self::requires_sealing`], which is an exhaustive
+/// `match`: adding a variant is a compile error until someone decides whether
+/// that category's values are sensitive. The previous spelling was a `matches!`
+/// over `&str`, which silently answers "not sensitive" for a category nobody
+/// remembered to list — and that answer means message plaintext or cloud-media
+/// key material written to the app container in the clear, which is the one
+/// thing this module exists to prevent.
+///
+/// [`Self::from_key_type`] still has to cope with an unrecognised string,
+/// because the storage API is keyed by `&str`. It answers `None`, and
+/// `write_state_record` refuses to write that: a category the sealing decision
+/// does not cover fails closed and loudly rather than open and quietly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StateCategory {
+    PendingMessages,
+    Outbox,
+    MediaDescriptors,
+    PeerKeyPackages,
+    PeerCapabilities,
+    SessionStates,
+    WelcomeLifecycles,
+    BlockedUsers,
+    BothCreateAwaitingDecrypt,
+    LamportClock,
+    /// The value-less marker recording that the pre-split adoption sweep
+    /// completed. Post-split only, so it is deliberately absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] — but it *is* written to
+    /// protocol-state storage, so it belongs to the sealing decision like
+    /// every other category.
+    StateAdoption,
+}
+
+impl StateCategory {
+    /// The category a storage key type names, or `None` for a key type the
+    /// sealing decision below does not cover.
+    pub(crate) fn from_key_type(key_type: &str) -> Option<Self> {
+        Some(match key_type {
+            storage_keys::PENDING_MESSAGES => Self::PendingMessages,
+            storage_keys::OUTBOX => Self::Outbox,
+            storage_keys::MEDIA_DESCRIPTORS => Self::MediaDescriptors,
+            storage_keys::PEER_KEY_PACKAGES => Self::PeerKeyPackages,
+            storage_keys::PEER_CAPABILITIES => Self::PeerCapabilities,
+            storage_keys::SESSION_STATES => Self::SessionStates,
+            storage_keys::WELCOME_LIFECYCLES => Self::WelcomeLifecycles,
+            storage_keys::BLOCKED_USERS => Self::BlockedUsers,
+            storage_keys::BOTH_CREATE_AWAITING_DECRYPT => Self::BothCreateAwaitingDecrypt,
+            storage_keys::LAMPORT_CLOCK => Self::LamportClock,
+            storage_keys::STATE_ADOPTION => Self::StateAdoption,
+            _ => return None,
+        })
+    }
+
+    /// Whether this category's values must be sealed before they reach the
+    /// install-scoped store.
+    ///
+    /// The single place record sensitivity is decided — adding a category means
+    /// deciding here, not at each call site. Sealed categories are the ones
+    /// whose values can carry message plaintext, user content, or media key
+    /// material:
+    ///
+    /// - [`storage_keys::PENDING_MESSAGES`]: original plaintext, plus rich
+    ///   extras that can include `MediaMetadata::encryption_key`/`iv`.
+    /// - [`storage_keys::OUTBOX`]: the outgoing `Message` — ciphertext for
+    ///   encrypted sends, but plaintext when the app opted out of encryption,
+    ///   and its outer `media_metadata` carries the cloud-media secrets on the
+    ///   forward path.
+    /// - [`storage_keys::MEDIA_DESCRIPTORS`]: file names and recipients of
+    ///   in-flight transfers.
+    ///
+    /// Everything else is public wire material (key packages, advertised
+    /// capability versions), a small state enum, a logical clock, or a
+    /// value-less marker whose only information is the key id — which sealing
+    /// cannot hide anyway, because the store addresses records by it.
+    fn requires_sealing(self) -> bool {
+        match self {
+            Self::PendingMessages | Self::Outbox | Self::MediaDescriptors => true,
+            Self::PeerKeyPackages
+            | Self::PeerCapabilities
+            | Self::SessionStates
+            | Self::WelcomeLifecycles
+            | Self::BlockedUsers
+            | Self::BothCreateAwaitingDecrypt
+            | Self::LamportClock
+            | Self::StateAdoption => false,
+        }
+    }
+}
+
+/// Whether a key type's values must be sealed. Unknown key types answer `false`
+/// only for *reads*, where nothing this SDK wrote can be waiting — the write
+/// side refuses them outright.
+fn record_requires_sealing(key_type: &str) -> bool {
+    StateCategory::from_key_type(key_type).is_some_and(StateCategory::requires_sealing)
+}
+
+/// Outcome of reading one protocol-state record.
+///
+/// Three states, not two, because "no bytes" has three very different causes
+/// and only one of them is a loss:
+///
+/// - [`Self::Missing`] — nothing was ever here.
+/// - [`Self::Unreadable`] — a record *was* here, was examined, and is gone for
+///   good (oversized, tampered, or sealed under a key this install no longer
+///   has). It has been deleted.
+/// - [`Self::Unavailable`] — a record is still here and may be perfectly good,
+///   but cannot be read *this session* (the record key is not loaded, or the
+///   backend refused the read). It is left on disk and a later launch may
+///   recover it.
+///
+/// Restore paths that own app-visible message state settle only
+/// [`Self::Unreadable`]. Settling [`Self::Unavailable`] would be wrong twice
+/// over: the record survives, so the next launch restores it and re-drives
+/// delivery — the app would have been told the message failed terminally and
+/// then have it delivered anyway, with a hand re-send (a *new* id, so dedup
+/// cannot collapse it) landing as a second copy.
+pub(crate) enum StateRecord {
+    /// No record under this key.
+    Missing,
+    /// A record existed, could not be returned, and has been deleted — or,
+    /// when the reader was given a [`PruneBudget`] that has run out, left for a
+    /// later launch to delete. Nothing is ever recovered from it either way, so
+    /// callers treat the two identically; the budget only defers the unlink.
+    Unreadable,
+    /// A record exists but could not be read this session; it is still on disk.
+    Unavailable,
+    /// The record's plaintext value.
+    Present(Vec<u8>),
+}
+
+impl StateRecord {
+    /// The record's bytes, treating an unrecoverable record like an absent one.
+    /// For callers whose category carries no app-visible commitment.
+    fn into_bytes(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Present(data) => Some(data),
+            Self::Missing | Self::Unreadable | Self::Unavailable => None,
+        }
+    }
+}
+
+/// Outcome of restoring one recipient's pending queue. Mirrors
+/// [`StateRecord`]'s three-way split for the same reason.
+enum PendingRestore {
+    /// Nothing was queued for this recipient.
+    Absent,
+    /// A queue existed but could not be recovered. Its message ids are inside
+    /// the record that would not open, so they cannot be settled individually.
+    Lost,
+    /// A queue exists but could not be read this session and is still on disk.
+    /// Reporting it as lost would be a lie a later launch contradicts.
+    Unavailable,
+    /// The recovered queue (possibly empty).
+    Restored(Vec<PendingMessage>),
+}
+
+/// Largest number of keys any single pass will process for a category with no
+/// live insert-time cap of its own.
+///
+/// The pending queue is the widest such category, at
+/// [`MAX_PENDING_MESSAGES_GLOBAL`] recipients, so a store listing more than a
+/// generous multiple of that has been tampered with or was written by a build
+/// with wildly different bounds. That threat matters more here than it did
+/// before the storage split, not less: this state used to live in the
+/// credential store and now lives in the app container, where write access is
+/// easier to come by. Sealing already keeps a forged record from ever
+/// deserializing; this bounds the *work* as well as the result.
+///
+/// Every walk stops here; what happens to the tail depends on the category:
+///
+/// - Most **restores** simply *ignore* it — they do not delete it. A later
+///   launch still reaches it, but *not* because the listing order varies: all
+///   three built-in providers return their keys sorted, so the walked prefix is
+///   deterministic. It drains because the prefix is **consumed** — restored
+///   entries are flushed, expired, or evicted for capacity, and their records
+///   deleted — so each launch lists fewer keys and the walk reaches further.
+///   The categories restore never consumes ([`storage_keys::BLOCKED_USERS`],
+///   [`storage_keys::BOTH_CREATE_AWAITING_DECRYPT`],
+///   [`storage_keys::WELCOME_LIFECYCLES`]) therefore keep the *same* tail on
+///   every launch, indefinitely. That is tolerable only because this bound sits
+///   far above anything this SDK can legitimately write, so reaching it already
+///   means the store was tampered with — do not carry the "a later launch gets
+///   the rest" argument over to a tighter bound.
+/// - The two **cache** categories (`restore_peer_key_packages`,
+///   `restore_peer_capabilities`) prune the overflow *inside* the prefix down
+///   to their own much smaller live caps. Losing a cached key package or
+///   capability record only costs a recoverable re-exchange, which is what
+///   makes deleting the overflow the right policy there. How much they prune
+///   per launch is bounded separately by [`MAX_RESTORE_PRUNE_DELETES`],
+///   because this bound limits *reads* and a prune is a synchronous provider
+///   delete — so the store shrinks by that budget per launch and the tail
+///   drains over successive launches.
+/// - **Adoption** treats hitting this bound as an incomplete pass instead: it
+///   deletes each record it moves, so withholding its completion marker drains
+///   the remainder over successive launches rather than abandoning it in the
+///   credential store (see `adopt_legacy_protocol_state`).
+///
+/// Categories whose live insert path is capped get a tighter bound derived from
+/// that cap instead (see [`OUTBOX_RESTORE_KEY_CAP`]).
+///
+/// `restore_tofu_keys` uses this bound too, even though TOFU pins never left
+/// the credential store: the argument for bounding *work* on the boot path does
+/// not depend on which store is easier to write to. It is the one category that
+/// bounds its walk without ever pruning the tail — see the rationale there.
+pub(super) const MAX_RESTORE_KEYS_PER_CATEGORY: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
+
+/// Restore-walk bound for the outbox.
+///
+/// The live insert path hard-caps the outbox at [`MAX_OUTBOX_ENTRIES`]
+/// (`ensure_outbox_entry` evicts before admitting), so a durable store can
+/// never legitimately hold more than that plus what a merge restored. Four
+/// times the cap is ample headroom and avoids walking — and transiently
+/// allocating up to [`MAX_PROTOCOL_STATE_RECORD_BYTES`] for — thirty times more
+/// entries than could ever be kept.
+///
+/// Media transfer descriptors deliberately keep the wider bound: unlike the
+/// outbox, `persist_media_descriptor` has no insert-time cap
+/// ([`MAX_MEDIA_DESCRIPTORS`] is applied only on restore), so a long-running
+/// session can legitimately leave more on disk than the restore cap. Walking
+/// only a tight prefix would keep the wrong ones and strand the rest forever.
+const OUTBOX_RESTORE_KEY_CAP: usize = 4 * MAX_OUTBOX_ENTRIES;
+
+/// Restore-walk bound for the pending queue, counted in *entries* rather than
+/// records.
+///
+/// [`MAX_RESTORE_KEYS_PER_CATEGORY`] bounds how many pending-queue *records*
+/// one pass opens, and each record holds a whole recipient's queue — up to
+/// [`MAX_PENDING_MESSAGES_PER_PEER`] entries after the trim. Bounding only the
+/// record count therefore admits `16384 × 64` entries, and holding the global
+/// caps across them is not free: `evict_oldest_pending_message` scans the whole
+/// in-memory queue to find the oldest entry, so every entry past
+/// [`MAX_PENDING_MESSAGES_GLOBAL`] costs an O(`MAX_PENDING_MESSAGES_GLOBAL`)
+/// pass. That is roughly four billion comparisons on the *synchronous* boot
+/// path, before counting one provider load per record.
+///
+/// This is the same lesson the built-in providers' `list_keys` bound learned:
+/// count the work, not the results. And it is reachable without tampering — the
+/// pre-split build had no pending-queue caps at all, so an upgraded install can
+/// legitimately hold far more than the caps now admit, and the adoption sweep
+/// moves all of it into the store this walk reads.
+///
+/// The tail is *ignored*, never pruned, exactly like the record-count tail
+/// above it: those ids live inside records nothing has opened, so deleting them
+/// would be an unsettleable loss. Sized at the same generous multiple of the
+/// live cap the rest of this module uses, so no store this SDK wrote is ever
+/// truncated.
+///
+/// "Ignored" has to mean ignored *for the session*, not just for the walk. Both
+/// of this category's bounds therefore freeze the recipients they did not reach
+/// (`pending_queues_unreadable_this_session`), because one record holds a
+/// recipient's whole queue and an ordinary enqueue would otherwise write the
+/// in-memory view over it. The outbox and media-descriptor tails need no
+/// equivalent: those are keyed per message and per file, so a later write only
+/// ever touches a different key.
+pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
+
+/// Durable deletes one restore path may issue in a single launch.
+///
+/// [`MAX_RESTORE_KEYS_PER_CATEGORY`] bounds how many records a walk *reads*.
+/// It does not bound how many it *deletes*, and those are not the same cost: a
+/// delete is a synchronous provider round trip that flushes the containing
+/// directory on all three built-in providers — `F_FULLFSYNC` on iOS, which is a
+/// full device barrier rather than a hint. Pruning every over-cap record in one
+/// pass therefore costs, in the worst case, tens of thousands of device
+/// barriers on the *synchronous* `initialize_mls` path: not a slow launch, a
+/// launch the platform watchdog kills.
+///
+/// So the walk bound and the prune bound are separate numbers, because they
+/// bound separate resources. The same lesson as the providers' `list_keys`
+/// bound and [`MAX_PENDING_RESTORE_ENTRIES`], applied to the write side.
+///
+/// Safe to stop early precisely because pruning is *idempotent and resumable*:
+/// an over-cap record left on disk is walked again next launch and pruned then,
+/// exactly as `adopt_legacy_protocol_state` drains its own truncated pass.
+///
+/// # Two ways to spend it, because two kinds of walk owe the application
+/// different things
+///
+/// A **cache or advisory** walk ([`PruneBudget::refusing`]) may simply refuse a
+/// delete once the allowance is gone: dropping a cached key package or a media
+/// descriptor costs a recoverable re-exchange, so the record is left on disk and
+/// nothing is owed to anyone.
+///
+/// A **settlement-paired** walk ([`PruneBudget::counting`]) cannot. Refusing an
+/// individual delete there would either settle an id whose record a later launch
+/// restores and re-drives — the exact contradiction [`StateRecord`] exists to
+/// prevent — or drop an entry from memory while leaving the app holding an id
+/// nothing resolves. So it *counts* what it spends, never refuses a delete
+/// mid-record, and stops at the next **record boundary**, where stopping is
+/// safe because the untouched remainder is exactly what a later launch reads.
+/// [`OfflineProtocol::restore_pending_messages`] spends it that way, and freezes
+/// the recipients it did not reach for the session, the same way it freezes the
+/// tail of its two walk bounds.
+///
+/// [`OfflineProtocol::restore_outbox`] is deliberately **not** budgeted at all.
+/// It is settlement-paired like the pending walk, but its walk bound is
+/// [`OUTBOX_RESTORE_KEY_CAP`] — eight times tighter, capping it near 1.5k
+/// deletes rather than 16k — and, unlike a pending record, an outbox record left
+/// unwalked is one the app is still holding a live id for, so deferring it
+/// defers delivery rather than only deferring a diagnostic.
+///
+/// # This bounds deletes, and deletes are not the only durable cost
+///
+/// A *write* flushes the record **and** its directory, so it is strictly more
+/// expensive than a delete. Two write paths on the restore walk are unbounded
+/// on purpose, for the same reason `restore_outbox`'s deletes are: each is
+/// paired with a settlement that cannot be separated from it.
+///
+/// - `restore_pending_messages` re-persists every recipient whose queue lost
+///   entries to a capacity cap. Skipping one would leave its durable record
+///   listing messages already settled as `message_failed`, which the next launch
+///   would restore and deliver.
+/// - `restore_outbox` re-persists refreshed and orphaned entries for the same
+///   reason.
+///
+/// Both are bounded transitively — by [`MAX_PENDING_RESTORE_ENTRIES`] and
+/// [`OUTBOX_RESTORE_KEY_CAP`] respectively — not by this constant. Tightening
+/// the write volume means tightening those, not budgeting here.
+pub(super) const MAX_RESTORE_PRUNE_DELETES: usize = 512;
+
+/// Everything one pending-queue restore walk accumulates across recipients.
+///
+/// The running totals are maintained rather than recomputed: the global caps
+/// would otherwise re-walk the whole in-memory queue once per eviction, and the
+/// walk can admit up to [`MAX_PENDING_RESTORE_ENTRIES`] entries.
+///
+/// They start at zero rather than from the in-memory queue because that queue is
+/// necessarily empty at this point: `queue_message_for_session_establishment` is
+/// gated on `should_auto_encrypt()`, which requires an MLS manager, and
+/// `initialize_mls` returns early once one is published — so nothing can have
+/// been queued before the restore that publishes it.
+#[derive(Default)]
+struct RestoredPendingAdmission {
+    /// Entries admitted into `pending_encrypted_messages` so far.
+    global_count: usize,
+    /// Their total serialized footprint.
+    global_bytes: usize,
+    /// Ids dropped by a count or byte cap, to settle as failed.
+    capacity_evicted: Vec<MessageId>,
+    /// Recipients whose persisted record no longer matches memory.
+    changed_recipients: std::collections::HashSet<String>,
+}
+
+/// Per-launch allowance for the durable deletes a restore path issues while
+/// pruning, and whether it ran out. See [`MAX_RESTORE_PRUNE_DELETES`].
+///
+/// Deliberately has no `Default`: whether a walk may *refuse* a delete or only
+/// *count* it is the whole safety question, so it has to be answered at the
+/// construction site rather than inherited from whichever answer happened to be
+/// the zero value.
+struct PruneBudget {
+    spent: usize,
+    exhausted: bool,
+    /// Whether [`Self::claim`] may turn a delete down once the allowance is
+    /// gone. False for settlement-paired walks — see
+    /// [`MAX_RESTORE_PRUNE_DELETES`].
+    refusable: bool,
+}
+
+impl PruneBudget {
+    /// A budget for a walk whose records are caches or advisory signals, which
+    /// may refuse a delete outright and leave the record for a later launch.
+    fn refusing() -> Self {
+        Self {
+            spent: 0,
+            exhausted: false,
+            refusable: true,
+        }
+    }
+
+    /// A budget for a settlement-paired walk, which counts every delete but
+    /// never refuses one.
+    ///
+    /// Refusing mid-record would break the pairing between a delete and the
+    /// terminal event that names what it destroyed. The caller instead polls
+    /// [`Self::is_spent`] between records and stops there.
+    fn counting() -> Self {
+        Self {
+            spent: 0,
+            exhausted: false,
+            refusable: false,
+        }
+    }
+
+    /// Claims one delete. Refuses — and records that the budget is gone — only
+    /// for a [`Self::refusing`] budget; a [`Self::counting`] one always allows
+    /// the delete and just charges for it.
+    fn claim(&mut self) -> bool {
+        if self.spent >= MAX_RESTORE_PRUNE_DELETES {
+            self.exhausted = true;
+            if self.refusable {
+                return false;
+            }
+        }
+        self.spent = self.spent.saturating_add(1);
+        true
+    }
+
+    /// Whether the allowance is used up. A [`Self::counting`] caller checks this
+    /// at each record boundary to decide whether to walk any further.
+    fn is_spent(&self) -> bool {
+        self.spent >= MAX_RESTORE_PRUNE_DELETES
+    }
+}
+
+/// Claims one delete against an optional budget, allowing it unconditionally
+/// when the caller supplied none.
+///
+/// The `None` case is what the settlement-paired walks pass: a delete they
+/// cannot postpone without either settling an id a later launch restores or
+/// dropping one the application still holds. See [`MAX_RESTORE_PRUNE_DELETES`].
+fn claim_prune(budget: &mut Option<&mut PruneBudget>) -> bool {
+    match budget {
+        Some(budget) => budget.claim(),
+        None => true,
+    }
+}
+
 impl OfflineProtocol {
+    // ========================================================================
+    // PROTOCOL-STATE RECORD I/O (SEALING + SIZE POLICY CHOKEPOINT)
+    // ========================================================================
+
+    /// Writes one protocol-state record, sealing it first when its category
+    /// requires that, and refusing anything over
+    /// [`MAX_PROTOCOL_STATE_RECORD_BYTES`].
+    ///
+    /// Every value written to [`ProtocolStateStorage`] goes through here, so
+    /// confidentiality and size policy live in one place rather than being
+    /// re-decided per call site.
+    pub(crate) fn write_state_record(
+        &self,
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> ProtocolStateResult<()> {
+        if data.len() > MAX_PROTOCOL_STATE_RECORD_BYTES {
+            return Err(ProtocolStateError::StoreFailed(format!(
+                "record is {} bytes, over the {} byte limit",
+                data.len(),
+                MAX_PROTOCOL_STATE_RECORD_BYTES
+            )));
+        }
+
+        // Fail closed on a category the sealing decision does not cover. The
+        // alternative is writing it in the clear because the default answer to
+        // "is this sensitive?" happened to be "no", which is exactly the
+        // silent-plaintext outcome `StateCategory` exists to make impossible.
+        let Some(category) = StateCategory::from_key_type(key_type) else {
+            return Err(ProtocolStateError::StoreFailed(format!(
+                "unknown protocol-state category '{}'; refusing to persist \
+                 a record whose sensitivity has not been decided",
+                key_type
+            )));
+        };
+
+        if !category.requires_sealing() {
+            return storage.store(key_type, key_id, data);
+        }
+
+        // Fail closed: without the per-install key this record would have to be
+        // written in the clear, and losing crash recovery for it is strictly
+        // less bad than losing at-rest confidentiality.
+        let Some(cipher) = &self.state_record_cipher else {
+            return Err(ProtocolStateError::StoreFailed(
+                "protocol state record key unavailable; refusing to persist in the clear"
+                    .to_string(),
+            ));
+        };
+        let Some(sealed) = cipher.seal(key_type, key_id, data) else {
+            return Err(ProtocolStateError::StoreFailed(
+                "failed to seal protocol state record".to_string(),
+            ));
+        };
+        storage.store(key_type, key_id, &sealed)
+    }
+
+    /// Reads one protocol-state record, opening it when its category is sealed,
+    /// and discarding the bytes for callers that do not need the
+    /// missing-versus-destroyed distinction.
+    pub(crate) fn read_state_record(
+        &self,
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+    ) -> ProtocolStateResult<Option<Vec<u8>>> {
+        Ok(self
+            .read_state_record_detailed(storage, key_type, key_id)?
+            .into_bytes())
+    }
+
+    /// Loads one protocol-state entry for a caller that only needs to know
+    /// whether usable bytes are there.
+    ///
+    /// Both [`ProtocolStateError::NotFound`] and
+    /// [`ProtocolStateError::Corrupted`] read as `None`. The trait documents
+    /// `NotFound` as the variant for implementations whose platform API cannot
+    /// express absence any other way, so it has to be *read* as absence here —
+    /// otherwise a provider that honors that contract turns every record it
+    /// holds into a spurious unrecoverable loss. `Corrupted` is a record that
+    /// exists and can never be decoded, which for a probe is the same answer:
+    /// there is nothing to inherit, and writing over it is the recovery.
+    ///
+    /// Callers that owe the app a settlement need the two kept apart and go
+    /// through [`Self::read_state_record_detailed`] instead.
+    fn load_state_bytes(
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+    ) -> ProtocolStateResult<Option<Vec<u8>>> {
+        match storage.load(key_type, key_id) {
+            Ok(data) => Ok(data),
+            Err(ProtocolStateError::NotFound(_) | ProtocolStateError::Corrupted(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Lists one protocol-state category, treating
+    /// [`ProtocolStateError::NotFound`] as an empty category.
+    ///
+    /// Same reasoning as [`Self::load_state_bytes`]: a backend that can only
+    /// spell "nothing is filed under this key type" as `NotFound` is reporting
+    /// emptiness, not failure. Every restore propagates a listing error, so
+    /// without this a provider honoring that contract fails restore and rolls
+    /// `initialize_mls` back over a store that is merely empty.
+    fn list_state_keys(
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+    ) -> ProtocolStateResult<Vec<String>> {
+        match storage.list_keys(key_type) {
+            Ok(keys) => Ok(keys),
+            Err(ProtocolStateError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Reads one protocol-state record, distinguishing an absent record from
+    /// one that was destroyed and from one that merely cannot be read now.
+    ///
+    /// Never yields raw bytes for a record that is oversized or will not open.
+    /// Such a record is corrupt or tampered, so it is also deleted, which keeps
+    /// a poison record from being re-examined on every boot — and reported as
+    /// [`StateRecord::Unreadable`], because a caller holding an app-visible
+    /// promise about that record (an outbox entry the app was told was queued)
+    /// has to settle it rather than let it evaporate.
+    ///
+    /// A missing record *key* is deliberately not that: those records may be
+    /// perfectly good, so they are left on disk and reported as
+    /// [`StateRecord::Unavailable`]. Nothing is recovered from them this run
+    /// either way, but a later launch can — which is exactly why they must not
+    /// be settled as failures now.
+    ///
+    /// The same split applies to what the store itself reports.
+    /// [`ProtocolStateError::Corrupted`] is documented as a record that exists
+    /// and cannot be decoded, which is permanent by construction — so it is
+    /// [`StateRecord::Unreadable`], not a read to retry. Every other error is a
+    /// failure of *this* read and stays [`StateRecord::Unavailable`].
+    pub(crate) fn read_state_record_detailed(
+        &self,
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+    ) -> ProtocolStateResult<StateRecord> {
+        self.read_state_record_detailed_budgeted(storage, key_type, key_id, None)
+    }
+
+    /// [`Self::read_state_record_detailed`], charging its own drop-deletes to
+    /// `budget` when one is supplied.
+    ///
+    /// This reader deletes what it cannot return, and on a restore walk that is
+    /// a durable delete like any other — the same synchronous provider round
+    /// trip, with the same directory flush, that
+    /// [`MAX_RESTORE_PRUNE_DELETES`] exists to bound. A walk whose records are
+    /// *all* unreadable (a regenerated record key makes every sealed record on
+    /// the install unopenable) would otherwise issue one per record with
+    /// nothing counting them.
+    ///
+    /// A [`PruneBudget::refusing`] budget may turn the unlink down and leave the
+    /// record for a later launch; the record is reported
+    /// [`StateRecord::Unreadable`] either way, since nothing is ever recovered
+    /// from it. A [`PruneBudget::counting`] one always performs the unlink and
+    /// merely charges for it, so a settlement-paired caller
+    /// ([`Self::restore_pending_messages`]) keeps its delete and its terminal
+    /// event together and stops at its next record boundary instead.
+    ///
+    /// `None` is for the runtime callers and for [`Self::restore_outbox`],
+    /// whose walk bound already caps the volume — see
+    /// [`MAX_RESTORE_PRUNE_DELETES`].
+    fn read_state_record_detailed_budgeted(
+        &self,
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+        mut budget: Option<&mut PruneBudget>,
+    ) -> ProtocolStateResult<StateRecord> {
+        let data = match storage.load(key_type, key_id) {
+            Ok(Some(data)) => data,
+            Ok(None) => return Ok(StateRecord::Missing),
+            // Absence, spelled as an error by a backend that cannot spell it
+            // any other way.
+            Err(ProtocolStateError::NotFound(_)) => return Ok(StateRecord::Missing),
+            // A record was there and its store cannot decode it. Nothing will
+            // ever decode it, so this is a loss to settle rather than a read to
+            // retry — and it is deleted so it cannot be re-examined on every
+            // boot. Providers that detect corruption themselves have usually
+            // deleted it already, which makes the delete a no-op.
+            Err(ProtocolStateError::Corrupted(detail)) => {
+                warn!(
+                    key_type = %key_type,
+                    key_id = %key_id,
+                    detail = %detail,
+                    "Protocol state record reported corrupt by its store; dropping"
+                );
+                if claim_prune(&mut budget) {
+                    let _ = storage.delete(key_type, key_id);
+                }
+                return Ok(StateRecord::Unreadable);
+            }
+            Err(e) => return Err(e),
+        };
+
+        // Bound before deserialization: a corrupted or tampered record must not
+        // become an unbounded allocation while parsing during startup. The
+        // limit is on the *plaintext*, which is what the write side checks, so
+        // a sealed record is allowed its envelope on top — otherwise a record
+        // written at exactly the cap could never be read back.
+        let sealed = record_requires_sealing(key_type);
+        let limit = if sealed {
+            MAX_PROTOCOL_STATE_RECORD_BYTES.saturating_add(SEALED_RECORD_OVERHEAD)
+        } else {
+            MAX_PROTOCOL_STATE_RECORD_BYTES
+        };
+        if data.len() > limit {
+            warn!(
+                key_type = %key_type,
+                key_id = %key_id,
+                len = data.len(),
+                limit,
+                "Dropping oversized protocol state record"
+            );
+            if claim_prune(&mut budget) {
+                let _ = storage.delete(key_type, key_id);
+            }
+            return Ok(StateRecord::Unreadable);
+        }
+
+        if !sealed {
+            return Ok(StateRecord::Present(data));
+        }
+
+        let Some(cipher) = &self.state_record_cipher else {
+            // Left on disk on purpose: the record is very likely intact and the
+            // key may be back next launch. Reporting `Unavailable` is what stops
+            // restore from settling the whole outbox as failed and then
+            // re-delivering it on the next boot.
+            warn!(
+                key_type = %key_type,
+                key_id = %key_id,
+                "Protocol state record key unavailable; skipping sealed record"
+            );
+            return Ok(StateRecord::Unavailable);
+        };
+
+        match cipher.open(key_type, key_id, &data) {
+            Some(plaintext) => Ok(StateRecord::Present(plaintext)),
+            None => {
+                warn!(
+                    key_type = %key_type,
+                    key_id = %key_id,
+                    sealed = StateRecordCipher::looks_sealed(&data),
+                    "Protocol state record failed to open; deleting"
+                );
+                if claim_prune(&mut budget) {
+                    let _ = storage.delete(key_type, key_id);
+                }
+                Ok(StateRecord::Unreadable)
+            }
+        }
+    }
+
+    // ========================================================================
+    // PRE-SPLIT PROTOCOL STATE ADOPTION
+    // ========================================================================
+
+    /// Adopts protocol state written before the storage split, moving it out of
+    /// secure storage and into the install-scoped store.
+    ///
+    /// Splitting the domains renamed where this state lives. Without a sweep,
+    /// the first launch after an upgrade would come up with an empty outbox, an
+    /// empty pending queue, and — most sharply — an **empty block list**, since
+    /// all of it was previously persisted through the `MlsStorage` handle. The
+    /// records would also stay in the credential store forever with nothing
+    /// ever reading or deleting them, which is the worst possible resting place
+    /// for `pending_messages` (message plaintext) and `outbox` (cloud-media
+    /// `encryption_key`/`iv`) — the very values the split exists to seal.
+    ///
+    /// This is a bulk move rather than the read-through
+    /// [`crate::MlsStorage`] adoption used for MLS material, because
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] is a *closed* set: the SDK
+    /// declares every protocol-state category itself, where OpenMLS contributes
+    /// arbitrary labels to the MLS keyspace. Enumeration therefore terminates,
+    /// which read-through can never guarantee.
+    ///
+    /// **This sweep depends on that other adoption.** On a pre-upgrade install
+    /// the records it is looking for sit in the *un-namespaced* credential
+    /// store, and the handle it enumerates is the namespaced one — so the only
+    /// reason `secure.list_keys` and `secure.load` reach them at all is that
+    /// the built-in providers union in, and read through to, the legacy store
+    /// (`MlsSecureStorage` / `SecureStorage`, see `LegacyStoreAdoption`). Two
+    /// independently-designed mechanisms, one silently load-bearing for the
+    /// other: a provider built without a namespace has no read-through, so this
+    /// sweep finds nothing and the pre-split state stays where it is. Python
+    /// warns about exactly that case at construction.
+    ///
+    /// Properties worth keeping if this is ever touched:
+    ///
+    /// - **Resumable.** Each record is deleted from secure storage only once it
+    ///   is durably written to protocol-state storage, so a crash mid-sweep
+    ///   leaves the remainder to be re-adopted next launch.
+    /// - **Non-destructive.** A key already present in protocol-state storage
+    ///   wins and its legacy twin is left alone. Post-split state is always
+    ///   authoritative, and — since one backend may legitimately serve both
+    ///   handles in tests — a blind copy-then-delete could otherwise delete a
+    ///   record through the same store it just read it from.
+    /// - **All-or-nothing marker.** The marker is written only when the sweep
+    ///   completed without a storage error, so a transiently unavailable
+    ///   credential store means "try again next launch", not "give up forever".
+    /// - **Sealing applies.** Records are written through
+    ///   [`Self::write_state_record`], so categories that require sealing are
+    ///   sealed on the way in and the legacy plaintext is then deleted.
+    /// - **Nothing app-visible vanishes quietly.** A legacy record too large to
+    ///   have any reachable destination is settled before it is deleted, the
+    ///   same way [`Self::restore_outbox`] settles one it cannot recover. This
+    ///   is not hypothetical: the pre-split build had neither a content cap nor
+    ///   a per-peer byte budget, only 64 entries per peer, so the installs this
+    ///   branch's budgets exist for are exactly the ones whose legacy records
+    ///   can exceed [`MAX_PROTOCOL_STATE_RECORD_BYTES`].
+    pub(crate) fn adopt_legacy_protocol_state(&mut self) {
+        let (Some(secure), Some(state)) = (
+            self.secure_storage.clone(),
+            self.protocol_state_storage.clone(),
+        ) else {
+            return;
+        };
+
+        match Self::load_state_bytes(
+            state.as_ref(),
+            storage_keys::STATE_ADOPTION,
+            storage_keys::STATE_ADOPTION_ID,
+        ) {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(e) => {
+                // Unknown whether the sweep already ran. Skipping is the safe
+                // side: adoption is non-destructive, so re-running it later
+                // costs nothing, while running it against a store we cannot
+                // read is unnecessary work on every boot.
+                warn!(error = %e, "Could not read the protocol-state adoption marker; skipping adoption");
+                return;
+            }
+        }
+
+        let mut adopted = 0usize;
+        let mut failed = false;
+        // Settlements for records the sweep had to destroy. Collected rather
+        // than emitted inline because the per-record helper only holds `&self`,
+        // and because they belong on the same deferred path every other restore
+        // settlement uses.
+        let mut unadoptable: Vec<Event> = Vec::new();
+        for key_type in storage_keys::ADOPTABLE_STATE_KEY_TYPES {
+            let key_ids = match secure.list_keys(key_type) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(key_type = %key_type, error = %e, "Failed to list legacy protocol state");
+                    failed = true;
+                    continue;
+                }
+            };
+
+            if key_ids.len() > MAX_RESTORE_KEYS_PER_CATEGORY {
+                // Never reachable from state this SDK wrote, so bound the pass
+                // — but a truncated pass is not a completed one. Withholding
+                // the marker is what makes the tail drain over successive
+                // launches (each one adopts and deletes a prefix) instead of
+                // being abandoned in the credential store forever, which for
+                // `pending_messages` and `outbox` means message plaintext and
+                // cloud-media key material parked in the one place this sweep
+                // exists to clear.
+                warn!(
+                    key_type = %key_type,
+                    listed = key_ids.len(),
+                    cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                    "Legacy protocol state listed more entries than any legitimate run can produce; adopting a prefix and retrying the rest next launch"
+                );
+                failed = true;
+            }
+            for key_id in key_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+                match self.adopt_one_legacy_record(
+                    secure.as_ref(),
+                    state.as_ref(),
+                    key_type,
+                    &key_id,
+                    &mut unadoptable,
+                ) {
+                    Ok(true) => adopted += 1,
+                    Ok(false) => {}
+                    Err(()) => failed = true,
+                }
+            }
+        }
+
+        // Settle before the early return below: these records are already gone,
+        // so a partial sweep must not also withhold the only signal the app will
+        // ever get about them.
+        for event in unadoptable {
+            self.settle_restored_message_failure(event);
+        }
+
+        if failed {
+            warn!(
+                adopted,
+                "Pre-split protocol state only partially adopted; will retry on the next launch"
+            );
+            return;
+        }
+
+        if let Err(e) = self.write_state_record(
+            state.as_ref(),
+            storage_keys::STATE_ADOPTION,
+            storage_keys::STATE_ADOPTION_ID,
+            &[],
+        ) {
+            // Without the marker the sweep simply runs again next launch. It is
+            // idempotent, so that costs one wasted enumeration, not correctness.
+            warn!(error = %e, "Failed to record the protocol-state adoption marker");
+        }
+        if adopted > 0 {
+            info!(
+                count = adopted,
+                "Adopted pre-split protocol state from secure storage"
+            );
+        }
+    }
+
+    /// Moves one legacy record. `Ok(true)` when it was adopted, `Ok(false)`
+    /// when there was nothing to do, `Err(())` when a storage failure means the
+    /// sweep must be retried later. Settlements for records this had to destroy
+    /// are pushed onto `unadoptable` for the caller to emit.
+    fn adopt_one_legacy_record(
+        &self,
+        secure: &dyn MlsStorage,
+        state: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+        unadoptable: &mut Vec<Event>,
+    ) -> std::result::Result<bool, ()> {
+        // Post-split state wins: never overwrite a record this build wrote.
+        //
+        // The probe gets the same three-way treatment as every other read, for
+        // the same reason. A destination the store itself destroyed is not
+        // absent — the app holds ids for it — so the sweep proceeds but owes a
+        // settlement, which the legacy record only discharges by replacing it.
+        // A destination that is merely unreadable *this session* is left alone
+        // entirely: adopting over it would overwrite a record a later launch
+        // can still read.
+        let destination_destroyed = match self.read_state_record_detailed(state, key_type, key_id) {
+            Ok(StateRecord::Present(_)) => return Ok(false),
+            Ok(StateRecord::Missing) => false,
+            Ok(StateRecord::Unreadable) => true,
+            Ok(StateRecord::Unavailable) => {
+                warn!(
+                    key_type = %key_type,
+                    "Protocol state record unreadable this session; deferring adoption of its legacy twin"
+                );
+                return Err(());
+            }
+            Err(e) => {
+                warn!(key_type = %key_type, error = %e, "Failed to probe protocol state during adoption");
+                return Err(());
+            }
+        };
+
+        let data = match secure.load(key_type, key_id) {
+            Ok(Some(data)) => data,
+            // A key that listed but no longer loads was deleted underneath us.
+            Ok(None) => {
+                // Nothing left to inherit *and* the destination was destroyed
+                // by the probe, so this is the last moment anything can name
+                // what the app is still holding.
+                if destination_destroyed {
+                    unadoptable.extend(Self::unadoptable_record_settlement(key_type, key_id));
+                }
+                return Ok(false);
+            }
+            Err(e) => {
+                warn!(key_type = %key_type, error = %e, "Failed to read legacy protocol state");
+                return Err(());
+            }
+        };
+
+        if data.len() > MAX_PROTOCOL_STATE_RECORD_BYTES {
+            // Over the record cap, so it could never be written or restored.
+            // Delete it rather than retrying the sweep forever over a record
+            // that has no reachable destination — but settle first: the app is
+            // holding ids from before the upgrade, and this is the last moment
+            // anything can name them.
+            warn!(
+                key_type = %key_type,
+                len = data.len(),
+                "Dropping oversized legacy protocol state record"
+            );
+            unadoptable.extend(Self::unadoptable_record_settlement(key_type, key_id));
+            let _ = secure.delete(key_type, key_id);
+            return Ok(false);
+        }
+
+        if let Err(e) = self.write_state_record(state, key_type, key_id, &data) {
+            warn!(key_type = %key_type, error = %e, "Failed to adopt legacy protocol state record");
+            return Err(());
+        }
+
+        // Only now is the legacy copy redundant. Ordering matters: a delete
+        // before the write would lose the record on a crash in between.
+        if let Err(e) = secure.delete(key_type, key_id) {
+            // The record is safely adopted; the leftover is cosmetic and the
+            // next sweep's "already present" check will skip it. Do not fail
+            // the sweep over it.
+            debug!(key_type = %key_type, error = %e, "Failed to delete adopted legacy protocol state record");
+        }
+        Ok(true)
+    }
+
+    /// The settlement owed for a legacy record that had to be destroyed rather
+    /// than adopted, or `None` for a category the app holds no promise about.
+    ///
+    /// Mirrors what [`Self::restore_outbox`] and [`Self::restore_pending_messages`]
+    /// emit for the same loss after the split: an outbox record is nameable
+    /// without opening it, because its record key *is* the message id, while a
+    /// pending queue's ids are inside the record — so the recipient is the most
+    /// that can be reported.
+    ///
+    /// An outbox key that does not parse as a [`MessageId`] falls back to the
+    /// same diagnostic the pending queue uses rather than to silence. It should
+    /// not exist — this SDK has only ever keyed the outbox by message id — but
+    /// "should not exist" is exactly the class of record this whole path is for,
+    /// and the sweep deletes it either way. A settlement nobody can act on still
+    /// beats a destruction nobody is told about, which is the invariant the rest
+    /// of this module spends its time enforcing.
+    fn unadoptable_record_settlement(key_type: &str, key_id: &str) -> Option<Event> {
+        match key_type {
+            storage_keys::OUTBOX => Some(Self::unrecoverable_outbox_settlement(
+                key_id,
+                "Outbox entry from a previous version was too large to migrate",
+                0,
+            )),
+            storage_keys::PENDING_MESSAGES => Some(Event::convergence_diag(
+                "pending_state_lost".to_string(),
+                key_id.to_string(),
+                "Messages queued before the storage split exceeded the protocol-state record \
+                 limit and could not be migrated"
+                    .to_string(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The settlement owed for an outbox record that has been destroyed and
+    /// cannot be recovered.
+    ///
+    /// The record key *is* the message id, so the loss is nameable without
+    /// opening the record — but only if the key parses. A key that does not is
+    /// reported as the same `pending_state_lost` diagnostic the pending queue
+    /// uses, carrying the raw key, rather than as silence. It should not exist
+    /// (this SDK has only ever keyed the outbox by message id), but "should not
+    /// exist" is exactly the class of record every caller of this is handling,
+    /// and the record is deleted either way. A settlement nobody can act on
+    /// still beats a destruction nobody is told about.
+    fn unrecoverable_outbox_settlement(key_id: &str, reason: &str, attempts: u32) -> Event {
+        MessageId::from_str(key_id).map_or_else(
+            |_| {
+                Event::convergence_diag(
+                    "pending_state_lost".to_string(),
+                    key_id.to_string(),
+                    format!(
+                        "{reason}, and its message id could not be recovered from the record key"
+                    ),
+                )
+            },
+            |message_id| Event::message_failed(message_id, reason.to_string(), attempts),
+        )
+    }
+
+    // ========================================================================
+    // PROTOCOL-STATE RECORD KEY
+    // ========================================================================
+
+    /// Loads (or, on first run, generates and persists) the per-install key that
+    /// seals sensitive protocol-state records.
+    ///
+    /// The key lives in *secure* storage while the records it protects live in
+    /// the install-scoped container: uninstalling the app drops the container,
+    /// and a container lifted without the credential store yields only
+    /// ciphertext.
+    ///
+    /// Unlike the scrub and Nostr secrets, this one does **not** degrade to a
+    /// session-local value when it cannot be persisted. A key that does not
+    /// survive the process would seal records nothing could ever open, so a
+    /// persist failure leaves the cipher uninstalled and sensitive categories
+    /// simply are not persisted this session (they stay in memory and are
+    /// re-driven from there, exactly as when no storage is configured at all).
+    ///
+    /// Unlike the other secret-restore paths this one has no "already loaded"
+    /// short circuit, so the installed cipher is always the one belonging to
+    /// the secure storage currently attached. Reusing a cipher across a storage
+    /// swap would seal records under a key the next launch cannot find, which
+    /// reads as silent loss of every sealed record.
+    ///
+    /// That invariant is enforced, not just documented: any previously
+    /// installed cipher is dropped *before* the new store is read, so every
+    /// path out of here either installs the key belonging to the currently
+    /// attached store or leaves none at all. A failed load must not fall back
+    /// to the key of a store we are no longer using — that cipher would open
+    /// nothing here (records written under the new store's key are deleted as
+    /// unauthentic on read) and would seal records the next launch cannot
+    /// find a key for.
+    ///
+    /// # A present-but-wrong-length key is the destructive case
+    ///
+    /// The two failure branches below are deliberately asymmetric, and it is
+    /// worth being explicit about why, because the asymmetry looks like an
+    /// oversight and is not.
+    ///
+    /// A *failed load* leaves the cipher uninstalled. Sealed records then read
+    /// as [`StateRecord::Unavailable`]: they stay on disk, nothing is settled,
+    /// and a launch that can read the key recovers them. That is the recoverable
+    /// case, and it is treated as one.
+    ///
+    /// A blob of the *wrong length* is not the key and never will be — no
+    /// process can recover the original from it — so everything sealed under
+    /// that key is already unrecoverable by the time this function runs.
+    /// Regenerating is therefore not what destroys those records; it is what
+    /// lets the install seal again. The visible consequence is still large: the
+    /// records fail to open on the next read, are reported
+    /// [`StateRecord::Unreadable`], and restore settles the whole outbox and
+    /// pending queue as terminal `message_failed`. That is the honest answer —
+    /// the alternative, refusing to regenerate, would preserve ciphertext
+    /// nobody can ever open while permanently disabling persistence for every
+    /// sensitive category.
+    ///
+    /// What it must not do is look like routine key generation in the log, so
+    /// the warning names the consequence rather than the symptom.
+    pub(crate) fn restore_or_init_state_record_key(&mut self) {
+        self.state_record_cipher = None;
+
+        let Some(storage) = &self.secure_storage else {
+            return;
+        };
+
+        let key: Zeroizing<[u8; STATE_RECORD_KEY_BYTES]> = match storage.load(
+            storage_keys::STATE_RECORD_KEY,
+            storage_keys::STATE_RECORD_KEY_ID,
+        ) {
+            Ok(Some(bytes)) if bytes.len() == STATE_RECORD_KEY_BYTES => {
+                let bytes = Zeroizing::new(bytes);
+                let mut key = Zeroizing::new([0u8; STATE_RECORD_KEY_BYTES]);
+                key.copy_from_slice(&bytes);
+                debug!("Restored protocol state record key from secure storage");
+                key
+            }
+            Ok(other) => {
+                // A wrong-length blob is a corrupt write, not a usable key, and
+                // nothing can recover the original from it — so whatever it
+                // sealed is already lost before this runs. Regenerating is what
+                // lets the install seal again; see the note on this function
+                // for why refusing to is worse.
+                if let Some(bytes) = &other {
+                    warn!(
+                        len = bytes.len(),
+                        expected = STATE_RECORD_KEY_BYTES,
+                        "Protocol state record key is not a key and cannot be recovered; \
+                         regenerating. Every record sealed under the old key is \
+                         unrecoverable and will be settled as failed on restore — this is \
+                         not routine key generation"
+                    );
+                }
+                let fresh = StateRecordCipher::generate_key();
+                if let Err(e) = storage.store(
+                    storage_keys::STATE_RECORD_KEY,
+                    storage_keys::STATE_RECORD_KEY_ID,
+                    &*fresh,
+                ) {
+                    warn!(
+                        error = %e,
+                        "Failed to persist protocol state record key; \
+                         sensitive protocol state will not be persisted this session"
+                    );
+                    return;
+                }
+                info!("Generated and persisted per-install protocol state record key");
+                fresh
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to load protocol state record key; \
+                     sensitive protocol state will not be persisted this session"
+                );
+                return;
+            }
+        };
+
+        self.state_record_cipher = Some(StateRecordCipher::new(&key));
+    }
+
     // ========================================================================
     // PENDING MESSAGES PERSISTENCE
     // ========================================================================
@@ -37,9 +1158,25 @@ impl OfflineProtocol {
         recipient: &str,
         messages: &[PendingMessage],
     ) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
+
+        // One record holds this recipient's *whole* queue, so writing the
+        // in-memory view over a record restore could not read would destroy
+        // every message in it — ids the app is still holding, settled to no
+        // one. Behave as if no storage were configured for this recipient
+        // until a later launch can read the record and settle it properly.
+        if self
+            .pending_queues_unreadable_this_session
+            .contains(recipient)
+        {
+            warn!(
+                recipient = %recipient,
+                "Not persisting pending messages over a queue that could not be read this session"
+            );
+            return;
+        }
 
         if messages.is_empty() {
             if let Err(e) = storage.delete(storage_keys::PENDING_MESSAGES, recipient) {
@@ -54,7 +1191,12 @@ impl OfflineProtocol {
 
         match serde_json::to_vec(messages) {
             Ok(data) => {
-                if let Err(e) = storage.store(storage_keys::PENDING_MESSAGES, recipient, &data) {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::PENDING_MESSAGES,
+                    recipient,
+                    &data,
+                ) {
                     warn!(recipient = %recipient, error = %e, "Failed to persist pending messages");
                 }
             }
@@ -65,21 +1207,199 @@ impl OfflineProtocol {
     }
 
     /// Loads pending messages for a recipient from storage.
+    ///
+    /// Production restore goes through [`Self::load_pending_messages_detailed`]
+    /// instead: collapsing "nothing queued" into "the queue is gone" is exactly
+    /// the distinction restore has to act on.
+    #[cfg(test)]
     pub(crate) fn load_pending_messages_from_storage(
         &self,
         recipient: &str,
     ) -> Option<Vec<PendingMessage>> {
-        let storage = self.message_storage.as_ref()?;
-        let data = storage
-            .load(storage_keys::PENDING_MESSAGES, recipient)
-            .ok()??;
-        serde_json::from_slice(&data).ok()
+        match self.load_pending_messages_detailed(recipient, None) {
+            PendingRestore::Restored(mut messages) => {
+                for message in &mut messages {
+                    message.measure();
+                }
+                Some(messages)
+            }
+            PendingRestore::Absent | PendingRestore::Lost | PendingRestore::Unavailable => None,
+        }
+    }
+
+    /// Loads a recipient's pending queue, distinguishing "nothing queued" from
+    /// "a queue existed and its contents are gone" from "a queue exists and
+    /// cannot be read this session".
+    ///
+    /// Entries come back *unmeasured*: the derived `serialized_bytes` is
+    /// deliberately not persisted, and measuring re-serializes every entry, so
+    /// the caller measures only what it decides to keep rather than paying for
+    /// entries the per-peer count trim is about to drop. Anything that enters
+    /// `pending_encrypted_messages` must be measured first or it reads as free
+    /// against the queue byte budgets.
+    ///
+    /// `budget` counts the durable deletes this read causes — the reader's own
+    /// drop of a record that will not open, and the drop below of one whose
+    /// bytes will not parse. It must be a [`PruneBudget::counting`] budget, so
+    /// neither delete is ever refused: both are paired with the
+    /// `pending_state_lost` the caller emits, and settling a record still
+    /// sitting on disk is a claim the next launch contradicts. The caller stops
+    /// walking once the budget reads spent instead.
+    fn load_pending_messages_detailed(
+        &self,
+        recipient: &str,
+        mut budget: Option<&mut PruneBudget>,
+    ) -> PendingRestore {
+        let Some(storage) = self.protocol_state_storage.as_ref() else {
+            return PendingRestore::Absent;
+        };
+        let record = self.read_state_record_detailed_budgeted(
+            storage.as_ref(),
+            storage_keys::PENDING_MESSAGES,
+            recipient,
+            budget.as_deref_mut(),
+        );
+        let data = match record {
+            Ok(StateRecord::Present(data)) => data,
+            Ok(StateRecord::Missing) => return PendingRestore::Absent,
+            // Examined and destroyed: the queue that existed is gone for good.
+            Ok(StateRecord::Unreadable) => return PendingRestore::Lost,
+            // Still on disk, just not readable now. Reporting it as lost would
+            // be contradicted by the next launch restoring it.
+            Ok(StateRecord::Unavailable) | Err(_) => return PendingRestore::Unavailable,
+        };
+        let Ok(messages) = serde_json::from_slice::<Vec<PendingMessage>>(&data) else {
+            // Parsed-as-garbage is the same loss as failed-to-open. Drop the
+            // record so it is not re-parsed on every boot.
+            warn!(recipient = %recipient, "Dropping corrupted pending message record");
+            // Charged, and the answer deliberately not honoured: this delete is
+            // paired with the caller's `pending_state_lost`, so a budget that
+            // refused it would leave a settled record on disk. A `counting`
+            // budget never refuses; ignoring the answer is what keeps a
+            // mistakenly-`refusing` one failing in the safe direction.
+            claim_prune(&mut budget);
+            let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
+            return PendingRestore::Lost;
+        };
+        PendingRestore::Restored(messages)
     }
 
     /// Removes pending messages for a recipient from storage.
+    ///
+    /// Refuses for a recipient whose queue could not be read this session: the
+    /// delete would destroy messages nothing has been able to name yet, which
+    /// is the same unsettled loss [`Self::persist_pending_messages_snapshot`]
+    /// refuses to cause by overwriting.
     pub(crate) fn clear_pending_messages_from_storage(&self, recipient: &str) {
-        if let Some(storage) = &self.message_storage {
-            let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
+        if self
+            .pending_queues_unreadable_this_session
+            .contains(recipient)
+        {
+            warn!(
+                recipient = %recipient,
+                "Not clearing a persisted pending queue that could not be read this session"
+            );
+            return;
+        }
+        if let Some(storage) = &self.protocol_state_storage {
+            // Logged, not swallowed, like every other persistence failure in
+            // this module. A clear that silently failed leaves a record the
+            // next launch restores and re-flushes: the messages carry their
+            // original ids so receivers dedup them, but the sender re-emits
+            // `MessageSent` for traffic it already delivered, and nothing
+            // would say why.
+            if let Err(e) = storage.delete(storage_keys::PENDING_MESSAGES, recipient) {
+                warn!(
+                    recipient = %recipient,
+                    error = %e,
+                    "Failed to clear persisted pending messages"
+                );
+            }
+        }
+    }
+
+    /// Admits one recipient's recovered queue, holding it to the same caps the
+    /// live admission path enforces.
+    ///
+    /// Split out of [`Self::restore_pending_messages`] because it is the one
+    /// part of that walk with its own invariants rather than its own control
+    /// flow: a record written by an older build — or by a build with no caps at
+    /// all, which is every pre-split build — can hold entries the current
+    /// boundary would reject, so restore has to re-apply four bounds in a fixed
+    /// order.
+    ///
+    /// The order is load-bearing:
+    ///
+    /// 1. **Count trim first**, so the measure below is not paid for entries
+    ///    that are about to be dropped anyway.
+    /// 2. **Measure the survivors.** `serialized_bytes` is derived and not
+    ///    persisted, and everything after this point — both byte budgets and the
+    ///    map insert — reads an unmeasured entry as free.
+    /// 3. **Per-peer byte trim**, oldest-first like every other eviction here.
+    /// 4. **Global count and byte trim**, which can evict from a recipient
+    ///    admitted on an earlier iteration, hence the shared accumulator.
+    fn admit_restored_pending_queue(
+        &mut self,
+        recipient: &str,
+        mut messages: Vec<PendingMessage>,
+        admission: &mut RestoredPendingAdmission,
+    ) {
+        let overflow = messages.len().saturating_sub(MAX_PENDING_MESSAGES_PER_PEER);
+        if overflow > 0 {
+            admission
+                .capacity_evicted
+                .extend(messages.drain(..overflow).map(|message| message.message_id));
+            admission.changed_recipients.insert(recipient.to_string());
+        }
+        for message in &mut messages {
+            message.measure();
+        }
+
+        let mut peer_bytes: usize = messages
+            .iter()
+            .map(|message| message.serialized_bytes)
+            .sum();
+        let mut dropped_for_bytes = 0usize;
+        while peer_bytes > MAX_PENDING_MESSAGE_BYTES_PER_PEER && !messages.is_empty() {
+            let message = messages.remove(0);
+            peer_bytes = peer_bytes.saturating_sub(message.serialized_bytes);
+            admission.capacity_evicted.push(message.message_id);
+            dropped_for_bytes += 1;
+        }
+        if dropped_for_bytes > 0 {
+            admission.changed_recipients.insert(recipient.to_string());
+            warn!(
+                recipient = %recipient,
+                dropped = dropped_for_bytes,
+                limit = MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+                "Restored pending queue exceeded the per-peer byte budget"
+            );
+        }
+
+        if !messages.is_empty() {
+            info!(recipient = %recipient, count = messages.len(), "Restored pending messages from storage");
+            admission.global_count += messages.len();
+            admission.global_bytes += peer_bytes;
+            self.pending_encrypted_messages
+                .insert(recipient.to_string(), messages);
+        } else {
+            // Trimmed to nothing. The recipient was just read successfully, so
+            // it is not frozen and this clear cannot be the destructive kind.
+            self.clear_pending_messages_from_storage(recipient);
+        }
+
+        while admission.global_count > MAX_PENDING_MESSAGES_GLOBAL
+            || admission.global_bytes > MAX_PENDING_MESSAGE_BYTES_GLOBAL
+        {
+            let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
+                break;
+            };
+            admission.global_count = admission.global_count.saturating_sub(1);
+            admission.global_bytes = admission
+                .global_bytes
+                .saturating_sub(message.serialized_bytes);
+            admission.changed_recipients.insert(evicted_recipient);
+            admission.capacity_evicted.push(message.message_id);
         }
     }
 
@@ -88,23 +1408,222 @@ impl OfflineProtocol {
     /// This should be called after initializing storage to recover
     /// any messages that were pending when the app was terminated.
     pub(crate) fn restore_pending_messages(&mut self) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return Ok(());
         };
 
-        let recipients = storage
-            .list_keys(storage_keys::PENDING_MESSAGES)
-            .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
+        let mut recipients =
+            Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_MESSAGES)
+                .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
+        let listed = recipients.len();
 
-        for recipient in recipients {
-            if let Some(messages) = self.load_pending_messages_from_storage(&recipient) {
-                if !messages.is_empty() {
-                    info!(recipient = %recipient, count = messages.len(), "Restored pending messages from storage");
-                    self.pending_encrypted_messages.insert(recipient, messages);
-                }
+        // Rebuilt from this pass: a recipient is frozen on disk only while
+        // *this* restore could not read — or did not reach — its record.
+        self.pending_queues_unreadable_this_session.clear();
+
+        // Kept apart from the admission accumulator's `capacity_evicted` so the
+        // two reasons the app sees are the two things that actually happened.
+        let mut unaddressable = Vec::new();
+        let mut lost_recipients = Vec::new();
+        let mut admission = RestoredPendingAdmission::default();
+        // Entries opened so far, which is what actually bounds the work here —
+        // see [`MAX_PENDING_RESTORE_ENTRIES`].
+        let mut examined_entries = 0usize;
+        let mut entry_bound_reached = false;
+        // The third bound, and the one that counts *durable deletes* rather
+        // than reads. This walk is the widest in the module — its record bound
+        // is the same `MAX_RESTORE_KEYS_PER_CATEGORY` the budgeted cache walks
+        // use, eight times looser than the outbox's — and every record it
+        // cannot open costs a provider delete that flushes the containing
+        // directory (`F_FULLFSYNC` on iOS, a full device barrier). A
+        // regenerated record key makes *every* pending record unreadable at
+        // once, since this is a sealed category, and a queue lost that way
+        // contributes no entries, so `MAX_PENDING_RESTORE_ENTRIES` never binds
+        // in exactly that case.
+        //
+        // Counting rather than refusing: each of those deletes is paired with
+        // the `pending_state_lost` emitted below, and a settlement for a record
+        // still on disk is a claim the next launch contradicts. So the walk
+        // spends its allowance, then stops at the next *record boundary* — the
+        // one place stopping is safe — and freezes the rest.
+        let mut budget = PruneBudget::counting();
+        let mut prune_bound_reached = false;
+        // How far the walk got. Everything from here on is the tail none of the
+        // bounds below let this pass reach, and is frozen for the session — see
+        // the freeze right after the loop.
+        let mut walked = 0usize;
+        while walked < recipients.len() {
+            if walked >= MAX_RESTORE_KEYS_PER_CATEGORY {
+                break;
             }
+            if examined_entries >= MAX_PENDING_RESTORE_ENTRIES {
+                entry_bound_reached = true;
+                break;
+            }
+            if budget.is_spent() {
+                prune_bound_reached = true;
+                break;
+            }
+            let recipient = recipients[walked].clone();
+            walked += 1;
+            if Self::validate_outbound_recipient(&recipient).is_err() {
+                // The queue is unaddressable — nothing can ever be sent to this
+                // recipient again — so it is dropped, but the app still holds
+                // ids from `send_message*` that must be settled. The record has
+                // to be read *before* deleting it to recover them, and the read
+                // gets the same three-way treatment as every other restore.
+                match self.load_pending_messages_detailed(&recipient, Some(&mut budget)) {
+                    PendingRestore::Restored(messages) => {
+                        examined_entries = examined_entries.saturating_add(messages.len());
+                        unaddressable.extend(messages.into_iter().map(|m| m.message_id));
+                    }
+                    PendingRestore::Absent => {}
+                    // Already examined and destroyed by the read; the ids went
+                    // with it, so report the loss per recipient rather than
+                    // letting an unaddressable queue vanish more quietly than
+                    // an addressable one would.
+                    PendingRestore::Lost => {
+                        lost_recipients.push(recipient);
+                        continue;
+                    }
+                    // Intact on disk, just unreadable this session. Deleting it
+                    // now would destroy ids nothing can name; a later launch
+                    // reads the record and settles them properly. Being
+                    // unaddressable is not urgent — nothing will be sent from
+                    // this queue either way.
+                    PendingRestore::Unavailable => {
+                        warn!(
+                            recipient = %recipient,
+                            "Pending queue for an invalid recipient could not be read this session; leaving it in place"
+                        );
+                        self.pending_queues_unreadable_this_session
+                            .insert(recipient);
+                        continue;
+                    }
+                }
+                warn!(recipient = %recipient, "Dropping persisted pending queue for an invalid recipient");
+                // Charged, never refused: the settlement this delete pairs with
+                // was already recorded above, so the record has to go with it.
+                budget.claim();
+                let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
+                continue;
+            }
+            let messages = match self.load_pending_messages_detailed(&recipient, Some(&mut budget))
+            {
+                PendingRestore::Restored(messages) => messages,
+                PendingRestore::Absent => continue,
+                // A queue existed and its contents are gone. The ids are inside
+                // the record we could not open, so they cannot be settled
+                // individually — surface the loss per recipient instead of
+                // letting it read as "there was nothing queued".
+                PendingRestore::Lost => {
+                    lost_recipients.push(recipient);
+                    continue;
+                }
+                // Not readable this session, but still on disk. Say nothing: a
+                // later launch is expected to restore it, and a loss diagnostic
+                // now would be a claim the next launch contradicts.
+                PendingRestore::Unavailable => {
+                    warn!(
+                        recipient = %recipient,
+                        "Persisted pending queue could not be read this session; leaving it in place"
+                    );
+                    // Leaving the record on disk only helps if nothing
+                    // overwrites it before a later launch can read it. This
+                    // recipient's record is frozen for the session.
+                    self.pending_queues_unreadable_this_session
+                        .insert(recipient);
+                    continue;
+                }
+            };
+            examined_entries = examined_entries.saturating_add(messages.len());
+            self.admit_restored_pending_queue(&recipient, messages, &mut admission);
         }
 
+        let RestoredPendingAdmission {
+            capacity_evicted,
+            changed_recipients,
+            ..
+        } = admission;
+
+        // Leaving the tail on disk is only worth anything if nothing this
+        // session can then destroy it. A pending record holds a recipient's
+        // *whole* queue, so an ordinary enqueue for an unwalked recipient
+        // persists the in-memory view — one message — straight over it, and
+        // `block_user` / the aborted-session path delete it outright. Either
+        // way the ids inside a record nobody has opened are gone, settled to no
+        // one: exactly the loss the `Unavailable` freeze exists to prevent, and
+        // the walk bounds are the one path into it that had no freeze.
+        //
+        // Freezing is per recipient and per session, so the cost is that a new
+        // send to an unwalked peer stays in memory for this run; the next
+        // launch re-lists and may walk a different subset. Draining moves the
+        // ids the listing already materialized, so this adds no allocation the
+        // walk had not already paid for.
+        let unwalked = recipients.len().saturating_sub(walked);
+        self.pending_queues_unreadable_this_session
+            .extend(recipients.drain(walked..));
+
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                frozen = unwalked,
+                "Pending message store listed more recipients than any legitimate run can \
+                 produce; the tail is left on disk and frozen for this session"
+            );
+        }
+        if entry_bound_reached {
+            warn!(
+                examined = examined_entries,
+                cap = MAX_PENDING_RESTORE_ENTRIES,
+                frozen = unwalked,
+                "Pending message store held more queued entries than one restore may walk; \
+                 the remaining recipients are left on disk and frozen for this session"
+            );
+        }
+        if prune_bound_reached {
+            warn!(
+                deleted = budget.spent,
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                frozen = unwalked,
+                "Pending message restore spent its per-launch delete budget; the remaining \
+                 recipients are left on disk and frozen for this session"
+            );
+        }
+
+        for recipient in changed_recipients {
+            self.persist_or_clear_pending_messages(&recipient);
+        }
+        self.settle_restored_message_failures(capacity_evicted.into_iter().map(|message_id| {
+            Event::message_failed(
+                message_id,
+                "Pending session queue capacity exceeded".to_string(),
+                0,
+            )
+        }));
+        self.settle_restored_message_failures(unaddressable.into_iter().map(|message_id| {
+            Event::message_failed(
+                message_id,
+                "Recipient is not a valid user ID; queued message cannot be delivered".to_string(),
+                0,
+            )
+        }));
+        for recipient in &lost_recipients {
+            warn!(recipient = %recipient, "Persisted pending queue was unreadable and has been dropped");
+        }
+        self.settle_restored_message_failures(lost_recipients.into_iter().map(|recipient| {
+            Event::convergence_diag(
+                "pending_state_lost".to_string(),
+                recipient,
+                "Queued messages awaiting session establishment could not be recovered \
+                 from protocol-state storage and have been dropped"
+                    .to_string(),
+            )
+        }));
+
+        self.recompute_next_pending_message_expiry();
+        self.cleanup_expired_pending_messages();
         Ok(())
     }
 
@@ -114,12 +1633,17 @@ impl OfflineProtocol {
 
     /// Persists a received key package for a peer so it survives restart.
     pub(crate) fn persist_peer_key_package(&self, peer_id: &str, pkg: &ReceivedKeyPackage) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         match serde_json::to_vec(pkg) {
             Ok(data) => {
-                if let Err(e) = storage.store(storage_keys::PEER_KEY_PACKAGES, peer_id, &data) {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::PEER_KEY_PACKAGES,
+                    peer_id,
+                    &data,
+                ) {
                     warn!(peer_id = %peer_id, error = %e, "Failed to persist peer key package");
                 }
             }
@@ -130,18 +1654,55 @@ impl OfflineProtocol {
     }
 
     /// Loads a persisted key package for a peer (if present and not expired).
+    ///
+    /// Unbudgeted, for the runtime callers: one expired record dropped while
+    /// resolving a single peer is one provider round trip, not a storm.
     pub(crate) fn load_peer_key_package_from_storage(
         &self,
         peer_id: &str,
     ) -> Option<ReceivedKeyPackage> {
-        let storage = self.message_storage.as_ref()?;
-        let data = storage
-            .load(storage_keys::PEER_KEY_PACKAGES, peer_id)
-            .ok()??;
+        self.load_peer_key_package_bounded(peer_id, None)
+    }
+
+    /// Loads a persisted key package, charging the drop of an expired record to
+    /// `budget` when one is supplied.
+    ///
+    /// Restore supplies one. The expiry drop is a durable delete like any other
+    /// on that path — a synchronous provider round trip that flushes the
+    /// containing directory on all three built-in stores — and it is the
+    /// *common* one there: an over-cap key-package store is over-cap because it
+    /// is old, and [`MAX_KEY_PACKAGE_LIFETIME_MS`] is 30 days, so most of what
+    /// a restore walk finds in such a store has expired. Left unbudgeted it
+    /// also bypassed the over-cap prune entirely, because an expired record
+    /// never enters `pending_key_packages` and so never makes the cap bind.
+    ///
+    /// A record the budget spares is still not returned — it has expired either
+    /// way — it is simply left on disk for a later launch to drop, which is the
+    /// same idempotent-and-resumable property the rest of the prune relies on.
+    fn load_peer_key_package_bounded(
+        &self,
+        peer_id: &str,
+        mut budget: Option<&mut PruneBudget>,
+    ) -> Option<ReceivedKeyPackage> {
+        let storage = self.protocol_state_storage.as_ref()?;
+        // The reader deletes what it cannot return, so it gets the budget too —
+        // that delete is as durable as the expiry one below and was the last
+        // one on this walk that nothing counted.
+        let data = self
+            .read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                storage_keys::PEER_KEY_PACKAGES,
+                peer_id,
+                budget.as_deref_mut(),
+            )
+            .ok()?
+            .into_bytes()?;
         let pkg: ReceivedKeyPackage = serde_json::from_slice(&data).ok()?;
         let now_ms = Utc::now().timestamp_millis() as u64;
         if now_ms >= pkg.local_expires_at_ms {
-            let _ = storage.delete(storage_keys::PEER_KEY_PACKAGES, peer_id);
+            if claim_prune(&mut budget) {
+                let _ = storage.delete(storage_keys::PEER_KEY_PACKAGES, peer_id);
+            }
             return None;
         }
         Some(pkg)
@@ -149,7 +1710,7 @@ impl OfflineProtocol {
 
     /// Removes persisted key package for a peer (e.g. after session created).
     pub(crate) fn delete_peer_key_package_from_storage(&self, peer_id: &str) {
-        if let Some(storage) = &self.message_storage {
+        if let Some(storage) = &self.protocol_state_storage {
             let _ = storage.delete(storage_keys::PEER_KEY_PACKAGES, peer_id);
         }
     }
@@ -171,13 +1732,13 @@ impl OfflineProtocol {
         &mut self,
         mls: &Arc<RwLock<MlsManager>>,
     ) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
 
-        let peer_ids = storage
-            .list_keys(storage_keys::PEER_KEY_PACKAGES)
+        let peer_ids = Self::list_state_keys(storage.as_ref(), storage_keys::PEER_KEY_PACKAGES)
             .map_err(|e| Error::Other(format!("Failed to list peer key packages: {}", e)))?;
+        let listed = peer_ids.len();
 
         let sessions = {
             let manager = mls
@@ -187,8 +1748,22 @@ impl OfflineProtocol {
         };
         let session_set: std::collections::HashSet<_> = sessions.into_iter().collect();
 
-        let mut pruned = 0usize;
-        for peer_id in peer_ids {
+        let mut budget = PruneBudget::refusing();
+        let mut over_cap_pruned = 0usize;
+        // Bounded like every other category walk, and the prune inside it is
+        // bounded again by `MAX_RESTORE_PRUNE_DELETES` — the walk bounds reads,
+        // the budget bounds deletes, and a delete is the far more expensive of
+        // the two (a synchronous provider round trip that flushes a directory
+        // on all three built-in stores). Both tails drain over successive
+        // launches rather than stranding.
+        //
+        // *Both* kinds of delete this walk issues share that budget: the
+        // over-cap prune below and the expiry drop inside
+        // `load_peer_key_package_bounded`. They are not alternatives — an
+        // expired record never enters the map, so it never makes the cap bind,
+        // which means an over-cap store full of expired records would otherwise
+        // route every one of its deletes past the budget.
+        for peer_id in peer_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if session_set.contains(&peer_id) {
                 continue;
             }
@@ -197,25 +1772,57 @@ impl OfflineProtocol {
             // before the cap existed) cannot re-inflate memory on boot. Rather
             // than leaving the overflow to linger on disk forever — where it
             // would re-inflate memory on a future boot and waste durable
-            // storage — prune it so the store shrinks to the cap in a single
-            // boot. Dropping a cached package only costs a recoverable
-            // re-exchange, exactly like the live eviction path. Overflow is
-            // deleted without loading it, so peak memory stays cap-bounded.
+            // storage — prune it so the store shrinks toward the cap. Dropping
+            // a cached package only costs a recoverable re-exchange, exactly
+            // like the live eviction path. Overflow is deleted without loading
+            // it, so peak memory stays cap-bounded.
             if self.pending_key_packages.len() >= MAX_PENDING_KEY_PACKAGES {
+                if !budget.claim() {
+                    // The map only grows and the cap only binds harder, so
+                    // every remaining key would take this same branch. Nothing
+                    // is left to restore and nothing more may be deleted.
+                    break;
+                }
                 self.delete_peer_key_package_from_storage(&peer_id);
-                pruned += 1;
+                over_cap_pruned += 1;
                 continue;
             }
-            if let Some(pkg) = self.load_peer_key_package_from_storage(&peer_id) {
+            if let Some(pkg) = self.load_peer_key_package_bounded(&peer_id, Some(&mut budget)) {
                 info!(peer_id = %peer_id, "Restored peer key package from storage");
                 self.pending_key_packages.insert(peer_id, pkg);
             }
         }
-        if pruned > 0 {
+        if over_cap_pruned > 0 {
             warn!(
                 cap = MAX_PENDING_KEY_PACKAGES,
-                pruned,
+                pruned = over_cap_pruned,
                 "Peer key package store exceeded the cap on restore; pruned overflow from durable storage"
+            );
+        }
+        // Routine, unlike the over-cap prune above: cached packages expire and
+        // nothing else collects them, so this is the ordinary way the store
+        // shrinks. Reported at debug so a normal launch stays quiet. Folded in
+        // with the reader's own drops, which are neither routine nor a flood —
+        // separating a third counter would say more about the log line than
+        // about the store.
+        let dropped = budget.spent.saturating_sub(over_cap_pruned);
+        if dropped > 0 {
+            debug!(
+                pruned = dropped,
+                "Dropped expired or unreadable peer key packages from durable storage on restore"
+            );
+        }
+        if budget.exhausted {
+            warn!(
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Peer key package prune hit its per-launch delete budget; the rest is left on disk for a later launch"
+            );
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Peer key package store listed more peers than any legitimate run can produce; deferring the tail to a later launch"
             );
         }
 
@@ -232,12 +1839,17 @@ impl OfflineProtocol {
     /// other persist paths: a lost record only degrades output (JSON
     /// envelope, dropped rich extras) until the next live exchange.
     pub(crate) fn persist_peer_capabilities(&self, peer_id: &str, caps: &PeerCapabilities) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         match serde_json::to_vec(caps) {
             Ok(data) => {
-                if let Err(e) = storage.store(storage_keys::PEER_CAPABILITIES, peer_id, &data) {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::PEER_CAPABILITIES,
+                    peer_id,
+                    &data,
+                ) {
                     warn!(peer_id = %peer_id, error = %e, "Failed to persist peer capabilities");
                 }
             }
@@ -250,19 +1862,44 @@ impl OfflineProtocol {
     /// Removes the persisted capability record for a peer (downgrade,
     /// eviction, or peer-state cleanup).
     pub(crate) fn delete_peer_capabilities_from_storage(&self, peer_id: &str) {
-        if let Some(storage) = &self.message_storage {
+        if let Some(storage) = &self.protocol_state_storage {
             let _ = storage.delete(storage_keys::PEER_CAPABILITIES, peer_id);
         }
     }
 
-    /// Loads the persisted capability record for a peer, if any. Best-effort:
-    /// storage or parse failures read as "no record".
-    fn load_peer_capabilities(&self, peer_id: &str) -> Option<PeerCapabilities> {
-        let storage = self.message_storage.as_ref()?;
-        let data = storage
-            .load(storage_keys::PEER_CAPABILITIES, peer_id)
-            .ok()??;
-        serde_json::from_slice::<PeerCapabilities>(&data).ok()
+    /// Loads the persisted capability record for a peer.
+    ///
+    /// Three answers, not two, for the same reason [`StateRecord`] has three.
+    /// `Ok(None)` is "there is nothing here to merge with"; `Err(())` is "a
+    /// record may well be here and could not be read *this session*". The only
+    /// caller merges into whatever this returns and then writes the result
+    /// back, so collapsing the two would let one transient provider failure
+    /// write an attested-only record over a peer's *directly advertised*
+    /// capabilities — silently downgrading its MLS envelope and dropping its
+    /// rich extras until the next live key-package exchange.
+    ///
+    /// A record that is present but will not deserialize is `Ok(None)`:
+    /// nothing can be merged with bytes that do not parse, and the write that
+    /// follows is the recovery. Same for one the store itself destroyed.
+    fn load_peer_capabilities(
+        &self,
+        peer_id: &str,
+    ) -> std::result::Result<Option<PeerCapabilities>, ()> {
+        let Some(storage) = self.protocol_state_storage.as_ref() else {
+            return Ok(None);
+        };
+        match self.read_state_record_detailed(
+            storage.as_ref(),
+            storage_keys::PEER_CAPABILITIES,
+            peer_id,
+        ) {
+            Ok(StateRecord::Present(data)) => Ok(serde_json::from_slice(&data).ok()),
+            // Never written, or examined and destroyed: nothing to preserve.
+            Ok(StateRecord::Missing | StateRecord::Unreadable) => Ok(None),
+            // Still on disk and probably intact — merging into a default and
+            // persisting that would destroy it.
+            Ok(StateRecord::Unavailable) | Err(_) => Err(()),
+        }
     }
 
     /// Records an inviter-attested rich-payload capability for a peer we
@@ -271,10 +1908,11 @@ impl OfflineProtocol {
     /// `handle_key_package_message`: gated by our own kill switch and
     /// bounded like `key_package_sent_to`. Persistence stores the raw
     /// attested versions merged into the peer's existing capability record
-    /// (never clobbering directly-advertised fields), matching the
-    /// "switches gate use, not knowledge" rule. A later direct key-package
-    /// exchange overwrites the whole record and evicts the in-memory entry
-    /// — direct knowledge is always authoritative.
+    /// (never clobbering directly-advertised fields — which is why a record
+    /// that cannot be *read* this session skips the write rather than merging
+    /// into a default), matching the "switches gate use, not knowledge" rule.
+    /// A later direct key-package exchange overwrites the whole record and
+    /// evicts the in-memory entry — direct knowledge is always authoritative.
     pub(crate) fn record_attested_rich(&mut self, peer_id: &str, versions: &[u8]) {
         if peer_id == self.config.user_id || !versions.contains(&RICH_PAYLOAD_V1) {
             return;
@@ -292,7 +1930,21 @@ impl OfflineProtocol {
             }
             self.peer_rich_attested.insert(peer_id.to_string());
         }
-        let mut caps = self.load_peer_capabilities(peer_id).unwrap_or_default();
+        let Ok(existing) = self.load_peer_capabilities(peer_id) else {
+            // The record could not be read this session, so a write now would
+            // put an attested-only record over whatever is on disk — including
+            // the versions this peer advertised for itself, which are the
+            // authoritative ones. An attestation is advisory and the in-memory
+            // set above already opens the group gate for this run; the next Add
+            // commit re-attests. Skipping the write is strictly cheaper than
+            // losing a peer's real capabilities to a transient read.
+            warn!(
+                peer_id = %peer_id,
+                "Peer capability record unreadable this session; not persisting the attested capability"
+            );
+            return;
+        };
+        let mut caps = existing.unwrap_or_default();
         caps.attested_rich_versions = versions
             .iter()
             .copied()
@@ -320,16 +1972,17 @@ impl OfflineProtocol {
     /// leftovers. Best-effort: failures degrade output, never blocking
     /// restore.
     pub(crate) fn restore_peer_capabilities(&mut self, mls: &Arc<RwLock<MlsManager>>) {
-        let Some(storage) = self.message_storage.clone() else {
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
-        let peer_ids = match storage.list_keys(storage_keys::PEER_CAPABILITIES) {
-            Ok(ids) => ids,
-            Err(e) => {
-                warn!(error = %e, "Failed to list peer capabilities, skipping restore");
-                return;
-            }
-        };
+        let peer_ids =
+            match Self::list_state_keys(storage.as_ref(), storage_keys::PEER_CAPABILITIES) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(error = %e, "Failed to list peer capabilities, skipping restore");
+                    return;
+                }
+            };
 
         // Best-effort session lookup: if it fails, restore proceeds in
         // backend order rather than not at all.
@@ -339,32 +1992,63 @@ impl OfflineProtocol {
             .and_then(|manager| manager.list_sessions().ok())
             .map(|sessions| sessions.into_iter().collect())
             .unwrap_or_default();
+        let listed = peer_ids.len();
         let (mut peer_ids, non_session_ids): (Vec<_>, Vec<_>) = peer_ids
             .into_iter()
             .partition(|peer_id| session_set.contains(peer_id));
         peer_ids.extend(non_session_ids);
 
         let mut kept = 0usize;
-        let mut pruned = 0usize;
-        for peer_id in peer_ids {
+        let mut over_cap_pruned = 0usize;
+        let mut budget = PruneBudget::refusing();
+        // Bounded like `restore_peer_key_packages`, for the same reason: the
+        // prune below is a provider delete per over-cap entry, and those are
+        // budgeted separately from the read walk. The take comes *after* the
+        // session-peer partition, so the records this restore exists for are
+        // always inside the prefix however the backend ordered its listing.
+        //
+        // *Every* kind of delete this walk causes shares that budget, including
+        // the one it does not issue itself: a record the store reports corrupt,
+        // or one over the record cap, is dropped inside the reader. Handing the
+        // budget to the reader is the only way to count those — the same
+        // correction `restore_media_descriptors` needed, for the same reason.
+        for peer_id in peer_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if kept >= MAX_KEY_PACKAGE_SENT_TO {
+                if !budget.claim() {
+                    // `kept` only grows, so every remaining key would take this
+                    // same branch: nothing left to restore, nothing more that
+                    // may be deleted.
+                    break;
+                }
                 self.delete_peer_capabilities_from_storage(&peer_id);
-                pruned += 1;
+                over_cap_pruned += 1;
                 continue;
             }
-            let Ok(Some(data)) = storage.load(storage_keys::PEER_CAPABILITIES, &peer_id) else {
+            let Ok(StateRecord::Present(data)) = self.read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                storage_keys::PEER_CAPABILITIES,
+                &peer_id,
+                Some(&mut budget),
+            ) else {
                 continue;
             };
             let Ok(caps) = serde_json::from_slice::<PeerCapabilities>(&data) else {
-                // Corrupt record: drop it rather than re-parsing it forever.
+                // Corrupt record: drop it rather than re-parsing it forever —
+                // unless the delete budget is gone, in which case a later
+                // launch drops it instead. Re-parsing one record is cheap; the
+                // device barrier a delete costs is not.
                 warn!(peer_id = %peer_id, "Corrupt peer capability record, deleting");
-                self.delete_peer_capabilities_from_storage(&peer_id);
+                if budget.claim() {
+                    self.delete_peer_capabilities_from_storage(&peer_id);
+                }
                 continue;
             };
             if !caps.is_any() {
                 // Empty records are deleted at persist time; clean up any
                 // that predate that rule.
-                self.delete_peer_capabilities_from_storage(&peer_id);
+                if budget.claim() {
+                    self.delete_peer_capabilities_from_storage(&peer_id);
+                }
                 continue;
             }
             if self.config.encryption.compact_envelope_enabled
@@ -390,13 +2074,150 @@ impl OfflineProtocol {
                 "Restored peer capability records from storage"
             );
         }
-        if pruned > 0 {
+        if over_cap_pruned > 0 {
             warn!(
                 cap = MAX_KEY_PACKAGE_SENT_TO,
-                pruned,
+                pruned = over_cap_pruned,
                 "Peer capability store exceeded the cap on restore; pruned overflow from durable storage"
             );
         }
+        // Reported apart from the over-cap prune, like `restore_peer_key_packages`
+        // separates its expiry drops: a corrupt, empty, or unreadable record is
+        // not a store that outgrew its cap, and attributing it to one sends
+        // whoever reads this log looking for a flood that never happened.
+        let unreadable_pruned = budget.spent.saturating_sub(over_cap_pruned);
+        if unreadable_pruned > 0 {
+            debug!(
+                pruned = unreadable_pruned,
+                "Dropped unreadable peer capability records from durable storage on restore"
+            );
+        }
+        if budget.exhausted {
+            warn!(
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Peer capability prune hit its per-launch delete budget; the rest is left on disk for a later launch"
+            );
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Peer capability store listed more peers than any legitimate run can produce; deferring the tail to a later launch"
+            );
+        }
+    }
+
+    // ========================================================================
+    // RESTORE-PATH RECORD DECODING
+    // ========================================================================
+
+    /// Reads and decodes one JSON protocol-state record *for a restore walk*,
+    /// dropping a record whose bytes are not this category's type rather than
+    /// failing the walk.
+    ///
+    /// A record that parses as garbage is the same permanent loss as one that
+    /// fails to open, and every other restore on this path already treats it
+    /// that way ([`Self::restore_outbox`], [`Self::restore_pending_messages`],
+    /// [`Self::restore_peer_capabilities`]). Session states and Welcome
+    /// lifecycles were the two that did not: their loaders map a serde failure
+    /// to an error, and their restores propagate it, so one unparseable record
+    /// failed `initialize_mls` outright — and, because nothing deleted it,
+    /// failed it again on every launch after that. With `require_encryption`
+    /// on by default that install can no longer send anything, and there is no
+    /// in-app recovery. Both categories are unsealed, so they carry no
+    /// integrity protection at all, and both now live in the app container
+    /// rather than the credential store — the same threat model every restore
+    /// walk here is bounded against.
+    ///
+    /// Deliberately *not* folded into the loaders themselves. Those are also
+    /// read at runtime, where `is_session_confirmed` propagates the error on
+    /// purpose so a send fails closed instead of silently reading a Confirmed
+    /// session as Pending. Restore is the only caller that must survive the
+    /// record; the runtime one must not.
+    ///
+    /// Storage failures still propagate: a read that failed is not a record
+    /// that decoded to nothing, and restore rolls initialization back for it
+    /// exactly as before.
+    ///
+    /// `budget` bounds the durable deletes this causes — the drop below, and the
+    /// reader's own drop of a record that will not open. Both categories reached
+    /// through here are unsealed and advisory-to-restore, so a
+    /// [`PruneBudget::refusing`] budget is right: a record the budget spares is
+    /// simply re-walked and dropped on a later launch, exactly like the cache
+    /// prunes. Callers whose walk is bounded by something other than the store
+    /// (`restore_session_states_from_manager` iterates the MLS session list)
+    /// pass `None`.
+    fn load_restorable_state_record<T: DeserializeOwned>(
+        &self,
+        key_type: &str,
+        key_id: &str,
+        mut budget: Option<&mut PruneBudget>,
+    ) -> Result<Option<T>> {
+        let Some(storage) = &self.protocol_state_storage else {
+            return Ok(None);
+        };
+
+        let Some(data) = self
+            .read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                key_type,
+                key_id,
+                budget.as_deref_mut(),
+            )
+            .map_err(|e| {
+                Error::Other(format!("Failed to load {} for {}: {}", key_type, key_id, e))
+            })?
+            .into_bytes()
+        else {
+            return Ok(None);
+        };
+
+        match serde_json::from_slice::<T>(&data) {
+            Ok(value) => Ok(Some(value)),
+            Err(e) => {
+                warn!(
+                    key_type = %key_type,
+                    key_id = %key_id,
+                    error = %e,
+                    "Dropping a protocol-state record whose bytes are not the type \
+                     its category holds"
+                );
+                if claim_prune(&mut budget) {
+                    let _ = storage.delete(key_type, key_id);
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Restore-path read of a peer's session state. See
+    /// [`Self::load_restorable_state_record`] for why this is separate from
+    /// [`Self::load_session_state_entry`].
+    ///
+    /// Unbudgeted: its caller walks the *MLS session list*, not a
+    /// protocol-state category, so the volume is bounded by sessions this
+    /// install actually has rather than by whatever the container holds.
+    pub(crate) fn load_session_state_for_restore(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<SessionState>> {
+        self.load_restorable_state_record(storage_keys::SESSION_STATES, peer_id, None)
+    }
+
+    /// Reads a peer's Welcome lifecycle. See
+    /// [`Self::load_restorable_state_record`].
+    ///
+    /// Unlike session states, this category has no strict twin: restore is its
+    /// only reader (`welcome_lifecycles` is an in-memory map from then on), so
+    /// there is no send-path decision that has to fail closed on a record that
+    /// will not decode. It *is* walked by container-listed key, though, so its
+    /// deletes are budgeted like every other such walk.
+    fn load_welcome_lifecycle_for_restore(
+        &self,
+        peer_id: &str,
+        budget: Option<&mut PruneBudget>,
+    ) -> Result<Option<WelcomeLifecycleRecord>> {
+        self.load_restorable_state_record(storage_keys::WELCOME_LIFECYCLES, peer_id, budget)
     }
 
     // ========================================================================
@@ -404,13 +2225,19 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Loads a persisted session state entry (if present).
+    ///
+    /// A record that will not deserialize is an error here, not an absent
+    /// record: `is_session_confirmed` reads this on the send path and must
+    /// fail closed rather than treat a Confirmed session as Pending. The
+    /// restore walk, which must not be blocked by one poison record, goes
+    /// through [`Self::load_session_state_for_restore`] instead.
     pub(crate) fn load_session_state_entry(&self, peer_id: &str) -> Result<Option<SessionState>> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(None);
         };
 
-        let Some(data) = storage
-            .load(storage_keys::SESSION_STATES, peer_id)
+        let Some(data) = self
+            .read_state_record(storage.as_ref(), storage_keys::SESSION_STATES, peer_id)
             .map_err(|e| {
                 Error::Other(format!(
                     "Failed to load session state for {}: {}",
@@ -438,21 +2265,25 @@ impl OfflineProtocol {
         new_state: SessionState,
         source_event: &str,
     ) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Err(Error::MlsNotInitialized);
         };
 
         let encoded = serde_json::to_vec(&new_state).map_err(|e| {
             Error::Serialization(format!("Failed to serialize session state: {}", e))
         })?;
-        storage
-            .store(storage_keys::SESSION_STATES, peer_id, &encoded)
-            .map_err(|e| {
-                Error::Other(format!(
-                    "Failed to persist session state for {}: {}",
-                    peer_id, e
-                ))
-            })?;
+        self.write_state_record(
+            storage.as_ref(),
+            storage_keys::SESSION_STATES,
+            peer_id,
+            &encoded,
+        )
+        .map_err(|e| {
+            Error::Other(format!(
+                "Failed to persist session state for {}: {}",
+                peer_id, e
+            ))
+        })?;
 
         if matches!(new_state, SessionState::Confirmed) {
             info!(
@@ -469,7 +2300,7 @@ impl OfflineProtocol {
     }
 
     pub(crate) fn clear_session_state_entry(&self, peer_id: &str) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
         storage
@@ -486,58 +2317,33 @@ impl OfflineProtocol {
     // WELCOME LIFECYCLE PERSISTENCE
     // ========================================================================
 
-    pub(crate) fn load_welcome_lifecycle_entry(
-        &self,
-        peer_id: &str,
-    ) -> Result<Option<WelcomeLifecycleRecord>> {
-        let Some(storage) = &self.message_storage else {
-            return Ok(None);
-        };
-
-        let Some(data) = storage
-            .load(storage_keys::WELCOME_LIFECYCLES, peer_id)
-            .map_err(|e| {
-                Error::Other(format!(
-                    "Failed to load welcome lifecycle for {}: {}",
-                    peer_id, e
-                ))
-            })?
-        else {
-            return Ok(None);
-        };
-
-        let record = serde_json::from_slice::<WelcomeLifecycleRecord>(&data).map_err(|e| {
-            Error::Other(format!(
-                "Failed to deserialize welcome lifecycle for {}: {}",
-                peer_id, e
-            ))
-        })?;
-        Ok(Some(record))
-    }
-
     pub(crate) fn persist_welcome_lifecycle_entry(
         &self,
         record: &WelcomeLifecycleRecord,
     ) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Err(Error::MlsNotInitialized);
         };
 
         let encoded = serde_json::to_vec(record).map_err(|e| {
             Error::Serialization(format!("Failed to serialize welcome lifecycle: {}", e))
         })?;
-        storage
-            .store(storage_keys::WELCOME_LIFECYCLES, &record.peer_id, &encoded)
-            .map_err(|e| {
-                Error::Other(format!(
-                    "Failed to persist welcome lifecycle for {}: {}",
-                    record.peer_id, e
-                ))
-            })
+        self.write_state_record(
+            storage.as_ref(),
+            storage_keys::WELCOME_LIFECYCLES,
+            &record.peer_id,
+            &encoded,
+        )
+        .map_err(|e| {
+            Error::Other(format!(
+                "Failed to persist welcome lifecycle for {}: {}",
+                record.peer_id, e
+            ))
+        })
     }
 
     pub(crate) fn clear_welcome_lifecycle_entry(&self, peer_id: &str) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
         storage
@@ -552,16 +2358,24 @@ impl OfflineProtocol {
 
     pub(crate) fn restore_welcome_lifecycles(&mut self) -> Result<()> {
         self.welcome_lifecycles.clear();
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return Ok(());
         };
 
-        let peers = storage
-            .list_keys(storage_keys::WELCOME_LIFECYCLES)
+        let peers = Self::list_state_keys(storage.as_ref(), storage_keys::WELCOME_LIFECYCLES)
             .map_err(|e| Error::Other(format!("Failed to list welcome lifecycles: {}", e)))?;
+        let listed = peers.len();
 
-        for peer_id in peers {
-            if let Some(mut record) = self.load_welcome_lifecycle_entry(&peer_id)? {
+        // Bounded like every other container-listed walk: a record that will not
+        // decode is dropped, and that drop is a provider delete with a directory
+        // flush behind it. The tail waits for a later launch, which is safe for
+        // the same reason it is safe for the cache prunes — dropping a Welcome
+        // lifecycle is recoverable, and re-reading one costs a parse.
+        let mut budget = PruneBudget::refusing();
+        for peer_id in peers.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+            if let Some(mut record) =
+                self.load_welcome_lifecycle_for_restore(&peer_id, Some(&mut budget))?
+            {
                 if matches!(
                     record.state,
                     WelcomeDeliveryState::Created | WelcomeDeliveryState::SendAttempted
@@ -657,6 +2471,20 @@ impl OfflineProtocol {
             }
         }
 
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Welcome lifecycle store listed more peers than any legitimate run can produce; ignoring the tail"
+            );
+        }
+        if budget.exhausted {
+            warn!(
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Welcome lifecycle restore hit its per-launch delete budget; the rest is left on disk for a later launch"
+            );
+        }
+
         Ok(())
     }
 
@@ -673,7 +2501,7 @@ impl OfflineProtocol {
     /// belongs to the media outbox — file transfers are not persisted and
     /// resurrected chunks could never complete, so we never write them.
     pub(crate) fn persist_outbox_entry(&self, entry: &OutboxEntry) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if Self::is_media_outbox_message(&entry.message) {
@@ -681,9 +2509,12 @@ impl OfflineProtocol {
         }
         match serde_json::to_vec(entry) {
             Ok(data) => {
-                if let Err(e) =
-                    storage.store(storage_keys::OUTBOX, &entry.message.id.as_str(), &data)
-                {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::OUTBOX,
+                    &entry.message.id.as_str(),
+                    &data,
+                ) {
                     warn!(message_id = %entry.message.id, error = %e, "Failed to persist outbox entry");
                 }
             }
@@ -696,7 +2527,7 @@ impl OfflineProtocol {
     /// Removes a persisted outbox entry from storage. Best-effort: a media
     /// message id is never persisted, so deleting it is a harmless no-op.
     pub(crate) fn clear_outbox_entry_from_storage(&self, message_id: &MessageId) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::OUTBOX, &message_id.as_str()) {
@@ -735,27 +2566,71 @@ impl OfflineProtocol {
     ///   of the kept set;
     /// - pre-existing in-memory entries not yet in storage are persisted, so
     ///   memory and storage are consistent once restore returns.
+    ///
+    /// Deliberately **not** subject to [`MAX_RESTORE_PRUNE_DELETES`] in any
+    /// form. Every delete here is paired with a terminal `message_failed`, and
+    /// the two cannot be separated: skipping the delete while settling would
+    /// settle an id whose record the next launch restores and re-drives, and
+    /// skipping both would drop the entry from memory while leaving the
+    /// application holding an id nothing ever resolves.
+    ///
+    /// [`Self::restore_pending_messages`] is settlement-paired too and *is*
+    /// budgeted, by counting its deletes and stopping at a record boundary — so
+    /// the pairing alone is not what exempts this walk. Two things do.
+    /// [`OUTBOX_RESTORE_KEY_CAP`] bounds it eight times more tightly than the
+    /// pending walk's record bound, capping it near 1.5k deletes rather than
+    /// 16k; and an outbox record left unwalked is one the application holds a
+    /// *live* id for, so deferring it defers delivery, where deferring a pending
+    /// record only defers a diagnostic about messages already lost.
     pub(crate) fn restore_outbox(&mut self) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        // Cloned rather than borrowed: the loop below both reads through this
+        // handle and calls `&mut self` settlement paths, so holding a borrow of
+        // `self` across it is what forced the awkward per-iteration re-fetch
+        // this replaced.
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return Ok(());
         };
 
-        let message_ids = storage
-            .list_keys(storage_keys::OUTBOX)
+        let message_ids = Self::list_state_keys(storage.as_ref(), storage_keys::OUTBOX)
             .map_err(|e| Error::Other(format!("Failed to list outbox entries: {}", e)))?;
 
-        let lifetime = ChronoDuration::milliseconds(
-            self.config.reliability.retry.outbox_max_lifetime_ms as i64,
-        );
+        let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms;
+        let listed = message_ids.len();
 
         let mut restored: Vec<OutboxEntry> = Vec::new();
-        for message_id in message_ids {
-            let loaded = self
-                .message_storage
-                .as_ref()
-                .and_then(|s| s.load(storage_keys::OUTBOX, &message_id).ok().flatten());
-            let Some(data) = loaded else {
-                continue;
+        // Record keys the app was told were queued but that cannot be
+        // recovered. Unlike the pending queue, an outbox record is keyed *by*
+        // its message id, so each loss is individually settleable without
+        // opening it — kept as the raw key so one that does not parse as a
+        // `MessageId` still gets a diagnostic instead of silence.
+        let mut unrecoverable: Vec<String> = Vec::new();
+        for message_id in message_ids.into_iter().take(OUTBOX_RESTORE_KEY_CAP) {
+            let data = match self.read_state_record_detailed(
+                storage.as_ref(),
+                storage_keys::OUTBOX,
+                &message_id,
+            ) {
+                Ok(StateRecord::Present(data)) => data,
+                Ok(StateRecord::Missing) => continue,
+                Ok(StateRecord::Unreadable) => {
+                    warn!(message_id = %message_id, "Dropping unreadable outbox entry");
+                    unrecoverable.push(message_id);
+                    continue;
+                }
+                // Still on disk and probably intact — the record key is not
+                // loaded, or the backend refused this read. Settling it as
+                // failed would be a terminal answer the next launch overturns
+                // by restoring the entry and re-driving delivery, so the app
+                // would see `message_failed` and then a delivery (plus a second
+                // copy if the user re-sent by hand, which mints a new id that
+                // dedup cannot collapse). Leave it be.
+                Ok(StateRecord::Unavailable) | Err(_) => {
+                    warn!(
+                        message_id = %message_id,
+                        "Outbox entry could not be read this session; leaving it in place"
+                    );
+                    continue;
+                }
             };
 
             let entry = match serde_json::from_slice::<OutboxEntry>(&data) {
@@ -763,6 +2638,7 @@ impl OfflineProtocol {
                 Err(e) => {
                     warn!(message_id = %message_id, error = %e, "Dropping corrupted outbox entry");
                     self.delete_outbox_key(&message_id);
+                    unrecoverable.push(message_id);
                     continue;
                 }
             };
@@ -782,11 +2658,14 @@ impl OfflineProtocol {
         // the carrier-relative refresh below would otherwise re-grant them a
         // fresh window on every restart, indefinitely. This is a terminal
         // drop — emit `message_failed` like the in-process expiry does.
-        let absolute_cap = lifetime * crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR;
+        let absolute_lifetime_ms =
+            lifetime_ms.saturating_mul(crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as u64);
         let now = Utc::now();
         let mut absolutely_expired: Vec<OutboxEntry> = Vec::new();
         restored.retain(|entry| {
-            if entry.last_sent_at + lifetime <= now && entry.first_sent_at + absolute_cap <= now {
+            if lifetime_expired(now, entry.last_sent_at, lifetime_ms)
+                && lifetime_expired(now, entry.first_sent_at, absolute_lifetime_ms)
+            {
                 absolutely_expired.push(entry.clone());
                 return false;
             }
@@ -800,7 +2679,7 @@ impl OfflineProtocol {
                 repair_action = "absolute_lifetime_exceeded",
                 "outbox_entry_dropped"
             );
-            self.emit_event(crate::events::Event::message_failed(
+            self.settle_restored_message_failure(Event::message_failed(
                 entry.message.id.clone(),
                 "Outbox lifetime exceeded".to_string(),
                 entry.attempt_count,
@@ -816,7 +2695,29 @@ impl OfflineProtocol {
             restored.sort_by_key(|e| std::cmp::Reverse(e.last_sent_at));
             for entry in restored.drain(MAX_OUTBOX_ENTRIES..) {
                 self.delete_outbox_key(&entry.message.id.as_str());
+                // Terminal, like the pending queue's capacity eviction: the app
+                // holds this id and nothing will ever resolve it otherwise.
+                self.settle_restored_message_failure(Event::message_failed(
+                    entry.message.id.clone(),
+                    "Outbox capacity exceeded".to_string(),
+                    entry.attempt_count,
+                ));
             }
+        }
+
+        self.settle_restored_message_failures(unrecoverable.iter().map(|key| {
+            Self::unrecoverable_outbox_settlement(
+                key,
+                "Outbox entry could not be recovered from protocol-state storage",
+                0,
+            )
+        }));
+        if listed > OUTBOX_RESTORE_KEY_CAP {
+            warn!(
+                listed,
+                cap = OUTBOX_RESTORE_KEY_CAP,
+                "Outbox store listed more entries than any legitimate run can produce; ignoring the tail"
+            );
         }
 
         // Carrier-relative TTL: refresh any entry already past the outbox
@@ -825,7 +2726,7 @@ impl OfflineProtocol {
         // be re-persisted below, once the mutable borrow of `restored` is gone.
         let mut refreshed: Vec<OutboxEntry> = Vec::new();
         for entry in &mut restored {
-            if entry.last_sent_at + lifetime <= now {
+            if lifetime_expired(now, entry.last_sent_at, lifetime_ms) {
                 entry.last_sent_at = now;
                 refreshed.push(entry.clone());
                 info!(
@@ -871,7 +2772,7 @@ impl OfflineProtocol {
     /// [`Self::restore_outbox`], which already holds a storage handle and
     /// operates on raw persisted keys.
     fn delete_outbox_key(&self, message_id: &str) {
-        if let Some(storage) = &self.message_storage {
+        if let Some(storage) = &self.protocol_state_storage {
             if let Err(e) = storage.delete(storage_keys::OUTBOX, message_id) {
                 warn!(message_id = %message_id, error = %e, "Failed to delete outbox key");
             }
@@ -887,14 +2788,17 @@ impl OfflineProtocol {
     /// Best-effort and infallible, like [`Self::persist_outbox_entry`]: a
     /// failed write only costs the crash-recovery signal, not the transfer.
     pub(crate) fn persist_media_descriptor(&self, descriptor: &MediaTransferDescriptor) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         match serde_json::to_vec(descriptor) {
             Ok(data) => {
-                if let Err(e) =
-                    storage.store(storage_keys::MEDIA_DESCRIPTORS, &descriptor.file_id, &data)
-                {
+                if let Err(e) = self.write_state_record(
+                    storage.as_ref(),
+                    storage_keys::MEDIA_DESCRIPTORS,
+                    &descriptor.file_id,
+                    &data,
+                ) {
                     warn!(file_id = %descriptor.file_id, error = %e, "Failed to persist media descriptor");
                 }
             }
@@ -912,7 +2816,7 @@ impl OfflineProtocol {
     /// died mid-transfer.
     pub(crate) fn remove_media_descriptor(&mut self, file_id: &str) {
         self.restored_media_descriptors.remove(file_id);
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::MEDIA_DESCRIPTORS, file_id) {
@@ -923,53 +2827,94 @@ impl OfflineProtocol {
     /// Restores persisted media transfer descriptors on startup.
     ///
     /// Recovery rules mirror [`Self::restore_outbox`]:
-    /// - corrupted entries are dropped from storage and skipped;
+    /// - a record that will not open, or that the store itself calls corrupt,
+    ///   is dropped and skipped;
+    /// - so is one whose bytes are not a descriptor;
     /// - entries older than the outbox lifetime are dropped — the app has
     ///   long settled that message's fate, a resend signal would be noise;
     /// - the total is pruned to `MAX_MEDIA_DESCRIPTORS`, keeping the newest
     ///   by `queued_at` (overflow deleted from storage).
+    ///
+    /// **All four** of those deletes share one [`MAX_RESTORE_PRUNE_DELETES`]
+    /// budget, including the first — which this walk does not issue itself, so
+    /// it is the one that went uncounted: it happens inside
+    /// [`Self::read_state_record_detailed`], which is why the budget is handed
+    /// to the reader rather than only claimed around the explicit calls below.
+    /// Descriptors are a sealed category, so a regenerated record key makes
+    /// *every* record on the install take that path at once.
+    ///
+    /// A descriptor is advisory, so a record the budget spared is simply
+    /// re-walked and dropped on a later launch.
     ///
     /// The survivors are parked in `restored_media_descriptors`; `start()`
     /// emits one `MediaResendRequired` each once the event pipeline is live,
     /// leaving entries parked until a same-`file_id` resend consumes them or
     /// the restore TTL prunes them.
     pub(crate) fn restore_media_descriptors(&mut self) -> Result<()> {
-        let Some(storage) = &self.message_storage else {
+        // Cloned rather than borrowed, like `restore_outbox`: the walk below
+        // reads through this handle while holding a mutable borrow of the
+        // prune budget and calling `&self` delete helpers.
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return Ok(());
         };
 
-        let file_ids = storage
-            .list_keys(storage_keys::MEDIA_DESCRIPTORS)
+        let file_ids = Self::list_state_keys(storage.as_ref(), storage_keys::MEDIA_DESCRIPTORS)
             .map_err(|e| Error::Other(format!("Failed to list media descriptors: {}", e)))?;
 
-        let lifetime = ChronoDuration::milliseconds(
-            self.config.reliability.retry.outbox_max_lifetime_ms as i64,
-        );
+        let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms;
         let now = Utc::now();
 
         let mut restored: Vec<MediaTransferDescriptor> = Vec::new();
-        for file_id in file_ids {
-            let loaded = self.message_storage.as_ref().and_then(|s| {
-                s.load(storage_keys::MEDIA_DESCRIPTORS, &file_id)
-                    .ok()
-                    .flatten()
-            });
-            let Some(data) = loaded else {
-                continue;
+        // Every delete this walk causes — unreadable, unparseable, expired,
+        // over-cap — is budgeted together: a descriptor is purely advisory (the
+        // app re-initiates the transfer), so a record left on disk one launch
+        // longer costs nothing, while the device barrier each delete carries is
+        // the most expensive thing this walk can do. Skipped records are simply
+        // re-walked next launch and dropped then. "Causes" rather than
+        // "issues": the first of the four happens inside the reader, which is
+        // why the budget is handed to it below.
+        let mut budget = PruneBudget::refusing();
+        // Bounded, but deliberately by the wide ceiling rather than a multiple
+        // of `MAX_MEDIA_DESCRIPTORS`: that cap is applied here, on restore, and
+        // nowhere on the insert path, so a long session can legitimately leave
+        // more descriptors on disk than the cap. A tight prefix would keep the
+        // wrong ones (the survivors are chosen by `queued_at` among what was
+        // walked) and strand the rest forever, since nothing else deletes them.
+        // A descriptor loss is advisory anyway — the app re-initiates the
+        // transfer — so there is nothing to settle here; only the walk itself
+        // needs a ceiling.
+        for file_id in file_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+            // The reader takes the budget because it is the reader that deletes
+            // a record it cannot return — absent, unreadable, and
+            // unreadable-this-session are all "nothing to park" here, so this
+            // walk only has to distinguish them from a record it can decode.
+            let data = match self.read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                storage_keys::MEDIA_DESCRIPTORS,
+                &file_id,
+                Some(&mut budget),
+            ) {
+                Ok(StateRecord::Present(data)) => data,
+                Ok(StateRecord::Missing | StateRecord::Unreadable | StateRecord::Unavailable)
+                | Err(_) => continue,
             };
 
             let descriptor = match serde_json::from_slice::<MediaTransferDescriptor>(&data) {
                 Ok(descriptor) => descriptor,
                 Err(e) => {
                     warn!(file_id = %file_id, error = %e, "Dropping corrupted media descriptor");
-                    self.delete_media_descriptor_key(&file_id);
+                    if budget.claim() {
+                        self.delete_media_descriptor_key(&file_id);
+                    }
                     continue;
                 }
             };
 
-            if descriptor.queued_at + lifetime <= now {
+            if lifetime_expired(now, descriptor.queued_at, lifetime_ms) {
                 debug!(file_id = %file_id, "Dropping expired media descriptor");
-                self.delete_media_descriptor_key(&file_id);
+                if budget.claim() {
+                    self.delete_media_descriptor_key(&file_id);
+                }
                 continue;
             }
 
@@ -979,8 +2924,20 @@ impl OfflineProtocol {
         if restored.len() > MAX_MEDIA_DESCRIPTORS {
             restored.sort_by_key(|d| std::cmp::Reverse(d.queued_at));
             for descriptor in restored.drain(MAX_MEDIA_DESCRIPTORS..) {
-                self.delete_media_descriptor_key(&descriptor.file_id);
+                // Dropped from the parked set either way: the cap is what this
+                // build will announce, and a record the budget spared is
+                // re-walked (and re-capped) on the next launch.
+                if budget.claim() {
+                    self.delete_media_descriptor_key(&descriptor.file_id);
+                }
             }
+        }
+
+        if budget.exhausted {
+            warn!(
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Media descriptor prune hit its per-launch delete budget; the rest is left on disk for a later launch"
+            );
         }
 
         let count = restored.len();
@@ -1001,7 +2958,7 @@ impl OfflineProtocol {
     /// Deletes a media descriptor key from storage (restore-internal, mirrors
     /// [`Self::delete_outbox_key`]).
     fn delete_media_descriptor_key(&self, file_id: &str) {
-        if let Some(storage) = &self.message_storage {
+        if let Some(storage) = &self.protocol_state_storage {
             if let Err(e) = storage.delete(storage_keys::MEDIA_DESCRIPTORS, file_id) {
                 warn!(file_id = %file_id, error = %e, "Failed to delete media descriptor key");
             }
@@ -1014,17 +2971,19 @@ impl OfflineProtocol {
 
     /// Persists a blocked user entry to storage.
     pub(crate) fn persist_blocked_user(&self, user_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-        if let Err(e) = storage.store(storage_keys::BLOCKED_USERS, user_id, &[]) {
+        if let Err(e) =
+            self.write_state_record(storage.as_ref(), storage_keys::BLOCKED_USERS, user_id, &[])
+        {
             warn!(user_id = %user_id, error = %e, "Failed to persist blocked user");
         }
     }
 
     /// Deletes a blocked user entry from storage.
     pub(crate) fn delete_blocked_user(&self, user_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::BLOCKED_USERS, user_id) {
@@ -1035,23 +2994,34 @@ impl OfflineProtocol {
     /// Restores blocked users from persistent storage.
     ///
     /// Skips entries with invalid user IDs (best-effort restore).
-    pub(crate) fn restore_blocked_users(&mut self) {
-        let Some(storage) = &self.message_storage else {
-            return;
+    ///
+    /// A *listing* failure is not best-effort: it is indistinguishable from an
+    /// empty store, so swallowing it would come up with an empty block list and
+    /// tell no one — every peer the user blocked silently unblocked, from a
+    /// transient error. That is the same outcome this branch's release notes
+    /// call out as the reason a downgrade is not a rollback. Propagating rolls
+    /// `initialize_mls` back instead, so the app finds out rather than running
+    /// unprotected. Blocking is a safety control; it fails closed.
+    pub(crate) fn restore_blocked_users(&mut self) -> Result<()> {
+        let Some(storage) = &self.protocol_state_storage else {
+            return Ok(());
         };
-        let user_ids = match storage.list_keys(storage_keys::BLOCKED_USERS) {
-            Ok(keys) => keys,
-            Err(e) => {
-                warn!(error = %e, "Failed to list blocked users from storage");
-                return;
-            }
-        };
-        for user_id in &user_ids {
+        let user_ids = Self::list_state_keys(storage.as_ref(), storage_keys::BLOCKED_USERS)
+            .map_err(|e| Error::Other(format!("Failed to list blocked users: {}", e)))?;
+        let listed = user_ids.len();
+        for user_id in user_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if offline_protocol_core::UserId::new(user_id).is_err() {
                 warn!(user_id = %user_id, "Skipping blocked user entry with invalid user ID");
                 continue;
             }
             self.blocked_users.insert(user_id.clone());
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Blocked-user store listed more entries than any legitimate run can produce; ignoring the tail"
+            );
         }
         if !self.blocked_users.is_empty() {
             info!(
@@ -1059,6 +3029,7 @@ impl OfflineProtocol {
                 "Restored blocked users from storage"
             );
         }
+        Ok(())
     }
 
     // ========================================================================
@@ -1067,17 +3038,22 @@ impl OfflineProtocol {
 
     /// Persists a both-create owner-gate entry (value-less; the key is the peer).
     pub(crate) fn persist_both_create_awaiting_decrypt(&self, peer_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-        if let Err(e) = storage.store(storage_keys::BOTH_CREATE_AWAITING_DECRYPT, peer_id, &[]) {
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
+            storage_keys::BOTH_CREATE_AWAITING_DECRYPT,
+            peer_id,
+            &[],
+        ) {
             warn!(peer_id = %peer_id, error = %e, "Failed to persist both-create owner gate");
         }
     }
 
     /// Deletes a both-create owner-gate entry once the peer has converged.
     pub(crate) fn delete_both_create_awaiting_decrypt(&self, peer_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::BOTH_CREATE_AWAITING_DECRYPT, peer_id) {
@@ -1091,18 +3067,29 @@ impl OfflineProtocol {
     /// peers are harmless (confirmation short-circuits) and are cleared on the
     /// next confirm.
     pub(crate) fn restore_both_create_awaiting_decrypt(&mut self) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-        let peer_ids = match storage.list_keys(storage_keys::BOTH_CREATE_AWAITING_DECRYPT) {
+        let peer_ids = match Self::list_state_keys(
+            storage.as_ref(),
+            storage_keys::BOTH_CREATE_AWAITING_DECRYPT,
+        ) {
             Ok(keys) => keys,
             Err(e) => {
                 warn!(error = %e, "Failed to list both-create owner gate from storage");
                 return;
             }
         };
-        for peer_id in &peer_ids {
+        let listed = peer_ids.len();
+        for peer_id in peer_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             self.both_create_awaiting_decrypt.insert(peer_id.clone());
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Both-create owner gate listed more peers than any legitimate run can produce; ignoring the tail"
+            );
         }
         if !self.both_create_awaiting_decrypt.is_empty() {
             info!(
@@ -1132,15 +3119,15 @@ impl OfflineProtocol {
     /// [`crate::telemetry::TelemetryConfig::with_scrub_secret`] still wins over
     /// this persistent fallback (see [`crate::telemetry::Scrubber::from_config`]).
     ///
-    /// Idempotent across the two storage-entry paths (`initialize_mls` and
-    /// `enable_message_persistence`) via `telemetry_secret_persisted`. All
+    /// Idempotent across repeated initialization attempts via
+    /// `telemetry_secret_persisted`. All
     /// storage failures degrade gracefully to the in-memory random fallback —
     /// telemetry pseudonymization must never block protocol initialization.
     pub(crate) fn restore_or_init_scrub_secret(&mut self) {
         if self.telemetry_secret_persisted {
             return;
         }
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.secure_storage else {
             return;
         };
 
@@ -1201,8 +3188,8 @@ impl OfflineProtocol {
     /// is unaffected because it uses the separate routing tag, which remains
     /// derived from the device ID.
     ///
-    /// Idempotent across the two storage-entry paths (`initialize_mls` and
-    /// `enable_message_persistence`) via `nostr_secret_persisted`. All
+    /// Idempotent across repeated initialization attempts via
+    /// `nostr_secret_persisted`. All
     /// failures degrade gracefully to the construction-time ephemeral key,
     /// which is equally unforgeable but rotates per process — transport
     /// keying must never block protocol initialization. A secret that was
@@ -1213,7 +3200,7 @@ impl OfflineProtocol {
         if self.nostr_secret_persisted {
             return;
         }
-        let Some(storage) = self.message_storage.clone() else {
+        let Some(storage) = self.secure_storage.clone() else {
             return;
         };
         let Some(nostr_arc) = self.transport_manager.get_transport(TransportType::Nostr) else {
@@ -1330,11 +3317,10 @@ impl OfflineProtocol {
     /// ever equal the domain and collide with the install id.
     ///
     /// Returns `None` while the SDK is still on the random per-instance
-    /// fallback secret — i.e. before storage is provided via
-    /// [`super::OfflineProtocol::initialize_mls`] /
-    /// [`super::OfflineProtocol::enable_message_persistence`], or when
-    /// persistence failed this session. In that state the id would not be
-    /// stable across launches, so none is exposed.
+    /// fallback secret — i.e. before secure storage is provided via
+    /// [`super::OfflineProtocol::initialize_mls`], or when persistence failed
+    /// this session. In that state the id would not be stable across launches,
+    /// so none is exposed.
     ///
     /// Deliberately derived from the persistent fallback secret, not from an
     /// installed [`crate::telemetry::TelemetryConfig::with_scrub_secret`]
@@ -1376,11 +3362,12 @@ impl OfflineProtocol {
     }
 
     fn write_lamport_clock_to_storage(&mut self, value: u64) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
         let bytes = value.to_le_bytes();
-        if let Err(e) = storage.store(
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
             storage_keys::LAMPORT_CLOCK,
             storage_keys::LAMPORT_CLOCK_ID,
             &bytes,
@@ -1396,12 +3383,14 @@ impl OfflineProtocol {
     /// Uses `max(current, restored)` so the clock never goes backward even
     /// if the in-memory value has advanced before storage was attached.
     pub(crate) fn restore_lamport_clock(&mut self) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return;
         };
-        if let Ok(Some(data)) =
-            storage.load(storage_keys::LAMPORT_CLOCK, storage_keys::LAMPORT_CLOCK_ID)
-        {
+        if let Ok(Some(data)) = self.read_state_record(
+            storage.as_ref(),
+            storage_keys::LAMPORT_CLOCK,
+            storage_keys::LAMPORT_CLOCK_ID,
+        ) {
             if data.len() == 8 {
                 let restored = u64::from_le_bytes(data.try_into().expect("verified length is 8"));
                 let restored_clock = LamportClock::from_value(restored);

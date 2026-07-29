@@ -1,5 +1,6 @@
 //! Control message signing, verification, and TOFU key management.
 
+use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
 use super::{
     base64_decode, base64_encode, storage_keys, InternalMessageResult, OfflineProtocol, TofuEntry,
     CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIG_META_KEY, DATA_PLANE_PREFIXES, INTERNAL_PREFIXES,
@@ -519,7 +520,7 @@ impl OfflineProtocol {
 
     /// Persists a single TOFU entry to storage.
     pub(super) fn persist_tofu_entry(&self, peer_id: &str, entry: &TofuEntry) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.secure_storage else {
             return;
         };
         match serde_json::to_vec(entry) {
@@ -536,7 +537,7 @@ impl OfflineProtocol {
 
     /// Deletes a TOFU entry from storage (e.g. on LRU eviction).
     pub(super) fn delete_tofu_entry(&self, peer_id: &str) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.secure_storage else {
             return;
         };
         if let Err(e) = storage.delete(storage_keys::TOFU_KEYS, peer_id) {
@@ -609,8 +610,23 @@ impl OfflineProtocol {
     /// Caps the restored set at `MAX_TOFU_PEERS` to honour the in-memory
     /// capacity limit even if storage contains more entries (e.g. after
     /// the limit was lowered in a new version).
+    ///
+    /// Bounded by [`MAX_RESTORE_KEYS_PER_CATEGORY`] like every other category
+    /// walk on the restore path, so a store listing more entries than any
+    /// legitimate run can produce cannot turn the boot path into an unbounded
+    /// number of loads and allocations. The bound sits far above
+    /// `MAX_TOFU_PEERS`, so no store this SDK wrote is ever affected by it.
+    ///
+    /// Unlike the two cache restores (`restore_peer_key_packages`,
+    /// `restore_peer_capabilities`), the overflow is **not** pruned from
+    /// durable storage. A cached key package only costs a re-exchange when it
+    /// is dropped; a TOFU entry is a *pin*, and deleting one silently re-arms
+    /// trust-on-first-use for that peer — the next key it offers is accepted
+    /// without a mismatch warning. Stranding an over-cap entry is the strictly
+    /// safer failure, so this walk stops and says so rather than shrinking the
+    /// store.
     pub(super) fn restore_tofu_keys(&mut self) {
-        let Some(storage) = &self.message_storage else {
+        let Some(storage) = &self.secure_storage else {
             return;
         };
         let peer_ids = match storage.list_keys(storage_keys::TOFU_KEYS) {
@@ -620,10 +636,11 @@ impl OfflineProtocol {
                 return;
             }
         };
+        let listed = peer_ids.len();
         // Load all valid entries first so we can sort by last_seen_ms and
         // keep the most recently seen peers when truncating.
         let mut valid_entries: Vec<(String, TofuEntry)> = Vec::new();
-        for peer_id in &peer_ids {
+        for peer_id in peer_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             // Validate the peer_id: storage keys bypass UserId::new() so a
             // corrupted or pre-validation-era entry could contain hostile chars.
             if UserId::new(peer_id).is_err() {
@@ -659,6 +676,15 @@ impl OfflineProtocol {
                     .then_with(|| a.0.cmp(&b.0))
             });
             valid_entries.truncate(MAX_TOFU_PEERS);
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "TOFU store listed more peers than any legitimate run can produce; ignoring the \
+                 tail rather than pruning it, since a dropped pin silently re-arms \
+                 trust-on-first-use"
+            );
         }
         let restored = valid_entries.len() as u32;
         for (peer_id, entry) in valid_entries {

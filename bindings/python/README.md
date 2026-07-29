@@ -25,6 +25,8 @@ pip install -e .
 
 ```python
 import asyncio
+from pathlib import Path
+
 from offline_protocol_sdk import ProtocolManager
 from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
 
@@ -49,7 +51,13 @@ config = ProtocolConfig(
 )
 
 async def main():
-    async with ProtocolManager(config, event_handler=print) as pm:
+    # The installer must remove this application-owned directory on uninstall.
+    state_root = Path("/app/install-owned-data/offline-protocol")
+    async with ProtocolManager(
+        config,
+        event_handler=print,
+        state_root=state_root,
+    ) as pm:
         pm.internet.configure(server_url="ws://relay.example.com")
         await pm.internet.start()
 
@@ -71,6 +79,7 @@ offline_protocol_sdk/
 ├── internet_manager.py      # WebSocket transport (websockets library)
 ├── ble_manager.py           # BLE transport (bleak library)
 ├── secure_storage.py        # MLS key storage (keyring library)
+├── state_storage.py         # Restartable protocol state (application data)
 └── transport_manager.py     # Base transport abstraction
 ```
 
@@ -94,21 +103,97 @@ MLS cryptographic key material is stored using the `keyring` library:
 | Linux | Secret Service (GNOME Keyring / KWallet) |
 | Windows | Windows Credential Locker |
 
-You can provide your own storage by implementing the `MlsStorageProvider` callback interface:
+On a host with none of those available, `keyring` falls back to a null or
+plaintext backend. `SecureStorage` logs a warning when it detects one, but it
+does not refuse to run — and on Python that warning is louder than it looks.
+The credential store also holds `protocol_state_record_key`, the per-install key
+that seals pending messages, outbox entries, and media descriptors before they
+reach `AppStateStorage`. On a plaintext backend that key sits in a readable
+file, so the sealing gives you separation of *lifecycle* but not of
+*confidentiality*: anyone who can read the credential store can open every
+sealed protocol-state record. Install a real secret service (gnome-keyring,
+kwallet) for any deployment where that matters, or supply your own
+`MlsStorageProvider`.
+
+Restartable message-plane state is kept separately by `AppStateStorage`, outside
+the credential store. The built-in stores derive an opaque account namespace
+from both `app_id` and `user_id`, so multiple `ProtocolManager` instances do
+not share keys, outboxes, or retry state.
+
+Upgrading an install that predates namespacing keeps both halves of its state,
+by two different mechanisms.
+
+Its **MLS identity** is adopted by read-through: the first account to launch
+claims the old, unscoped keyring service and inherits its identity, sessions,
+and TOFU pins on demand. That service was shared by every account on the
+install, so only one can inherit it — a second account starts from a fresh
+identity and logs an error saying so. Inspect the outcome with
+`SecureStorage(...).legacy_adoption`, or opt out with `adopt_legacy_store=False`.
+
+Its **restartable delivery state** — outbox, pending queue, session and Welcome
+lifecycles, peer key packages and capabilities, media descriptors, blocked
+users, the Lamport clock — is swept out of the credential store into
+`state_root` on the first launch of this release, and the credential-store copy
+is deleted once the move is durable. The sweep is resumable and one-shot, and it
+reads *through* the secure provider, so a `SecureStorage` built without a
+namespace (which cannot claim the legacy service) finds nothing to sweep.
+
+An account that loses the claim above gets neither: no identity *and* no
+delivery state, so it comes up with an empty outbox and an empty block list,
+every previously blocked peer unblocked.
+
+Because the sweep deletes the credential-store copy, **downgrading is not a
+rollback** — an older build reads the old location and finds none of it. Roll
+forward, not back.
+
+Python has no portable app container: `Application Support`, `LOCALAPPDATA`,
+and XDG data directories commonly survive package removal. The SDK therefore
+does not guess a persistent default. Pass `state_root=` or set
+`OFFLINE_PROTOCOL_STATE_ROOT` to a directory owned by the installed
+application, and make the installer remove that directory on uninstall:
 
 ```python
-from offline_protocol_sdk.offline_protocol import MlsStorageProvider
+pm = ProtocolManager(
+    config,
+    state_root="/app/install-owned-data/offline-protocol",
+)
+```
 
-class MyStorage(MlsStorageProvider):
+Passing a custom `state_storage` bypasses `state_root`; the custom provider
+then owns both account isolation and uninstall cleanup.
+
+Custom integrations must provide both lifecycle-separated, account-isolated
+interfaces:
+
+```python
+from offline_protocol_sdk.offline_protocol import (
+    MlsStorageProvider,
+    ProtocolStateStorageProvider,
+)
+
+class MySecureStorage(MlsStorageProvider):
     def store(self, key_type: str, key_id: str, data: list[int]) -> None: ...
     def load(self, key_type: str, key_id: str) -> list[int] | None: ...
     def delete(self, key_type: str, key_id: str) -> None: ...
     def list_keys(self, key_type: str) -> list[str]: ...
 
-pm = ProtocolManager(config, storage=MyStorage())
+class MyStateStorage(ProtocolStateStorageProvider):
+    def store(self, key_type: str, key_id: str, data: bytes) -> None: ...
+    def load(self, key_type: str, key_id: str) -> bytes | None: ...
+    def delete(self, key_type: str, key_id: str) -> None: ...
+    def list_keys(self, key_type: str) -> list[str]: ...
+
+pm = ProtocolManager(
+    config,
+    storage=MySecureStorage(),
+    state_storage=MyStateStorage(),
+)
 ```
 
-**Important:** Keep a reference to the storage object alive for the entire protocol lifetime. If Python garbage-collects it, the Rust-side callback pointers become dangling.
+`ProtocolManager` keeps both callback objects alive for the protocol lifetime.
+Protocol state must live in application data rather than Keychain, Secret
+Service, or Windows Credential Locker. A custom provider shared by multiple
+accounts must apply the same `(app_id, user_id)` isolation itself.
 
 ## Running the Example
 

@@ -52,6 +52,11 @@ export interface RetryConfig {
    * dropped terminally instead of re-granted a window.
    */
   outboxMaxLifetimeMs?: number;
+  /**
+   * Maximum time a message may wait for MLS session establishment before a
+   * terminal `message_failed` event is emitted (default 7 days).
+   */
+  pendingMessageMaxLifetimeMs?: number;
 }
 
 export interface DedupConfig {

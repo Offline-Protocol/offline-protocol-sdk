@@ -78,17 +78,32 @@ impl OfflineProtocol {
     /// Updates the ACK configuration at runtime.
     ///
     /// Note: This affects new ACK registrations; existing pending ACKs keep their original timeout.
-    pub fn update_ack_config(&mut self, config: AckConfig) {
+    /// Validated the same way [`Self::update_retry_config`] is — by building
+    /// the candidate configuration and running the real validator — rather than
+    /// by repeating its checks inline. Hand-rolled copies drift: a constraint
+    /// added to `ProtocolConfig::validate` for a new `AckConfig` field would be
+    /// enforced at construction and silently skipped on the runtime-update path.
+    pub fn update_ack_config(&mut self, config: AckConfig) -> crate::Result<()> {
+        let mut candidate = self.config.clone();
+        candidate.reliability.ack = config.clone();
+        candidate.validate()?;
         self.ack_manager = AckManager::with_config(config.clone());
         self.config.reliability.ack = config;
+        Ok(())
     }
 
     /// Updates the retry configuration at runtime.
     ///
     /// Note: This affects new retry entries; existing entries keep their original timing.
-    pub fn update_retry_config(&mut self, config: RetryConfig) {
+    pub fn update_retry_config(&mut self, config: RetryConfig) -> crate::Result<()> {
+        let mut candidate = self.config.clone();
+        candidate.reliability.retry = config.clone();
+        candidate.validate()?;
         self.retry_queue = RetryQueue::with_config(config.clone());
         self.config.reliability.retry = config;
+        self.recompute_next_pending_message_expiry();
+        self.cleanup_expired_pending_messages();
+        Ok(())
     }
 
     /// Updates the deduplication configuration at runtime.
@@ -142,6 +157,7 @@ impl OfflineProtocol {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.prune_stale_known_peers(std::time::Instant::now());
+        self.cleanup_expired_pending_messages_if_due();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
         self.cleanup_group_message_dedup();
@@ -259,6 +275,7 @@ impl OfflineProtocol {
     ) -> Result<String> {
         // Service requests are internal control messages (not user content),
         // so they are exempt from require_encryption.
+        Self::validate_outbound_recipient(provider)?;
 
         let result = self
             .mesh_services
@@ -280,6 +297,7 @@ impl OfflineProtocol {
     ) -> Result<MessageId> {
         // Service responses are internal control messages (not user content),
         // so they are exempt from require_encryption.
+        Self::validate_outbound_recipient(requester)?;
 
         let result = self
             .mesh_services

@@ -2355,7 +2355,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val json = JSONObject(configJson)
             val ackConfig = AckConfig(
-                defaultTimeoutMs = json.optLong("defaultTimeoutMs", 5000).toULong(),
+                defaultTimeoutMs = json.optLong("defaultTimeoutMs", 10000).toULong(),
                 maxPendingAcks = json.optLong("maxPendingAcks", 1000).toULong()
             )
             
@@ -2379,7 +2379,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 initialDelayMs = json.optLong("initialDelayMs", 1000).toULong(),
                 maxDelayMs = json.optLong("maxDelayMs", 300000).toULong(),
                 backoffMultiplier = json.optDouble("backoffMultiplier", 2.0).toFloat(),
-                outboxMaxLifetimeMs = json.optLong("outboxMaxLifetimeMs", 604800000).toULong()
+                outboxMaxLifetimeMs = json.optLong("outboxMaxLifetimeMs", 604800000).toULong(),
+                pendingMessageMaxLifetimeMs =
+                    json.optLong("pendingMessageMaxLifetimeMs", 604800000).toULong()
             )
             
             protocol?.updateRetryConfig(retryConfig)
@@ -2787,9 +2789,46 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     fun initializeMlsWithSecureStorage(promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val storage = MlsSecureStorage(reactApplicationContext)
-            proto.initializeMls(storage)
-            emitDiagnostic("info", "MLS initialized with EncryptedSharedPreferences storage")
+            val config = currentConfig
+                ?: throw IllegalStateException("Protocol config not initialized")
+            val accountNamespace = StorageNamespace.account(config.appId, config.userId)
+            val secureStorage =
+                MlsSecureStorage(reactApplicationContext, accountNamespace)
+            val protocolStateStorage =
+                AppContainerProtocolStateStorage(
+                    reactApplicationContext,
+                    accountNamespace
+                )
+            proto.initializeMls(secureStorage, protocolStateStorage)
+            // Either of these means this account is starting from a fresh MLS
+            // identity — never let that pass silently.
+            when (secureStorage.legacyAdoption) {
+                is LegacyStoreAdoption.Decision.Conflict -> emitDiagnostic(
+                    "error",
+                    "Legacy secure store belongs to another account; this " +
+                        "account starts from a fresh MLS identity and cannot " +
+                        "decrypt its previous sessions. Its pre-split delivery " +
+                        "state is unreachable too, so it also comes up with an " +
+                        "empty outbox and an empty block list — every " +
+                        "previously blocked peer is unblocked"
+                )
+                is LegacyStoreAdoption.Decision.ClaimUnverified -> emitDiagnostic(
+                    "error",
+                    "Could not record this account's claim on the legacy secure " +
+                        "store, so it was not adopted: another account could " +
+                        "otherwise inherit the same MLS identity. This account " +
+                        "starts from a fresh identity and comes up with an empty " +
+                        "outbox and an empty block list — every previously " +
+                        "blocked peer is unblocked. The credential store is " +
+                        "failing writes; retrying on a healthy store adopts " +
+                        "normally"
+                )
+                else -> Unit
+            }
+            emitDiagnostic(
+                "info",
+                "MLS initialized with split secure and app-container storage"
+            )
             promise.resolve(null)
         } catch (e: Exception) {
             emitDiagnostic("error", "Failed to initialize MLS", mapOf(

@@ -2,7 +2,7 @@
 
 use crate::constants::{
     DEFAULT_BACKOFF_MULTIPLIER, DEFAULT_INITIAL_DELAY_MS, DEFAULT_MAX_DELAY_MS,
-    DEFAULT_MAX_RETRIES, DEFAULT_OUTBOX_LIFETIME_MS,
+    DEFAULT_MAX_RETRIES, DEFAULT_OUTBOX_LIFETIME_MS, DEFAULT_PENDING_MESSAGE_LIFETIME_MS,
 };
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{Message, MessagePriority};
@@ -26,6 +26,9 @@ pub struct RetryConfig {
 
     /// Maximum lifetime for messages in the outbox (milliseconds).
     pub outbox_max_lifetime_ms: u64,
+
+    /// Maximum lifetime for messages waiting on MLS session establishment.
+    pub pending_message_max_lifetime_ms: u64,
 }
 
 impl Default for RetryConfig {
@@ -36,6 +39,7 @@ impl Default for RetryConfig {
             max_delay_ms: DEFAULT_MAX_DELAY_MS,
             backoff_multiplier: DEFAULT_BACKOFF_MULTIPLIER,
             outbox_max_lifetime_ms: DEFAULT_OUTBOX_LIFETIME_MS,
+            pending_message_max_lifetime_ms: DEFAULT_PENDING_MESSAGE_LIFETIME_MS,
         }
     }
 }

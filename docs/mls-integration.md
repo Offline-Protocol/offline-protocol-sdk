@@ -164,6 +164,11 @@ Use the manual MLS APIs (described below) when you need:
 │  │  │  - iOS: Keychain                 │  │ │
 │  │  │  - Android: EncryptedPrefs       │  │ │
 │  │  └──────────────────────────────────┘  │ │
+│  │  ┌──────────────────────────────────┐  │ │
+│  │  │ App-Container Protocol State     │  │ │
+│  │  │ - Outbox / pending messages      │  │ │
+│  │  │ - Retry / delivery lifecycles    │  │ │
+│  │  └──────────────────────────────────┘  │ │
 │  └────────────────────────────────────────┘ │
 └─────────────────────────────────────────────┘
 ```
@@ -172,24 +177,35 @@ Use the manual MLS APIs (described below) when you need:
 
 ### 1. Initialize MLS
 
-MLS persists key material through a secure-storage backend that you provide by implementing
-`MlsStorageProvider` (iOS Keychain, Android Keystore / EncryptedSharedPreferences, or your own
-scheme). Pass your provider to `initializeMls` — see [Custom Storage](#custom-storage-advanced)
-for a complete provider implementation:
+MLS initialization requires two storage providers with different lifecycles:
+
+- `MlsStorageProvider` stores cryptographic material in Keychain, Keystore-backed
+  encrypted preferences, or another credential store.
+- `ProtocolStateStorageProvider` stores restartable delivery state inside the app
+  container. It must be removed on app deletion and must not use a credential store.
+
+The split is about *lifecycle*, not trust: some delivery state (queued message
+plaintext, cloud-media `encryption_key`/`iv`) is as sensitive as anything in the
+credential store. The SDK therefore seals those record values with a per-install
+AEAD key held in `MlsStorageProvider` before they reach the protocol-state
+provider — so the provider only ever sees ciphertext, and an app container lifted
+without the credential store yields nothing. See
+[Protocol-State Confidentiality](#protocol-state-confidentiality).
 
 ```swift
-// iOS — `storage` is your MlsStorageProvider (e.g. Keychain-backed)
-try mesh.initializeMls(storage: storage)
+try mesh.initializeMls(
+    secureStorage: keychainStorage,
+    protocolStateStorage: appContainerStorage
+)
 ```
 
 ```kotlin
-// Android — `storage` is your MlsStorageProvider (e.g. EncryptedSharedPreferences-backed)
-protocol.initializeMls(storage)
+protocol.initializeMls(encryptedStorage, appContainerStorage)
 ```
 
-> **React Native:** the wrapper bundles a Keychain / EncryptedSharedPreferences provider, so RN
-> apps can just call `initializeMlsWithSecureStorage()` — or let `start()` initialize MLS
-> automatically when encryption is enabled.
+> **React Native:** the wrapper supplies both providers, so apps can call
+> `initializeMlsWithSecureStorage()` — or let `start()` initialize MLS automatically
+> when encryption is enabled.
 
 ### 2. Generate and Share Key Packages
 
@@ -279,25 +295,33 @@ if let welcomeData = message.metadata["mls_welcome"] {
 
 ## Custom Storage (Advanced)
 
-The React Native wrapper ships built-in secure storage; native (Swift/Kotlin) integrations provide their own by implementing `MlsStorageProvider`. A custom provider is also useful for custom backup strategies, additional encryption layers, or testing.
+The React Native wrapper ships both built-in providers. Native Swift/Kotlin
+integrations provide an `MlsStorageProvider` for key material and a
+`ProtocolStateStorageProvider` for app-container state. Both interfaces expose
+the same CRUD operations, but they are intentionally different types so their
+lifecycles cannot be wired accidentally.
 
 ### Using Custom Storage
 
 ```swift
-// iOS - custom storage
-let customStorage = MyCustomMlsStorage()
-try mesh.initializeMls(storage: customStorage)
+let secureStorage = MyCustomMlsStorage()
+let stateStorage = MyAppContainerStateStorage()
+try mesh.initializeMls(
+    secureStorage: secureStorage,
+    protocolStateStorage: stateStorage
+)
 ```
 
 ```kotlin
-// Android - custom storage
-val customStorage = MyCustomMlsStorage()
-protocol.initializeMls(customStorage)
+val secureStorage = MyCustomMlsStorage()
+val stateStorage = MyAppContainerStateStorage()
+protocol.initializeMls(secureStorage, stateStorage)
 ```
 
-### Implementing MlsStorageProvider
+### Implementing the Providers
 
-To create a custom storage provider, implement the `MlsStorageProvider` protocol:
+Implement `MlsStorageProvider` for secure material. Implement
+`ProtocolStateStorageProvider` with the same methods for app-container state:
 
 ```swift
 // iOS Custom Implementation
@@ -340,6 +364,168 @@ class MyCustomMlsStorage : MlsStorageProvider {
     }
 }
 ```
+
+Do not implement the protocol-state provider with Keychain,
+EncryptedSharedPreferences backed by a surviving Keystore namespace, or any
+other store that can outlive the app container.
+
+**If you supply your own `MlsStorageProvider`, upgrading installs will not
+inherit their pre-split delivery state.** On first launch the SDK sweeps
+outbox entries, pending messages, lifecycles, the Lamport clock, and the block
+list out of secure storage and into protocol-state storage — but it enumerates
+them through the `MlsStorageProvider` it is given. The built-in providers find
+them because they read through to the pre-namespace store they replaced; a
+custom provider has no such fallback, so the sweep finds nothing and that state
+stays where it is. It is not lost — it is simply never picked up, and the
+install comes up with an empty outbox, an empty pending queue, and an **empty
+block list**. If you have shipped a custom provider and are upgrading across
+this release, have it read through to wherever your previous version wrote, or
+migrate that data yourself before calling `initializeMls`.
+
+**Protocol-state values are `ByteArray` / `Data` / `bytes`**, not the
+element-wise sequence `MlsStorageProvider` uses. That interface carries key
+material a few hundred bytes at a time; these records reach megabytes, where a
+boxed-per-element representation costs on the order of a million short-lived
+objects per call on Kotlin. Store and return the bytes verbatim — never inspect,
+re-encode, or truncate them, since the sensitive categories arrive sealed.
+
+**Writes must be atomic *and* durable before `store` returns.** The SDK treats a
+successful `store` as persisted and immediately writes state that depends on it
+— most sharply the per-install record-sealing key, after which sealed records
+start landing in the protocol-state container. A rename that commits ahead of
+its data blocks, or an `apply()` that only staged the write in memory, can crash
+into a container full of records whose key was never written. The built-in
+providers use `AtomicFile` on Android, `commit()` for encrypted preferences, and
+an fsync of the file *and* its parent directory on iOS and Python.
+
+**`load` must bound its read.** Check the stored entry's size *before*
+materializing it and never allocate — or hand back across the FFI — more than
+8 MiB. The SDK refuses to write anything near that, so a larger entry is corrupt
+or tampered. This obligation cannot live in the SDK, because by the time it can
+check a length the provider has already allocated the bytes. `listKeys` should
+stay bounded for the same reason; the SDK caps every category well below any
+sane ceiling.
+
+**Report a record you had to destroy as `CorruptedData`, not as absence.**
+Destruction and absence are different answers. When a provider drops an entry it
+can never decode — oversized, truncated, framing that does not parse — the SDK
+settles it: a lost outbox entry emits a terminal `message_failed`, because the
+application is holding the id `sendMessage` returned for it, and a lost pending
+queue emits a `pending_state_lost` diagnostic for the recipient. Returning
+`null` instead is accepted, but it is indistinguishable from a record that was
+never written, so the application is told nothing and that id never resolves.
+Reserve `CorruptedData` for permanent losses — a transient read failure is
+`LoadFailed`, which the SDK leaves in place for a later launch rather than
+settling.
+
+**If you address entries by filename, do not encode the key into the name.**
+Key ids are peer and message ids, so an encoding is both case-sensitive (`AAG`
+and `AAa` become the same file on a case-insensitive volume — APFS's macOS
+default — and one record silently overwrites the other) and unbounded (a
+long-but-valid id overruns the 255-byte `NAME_MAX`). Use a fixed-length
+lowercase digest and record the exact key inside the entry. The built-in
+providers do exactly this, in a format shared across iOS, Android, and Python:
+a `"OPS1"` magic, big-endian `u16` lengths for `keyType` and `keyId`, both keys
+in UTF-8, then the value bytes.
+
+### Protocol-State Confidentiality
+
+A protocol-state provider is a byte store, not a trusted one. Store and return
+the bytes you are handed **verbatim** — do not inspect, re-encode, compress, or
+truncate them.
+
+The SDK seals the record values that can carry message plaintext or media key
+material — pending session messages, outbox entries, and media transfer
+descriptors — with ChaCha20-Poly1305 under a per-install key kept in
+`MlsStorageProvider` (key type `protocol_state_record_key`). Each record's
+associated data binds it to its `(keyType, keyId)` slot, so a record cannot be
+moved between peers or categories by anyone with write access to the container.
+Record *keys* are not sealed: they are peer and message ids, and the store needs
+them in the clear to address entries. Built-in providers name files by digest,
+but each record carries its own `(keyType, keyId)` in its header, so treat the
+key as readable by anyone who can read the container.
+
+**What this does and does not hide.** Sealing protects message content and media
+key material. It does not protect the peer graph. These categories are stored in
+the clear, and for the marker-style ones the key *is* the whole content:
+
+| Category | In the clear |
+| --- | --- |
+| `blocked_users` | which peers you have blocked |
+| `both_create_awaiting_decrypt` | which peers are mid-handshake |
+| `session_states`, `welcome_lifecycles` | which peers you have sessions with, and their delivery state |
+| `peer_key_packages`, `peer_capabilities` | which peers you have exchanged with (public wire material) |
+| sealed categories' *keys* | which peers you have queued messages for, and their message ids |
+
+Before the storage split this metadata sat behind the OS keystore, so an
+attacker with app-container access but no credential-store access learned
+nothing from it; now they learn the graph. That is the deliberate cost of giving
+delivery state the container's lifecycle. If your threat model includes an
+attacker who can read the app container of an unlocked device, treat the peer
+graph as exposed.
+
+`blocked_users` in particular is *deliberately* left unsealed rather than folded
+into one sealed record. Sealing fails closed, and a block list that silently
+stops persisting whenever the record key is unavailable is a worse failure than
+a readable one: blocking is a safety control, and it must survive every state in
+which the SDK still runs.
+
+**Sealing is confidentiality, not integrity — and only the sealed categories get
+even that.** A sealed record is authenticated: its AEAD tag covers the value and
+its associated data binds it to its `(keyType, keyId)` slot, so an edited or
+relocated record does not open and is dropped. The categories in the table above
+carry no such protection. They are written in the clear and read back at face
+value, so an attacker who can *write* the app container of an unlocked device
+gets more than the peer graph:
+
+| Category | What a write buys | Consequence |
+| --- | --- | --- |
+| `blocked_users` | delete a marker | that peer is silently unblocked on the next launch |
+| `both_create_awaiting_decrypt` | delete a marker | the owner gate that requires a group-aware decrypt before confirming a peer is gone, so a stale plaintext probe can confirm a session the handshake never converged |
+| `session_states` | write `Confirmed` | a peer whose session was still pending is treated as confirmed |
+| `welcome_lifecycles` | edit state or retry schedule | Welcome delivery can be stalled or forced to retry |
+
+None of this forges or reads message content — that is MLS, and MLS keys never
+leave the credential store — but it does mean **container write access degrades
+safety and liveness controls, not just privacy.** Before the storage split these
+records sat behind the OS keystore, so the same attacker could do none of it.
+
+On stock iOS and Android the app container is writable only by the app itself,
+so this matters on a rooted or jailbroken device, or wherever else your threat
+model grants an attacker filesystem write. If it does, do not treat
+`blocked_users` or session confirmation as durable security state: re-derive them
+from a source you do trust. Sealing these categories instead is *not* the fix —
+it would make the block list fail closed, which is strictly worse (see the
+paragraph above).
+
+Consequences worth knowing:
+
+- **Fail closed.** If the per-install key cannot be read or written, those
+  categories are not persisted at all for that session rather than written in the
+  clear. Delivery still works from memory; only crash recovery is lost. Records
+  already on disk are left alone, not deleted — a later launch that can read the
+  key recovers them.
+- **The key is the container's undo button.** Clearing the credential store
+  without clearing the app container leaves records that no longer open; the SDK
+  drops them on read. Clearing the app container alone is the normal uninstall
+  path and is always safe.
+- **A dropped record is reported, not swallowed.** Anything the app was told was
+  queued gets settled when it cannot be recovered: an unrecoverable outbox entry
+  emits `message_failed`, and an unrecoverable pending queue emits a
+  `convergence_diag` with stage `pending_state_lost` naming the recipient (its
+  message ids are inside the record that would not open, so they cannot be named
+  individually). These are emitted on `start()`, not during `initialize_mls`, so
+  install your event callback before starting if you want to observe them.
+- **But only a record that is actually gone is settled.** A record that merely
+  could not be read *this session* — the seal key was unavailable, or the store
+  refused one read — stays on disk and produces no event. Settling it would be a
+  terminal answer the next launch overturns by restoring the entry and re-driving
+  delivery, so you would see `message_failed` and then a delivery. Do not treat a
+  quiet startup as proof that everything restored; treat `message_failed` as
+  proof that something did not.
+- **Records have a size ceiling.** The SDK refuses to write, and refuses to
+  deserialize on restore, any single record over 4 MiB — a corrupted or tampered
+  state file cannot become an unbounded allocation during startup.
 
 ### React Native
 
@@ -506,14 +692,15 @@ for runtime disable semantics.
 > The method names in these tables follow the **React Native / JS wrapper** API — including the
 > `mesh*` group helpers and `initializeMlsWithSecureStorage()`. The native UniFFI bindings expose
 > the same operations under their generated names (e.g. `createGroup`, `inviteToGroup`,
-> `sendGroupMessage`, `initializeMls(storage)`), as shown in the Swift/Kotlin snippets above.
+> `sendGroupMessage`, `initializeMls(secureStorage, protocolStateStorage)`), as shown in the
+> Swift/Kotlin snippets above.
 
 ### Initialization
 
 | Method | Description |
 |--------|-------------|
-| `initializeMlsWithSecureStorage()` | Initialize MLS with built-in platform secure storage (recommended) |
-| `initializeMls(storage)` | Initialize MLS with custom storage provider |
+| `initializeMlsWithSecureStorage()` | Initialize MLS with built-in secure and app-container state storage (recommended) |
+| `initializeMls(secureStorage, protocolStateStorage)` | Initialize MLS with custom lifecycle-separated providers |
 | `isMlsInitialized()` | Check if MLS is initialized |
 
 ### Key Packages

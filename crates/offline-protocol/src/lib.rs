@@ -18,6 +18,7 @@ mod media_envelope;
 pub mod mls;
 pub mod mls_observability;
 pub mod protocol;
+pub mod protocol_state_storage;
 pub mod telemetry;
 pub mod transport_manager;
 pub mod visualization;
@@ -34,6 +35,10 @@ pub use events::{
 pub use group_mesh::{GroupRichReadiness, GroupSendOptions, RelaySyncState};
 pub use offline_protocol_services::MeshServices;
 pub use protocol::{MediaSendOptions, OfflineProtocol, SendMessageOptions};
+pub use protocol_state_storage::{
+    ProtocolStateError, ProtocolStateResult, ProtocolStateStorage,
+    MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES,
+};
 pub use transport_manager::TransportManager;
 pub use visualization::{
     MessageStats, NetworkLink, NetworkNode, NetworkTopology, NetworkVisualizer, NodeRole,

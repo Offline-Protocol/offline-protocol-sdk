@@ -15,15 +15,29 @@ import threading
 
 import keyring
 
+from . import legacy_store_adoption
 from .offline_protocol import MlsStorageError, MlsStorageProvider
+from .storage_namespace import require_account_storage_namespace
 
 logger = logging.getLogger(__name__)
 
-# Service name used for all keyring entries
-_DEFAULT_SERVICE = "offline-protocol-mls"
+# Base service name used for keyring entries
+_DEFAULT_SERVICE = "offline-protocol-mls-v2"
+
+# Service the pre-namespace store used, adopted on upgrade so an existing
+# install keeps its MLS identity (see ``legacy_store_adoption``).
+_LEGACY_SERVICE = "offline-protocol-mls"
 
 # Prefix for index entries that track key IDs per key_type
 _INDEX_PREFIX = "index:"
+
+#: Serialises legacy-store adoption across *every* provider in the process.
+#:
+#: Deliberately module-level rather than the per-instance ``self._lock``: two
+#: accounts adopting concurrently are two ``SecureStorage`` objects, so an
+#: instance lock cannot order them by construction. See
+#: :meth:`SecureStorage._resolve_legacy_adoption`.
+_ADOPTION_LOCK = threading.Lock()
 
 
 class SecureStorage(MlsStorageProvider):
@@ -38,9 +52,45 @@ class SecureStorage(MlsStorageProvider):
     callback pointers on the Rust side become dangling.
     """
 
-    def __init__(self, service: str = _DEFAULT_SERVICE) -> None:
-        self._service = service
-        self._lock = threading.Lock()
+    def __init__(
+        self,
+        service: str = _DEFAULT_SERVICE,
+        *,
+        namespace: str | None = None,
+        adopt_legacy_store: bool = True,
+    ) -> None:
+        if namespace is not None:
+            require_account_storage_namespace(namespace)
+        self._service = f"{service}:{namespace}" if namespace is not None else service
+        self._lock = threading.RLock()
+
+        # The legacy store predates namespacing and predates the "-v2" suffix,
+        # so it is only ever the default service under its old name.
+        self._legacy_service = (
+            _LEGACY_SERVICE
+            if adopt_legacy_store and service == _DEFAULT_SERVICE and namespace is not None
+            else None
+        )
+
+        # Adoption records its claim under the account namespace, so a store
+        # built without one cannot participate — and on the default service
+        # that means an upgraded install silently mints a fresh MLS identity,
+        # abandoning every session, group, and TOFU pin it had. Say so: every
+        # other platform surfaces the analogous case as an error diagnostic.
+        # ``ProtocolManager`` supplies the namespace; this fires for callers
+        # that construct their own provider.
+        if adopt_legacy_store and service == _DEFAULT_SERVICE and namespace is None:
+            logger.warning(
+                "SecureStorage built without an account namespace: the "
+                "pre-namespace store cannot be adopted, so an upgraded install "
+                "starts from a fresh MLS identity and cannot decrypt its old "
+                "sessions. Its pre-split delivery state is unreachable too — "
+                "the SDK's protocol-state adoption sweep reads it through this "
+                "provider — so the install also comes up with an empty outbox "
+                "and an empty block list. Pass "
+                "namespace=account_storage_namespace(app_id, user_id), or let "
+                "ProtocolManager build the provider."
+            )
 
         # Warn if keyring resolved to a plaintext or null backend — MLS key
         # material would be stored unprotected.
@@ -57,97 +107,275 @@ class SecureStorage(MlsStorageProvider):
         except Exception:
             logger.debug("Could not inspect keyring backend", exc_info=True)
 
+        #: Outcome of the one-time legacy-store adoption, for the caller to
+        #: surface. A ``"conflict"`` in particular must not pass silently: this
+        #: account is starting from a fresh identity.
+        self.legacy_adoption = (
+            self._resolve_legacy_adoption(namespace)
+            if self._legacy_service is not None and namespace is not None
+            else legacy_store_adoption.NONE
+        )
+
     # -- MlsStorageProvider interface ----------------------------------------
 
     def store(self, key_type: str, key_id: str, data: list[int]) -> None:
-        key = _make_key(key_type, key_id)
-        encoded = base64.b64encode(bytes(data)).decode("ascii")
-
         with self._lock:
-            try:
-                keyring.set_password(self._service, key, encoded)
-                self._index_add(key_type, key_id)
-            except Exception as exc:
-                raise MlsStorageError.StoreFailed(
-                    f"keyring store failed: {exc}"
-                ) from exc
+            self._store(self._service, key_type, key_id, bytes(data))
 
     def load(self, key_type: str, key_id: str) -> list[int] | None:
-        key = _make_key(key_type, key_id)
-        try:
-            encoded = keyring.get_password(self._service, key)
-            if encoded is None:
-                return None
-            return list(base64.b64decode(encoded))
-        except Exception as exc:
-            raise MlsStorageError.LoadFailed(
-                f"keyring load failed: {exc}"
-            ) from exc
+        """Load one entry, falling through to the adopted legacy store on a miss.
 
-    def delete(self, key_type: str, key_id: str) -> None:
-        key = _make_key(key_type, key_id)
+        Each primitive below takes ``self._lock``, but this *compound*
+        read-then-promote is not atomic against :meth:`delete`, and deliberately
+        so. Interleaved, they would resurrect key material: this method could
+        observe a miss in the namespaced store, read the legacy value, and then
+        promote it after a concurrent delete had already removed both copies —
+        defeating the very guarantee :meth:`delete` documents.
 
+        That is unreachable because the SDK is the only caller and serialises
+        every storage operation behind its own mutex: ``OfflineProtocol``'s
+        methods take ``&mut self`` and the UniFFI wrapper holds them under one
+        lock, so no two provider calls overlap. Widening the lock to cover the
+        whole compound operation would mean holding it across a keyring read on
+        every miss, which is the common path during an upgrade. If a second
+        caller is ever given this provider, that trade has to be revisited.
+        """
+
+        current = self._read(self._service, key_type, key_id)
+        if current is not None:
+            return list(current)
+
+        legacy = self._read_through_service(key_type)
+        if legacy is None:
+            return None
+        inherited = self._read(legacy, key_type, key_id)
+        if inherited is None:
+            return None
+
+        # Best-effort promotion: a failed copy still returns the value, it just
+        # costs another read-through next launch.
         with self._lock:
             try:
-                keyring.delete_password(self._service, key)
-            except keyring.errors.PasswordDeleteError:
-                pass  # already gone — not an error (matches iOS Keychain behaviour)
-            except Exception as exc:
-                raise MlsStorageError.DeleteFailed(
-                    f"keyring delete failed: {exc}"
-                ) from exc
+                self._store(self._service, key_type, key_id, inherited)
+            except Exception:
+                logger.warning(
+                    "failed to promote inherited entry for %s", key_type, exc_info=True
+                )
+        return list(inherited)
 
-            self._index_remove(key_type, key_id)
+    def delete(self, key_type: str, key_id: str) -> None:
+        with self._lock:
+            self._remove(self._service, key_type, key_id)
+            # A delete that left the legacy copy in place would let
+            # read-through resurrect key material the caller believes is gone.
+            legacy = self._read_through_service(key_type)
+            if legacy is not None:
+                try:
+                    self._remove(legacy, key_type, key_id)
+                except Exception:
+                    logger.warning(
+                        "failed to delete inherited entry for %s",
+                        key_type,
+                        exc_info=True,
+                    )
 
     def list_keys(self, key_type: str) -> list[str]:
         """Return all key IDs stored under *key_type*.
 
         ``keyring`` does not natively support listing, so we maintain a
         JSON-encoded index entry per key_type — the same strategy used by
-        the Android ``MlsSecureStorage`` (index prefix approach).
+        the Android ``MlsSecureStorage`` (index prefix approach). The adopted
+        legacy store's index is unioned in, so a not-yet-promoted entry is
+        still discoverable.
         """
         with self._lock:
             try:
-                return self._index_get(key_type)
+                keys = list(self._index_get(self._service, key_type))
+                legacy = self._read_through_service(key_type)
+                if legacy is not None:
+                    for key in self._index_get(legacy, key_type):
+                        if key not in keys:
+                            keys.append(key)
+                return keys
             except Exception as exc:
                 raise MlsStorageError.LoadFailed(
                     f"keyring list_keys failed: {exc}"
                 ) from exc
+
+    # -- legacy adoption -----------------------------------------------------
+
+    def _resolve_legacy_adoption(self, namespace: str):
+        """Resolve — and, when the legacy store is unclaimed, record — this
+        account's right to inherit it.
+
+        The whole probe → claim → read-back sequence runs under
+        ``_ADOPTION_LOCK``, because reading it back is not on its own enough to
+        make inheritance exclusive. The read back closes a write that silently
+        failed, and a second account claiming between our probe and our write.
+        It does not close two accounts interleaving like this::
+
+            A._read_claim() -> None     B._read_claim() -> None
+            A._store(nsA)
+            A._read_claim() -> nsA  => adopt
+                                        B._store(nsB)
+                                        B._read_claim() -> nsB  => adopt
+
+        Both adopt, both promote the same MLS signing identity, and each ends
+        up holding the other's sessions and group state — the outcome the claim
+        exists to prevent, arriving silently. The invariant is "at most one
+        account holds a verified claim", and an unsynchronised
+        read-modify-write does not provide it. The lock is module-level for the
+        same reason: two accounts on one device are two providers, so the
+        per-instance ``self._lock`` cannot order them.
+        """
+
+        assert self._legacy_service is not None
+        with _ADOPTION_LOCK:
+            return self._resolve_legacy_adoption_locked(namespace)
+
+    def _resolve_legacy_adoption_locked(self, namespace: str):
+        decision = legacy_store_adoption.decide(self._read_claim(), namespace)
+
+        if decision.kind != "adopt":
+            if decision.kind == "conflict":
+                logger.error(
+                    "legacy secure store already belongs to another account; this "
+                    "account starts from a fresh MLS identity and cannot decrypt "
+                    "its old sessions."
+                )
+            return decision
+
+        # Read the claim back rather than assuming the write landed: a write
+        # that failed silently leaves the store looking unclaimed to the next
+        # account, which would then adopt the same MLS identity. See
+        # ``legacy_store_adoption.confirm_claim``.
+        try:
+            self._store(
+                self._legacy_service,
+                legacy_store_adoption.CLAIM_KEY_TYPE,
+                legacy_store_adoption.CLAIM_KEY_ID,
+                namespace.encode("utf-8"),
+            )
+        except Exception:
+            logger.warning("failed to claim the legacy secure store", exc_info=True)
+            confirmed = legacy_store_adoption.CLAIM_UNVERIFIED
+        else:
+            confirmed = legacy_store_adoption.confirm_claim(self._read_claim(), namespace)
+
+        if confirmed.kind == "adopt":
+            logger.info("adopting the pre-namespace secure store for this account")
+        elif confirmed.kind == "claim_unverified":
+            logger.error(
+                "could not record this account's claim on the legacy secure "
+                "store, so it was not adopted: another account could otherwise "
+                "inherit the same MLS identity. This account starts from a "
+                "fresh identity."
+            )
+        elif confirmed.kind == "conflict":
+            logger.error(
+                "legacy secure store was claimed by another account "
+                "concurrently; this account starts from a fresh MLS identity."
+            )
+        return confirmed
+
+    def _read_claim(self) -> str | None:
+        """The claim recorded in the legacy store, or None when absent or
+        unreadable.
+
+        A failed read is deliberately not distinguished from an absent claim on
+        the way *in* (both mean "looks unclaimed") but is on the way back *out*,
+        where it means the claim is unproven.
+        """
+
+        assert self._legacy_service is not None
+        try:
+            raw = self._read(
+                self._legacy_service,
+                legacy_store_adoption.CLAIM_KEY_TYPE,
+                legacy_store_adoption.CLAIM_KEY_ID,
+            )
+        except Exception:
+            logger.warning(
+                "legacy secure store claim could not be read", exc_info=True
+            )
+            return None
+        return raw.decode("utf-8", errors="replace") if raw is not None else None
+
+    def _read_through_service(self, key_type: str) -> str | None:
+        """The legacy service to consult for *key_type*, or None when
+        read-through is off (no legacy store, another account claimed it, or
+        this account could not prove its own claim)."""
+
+        if self._legacy_service is None:
+            return None
+        if not self.legacy_adoption.allows_read_through:
+            return None
+        if legacy_store_adoption.is_claim_entry(key_type):
+            return None
+        return self._legacy_service
+
+    # -- keyring primitives --------------------------------------------------
+
+    def _store(self, service: str, key_type: str, key_id: str, data: bytes) -> None:
+        try:
+            keyring.set_password(
+                service, _make_key(key_type, key_id), base64.b64encode(data).decode("ascii")
+            )
+            self._index_add(service, key_type, key_id)
+        except Exception as exc:
+            raise MlsStorageError.StoreFailed(f"keyring store failed: {exc}") from exc
+
+    def _read(self, service: str, key_type: str, key_id: str) -> bytes | None:
+        try:
+            encoded = keyring.get_password(service, _make_key(key_type, key_id))
+            if encoded is None:
+                return None
+            return base64.b64decode(encoded)
+        except Exception as exc:
+            raise MlsStorageError.LoadFailed(f"keyring load failed: {exc}") from exc
+
+    def _remove(self, service: str, key_type: str, key_id: str) -> None:
+        try:
+            keyring.delete_password(service, _make_key(key_type, key_id))
+        except keyring.errors.PasswordDeleteError:
+            pass  # already gone — not an error (matches iOS Keychain behaviour)
+        except Exception as exc:
+            raise MlsStorageError.DeleteFailed(f"keyring delete failed: {exc}") from exc
+
+        self._index_remove(service, key_type, key_id)
 
     # -- index helpers -------------------------------------------------------
 
     def _index_key(self, key_type: str) -> str:
         return f"{_INDEX_PREFIX}{key_type}"
 
-    def _index_get(self, key_type: str) -> list[str]:
-        raw = keyring.get_password(self._service, self._index_key(key_type))
+    def _index_get(self, service: str, key_type: str) -> list[str]:
+        raw = keyring.get_password(service, self._index_key(key_type))
         if raw is None:
             return []
         return json.loads(raw)
 
-    def _index_add(self, key_type: str, key_id: str) -> None:
-        ids = set(self._index_get(key_type))
+    def _index_add(self, service: str, key_type: str, key_id: str) -> None:
+        ids = set(self._index_get(service, key_type))
         ids.add(key_id)
         keyring.set_password(
-            self._service,
+            service,
             self._index_key(key_type),
             json.dumps(sorted(ids)),
         )
 
-    def _index_remove(self, key_type: str, key_id: str) -> None:
-        ids = set(self._index_get(key_type))
+    def _index_remove(self, service: str, key_type: str, key_id: str) -> None:
+        ids = set(self._index_get(service, key_type))
         ids.discard(key_id)
         if ids:
             keyring.set_password(
-                self._service,
+                service,
                 self._index_key(key_type),
                 json.dumps(sorted(ids)),
             )
         else:
             try:
-                keyring.delete_password(
-                    self._service, self._index_key(key_type)
-                )
+                keyring.delete_password(service, self._index_key(key_type))
             except keyring.errors.PasswordDeleteError:
                 pass
 

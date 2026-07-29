@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Callable
 
 from .offline_protocol import (
@@ -28,6 +29,8 @@ from .ble_manager import BleManager
 from .ble_peripheral import BlePeripheral
 from .internet_manager import InternetManager
 from .secure_storage import SecureStorage
+from .state_storage import AppStateStorage
+from .storage_namespace import account_storage_namespace
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +111,7 @@ class ProtocolManager:
 
     Typical usage::
 
-        async with ProtocolManager(config) as pm:
+        async with ProtocolManager(config, state_root="/app/install/state") as pm:
             pm.on_event(lambda e: print(e))
             pm.internet.configure(server_url="ws://relay.example.com")
             await pm.internet.start()
@@ -116,7 +119,7 @@ class ProtocolManager:
 
     Or without ``async with``::
 
-        pm = ProtocolManager(config)
+        pm = ProtocolManager(config, state_root="/app/install/state")
         await pm.start()
         ...
         await pm.stop()
@@ -130,6 +133,14 @@ class ProtocolManager:
     storage:
         Optional ``MlsStorageProvider`` for MLS key material.  Defaults to
         :class:`SecureStorage` backed by the platform keyring.
+    state_storage:
+        Optional ``ProtocolStateStorageProvider`` for restartable delivery
+        state. When omitted, ``state_root`` or ``OFFLINE_PROTOCOL_STATE_ROOT``
+        must select an application-owned directory that the installer removes
+        with the application.
+    state_root:
+        Root directory for the built-in :class:`AppStateStorage`. Ignored when
+        ``state_storage`` is supplied.
     """
 
     def __init__(
@@ -137,18 +148,31 @@ class ProtocolManager:
         config: ProtocolConfig,
         event_handler: Callable[[dict[str, Any]], None] | None = None,
         storage: Any | None = None,
+        state_storage: Any | None = None,
+        *,
+        state_root: str | Path | None = None,
     ) -> None:
         self._config = config
         self._event_handler = event_handler
-        self._storage = storage or SecureStorage()
+
+        device_id = config.user_id  # type: ignore[union-attr]
+        app_id = getattr(config, "app_id", "offline-messenger")
+        storage_namespace = account_storage_namespace(app_id, device_id)
+        self._storage = (
+            storage
+            if storage is not None
+            else SecureStorage(namespace=storage_namespace)
+        )
+        self._state_storage = (
+            state_storage
+            if state_storage is not None
+            else AppStateStorage(root=state_root, namespace=storage_namespace)
+        )
 
         # Create the core protocol instance
         self._protocol = OfflineProtocol(config)
 
         # Transport managers
-        device_id = config.user_id  # type: ignore[union-attr]
-        app_id = getattr(config, "app_id", "offline-messenger")
-
         self.ble: BleManager | None = None
         if getattr(config, "ble_enabled", False):
             self.ble = BleManager(self._protocol, device_id)
@@ -214,6 +238,7 @@ class ProtocolManager:
             self._ble_cb,
             self._wifi_cb,
             self._storage,
+            self._state_storage,
         ]
         if self._nostr_cb is not None:
             self._prevent_gc.append(self._nostr_cb)
@@ -222,7 +247,7 @@ class ProtocolManager:
 
         # Initialise MLS encryption
         try:
-            self._protocol.initialize_mls(self._storage)
+            self._protocol.initialize_mls(self._storage, self._state_storage)
         except Exception as exc:
             logger.warning("MLS initialisation failed (non-fatal): %s", exc)
 

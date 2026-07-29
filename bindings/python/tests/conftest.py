@@ -21,7 +21,7 @@ class InMemoryStorage(MlsStorageProvider):
     exercise the same concurrency contract the real storage provides.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *args: object, **kwargs: object) -> None:
         self._data: dict[tuple[str, str], bytes] = {}
         self._lock = threading.Lock()
 
@@ -51,17 +51,24 @@ def in_memory_storage() -> InMemoryStorage:
 
 
 @pytest.fixture(autouse=True)
-def _stub_secure_storage(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Prevent tests from hitting the real platform keyring.
+def _stub_default_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Prevent tests from hitting real platform storage.
 
     ``ProtocolManager`` instantiates ``SecureStorage()`` by default, which
     on macOS prompts for the login-keychain password on every access.
-    Redirect the symbol imported by ``protocol_manager`` to an in-memory
-    stand-in so tests run unattended.
+    Redirect secure storage to an in-memory stand-in so tests run unattended.
+    Protocol state uses the real file backend under a per-test install root.
     """
     from offline_protocol_sdk import protocol_manager as pm_module
 
     monkeypatch.setattr(pm_module, "SecureStorage", InMemoryStorage)
+    monkeypatch.setenv(
+        "OFFLINE_PROTOCOL_STATE_ROOT",
+        str(tmp_path / "application-install" / "protocol-state"),
+    )
 
 
 @pytest.fixture

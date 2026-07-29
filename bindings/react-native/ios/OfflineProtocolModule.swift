@@ -2255,7 +2255,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let ackConfig = AckConfig(
-                defaultTimeoutMs: (config["defaultTimeoutMs"] as? NSNumber)?.uint64Value ?? 5000,
+                defaultTimeoutMs: (config["defaultTimeoutMs"] as? NSNumber)?.uint64Value ?? 10000,
                 maxPendingAcks: (config["maxPendingAcks"] as? NSNumber)?.uint64Value ?? 1000
             )
             
@@ -2289,7 +2289,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 initialDelayMs: (config["initialDelayMs"] as? NSNumber)?.uint64Value ?? 1000,
                 maxDelayMs: (config["maxDelayMs"] as? NSNumber)?.uint64Value ?? 300000,
                 backoffMultiplier: (config["backoffMultiplier"] as? NSNumber)?.floatValue ?? 2.0,
-                outboxMaxLifetimeMs: (config["outboxMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000
+                outboxMaxLifetimeMs: (config["outboxMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000,
+                pendingMessageMaxLifetimeMs: (config["pendingMessageMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 604800000
             )
             
             try proto.updateRetryConfig(config: retryConfig)
@@ -2719,10 +2720,57 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_MLS", "Protocol not initialized", nil)
             return
         }
+        guard let config = currentConfig else {
+            rejecter("ERROR_MLS", "Protocol config not initialized", nil)
+            return
+        }
         do {
-            let storage = MlsSecureStorage()
-            try proto.initializeMls(storage: storage)
-            emitDiagnostic(level: "info", message: "MLS initialized with Keychain storage")
+            let accountNamespace = StorageNamespace.account(
+                appId: config.appId,
+                userId: config.userId
+            )
+            let secureStorage = try MlsSecureStorage(
+                accountNamespace: accountNamespace
+            )
+            let protocolStateStorage = try AppContainerProtocolStateStorage(
+                accountNamespace: accountNamespace
+            )
+            try proto.initializeMls(
+                secureStorage: secureStorage,
+                protocolStateStorage: protocolStateStorage
+            )
+            // Either of these means this account is starting from a fresh MLS
+            // identity — never let that pass silently.
+            switch secureStorage.legacyAdoption {
+            case .conflict?:
+                emitDiagnostic(
+                    level: "error",
+                    message: "Legacy secure store belongs to another account; "
+                        + "this account starts from a fresh MLS identity and "
+                        + "cannot decrypt its previous sessions. Its pre-split "
+                        + "delivery state is unreachable too, so it also comes "
+                        + "up with an empty outbox and an empty block list — "
+                        + "every previously blocked peer is unblocked"
+                )
+            case .claimUnverified?:
+                emitDiagnostic(
+                    level: "error",
+                    message: "Could not record this account's claim on the "
+                        + "legacy secure store, so it was not adopted: another "
+                        + "account could otherwise inherit the same MLS "
+                        + "identity. This account starts from a fresh identity "
+                        + "and comes up with an empty outbox and an empty block "
+                        + "list — every previously blocked peer is unblocked. "
+                        + "The credential store is failing writes; retrying on "
+                        + "a healthy store adopts normally"
+                )
+            case .adopt?, .resume?, .none:
+                break
+            }
+            emitDiagnostic(
+                level: "info",
+                message: "MLS initialized with split Keychain and app-container storage"
+            )
             resolver(nil)
         } catch {
             emitDiagnostic(level: "error", message: "Failed to initialize MLS", context: [

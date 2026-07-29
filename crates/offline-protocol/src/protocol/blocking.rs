@@ -246,7 +246,7 @@ mod tests {
     fn test_blocked_user_persistence() {
         let mut proto = make_protocol("alice");
         let storage = Arc::new(InMemoryStorage::new());
-        proto.enable_message_persistence(storage).unwrap();
+        proto.enable_message_persistence_for_test(storage).unwrap();
 
         proto.block_user("bob").unwrap();
         assert!(proto.is_user_blocked("bob"));
@@ -255,7 +255,7 @@ mod tests {
         proto.blocked_users.clear();
         assert!(!proto.is_user_blocked("bob"));
 
-        proto.restore_blocked_users();
+        proto.restore_blocked_users().unwrap();
         assert!(proto.is_user_blocked("bob"));
     }
 
@@ -359,7 +359,7 @@ mod tests {
 
         let mut proto = make_protocol("alice");
         let storage = Arc::new(MlsInMemoryStorage::new());
-        proto.initialize_mls(storage).unwrap();
+        proto.initialize_mls_for_test(storage).unwrap();
 
         use crate::protocol::types::ReceivedKeyPackage;
 
@@ -1277,14 +1277,16 @@ mod tests {
 
         let mut proto = make_protocol("alice");
         let storage = Arc::new(InMemoryStorage::new());
-        proto.enable_message_persistence(storage.clone()).unwrap();
+        proto
+            .enable_message_persistence_for_test(storage.clone())
+            .unwrap();
 
         // Directly write valid and invalid entries into storage
         storage.store("blocked_users", "bob", &[]).unwrap();
         storage.store("blocked_users", "", &[]).unwrap(); // invalid: empty user ID
 
         proto.blocked_users.clear();
-        proto.restore_blocked_users();
+        proto.restore_blocked_users().unwrap();
 
         // "bob" should be restored, "" should be skipped
         assert!(proto.is_user_blocked("bob"));
@@ -1300,12 +1302,12 @@ mod tests {
         // Set up alice with MLS
         let mut alice = make_protocol("alice");
         let alice_storage = Arc::new(MlsInMemoryStorage::new());
-        alice.initialize_mls(alice_storage).unwrap();
+        alice.initialize_mls_for_test(alice_storage).unwrap();
 
         // Set up bob with MLS
         let mut bob = make_protocol("bob");
         let bob_storage = Arc::new(MlsInMemoryStorage::new());
-        bob.initialize_mls(bob_storage).unwrap();
+        bob.initialize_mls_for_test(bob_storage).unwrap();
 
         // Exchange key packages to establish a session
         let alice_key_pkg = {
@@ -1415,10 +1417,10 @@ mod tests {
         // Establish an alice→bob MLS session (alice owns the group).
         let mut alice = make_protocol("alice");
         alice
-            .initialize_mls(Arc::new(MlsInMemoryStorage::new()))
+            .initialize_mls_for_test(Arc::new(MlsInMemoryStorage::new()))
             .unwrap();
         let mut bob = make_protocol("bob");
-        bob.initialize_mls(Arc::new(MlsInMemoryStorage::new()))
+        bob.initialize_mls_for_test(Arc::new(MlsInMemoryStorage::new()))
             .unwrap();
 
         let bob_key_pkg = {
@@ -1495,9 +1497,9 @@ mod tests {
         // Establish an alice→bob MLS session (alice owns the group), same shape
         // as the happy-path test above.
         let mut alice = make_protocol("alice");
-        alice.initialize_mls(storage.clone()).unwrap();
+        alice.initialize_mls_for_test(storage.clone()).unwrap();
         let mut bob = make_protocol("bob");
-        bob.initialize_mls(Arc::new(MlsInMemoryStorage::new()))
+        bob.initialize_mls_for_test(Arc::new(MlsInMemoryStorage::new()))
             .unwrap();
 
         let bob_key_pkg = {

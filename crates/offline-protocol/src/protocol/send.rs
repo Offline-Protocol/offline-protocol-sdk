@@ -1,13 +1,15 @@
 //! Send pipeline, outbox management, and delivery tracking.
 
 use super::{
-    base64_encode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
-    ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions, MediaTransferDescriptor,
-    OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation, OutboxEntry, OutboxReseal,
-    PendingConnectionRequest, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
-    RichPayloadV1, RichSendExtras, SendMessageOptions, TypingIndicatorPayload,
-    WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO,
-    MAX_PENDING_CONNECTION_REQUESTS, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
+    base64_encode, internal_prefixes, lifetime_expired, lock_shared_state,
+    ConnectionAcceptedPayload, ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions,
+    MediaTransferDescriptor, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
+    OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PendingProvenance,
+    PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras,
+    SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
+    MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES, MAX_PENDING_CONNECTION_REQUESTS,
+    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
     MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
     SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_UNREACHABLE_RETRY_CAP_SECS,
@@ -20,7 +22,7 @@ use crate::file_transfer::{FileChunk, OutboundTransferState};
 use crate::media_envelope::{encode_media_envelope, MediaChunkPlaintext, MediaRichExtras};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 use crate::{Error, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use offline_protocol_core::{
     AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, UserId,
     TTL,
@@ -108,12 +110,15 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let content_str: String = content.into();
         let priority = options.priority.unwrap_or(MessagePriority::Medium);
+        Self::validate_outbound_recipient(&recipient_str)?;
 
         // Prevent sending messages to blocked users. Blocking is bidirectional:
         // we neither receive from nor send to a blocked peer.
         if self.is_user_blocked(&recipient_str) {
             return Err(Error::UserBlocked(recipient_str));
         }
+
+        Self::check_content_size(&content_str)?;
 
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the public API.
@@ -249,6 +254,7 @@ impl OfflineProtocol {
 
         let recipient_str: String = new_recipient.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
+        Self::validate_outbound_recipient(&recipient_str)?;
 
         if self.is_user_blocked(&recipient_str) {
             return Err(Error::UserBlocked(recipient_str));
@@ -293,9 +299,10 @@ impl OfflineProtocol {
             media_metadata: original_message.media_metadata.clone(),
             forward_info: Some(forward_info.clone()),
         };
-        // Same boundary cap as `send_message_with` — enforced here, not at
+        // Same boundary caps as `send_message_with` — enforced here, not at
         // seal time, so a forward queued behind session establishment is
-        // always known to seal at flush.
+        // always known to seal at flush and always fits the queue's budget.
+        Self::check_content_size(&original_message.content)?;
         rich.check_size()?;
 
         // Prepare content (may encrypt). ForwardInfo is threaded through so
@@ -575,6 +582,18 @@ impl OfflineProtocol {
                 ..Default::default()
             },
         )
+    }
+
+    /// Rejects a recipient token that is not a well-formed [`UserId`].
+    ///
+    /// Enforced at every outbound boundary so an app-owned placeholder (an
+    /// `unresolved:token`, an empty string) cannot become durable protocol
+    /// state — an outbox entry or pending-queue record that is retried, stored,
+    /// and restored forever against an address no transport can ever resolve.
+    pub(crate) fn validate_outbound_recipient(recipient: &str) -> Result<()> {
+        UserId::new(recipient)
+            .map(|_| ())
+            .map_err(|error| Error::InvalidArgument(format!("Invalid recipient user ID: {error}")))
     }
 
     /// Creates a new message from the given parameters.
@@ -1062,7 +1081,7 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         rich: Option<&RichSendExtras>,
-        existing_id: Option<MessageId>,
+        provenance: Option<PendingProvenance>,
         reconciliation_reason: &'static str,
     ) -> Result<OutboundSendPreparation> {
         if self.should_auto_encrypt() {
@@ -1149,7 +1168,7 @@ impl OfflineProtocol {
                             content_type,
                             media_metadata,
                             rich_extras.cloned(),
-                            existing_id,
+                            provenance,
                             reconciliation_reason,
                         )?;
                         return Ok(OutboundSendPreparation::Queued(queued_id));
@@ -1174,7 +1193,7 @@ impl OfflineProtocol {
                         content_type,
                         media_metadata,
                         rich_extras.cloned(),
-                        existing_id,
+                        provenance,
                         reconciliation_reason,
                     )?;
                     Ok(OutboundSendPreparation::Queued(queued_id))
@@ -1184,7 +1203,7 @@ impl OfflineProtocol {
         } else if self.config.encryption.require_encryption {
             Err(Error::EncryptFailed(
                 "MLS encryption is required (the default) but MLS is not initialized — \
-                 call initialize_mls() with an MlsStorage, or explicitly opt out with \
+                 call initialize_mls() with secure and protocol-state storage, or explicitly opt out with \
                  require_encryption=false to send plaintext"
                     .to_string(),
             ))
@@ -1209,6 +1228,36 @@ impl OfflineProtocol {
     // PENDING / FLUSH
     // ========================================================================
 
+    /// Enforces [`MAX_MESSAGE_CONTENT_BYTES`] on application-supplied content.
+    ///
+    /// Enforced at the public send boundary rather than at transmit time,
+    /// because a message that has to wait for MLS session establishment is
+    /// queued — in memory and on disk — long before it ever reaches the
+    /// transport's own size check. Without this cap a handful of very large
+    /// sends could exhaust mobile memory and protocol-state storage while
+    /// still satisfying the pending queue's entry-count limits.
+    ///
+    /// Applies to the plaintext the app hands us. MLS ciphertext, base64, and
+    /// the JSON wire envelope expand it further, which is why the cap sits
+    /// well under the transport's 1 MiB ceiling: everything accepted here can
+    /// actually be delivered.
+    ///
+    /// Deliberately *not* applied to the group surface: a group send has no
+    /// durable pre-session queue behind it (there is no per-recipient MLS
+    /// session to wait on), so it is bounded by the transport alone — the
+    /// documented "no send-side limit" behavior that
+    /// `test_group_mls_send_large_content_no_send_side_limit` pins.
+    pub(crate) fn check_content_size(content: &str) -> Result<()> {
+        if content.len() > MAX_MESSAGE_CONTENT_BYTES {
+            return Err(Error::InvalidArgument(format!(
+                "Message content too large: {} bytes (max {}); use send_media for large payloads",
+                content.len(),
+                MAX_MESSAGE_CONTENT_BYTES
+            )));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn queue_message_for_session_establishment(
         &mut self,
@@ -1220,21 +1269,26 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         rich: Option<RichSendExtras>,
-        existing_id: Option<MessageId>,
+        provenance: Option<PendingProvenance>,
         reconciliation_reason: &'static str,
     ) -> Result<MessageId> {
         // Fresh sends mint an ID without ticking the Lamport clock — the
         // real tick happens when flush_pending_messages re-sends after the
         // session is established. A flush-time re-queue passes the id the
-        // caller already holds so Deferred/Sent/Delivered stay correlatable.
-        let message_id = existing_id.unwrap_or_default();
+        // caller already holds so Deferred/Sent/Delivered stay correlatable,
+        // and the timestamp it first entered the queue so the absolute
+        // pending lifetime is not renewed by the round trip.
+        let (message_id, first_queued_at) = match provenance {
+            Some(provenance) => (provenance.message_id, provenance.first_queued_at),
+            None => (MessageId::default(), None),
+        };
 
         debug!(
             recipient = %recipient,
             message_id = %message_id,
             "Message queued pending session establishment"
         );
-        self.queue_pending_message(
+        self.queue_pending_message_at(
             recipient,
             content,
             priority,
@@ -1244,6 +1298,7 @@ impl OfflineProtocol {
             content_type,
             media_metadata,
             rich,
+            first_queued_at.unwrap_or_else(Utc::now),
         );
         self.kick_pending_session_reconciliation(reconciliation_reason);
         if self.has_terminal_welcome_failure(recipient) {
@@ -1260,7 +1315,15 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
-    /// Queues a message with a specific message ID for later sending when session is established.
+    /// Queues a message with a specific message ID for later sending when
+    /// session is established, starting a fresh pending lifetime.
+    ///
+    /// A re-queue must go through [`Self::queue_pending_message_at`] with the
+    /// entry's original timestamp instead — which is why production code always
+    /// calls that one directly (through
+    /// `queue_message_for_session_establishment`, where the distinction is
+    /// made) and this convenience exists only for tests.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn queue_pending_message(
         &mut self,
@@ -1274,8 +1337,50 @@ impl OfflineProtocol {
         media_metadata: Option<MediaMetadata>,
         rich: Option<RichSendExtras>,
     ) {
+        self.queue_pending_message_at(
+            recipient,
+            content,
+            priority,
+            message_id,
+            reply_to_msg,
+            forwarded_from,
+            content_type,
+            media_metadata,
+            rich,
+            Utc::now(),
+        );
+    }
+
+    /// Queues a message with an explicit first-queued timestamp.
+    ///
+    /// `queued_at` is the instant the message *first* entered the pending
+    /// queue, which is what `pending_message_max_lifetime_ms` is measured from.
+    /// Re-queueing an entry (a flush that found the session still unavailable)
+    /// must pass the original value: stamping `now()` there would hand the
+    /// message a fresh window on every failed reconciliation, so a message
+    /// could outlive an "absolute" lifetime indefinitely.
+    ///
+    /// Admission is bounded on two axes — entry count and serialized bytes,
+    /// per peer and globally — because message content is
+    /// application-supplied and a count alone bounds neither memory nor
+    /// durable storage. Both axes evict oldest-first and settle each evicted
+    /// message as failed.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn queue_pending_message_at(
+        &mut self,
+        recipient: &str,
+        content: &str,
+        priority: MessagePriority,
+        message_id: MessageId,
+        reply_to_msg: Option<MessageId>,
+        forwarded_from: Option<ForwardInfo>,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
+        rich: Option<RichSendExtras>,
+        queued_at: DateTime<Utc>,
+    ) {
         let message_id_str = message_id.as_str().to_string();
-        let pending = PendingMessage {
+        let mut pending = PendingMessage {
             content: content.to_string(),
             priority,
             message_id,
@@ -1284,8 +1389,58 @@ impl OfflineProtocol {
             content_type,
             media_metadata,
             rich,
-            queued_at: Utc::now(),
+            queued_at,
+            serialized_bytes: 0,
         };
+        pending.measure();
+        let incoming_bytes = pending.serialized_bytes;
+
+        let mut evicted = Vec::new();
+        let mut changed_recipients = HashSet::new();
+
+        while self
+            .pending_encrypted_messages
+            .get(recipient)
+            .is_some_and(|messages| messages.len() >= MAX_PENDING_MESSAGES_PER_PEER)
+        {
+            if let Some(message) = self.evict_pending_message_at(recipient, 0) {
+                evicted.push(message);
+                changed_recipients.insert(recipient.to_string());
+            } else {
+                break;
+            }
+        }
+
+        // The running totals are decremented as entries are evicted rather
+        // than recomputed each turn, so a queue at capacity does not make
+        // admission quadratic.
+        let mut peer_bytes = self.pending_message_bytes_for(recipient);
+        while peer_bytes.saturating_add(incoming_bytes) > MAX_PENDING_MESSAGE_BYTES_PER_PEER {
+            let Some(message) = self.evict_pending_message_at(recipient, 0) else {
+                break;
+            };
+            peer_bytes = peer_bytes.saturating_sub(message.serialized_bytes);
+            changed_recipients.insert(recipient.to_string());
+            evicted.push(message);
+        }
+
+        while self.total_pending_message_count() >= MAX_PENDING_MESSAGES_GLOBAL {
+            let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
+                break;
+            };
+            changed_recipients.insert(evicted_recipient);
+            evicted.push(message);
+        }
+
+        let mut global_bytes = self.total_pending_message_bytes();
+        while global_bytes.saturating_add(incoming_bytes) > MAX_PENDING_MESSAGE_BYTES_GLOBAL {
+            let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
+                break;
+            };
+            global_bytes = global_bytes.saturating_sub(message.serialized_bytes);
+            changed_recipients.insert(evicted_recipient);
+            evicted.push(message);
+        }
 
         // Push to in-memory queue first, then persist (the in-memory queue
         // is the source of truth; storage is a crash-recovery backup).
@@ -1293,10 +1448,134 @@ impl OfflineProtocol {
             .entry(recipient.to_string())
             .or_default()
             .push(pending);
+        self.note_pending_message_expiry(queued_at);
 
+        changed_recipients.remove(recipient);
+        for changed_recipient in changed_recipients {
+            self.persist_or_clear_pending_messages(&changed_recipient);
+        }
         self.persist_pending_messages_for_recipient(recipient);
 
+        for message in evicted {
+            self.emit_event(Event::message_failed(
+                message.message_id,
+                "Pending session queue capacity exceeded".to_string(),
+                0,
+            ));
+        }
+
         debug!(recipient = %recipient, message_id = %message_id_str, "Queued message pending session establishment");
+    }
+
+    pub(super) fn total_pending_message_count(&self) -> usize {
+        self.pending_encrypted_messages.values().map(Vec::len).sum()
+    }
+
+    /// Total serialized footprint of the pending-session queue across all
+    /// peers. Summing precomputed per-entry sizes, so this stays a cheap
+    /// integer walk rather than re-serializing the queue.
+    pub(super) fn total_pending_message_bytes(&self) -> usize {
+        self.pending_encrypted_messages
+            .values()
+            .flatten()
+            .map(|message| message.serialized_bytes)
+            .sum()
+    }
+
+    /// Serialized footprint of one peer's pending-session queue.
+    pub(super) fn pending_message_bytes_for(&self, recipient: &str) -> usize {
+        self.pending_encrypted_messages
+            .get(recipient)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| message.serialized_bytes)
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    fn evict_pending_message_at(
+        &mut self,
+        recipient: &str,
+        index: usize,
+    ) -> Option<PendingMessage> {
+        let (message, remove_recipient) = {
+            let messages = self.pending_encrypted_messages.get_mut(recipient)?;
+            if index >= messages.len() {
+                return None;
+            }
+            let message = messages.remove(index);
+            (message, messages.is_empty())
+        };
+        if remove_recipient {
+            self.pending_encrypted_messages.remove(recipient);
+        }
+        Some(message)
+    }
+
+    pub(super) fn evict_oldest_pending_message(&mut self) -> Option<(String, PendingMessage)> {
+        let (recipient, index) = self
+            .pending_encrypted_messages
+            .iter()
+            .flat_map(|(recipient, messages)| {
+                messages
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, message)| (recipient, index, message))
+            })
+            .min_by(|left, right| {
+                left.2
+                    .queued_at
+                    .cmp(&right.2.queued_at)
+                    .then_with(|| left.2.message_id.as_str().cmp(&right.2.message_id.as_str()))
+            })
+            .map(|(recipient, index, _)| (recipient.clone(), index))?;
+        let message = self.evict_pending_message_at(&recipient, index)?;
+        Some((recipient, message))
+    }
+
+    pub(super) fn persist_or_clear_pending_messages(&self, recipient: &str) {
+        if self.pending_encrypted_messages.contains_key(recipient) {
+            self.persist_pending_messages_for_recipient(recipient);
+        } else {
+            self.clear_pending_messages_from_storage(recipient);
+        }
+    }
+
+    fn pending_message_expiry(queued_at: DateTime<Utc>, lifetime_ms: u64) -> Option<DateTime<Utc>> {
+        let lifetime_ms = i64::try_from(lifetime_ms).ok()?;
+        queued_at.checked_add_signed(chrono::Duration::milliseconds(lifetime_ms))
+    }
+
+    fn note_pending_message_expiry(&mut self, queued_at: DateTime<Utc>) {
+        let Some(expiry) = Self::pending_message_expiry(
+            queued_at,
+            self.config
+                .reliability
+                .retry
+                .pending_message_max_lifetime_ms,
+        ) else {
+            return;
+        };
+        self.next_pending_message_expiry = Some(
+            self.next_pending_message_expiry
+                .map_or(expiry, |current| current.min(expiry)),
+        );
+    }
+
+    pub(super) fn recompute_next_pending_message_expiry(&mut self) {
+        let lifetime_ms = self
+            .config
+            .reliability
+            .retry
+            .pending_message_max_lifetime_ms;
+        self.next_pending_message_expiry = self
+            .pending_encrypted_messages
+            .values()
+            .flat_map(|messages| messages.iter())
+            .filter_map(|message| Self::pending_message_expiry(message.queued_at, lifetime_ms))
+            .min();
     }
 
     /// Flushes pending messages for a recipient after session is established.
@@ -1384,7 +1663,7 @@ impl OfflineProtocol {
                     msg.content_type,
                     msg.media_metadata.clone(),
                     msg.rich.as_ref(),
-                    Some(msg.message_id.clone()),
+                    Some(PendingProvenance::requeued(&msg)),
                     "flush_pending",
                 ) {
                     Ok(OutboundSendPreparation::Ready(c)) => c,
@@ -1477,6 +1756,18 @@ impl OfflineProtocol {
                     "Dropping flush failures for aborted pending session"
                 );
             } else {
+                // Every other path into `pending_encrypted_messages` notes the
+                // entry's deadline. This one is a *re*-insertion of entries the
+                // queue already held, so today the cached minimum is still
+                // correct without it — but only because nothing recomputes that
+                // cache while a flush is in progress. Noting them keeps
+                // "`next_pending_message_expiry` is never later than the true
+                // minimum" an invariant of the code rather than of the call
+                // graph: if it ever broke, these entries would stop being
+                // scanned and would never expire, silently, on the one queue the
+                // absolute pending lifetime exists to bound.
+                let merged_deadlines: Vec<DateTime<Utc>> =
+                    remaining.iter().map(|m| m.queued_at).collect();
                 let queue = self
                     .pending_encrypted_messages
                     .entry(recipient.to_string())
@@ -1491,6 +1782,9 @@ impl OfflineProtocol {
                         .position(|id| *id == m.message_id.as_str())
                         .unwrap_or(usize::MAX)
                 });
+                for queued_at in merged_deadlines {
+                    self.note_pending_message_expiry(queued_at);
+                }
                 self.persist_pending_messages_for_recipient(recipient);
             }
         }
@@ -1611,6 +1905,7 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let file_name_str: String = file_name.into();
         let media_metadata = options.media_metadata;
+        Self::validate_outbound_recipient(&recipient_str)?;
 
         // Validate the reply id like send_message_with does — a malformed id
         // fails the call instead of riding sealed to the receiver.
@@ -1722,7 +2017,7 @@ impl OfflineProtocol {
         } else if self.config.encryption.require_encryption {
             return Err(Error::EncryptFailed(
                 "MLS encryption is required (the default) but MLS is not initialized — \
-                 call initialize_mls() with an MlsStorage, or explicitly opt out with \
+                 call initialize_mls() with secure and protocol-state storage, or explicitly opt out with \
                  require_encryption=false to send plaintext media"
                     .to_string(),
             ));
@@ -2255,7 +2550,7 @@ impl OfflineProtocol {
             reseal.content_type,
             reseal.media_metadata.clone(),
             reseal.rich.as_ref(),
-            Some(message.id.clone()),
+            Some(PendingProvenance::for_id(message.id.clone())),
             "resend_reseal",
         ) {
             Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => Some(sealed),
@@ -2315,24 +2610,92 @@ impl OfflineProtocol {
             .map(|pending| pending.recipient)
     }
 
+    /// Removes messages that have waited too long for MLS session
+    /// establishment. This gives the pre-outbox queue the same bounded
+    /// lifecycle guarantee as dispatched messages.
+    pub(super) fn cleanup_expired_pending_messages(&mut self) {
+        self.cleanup_expired_pending_messages_at(Utc::now());
+    }
+
+    /// Runs pending-message expiry only when the earliest queued deadline is
+    /// due. Bindings call `process()` every 100 ms, so blindly scanning the
+    /// entire queue there wastes CPU and battery for almost the whole default
+    /// seven-day lifetime.
+    pub(super) fn cleanup_expired_pending_messages_if_due(&mut self) {
+        let now = Utc::now();
+        if self
+            .next_pending_message_expiry
+            .is_some_and(|expiry| now >= expiry)
+        {
+            self.cleanup_expired_pending_messages_at(now);
+        }
+    }
+
+    fn cleanup_expired_pending_messages_at(&mut self, now: DateTime<Utc>) {
+        let lifetime_ms = self
+            .config
+            .reliability
+            .retry
+            .pending_message_max_lifetime_ms;
+        let mut changed_recipients = Vec::new();
+        let mut expired_ids = Vec::new();
+
+        for (recipient, messages) in &mut self.pending_encrypted_messages {
+            let previous_len = messages.len();
+            messages.retain(|pending| {
+                if lifetime_expired(now, pending.queued_at, lifetime_ms) {
+                    expired_ids.push(pending.message_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            if messages.len() != previous_len {
+                changed_recipients.push(recipient.clone());
+            }
+        }
+
+        for recipient in changed_recipients {
+            if self
+                .pending_encrypted_messages
+                .get(&recipient)
+                .is_some_and(Vec::is_empty)
+            {
+                self.pending_encrypted_messages.remove(&recipient);
+                self.clear_pending_messages_from_storage(&recipient);
+            } else {
+                self.persist_pending_messages_for_recipient(&recipient);
+            }
+        }
+        self.recompute_next_pending_message_expiry();
+
+        for message_id in expired_ids {
+            // Reached both from `process()` (emits immediately) and from
+            // restore, which runs before the event pipeline is live.
+            self.settle_restored_message_failure(Event::message_failed(
+                message_id,
+                "Pending session lifetime exceeded".to_string(),
+                0,
+            ));
+        }
+    }
+
     pub(super) fn cleanup_outbox(&mut self) {
         let now = Utc::now();
-        let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms as i64;
-        let cutoff = now - ChronoDuration::milliseconds(lifetime_ms);
+        let lifetime_ms = self.config.reliability.retry.outbox_max_lifetime_ms;
         // In-process twin of the restore path's absolute cap
         // (`restore_outbox`): the carrier-relative window slides on every
         // send, and an unreachable-parked DM's mesh reachability probe keeps
         // sending — without an absolute bound from `first_sent_at`, a
         // long-lived process would keep such an entry alive forever.
-        let absolute_cutoff = now
-            - ChronoDuration::milliseconds(
-                lifetime_ms
-                    .saturating_mul(crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as i64),
-            );
+        let absolute_lifetime_ms =
+            lifetime_ms.saturating_mul(crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as u64);
 
         let mut expired_from_outbox = Vec::new();
         for (message_id, entry) in &self.outbox {
-            if entry.last_sent_at >= cutoff && entry.first_sent_at >= absolute_cutoff {
+            if !lifetime_expired(now, entry.last_sent_at, lifetime_ms)
+                && !lifetime_expired(now, entry.first_sent_at, absolute_lifetime_ms)
+            {
                 continue;
             }
             if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(&entry.message.id)
@@ -2390,7 +2753,7 @@ impl OfflineProtocol {
 
         let mut expired_from_media = Vec::new();
         for (message_id, entry) in &self.media_outbox {
-            if entry.last_sent_at >= cutoff {
+            if !lifetime_expired(now, entry.last_sent_at, lifetime_ms) {
                 continue;
             }
             if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(&entry.message.id)
@@ -3395,6 +3758,7 @@ impl OfflineProtocol {
         key_package: Option<Vec<u8>>,
         initial_message: Option<String>,
     ) -> Result<MessageId> {
+        Self::validate_outbound_recipient(recipient)?;
         if let Some(msg) = initial_message.as_deref() {
             if msg.len() > MAX_INITIAL_MESSAGE_BYTES {
                 return Err(Error::InvalidArgument(format!(
@@ -3475,6 +3839,7 @@ impl OfflineProtocol {
         accepter_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
+        Self::validate_outbound_recipient(recipient)?;
         // Accept messages are internal control messages (not user content),
         // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
@@ -3509,6 +3874,7 @@ impl OfflineProtocol {
     /// Connection rejects are internal control messages sent in plaintext,
     /// exempt from `require_encryption` (same as key packages and welcome messages).
     pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
+        Self::validate_outbound_recipient(recipient)?;
         // Reject messages are internal control messages (not user content),
         // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
@@ -3535,6 +3901,7 @@ impl OfflineProtocol {
     /// Connection cancellations are internal control messages sent in plaintext,
     /// exempt from `require_encryption` (same as key packages and welcome messages).
     pub fn cancel_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
+        Self::validate_outbound_recipient(recipient)?;
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -3560,11 +3927,7 @@ impl OfflineProtocol {
         recipient: &str,
         status: PresenceStatus,
     ) -> Result<MessageId> {
-        if recipient.is_empty() {
-            return Err(Error::InvalidArgument(
-                "recipient must not be empty".to_string(),
-            ));
-        }
+        Self::validate_outbound_recipient(recipient)?;
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -3596,11 +3959,7 @@ impl OfflineProtocol {
         conversation_id: &str,
         is_typing: bool,
     ) -> Result<MessageId> {
-        if recipient.is_empty() {
-            return Err(Error::InvalidArgument(
-                "recipient must not be empty".to_string(),
-            ));
-        }
+        Self::validate_outbound_recipient(recipient)?;
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -3636,11 +3995,7 @@ impl OfflineProtocol {
         recipient: &str,
         message_ids: Vec<String>,
     ) -> Result<MessageId> {
-        if recipient.is_empty() {
-            return Err(Error::InvalidArgument(
-                "recipient must not be empty".to_string(),
-            ));
-        }
+        Self::validate_outbound_recipient(recipient)?;
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }

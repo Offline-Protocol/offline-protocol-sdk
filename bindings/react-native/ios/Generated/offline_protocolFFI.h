@@ -292,6 +292,34 @@ typedef void (*UniffiCallbackInterfaceNostrTransportCallbackMethod0)(uint64_t, v
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0
+typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1
+typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod1)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2
+typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod2)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3
+typedef void (*UniffiCallbackInterfaceProtocolStateStorageProviderMethod3)(uint64_t, RustBuffer, RustBuffer* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_RETICULUM_TRANSPORT_CALLBACK_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_RETICULUM_TRANSPORT_CALLBACK_METHOD0
 typedef void (*UniffiCallbackInterfaceReticulumTransportCallbackMethod0)(uint64_t, void* _Nonnull, 
@@ -392,6 +420,18 @@ typedef struct UniffiVTableCallbackInterfaceNostrTransportCallback {
     UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceNostrTransportCallbackMethod0 _Nonnull onMessagesAvailable;
 } UniffiVTableCallbackInterfaceNostrTransportCallback;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PROTOCOL_STATE_STORAGE_PROVIDER
+typedef struct UniffiVTableCallbackInterfaceProtocolStateStorageProvider {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceProtocolStateStorageProviderMethod0 _Nonnull store;
+    UniffiCallbackInterfaceProtocolStateStorageProviderMethod1 _Nonnull load;
+    UniffiCallbackInterfaceProtocolStateStorageProviderMethod2 _Nonnull delete;
+    UniffiCallbackInterfaceProtocolStateStorageProviderMethod3 _Nonnull listKeys;
+} UniffiVTableCallbackInterfaceProtocolStateStorageProvider;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_RETICULUM_TRANSPORT_CALLBACK
@@ -754,7 +794,7 @@ int8_t uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route(uint64
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_INITIALIZE_MLS
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_INITIALIZE_MLS
-void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(uint64_t ptr, uint64_t storage, RustCallStatus *_Nonnull out_status
+void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(uint64_t ptr, uint64_t secure_storage, uint64_t protocol_state_storage, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_INSTALL_TELEMETRY_SINK
@@ -1280,6 +1320,11 @@ void uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider(c
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_NOSTRTRANSPORTCALLBACK
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_NOSTRTRANSPORTCALLBACK
 void uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback(const UniffiVTableCallbackInterfaceNostrTransportCallback* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_PROTOCOLSTATESTORAGEPROVIDER
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_PROTOCOLSTATESTORAGEPROVIDER
+void uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider(const UniffiVTableCallbackInterfaceProtocolStateStorageProvider* _Nonnull vtable
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_RETICULUMTRANSPORTCALLBACK
@@ -2574,6 +2619,30 @@ uint16_t uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_NOSTRTRANSPORTCALLBACK_ON_MESSAGES_AVAILABLE
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_NOSTRTRANSPORTCALLBACK_ON_MESSAGES_AVAILABLE
 uint16_t uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_STORE
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_STORE
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_LOAD
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_LOAD
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_DELETE
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_DELETE
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_LIST_KEYS
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_PROTOCOLSTATESTORAGEPROVIDER_LIST_KEYS
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_list_keys(void
     
 );
 #endif

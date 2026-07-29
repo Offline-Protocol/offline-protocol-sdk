@@ -43,6 +43,26 @@ def _make_config(**overrides) -> ProtocolConfig:
 
 
 class TestProtocolManagerLifecycle:
+    def test_default_stores_use_the_account_namespace(self):
+        config = _make_config(app_id="test-app", user_id="test-user-1")
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        with (
+            patch(
+                "offline_protocol_sdk.protocol_manager.SecureStorage"
+            ) as secure_storage,
+            patch(
+                "offline_protocol_sdk.protocol_manager.AppStateStorage"
+            ) as state_storage,
+        ):
+            ProtocolManager(config)
+
+        expected = (
+            "account-814873e0cbdb2a1f25f14b31625e7f904cf9923e55b415b91ca4b29b210c12a1"
+        )
+        secure_storage.assert_called_once_with(namespace=expected)
+        state_storage.assert_called_once_with(root=None, namespace=expected)
+
     @pytest.mark.asyncio
     async def test_start_stop(self):
         config = _make_config()

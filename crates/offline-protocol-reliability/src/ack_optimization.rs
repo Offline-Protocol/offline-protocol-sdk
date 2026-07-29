@@ -217,7 +217,12 @@ impl AckOptimizer {
         self.pending_since
             .iter()
             .filter_map(|(dest, since)| {
-                if now.signed_duration_since(*since) > timeout {
+                // Inclusive: a batch that has waited *at least* the configured
+                // timeout is due. The strict form made a zero timeout mean
+                // "never, until the clock happens to tick", so a batch
+                // configured to flush immediately only flushed when two
+                // `Utc::now()` calls landed in different microseconds.
+                if now.signed_duration_since(*since) >= timeout {
                     Some(dest.clone())
                 } else {
                     None

@@ -35,8 +35,9 @@ def test_start_stop_lifecycle(default_config: ProtocolConfig) -> None:
 def test_initialize_mls(default_config: ProtocolConfig) -> None:
     """MLS can be initialised with an in-memory storage provider."""
     proto = OfflineProtocol(default_config)
-    storage = InMemoryStorage()
-    proto.initialize_mls(storage)
+    secure_storage = InMemoryStorage()
+    state_storage = InMemoryStorage()
+    proto.initialize_mls(secure_storage, state_storage)
     # Should not raise; MLS is now ready
 
 

@@ -32,6 +32,12 @@ pub const DEFAULT_BACKOFF_MULTIPLIER: f32 = 2.0;
 /// must survive at least that long before the outbox gives up on them.
 pub const DEFAULT_OUTBOX_LIFETIME_MS: u64 = 604_800_000;
 
+/// Maximum lifetime for messages waiting on MLS session establishment.
+///
+/// This is deliberately finite so an unresolved or permanently invalid
+/// recipient cannot remain in durable `pending_messages` forever.
+pub const DEFAULT_PENDING_MESSAGE_LIFETIME_MS: u64 = 604_800_000;
+
 /// Estimated size of an ACK entry in bytes (message ID + metadata).
 pub const ESTIMATED_ACK_SIZE_BYTES: usize = 40;
 
@@ -70,12 +76,44 @@ mod tests {
             return;
         };
 
+        let ack_expected = [
+            (
+                format!("json.optLong(\"defaultTimeoutMs\", {DEFAULT_ACK_TIMEOUT_MS})"),
+                format!(
+                    "(config[\"defaultTimeoutMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_ACK_TIMEOUT_MS}"
+                ),
+            ),
+            (
+                format!("json.optLong(\"maxPendingAcks\", {DEFAULT_MAX_PENDING_ACKS})"),
+                format!(
+                    "(config[\"maxPendingAcks\"] as? NSNumber)?.uint64Value ?? {DEFAULT_MAX_PENDING_ACKS}"
+                ),
+            ),
+        ];
+        for (kotlin_fallback, swift_fallback) in &ack_expected {
+            assert!(
+                kotlin.contains(kotlin_fallback),
+                "RN Android bridge ACK fallback drifted from the Rust default: \
+                 expected `{kotlin_fallback}` in {}",
+                kotlin_path.display()
+            );
+            assert!(
+                swift.contains(swift_fallback),
+                "RN iOS bridge ACK fallback drifted from the Rust default: \
+                 expected `{swift_fallback}` in {}",
+                swift_path.display()
+            );
+        }
+
         let kotlin_expected = [
             format!("json.optInt(\"maxRetries\", {DEFAULT_MAX_RETRIES})"),
             format!("json.optLong(\"initialDelayMs\", {DEFAULT_INITIAL_DELAY_MS})"),
             format!("json.optLong(\"maxDelayMs\", {DEFAULT_MAX_DELAY_MS})"),
             format!("json.optDouble(\"backoffMultiplier\", {DEFAULT_BACKOFF_MULTIPLIER:.1})"),
             format!("json.optLong(\"outboxMaxLifetimeMs\", {DEFAULT_OUTBOX_LIFETIME_MS})"),
+            format!(
+                "json.optLong(\"pendingMessageMaxLifetimeMs\", {DEFAULT_PENDING_MESSAGE_LIFETIME_MS})"
+            ),
         ];
         for expected in &kotlin_expected {
             assert!(
@@ -97,6 +135,9 @@ mod tests {
             ),
             format!(
                 "(config[\"outboxMaxLifetimeMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_OUTBOX_LIFETIME_MS}"
+            ),
+            format!(
+                "(config[\"pendingMessageMaxLifetimeMs\"] as? NSNumber)?.uint64Value ?? {DEFAULT_PENDING_MESSAGE_LIFETIME_MS}"
             ),
         ];
         for expected in &swift_expected {

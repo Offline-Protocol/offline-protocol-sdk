@@ -2060,7 +2060,15 @@ impl OfflineProtocol {
     ///
     /// Requires the invitee's key package to be available in `pending_key_packages`.
     /// Sends a Welcome to the invitee and a Commit to all existing members.
+    ///
+    /// Admission is where recipient validation belongs. The removal and role
+    /// paths deliberately do *not* validate: a roster entry admitted by an
+    /// older build (before the id rules tightened) must stay removable, and a
+    /// gate there would turn "a bad member exists" into "a bad member cannot be
+    /// removed" — the wrong direction for a moderation control.
     pub fn invite_to_group(&mut self, group_id: &str, invitee_user_id: &str) -> Result<()> {
+        Self::validate_outbound_recipient(invitee_user_id)?;
+
         // Admin check
         let self_id = self.config.user_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
@@ -2259,6 +2267,8 @@ impl OfflineProtocol {
     ///
     /// Sends a Commit to all remaining members.
     pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
+        // Deliberately unvalidated — see `invite_to_group`. Removal must work
+        // on whatever is actually on the roster.
         let self_id = self.config.user_id.clone();
 
         // Admin check + last-admin guard (single metadata load)
@@ -3069,6 +3079,8 @@ impl OfflineProtocol {
         target_user_id: &str,
         role: GroupRole,
     ) -> Result<()> {
+        // Deliberately unvalidated — see `invite_to_group`. Demoting a member
+        // admitted under older id rules must stay possible.
         let self_id = self.config.user_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
             return Err(Error::PermissionDenied(

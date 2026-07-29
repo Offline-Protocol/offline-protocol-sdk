@@ -79,6 +79,15 @@ pub trait MlsStorage: Send + Sync {
     /// Implementations should also provide best-effort crash durability so power
     /// loss does not silently roll back acknowledged critical state writes.
     ///
+    /// Durability is *ordering*-critical, not just best practice: the SDK treats
+    /// a returned `Ok(())` as persisted and immediately writes state that depends
+    /// on it. The per-install protocol-state record key is the sharp case — the
+    /// moment it stores, sealed records start landing in the (separate,
+    /// app-container) protocol-state store. A backend that acknowledges a write
+    /// it has only staged in memory (Android's `SharedPreferences.apply()`, an
+    /// unflushed file handle) can crash into a state where those records exist
+    /// but their key never did, and they are then dropped as unauthentic.
+    ///
     /// # Arguments
     ///
     /// * `key_type` - Category of the data (e.g., "identity", "group_state")
