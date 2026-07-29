@@ -67,6 +67,13 @@ internal object ProtocolStateRecord {
      */
     const val MAX_LISTED_KEYS = 65_536
 
+    /**
+     * Ceiling on entries one stale-temporary sweep examines, so a tampered
+     * directory cannot turn the first store of a session into an unbounded
+     * scan. Mirrors the iOS and Python providers.
+     */
+    const val MAX_SWEEP_ENTRIES = 4_096
+
     private const val HEX = "0123456789abcdef"
 
     fun digest(vararg components: String): String {
@@ -172,6 +179,15 @@ class AppContainerProtocolStateStorage(
         }
     }
 
+    /**
+     * Type directories whose stale temporaries have already been swept by this
+     * instance. Kept per instance rather than in the companion object because
+     * the sweep is idempotent, so a second instance repeating it once costs one
+     * bounded scan and nothing else — while the *safety* of that scan comes from
+     * [LOCK], not from this set. Mirrors iOS and Python.
+     */
+    private val swept = mutableSetOf<File>()
+
     override fun store(keyType: String, keyId: String, data: ByteArray) {
         val framed = ProtocolStateRecord.frame(keyType, keyId, data)
 
@@ -183,6 +199,7 @@ class AppContainerProtocolStateStorage(
                     "Failed to create protocol-state type directory"
                 )
             }
+            sweepTemporaries(directory)
 
             val atomicFile = AtomicFile(entryFile(keyType, keyId))
             var output: FileOutputStream? = null
@@ -251,6 +268,54 @@ class AppContainerProtocolStateStorage(
                 )
             }
             return raw.copyOfRange(header.valueOffset, raw.size)
+        }
+    }
+
+    /**
+     * Removes temporaries a previous process died before renaming.
+     *
+     * From API 30 `AtomicFile.startWrite()` writes `<name>.new` and
+     * `finishWrite()` renames it into place, so a crash in between orphans that
+     * file. `AtomicFile` reclaims a stale `.new` only when something opens *that
+     * key* again — and for a write that was the entry's *first*, there is no
+     * base file, so [enumerateKeys] never lists the key, nothing ever loads or
+     * deletes it, and the orphan survives for the life of the install inside a
+     * container the application cannot reasonably be asked to clean itself.
+     *
+     * A `.new` is never the authoritative copy — `AtomicFile.openRead` discards
+     * it — so unlinking one is always safe with respect to *content*. It is safe
+     * with respect to *concurrency* because the lock is process-wide: `store`
+     * holds it across `startWrite`/`finishWrite`, so no temporary any writer in
+     * this process is using can be visible here. That is the entire safety
+     * argument, and it is the same one the iOS and Python sweeps rest on.
+     *
+     * `.bak` is deliberately left alone: below API 30 `startWrite` renames the
+     * base to `.bak` first, so a lone `.bak` is the *good* copy — which is why
+     * [readHeader] prefers it.
+     *
+     * Runs once per type directory per instance — the caller is the first store
+     * into that category, which keeps it off the restore path — and is best
+     * effort.
+     */
+    private fun sweepTemporaries(directory: File) {
+        if (!swept.add(directory)) {
+            return
+        }
+        val names = directory.list() ?: return
+        var examined = 0
+        for (name in names) {
+            if (examined >= ProtocolStateRecord.MAX_SWEEP_ENTRIES) {
+                break
+            }
+            examined++
+            if (!name.startsWith("k_") || !name.endsWith(".new")) {
+                continue
+            }
+            try {
+                File(directory, name).delete()
+            } catch (_: Exception) {
+                // Losing the race with another process's rename costs nothing.
+            }
         }
     }
 

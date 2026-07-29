@@ -315,6 +315,41 @@ class ProtocolStateStorageTest {
     }
 
     /**
+     * From API 30 `AtomicFile.startWrite()` writes `<name>.new` and renames it
+     * into place, so a crash in between orphans that file. `AtomicFile`
+     * reclaims a stale `.new` only when something opens *that key* again — and
+     * for a crash during an entry's first write there is no base file, so
+     * enumeration never lists the key, nothing ever loads or deletes it, and
+     * the orphan survives for the life of the install. The iOS and Python
+     * providers sweep for exactly this.
+     */
+    @Test
+    fun storeSweepsOrphanedWriteTemporaries() {
+        val account = namespace("temporary-sweep")
+        val storage = AppContainerProtocolStateStorage(context, account)
+        storage.store("outbox", "message-1", byteArrayOf(1))
+
+        val directory = entryFile(account, "outbox", "message-1").parentFile!!
+        val orphan = File(directory, "k_deadbeef.new")
+        orphan.writeBytes(byteArrayOf(9, 9, 9))
+        // Below API 30 `startWrite` renames the base to `.bak` first, so a lone
+        // `.bak` is the *good* copy — `readHeader` prefers it and the sweep
+        // must not touch it.
+        val backup = File(directory, "k_cafebabe.bak")
+        backup.writeBytes(byteArrayOf(7, 7, 7))
+
+        // A fresh instance: the sweep runs once per type directory per
+        // provider, and the bridge builds one on every initializeMls.
+        val second = AppContainerProtocolStateStorage(context, account)
+        second.store("outbox", "message-2", byteArrayOf(2))
+
+        assertFalse("an orphaned .new must not survive the sweep", orphan.exists())
+        assertTrue("a lone .bak is the authoritative copy", backup.exists())
+        assertEquals(listOf(1), loadedBytes(second, "outbox", "message-1"))
+        assertEquals(listOf(2), loadedBytes(second, "outbox", "message-2"))
+    }
+
+    /**
      * A digest names exactly one record, so two names for one key id can only
      * come from an `AtomicFile` twin or a copy planted in the container.
      * Restore must not walk the id twice because of it.
