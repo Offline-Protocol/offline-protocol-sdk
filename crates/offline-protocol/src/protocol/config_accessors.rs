@@ -78,17 +78,15 @@ impl OfflineProtocol {
     /// Updates the ACK configuration at runtime.
     ///
     /// Note: This affects new ACK registrations; existing pending ACKs keep their original timeout.
+    /// Validated the same way [`Self::update_retry_config`] is — by building
+    /// the candidate configuration and running the real validator — rather than
+    /// by repeating its checks inline. Hand-rolled copies drift: a constraint
+    /// added to `ProtocolConfig::validate` for a new `AckConfig` field would be
+    /// enforced at construction and silently skipped on the runtime-update path.
     pub fn update_ack_config(&mut self, config: AckConfig) -> crate::Result<()> {
-        if config.default_timeout_ms == 0 {
-            return Err(crate::Error::InvalidConfiguration(
-                "ack.default_timeout_ms must be greater than 0".to_string(),
-            ));
-        }
-        if config.max_pending_acks == 0 {
-            return Err(crate::Error::InvalidConfiguration(
-                "ack.max_pending_acks must be greater than 0".to_string(),
-            ));
-        }
+        let mut candidate = self.config.clone();
+        candidate.reliability.ack = config.clone();
+        candidate.validate()?;
         self.ack_manager = AckManager::with_config(config.clone());
         self.config.reliability.ack = config;
         Ok(())
