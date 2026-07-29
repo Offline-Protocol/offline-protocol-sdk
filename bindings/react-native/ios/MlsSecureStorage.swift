@@ -22,6 +22,13 @@ final class MlsSecureStorage: MlsStorageProvider {
     private let accessGroup: String?
     private let lock = NSLock()
 
+    /// Serialises legacy-store adoption across *every* instance in the process.
+    ///
+    /// Deliberately not the per-instance `lock` above: two accounts adopting
+    /// concurrently are two `MlsSecureStorage` objects, so an instance lock
+    /// cannot order them by construction. See `resolveLegacyAdoption`.
+    private static let adoptionLock = NSLock()
+
     /// Outcome of the one-time legacy-store adoption, for the caller to
     /// surface. `.conflict` in particular must not pass silently: this account
     /// is starting from a fresh identity.
@@ -117,10 +124,33 @@ final class MlsSecureStorage: MlsStorageProvider {
     /// silently would leave the store looking unclaimed to the next account,
     /// which would then adopt the same identity. See
     /// `LegacyStoreAdoption.confirmClaim`.
+    ///
+    /// The whole probe → claim → read-back sequence runs under `adoptionLock`,
+    /// because reading it back is not on its own enough to make inheritance
+    /// exclusive. The read back closes a write that silently failed, and a
+    /// second account claiming between our probe and our write. It does not
+    /// close two accounts interleaving like this:
+    ///
+    ///     A.readLegacyClaim() -> nil    B.readLegacyClaim() -> nil
+    ///     A.store(nsA)
+    ///     A.readLegacyClaim() -> nsA  => adopt
+    ///                                   B.store(nsB)
+    ///                                   B.readLegacyClaim() -> nsB  => adopt
+    ///
+    /// Both adopt, both promote the same MLS signing identity, and each ends up
+    /// holding the other's sessions and group state — the outcome the claim
+    /// exists to prevent, arriving silently. The invariant is "at most one
+    /// account holds a verified claim", and an unsynchronised read-modify-write
+    /// does not provide it. The lock is `static` for the same reason: two
+    /// accounts on one device are two instances, so the per-instance `lock`
+    /// cannot order them.
     private func resolveLegacyAdoption(
         namespace: String,
         legacy: String
     ) -> LegacyStoreAdoption.Decision {
+        Self.adoptionLock.lock()
+        defer { Self.adoptionLock.unlock() }
+
         let decision = LegacyStoreAdoption.decide(
             existingClaim: readLegacyClaim(from: legacy),
             namespace: namespace

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import threading
 from unittest.mock import MagicMock, patch
 
 import keyring.errors
 import pytest
 
+from offline_protocol_sdk import legacy_store_adoption
 from offline_protocol_sdk import secure_storage as secure_storage_module
 from offline_protocol_sdk.secure_storage import SecureStorage
 
@@ -371,3 +373,123 @@ class TestLegacyStoreAdoption:
         assert not any(
             "account namespace" in record.message for record in caplog.records
         ), caplog.text
+
+    def test_two_accounts_adopting_concurrently_cannot_both_win(
+        self, fake_keyring: FakeKeyring
+    ) -> None:
+        # Reading the claim back is not on its own enough to make inheritance
+        # exclusive. It closes a write that silently failed, and a second
+        # account claiming between our probe and our write. It does not close
+        # two accounts interleaving like this:
+        #
+        #     A.probe -> None          B.probe -> None
+        #     A.write(ALICE)
+        #     A.read back -> ALICE  => adopt
+        #                              B.write(BOB)
+        #                              B.read back -> BOB  => adopt
+        #
+        # Both adopt, both promote the same MLS signing identity, and each ends
+        # up holding the other's sessions and group state — silently. The
+        # invariant is "at most one account holds a verified claim", which an
+        # unsynchronised read-modify-write does not provide.
+        #
+        # The barrier below is what forces that interleaving: each provider
+        # blocks *after* its probe has read, and before it can write, until the
+        # other has also probed. It has to sit after the read rather than before
+        # it — the whole probe/write/read-back sequence is in-memory dict work
+        # that CPython runs inside one GIL slice, so releasing both threads
+        # before the probe just lets the first finish before the second starts,
+        # and the race never reproduces.
+        #
+        # Serialised, the second provider never reaches its probe while the
+        # first holds the lock, so the barrier times out and the sequences stay
+        # whole — which is the assertion. Unserialised, both probe an unclaimed
+        # store and both adopt.
+        fake_keyring.seed(
+            secure_storage_module._LEGACY_SERVICE, "identity", "key_pair", b"old-key"
+        )
+        claim_key = (
+            f"{legacy_store_adoption.CLAIM_KEY_TYPE}:"
+            f"{legacy_store_adoption.CLAIM_KEY_ID}"
+        )
+
+        barrier = threading.Barrier(2, timeout=1.0)
+        arrived: set[str] = set()
+        journal: list[tuple[str, str]] = []
+        journal_lock = threading.Lock()
+
+        real_get = fake_keyring.get_password
+        real_set = fake_keyring.set_password
+
+        def get_password(service: str, key: str) -> str | None:
+            if key != claim_key:
+                return real_get(service, key)
+            with journal_lock:
+                journal.append((threading.current_thread().name, "read"))
+                first = threading.current_thread().name not in arrived
+                arrived.add(threading.current_thread().name)
+            result = real_get(service, key)
+            if first:
+                # Hold the probe open until the other account has also probed,
+                # so an unserialised implementation is guaranteed to see two
+                # "unclaimed" answers rather than winning a scheduling race.
+                try:
+                    barrier.wait()
+                except threading.BrokenBarrierError:
+                    pass
+            return result
+
+        def set_password(service: str, key: str, value: str) -> None:
+            if key == claim_key:
+                with journal_lock:
+                    journal.append((threading.current_thread().name, "write"))
+            real_set(service, key, value)
+
+        fake_keyring.get_password = get_password
+        fake_keyring.set_password = set_password
+
+        stores: dict[str, SecureStorage] = {}
+
+        def build(namespace: str) -> None:
+            stores[namespace] = SecureStorage(namespace=namespace)
+
+        threads = [
+            threading.Thread(target=build, args=(namespace,), name=name)
+            for name, namespace in (("alice", ALICE), ("bob", BOB))
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            assert not thread.is_alive(), "adoption deadlocked"
+
+        adopted = [
+            namespace
+            for namespace, store in stores.items()
+            if store.legacy_adoption.allows_read_through
+        ]
+        assert len(adopted) == 1, (
+            f"exactly one account may inherit the legacy store, got {adopted}; "
+            f"claim journal: {journal}"
+        )
+
+        # The loser must be told, not silently rotated into a fresh identity.
+        loser = next(
+            store
+            for namespace, store in stores.items()
+            if namespace not in adopted
+        )
+        assert loser.legacy_adoption.kind == "conflict"
+
+        # And only the winner reads through to the legacy key material.
+        winner = stores[adopted[0]]
+        assert winner.load("identity", "key_pair") == list(b"old-key")
+        assert loser.load("identity", "key_pair") is None
+
+        # No interleaving: one account's whole probe/write/read-back sequence
+        # completes before the other's begins.
+        owners = [name for name, _ in journal]
+        assert owners == sorted(owners, key=owners.index), (
+            f"claim sequences interleaved, so the lock is not held across "
+            f"probe -> write -> read back: {journal}"
+        )

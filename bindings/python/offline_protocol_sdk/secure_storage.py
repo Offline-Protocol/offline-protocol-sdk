@@ -31,6 +31,14 @@ _LEGACY_SERVICE = "offline-protocol-mls"
 # Prefix for index entries that track key IDs per key_type
 _INDEX_PREFIX = "index:"
 
+#: Serialises legacy-store adoption across *every* provider in the process.
+#:
+#: Deliberately module-level rather than the per-instance ``self._lock``: two
+#: accounts adopting concurrently are two ``SecureStorage`` objects, so an
+#: instance lock cannot order them by construction. See
+#: :meth:`SecureStorage._resolve_legacy_adoption`.
+_ADOPTION_LOCK = threading.Lock()
+
 
 class SecureStorage(MlsStorageProvider):
     """MlsStorageProvider backed by platform-native credential storage.
@@ -180,9 +188,34 @@ class SecureStorage(MlsStorageProvider):
 
     def _resolve_legacy_adoption(self, namespace: str):
         """Resolve — and, when the legacy store is unclaimed, record — this
-        account's right to inherit it."""
+        account's right to inherit it.
+
+        The whole probe → claim → read-back sequence runs under
+        ``_ADOPTION_LOCK``, because reading it back is not on its own enough to
+        make inheritance exclusive. The read back closes a write that silently
+        failed, and a second account claiming between our probe and our write.
+        It does not close two accounts interleaving like this::
+
+            A._read_claim() -> None     B._read_claim() -> None
+            A._store(nsA)
+            A._read_claim() -> nsA  => adopt
+                                        B._store(nsB)
+                                        B._read_claim() -> nsB  => adopt
+
+        Both adopt, both promote the same MLS signing identity, and each ends
+        up holding the other's sessions and group state — the outcome the claim
+        exists to prevent, arriving silently. The invariant is "at most one
+        account holds a verified claim", and an unsynchronised
+        read-modify-write does not provide it. The lock is module-level for the
+        same reason: two accounts on one device are two providers, so the
+        per-instance ``self._lock`` cannot order them.
+        """
 
         assert self._legacy_service is not None
+        with _ADOPTION_LOCK:
+            return self._resolve_legacy_adoption_locked(namespace)
+
+    def _resolve_legacy_adoption_locked(self, namespace: str):
         decision = legacy_store_adoption.decide(self._read_claim(), namespace)
 
         if decision.kind != "adopt":

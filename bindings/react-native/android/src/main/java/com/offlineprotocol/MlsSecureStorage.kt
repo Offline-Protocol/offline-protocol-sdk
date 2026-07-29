@@ -170,10 +170,37 @@ class MlsSecureStorage(
      * silently would leave the store looking unclaimed to the next account,
      * which would then adopt the same identity. See
      * [LegacyStoreAdoption.confirmClaim].
+     *
+     * The whole probe → claim → read-back sequence runs under [LOCK], because
+     * reading it back is not on its own enough to make inheritance exclusive.
+     * The read back closes a write that silently failed, and a second account
+     * claiming between our probe and our write. It does not close two accounts
+     * interleaving like this:
+     *
+     *     A.readClaim() -> null        B.readClaim() -> null
+     *     A.store(nsA)
+     *     A.readClaim() -> nsA  => adopt
+     *                              B.store(nsB)
+     *                              B.readClaim() -> nsB  => adopt
+     *
+     * Both adopt, both promote the same MLS signing identity, and each ends up
+     * holding the other's sessions and group state — which is the outcome the
+     * claim exists to prevent, arriving silently. The invariant is "at most one
+     * account holds a verified claim", and an unsynchronised read-modify-write
+     * does not provide it. A process-wide lock does: two accounts on one device
+     * are two objects in one process, and there is no cross-process case for a
+     * single application's credential store.
      */
     private fun resolveLegacyAdoption(): LegacyStoreAdoption.Decision {
         val legacy = legacyPreferences ?: return LegacyStoreAdoption.Decision.None
+        synchronized(LOCK) {
+            return resolveLegacyAdoptionLocked(legacy)
+        }
+    }
 
+    private fun resolveLegacyAdoptionLocked(
+        legacy: SharedPreferences
+    ): LegacyStoreAdoption.Decision {
         val decision = LegacyStoreAdoption.decide(readClaim(legacy), namespace)
         if (decision !is LegacyStoreAdoption.Decision.Adopt) {
             if (decision is LegacyStoreAdoption.Decision.Conflict) {
