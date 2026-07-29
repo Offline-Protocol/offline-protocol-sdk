@@ -26596,6 +26596,120 @@ fn touches_restoring(padded: &'static str, padding: usize) -> usize {
     touches
 }
 
+/// An [`MlsStorage`] that pads the TOFU listing with synthetic ids and counts
+/// the loads a restore then makes against that category.
+///
+/// TOFU pins are the one restored category that never left the credential
+/// store, so the protocol-state `CountingStorage` above cannot observe them.
+struct CountingSecureStorage {
+    inner: crate::mls::InMemoryStorage,
+    padding: usize,
+    loads: Mutex<usize>,
+}
+
+impl MlsStorage for CountingSecureStorage {
+    fn store(
+        &self,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+        if key_type == storage_keys::TOFU_KEYS {
+            *self.loads.lock().unwrap() += 1;
+        }
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.inner.delete(key_type, key_id)
+    }
+
+    fn list_keys(
+        &self,
+        key_type: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        let mut keys = self.inner.list_keys(key_type)?;
+        if key_type == storage_keys::TOFU_KEYS {
+            // Valid user ids, so the restore's own `UserId::new` gate does not
+            // short-circuit the walk before it reaches a load.
+            keys.extend((0..self.padding).map(|index| format!("padded-peer-{index:06}")));
+        }
+        Ok(keys)
+    }
+}
+
+#[test]
+fn test_tofu_restore_stops_at_the_category_bound_without_pruning() {
+    // TOFU was the last category walk with no bound: it read whatever
+    // `list_keys` handed back, loading every entry into memory before applying
+    // `MAX_TOFU_PEERS`. Living in the credential store rather than the app
+    // container is a weaker threat model, not an absent one, and the bound is
+    // about work on the boot path either way.
+    //
+    // The tail is deliberately *ignored*, never pruned. The two cache restores
+    // delete their overflow because a dropped key package costs a re-exchange;
+    // a TOFU entry is a pin, and deleting one silently re-arms
+    // trust-on-first-use for that peer.
+    use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
+
+    let padding = 4 * MAX_RESTORE_KEYS_PER_CATEGORY;
+    let counting = Arc::new(CountingSecureStorage {
+        inner: crate::mls::InMemoryStorage::new(),
+        padding,
+        loads: Mutex::new(0),
+    });
+
+    // One real pin, so the walk has something legitimate to recover too.
+    let entry = serde_json::to_vec(&TofuEntry {
+        public_key: b"bob-key".to_vec(),
+        last_seen_ms: 1,
+    })
+    .unwrap();
+    counting
+        .inner
+        .store(storage_keys::TOFU_KEYS, "bob", &entry)
+        .unwrap();
+
+    let secure_handle: Arc<dyn MlsStorage> = counting.clone();
+    let state_backend: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
+        storage: state_backend,
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let loads = *counting.loads.lock().unwrap();
+    assert!(
+        loads <= MAX_RESTORE_KEYS_PER_CATEGORY,
+        "TOFU restore loaded {loads} entries, over the {MAX_RESTORE_KEYS_PER_CATEGORY} bound"
+    );
+    assert!(loads > 0, "TOFU restore must still walk the bounded prefix");
+
+    // Nothing was deleted: an over-cap pin is stranded, never unpinned.
+    assert!(
+        counting
+            .inner
+            .load(storage_keys::TOFU_KEYS, "bob")
+            .unwrap()
+            .is_some(),
+        "a bounded TOFU walk must not prune the store it could not finish reading"
+    );
+}
+
 #[test]
 fn test_cache_restores_stop_at_the_category_bound() {
     // Peer key packages and capabilities are the two restores that *prune*
