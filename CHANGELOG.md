@@ -113,6 +113,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **The built-in Android provider's key enumeration counts a record once, not twice.** An entry and its `AtomicFile` `.bak` twin are one record — the header read resolves both to the same target — but each name incremented the examined counter, so a directory of twinned records spent two of the bound on every one of them and halved the effective ceiling on exactly the tampered or crash-interrupted directory the bound exists for.
 
+- **An inviter-attested rich capability no longer overwrites what a peer advertised for itself.** Attestation merges into the peer's existing capability record, but the loader behind that merge folded "there is no record" and "this read failed" into the same answer, so one transient provider failure wrote an attested-only record over the peer's own `env_versions` and `rich_versions` — the authoritative ones. The damage outlived the session: the next launch restored a record with no envelope capability, so encrypted DMs to that peer dropped back to the legacy JSON envelope (~2.7× larger, more fragments) until a live key-package exchange rebuilt it. Reachable only for a peer not already known rich-capable, which is exactly the peer attestation exists for. The loader now gives the same three-way answer every other protocol-state read does, and a record that cannot be read this session skips the write entirely — the in-memory set still opens the group seal gate for the run, and the next Add commit re-attests.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed

@@ -2525,6 +2525,123 @@ fn attested_rich_persist_truncates_and_merges_with_direct_record() {
 }
 
 #[test]
+fn attested_rich_does_not_clobber_a_record_it_could_not_read() {
+    // An attestation merges into the peer's existing record, so it has to be
+    // able to *read* that record first. A provider failure that reads as "no
+    // record" would put an attested-only record over the versions the peer
+    // advertised for itself — and those are the authoritative ones. The damage
+    // outlives the session: on the next launch `restore_peer_capabilities`
+    // finds no `env_versions`, so encrypted DMs to that peer drop back to the
+    // legacy JSON envelope (~2.7x larger) until a live key-package exchange.
+    //
+    // Only reachable for a peer we do *not* already know is rich-capable —
+    // `record_attested_rich` returns early for those — so the fixture gives the
+    // peer a compact-envelope capability and no rich one.
+    struct FailingCapabilityLoadStorage {
+        inner: Arc<InMemoryStorage>,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl crate::ProtocolStateStorage for FailingCapabilityLoadStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .store(key_type, key_id, data)
+                .map_err(map_test_storage_error)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+            if key_type == storage_keys::PEER_CAPABILITIES
+                && self.fail.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                // Transient: the record is intact, this read is not.
+                return Err(crate::ProtocolStateError::LoadFailed(
+                    "forced capability-record read failure".to_string(),
+                ));
+            }
+            self.inner
+                .load(key_type, key_id)
+                .map_err(map_test_storage_error)
+        }
+
+        fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .delete(key_type, key_id)
+                .map_err(map_test_storage_error)
+        }
+
+        fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+            self.inner
+                .list_keys(key_type)
+                .map_err(map_test_storage_error)
+        }
+    }
+
+    let backing = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(FailingCapabilityLoadStorage {
+        inner: backing.clone(),
+        fail: std::sync::atomic::AtomicBool::new(false),
+    });
+
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.secure_storage = Some(backing.clone());
+    protocol.protocol_state_storage = Some(state.clone());
+    protocol.restore_or_init_state_record_key();
+
+    feed_key_package_with_caps(
+        &mut protocol,
+        "peer",
+        vec![MLS_ENVELOPE_COMPACT_V1],
+        Vec::new(),
+    );
+    assert!(protocol.peer_compact_envelope.contains("peer"));
+    assert!(!protocol.peer_rich_payload.contains("peer"));
+
+    // The attestation lands while the peer's record cannot be read.
+    state.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
+    state.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // In memory the attestation still opens the group gate for this run: it is
+    // the durable record that must survive untouched.
+    assert!(protocol.peer_rich_attested.contains("peer"));
+
+    let data = backing
+        .load(storage_keys::PEER_CAPABILITIES, "peer")
+        .unwrap()
+        .expect("the directly-advertised record must still be there");
+    let caps: PeerCapabilities = serde_json::from_slice(&data).unwrap();
+    assert!(
+        caps.env_versions.contains(&MLS_ENVELOPE_COMPACT_V1),
+        "an unreadable record must not be replaced by an attested-only one"
+    );
+
+    // The real consequence: a restart still knows the peer takes the compact
+    // envelope.
+    let mut restarted = OfflineProtocol::new({
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config
+    })
+    .unwrap();
+    restarted.initialize_mls_for_test(backing).unwrap();
+    assert!(
+        restarted.peer_compact_envelope.contains("peer"),
+        "the peer's advertised envelope capability must survive the failed attestation"
+    );
+}
+
+#[test]
 fn attested_rich_flood_eviction_clears_at_cap() {
     // Bounded like the direct sets: keyed by ids from (signed but
     // TOFU-trusted) group control frames, so reset at capacity rather than

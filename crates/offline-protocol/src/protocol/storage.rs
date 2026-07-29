@@ -1477,14 +1477,39 @@ impl OfflineProtocol {
         }
     }
 
-    /// Loads the persisted capability record for a peer, if any. Best-effort:
-    /// storage or parse failures read as "no record".
-    fn load_peer_capabilities(&self, peer_id: &str) -> Option<PeerCapabilities> {
-        let storage = self.protocol_state_storage.as_ref()?;
-        let data = self
-            .read_state_record(storage.as_ref(), storage_keys::PEER_CAPABILITIES, peer_id)
-            .ok()??;
-        serde_json::from_slice::<PeerCapabilities>(&data).ok()
+    /// Loads the persisted capability record for a peer.
+    ///
+    /// Three answers, not two, for the same reason [`StateRecord`] has three.
+    /// `Ok(None)` is "there is nothing here to merge with"; `Err(())` is "a
+    /// record may well be here and could not be read *this session*". The only
+    /// caller merges into whatever this returns and then writes the result
+    /// back, so collapsing the two would let one transient provider failure
+    /// write an attested-only record over a peer's *directly advertised*
+    /// capabilities — silently downgrading its MLS envelope and dropping its
+    /// rich extras until the next live key-package exchange.
+    ///
+    /// A record that is present but will not deserialize is `Ok(None)`:
+    /// nothing can be merged with bytes that do not parse, and the write that
+    /// follows is the recovery. Same for one the store itself destroyed.
+    fn load_peer_capabilities(
+        &self,
+        peer_id: &str,
+    ) -> std::result::Result<Option<PeerCapabilities>, ()> {
+        let Some(storage) = self.protocol_state_storage.as_ref() else {
+            return Ok(None);
+        };
+        match self.read_state_record_detailed(
+            storage.as_ref(),
+            storage_keys::PEER_CAPABILITIES,
+            peer_id,
+        ) {
+            Ok(StateRecord::Present(data)) => Ok(serde_json::from_slice(&data).ok()),
+            // Never written, or examined and destroyed: nothing to preserve.
+            Ok(StateRecord::Missing | StateRecord::Unreadable) => Ok(None),
+            // Still on disk and probably intact — merging into a default and
+            // persisting that would destroy it.
+            Ok(StateRecord::Unavailable) | Err(_) => Err(()),
+        }
     }
 
     /// Records an inviter-attested rich-payload capability for a peer we
@@ -1493,10 +1518,11 @@ impl OfflineProtocol {
     /// `handle_key_package_message`: gated by our own kill switch and
     /// bounded like `key_package_sent_to`. Persistence stores the raw
     /// attested versions merged into the peer's existing capability record
-    /// (never clobbering directly-advertised fields), matching the
-    /// "switches gate use, not knowledge" rule. A later direct key-package
-    /// exchange overwrites the whole record and evicts the in-memory entry
-    /// — direct knowledge is always authoritative.
+    /// (never clobbering directly-advertised fields — which is why a record
+    /// that cannot be *read* this session skips the write rather than merging
+    /// into a default), matching the "switches gate use, not knowledge" rule.
+    /// A later direct key-package exchange overwrites the whole record and
+    /// evicts the in-memory entry — direct knowledge is always authoritative.
     pub(crate) fn record_attested_rich(&mut self, peer_id: &str, versions: &[u8]) {
         if peer_id == self.config.user_id || !versions.contains(&RICH_PAYLOAD_V1) {
             return;
@@ -1514,7 +1540,21 @@ impl OfflineProtocol {
             }
             self.peer_rich_attested.insert(peer_id.to_string());
         }
-        let mut caps = self.load_peer_capabilities(peer_id).unwrap_or_default();
+        let Ok(existing) = self.load_peer_capabilities(peer_id) else {
+            // The record could not be read this session, so a write now would
+            // put an attested-only record over whatever is on disk — including
+            // the versions this peer advertised for itself, which are the
+            // authoritative ones. An attestation is advisory and the in-memory
+            // set above already opens the group gate for this run; the next Add
+            // commit re-attests. Skipping the write is strictly cheaper than
+            // losing a peer's real capabilities to a transient read.
+            warn!(
+                peer_id = %peer_id,
+                "Peer capability record unreadable this session; not persisting the attested capability"
+            );
+            return;
+        };
+        let mut caps = existing.unwrap_or_default();
         caps.attested_rich_versions = versions
             .iter()
             .copied()
