@@ -334,6 +334,13 @@ class AppContainerProtocolStateStorage(
                 // filesystem already handed us.
                 val names = directory.list() ?: return Enumeration(emptyList(), 0)
                 val keys = LinkedHashSet<String>()
+                // Base names already counted. An entry and its `AtomicFile`
+                // `.bak` twin are one record — `readHeader` resolves both to the
+                // same target — so counting them separately would spend two of
+                // `limit` on one record and halve the effective bound in the
+                // worst case. Bounded by `limit` itself: an insert only happens
+                // on the path that increments `examined`.
+                val seen = HashSet<String>()
                 var examined = 0
                 for (name in names) {
                     if (examined >= limit) {
@@ -342,9 +349,12 @@ class AppContainerProtocolStateStorage(
                     if (!name.startsWith("k_") || name.endsWith(".new")) {
                         continue
                     }
+                    val base = name.removeSuffix(".bak")
+                    if (!seen.add(base)) {
+                        continue
+                    }
                     examined++
-                    val header = readHeader(File(directory, name.removeSuffix(".bak")))
-                        ?: continue
+                    val header = readHeader(File(directory, base)) ?: continue
                     if (header.keyType == keyType) {
                         keys.add(header.keyId)
                     }

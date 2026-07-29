@@ -322,4 +322,35 @@ class ProtocolStateStorageTest {
         assertEquals(listOf("message-1"), storage.listKeys("outbox"))
         assertEquals(listOf(1, 2, 3), loadedBytes(storage, "outbox", "message-1"))
     }
+
+    /**
+     * An entry and its `.bak` twin are one record — [readHeader] resolves both
+     * to the same target — so they must cost one examination, not two.
+     * Counting them separately halves the effective bound on exactly the
+     * directory the bound exists for.
+     */
+    @Test
+    fun anAtomicFileTwinCostsOneExaminationNotTwo() {
+        val account = namespace("twin-accounting")
+        val storage = AppContainerProtocolStateStorage(context, account)
+        storage.store("outbox", "message-1", byteArrayOf(1, 2, 3))
+        storage.store("outbox", "message-2", byteArrayOf(4, 5, 6))
+
+        for (keyId in listOf("message-1", "message-2")) {
+            val base = entryFile(account, "outbox", keyId)
+            base.copyTo(File("${base.path}.bak"), overwrite = true)
+        }
+
+        // A limit well above the directory size, so what is measured is the
+        // accounting rather than where the walk happened to stop — `list()`
+        // order is filesystem-defined and must not decide the outcome.
+        val enumeration = storage.enumerateKeys("outbox", 64)
+
+        assertEquals(
+            "two records with twins must examine two entries, not four",
+            2,
+            enumeration.examined
+        )
+        assertEquals(listOf("message-1", "message-2"), enumeration.keys)
+    }
 }

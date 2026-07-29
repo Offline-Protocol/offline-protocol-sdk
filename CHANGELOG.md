@@ -111,6 +111,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **The built-in Python provider creates its directories owner-only.** iOS and Android get container isolation from the OS; Python's container is whatever directory the application names, created at the process umask and so typically world-listable. Record *files* were already owner-only (`mkstemp` creates them `0600` and `os.replace` preserves that), so contents were never exposed — but a listable directory leaks the entry count and, since the filename digest is unsalted, confirms any guessable peer or message id. Directories are now created `0700` and an existing store is tightened on open, since `mkdir(mode=...)` is both masked by the umask and a no-op when the directory already exists.
 
+- **The built-in Android provider's key enumeration counts a record once, not twice.** An entry and its `AtomicFile` `.bak` twin are one record — the header read resolves both to the same target — but each name incremented the examined counter, so a directory of twinned records spent two of the bound on every one of them and halved the effective ceiling on exactly the tampered or crash-interrupted directory the bound exists for.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed
