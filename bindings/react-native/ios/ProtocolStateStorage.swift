@@ -285,12 +285,15 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     /// three built-in stores are meant to be one implementation in three
     /// languages.
     ///
-    /// Safe to unlink unconditionally: `store` holds the instance lock for the
-    /// whole write, so no temporary this instance is using can be visible here.
-    /// Runs once per type directory per process — the caller is the first store
-    /// into that category, which keeps it off the restore path — and is best
-    /// effort, since losing the race with another writer's rename costs
-    /// nothing.
+    /// Safe to unlink unconditionally *because the lock is process-wide*:
+    /// `store` holds it for the whole write, so no temporary any writer in this
+    /// process is using can be visible here. That is the entire safety argument,
+    /// and it is why the lock is `static` rather than per instance — the bridge
+    /// builds a fresh provider on every `initializeMls`, and an instance lock
+    /// cannot order two of them over one root. Runs once per type directory per
+    /// instance — the caller is the first store into that category, which keeps
+    /// it off the restore path — and is best effort, since losing the race with
+    /// another process's rename costs nothing.
     private func sweepTemporaries(in directory: URL) {
         if swept.contains(directory) {
             return

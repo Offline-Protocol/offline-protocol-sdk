@@ -142,7 +142,10 @@ fn record_requires_sealing(key_type: &str) -> bool {
 pub(crate) enum StateRecord {
     /// No record under this key.
     Missing,
-    /// A record existed, could not be returned, and has been deleted.
+    /// A record existed, could not be returned, and has been deleted — or,
+    /// when the reader was given a [`PruneBudget`] that has run out, left for a
+    /// later launch to delete. Nothing is ever recovered from it either way, so
+    /// callers treat the two identically; the budget only defers the unlink.
     Unreadable,
     /// A record exists but could not be read this session; it is still on disk.
     Unavailable,
@@ -349,6 +352,19 @@ impl PruneBudget {
     }
 }
 
+/// Claims one delete against an optional budget, allowing it unconditionally
+/// when the caller supplied none.
+///
+/// The `None` case is what the settlement-paired walks pass: a delete they
+/// cannot postpone without either settling an id a later launch restores or
+/// dropping one the application still holds. See [`MAX_RESTORE_PRUNE_DELETES`].
+fn claim_prune(budget: &mut Option<&mut PruneBudget>) -> bool {
+    match budget {
+        Some(budget) => budget.claim(),
+        None => true,
+    }
+}
+
 impl OfflineProtocol {
     // ========================================================================
     // PROTOCOL-STATE RECORD I/O (SEALING + SIZE POLICY CHOKEPOINT)
@@ -495,6 +511,33 @@ impl OfflineProtocol {
         key_type: &str,
         key_id: &str,
     ) -> ProtocolStateResult<StateRecord> {
+        self.read_state_record_detailed_budgeted(storage, key_type, key_id, None)
+    }
+
+    /// [`Self::read_state_record_detailed`], charging its own drop-deletes to
+    /// `budget` when one is supplied.
+    ///
+    /// This reader deletes what it cannot return, and on a restore walk that is
+    /// a durable delete like any other — the same synchronous provider round
+    /// trip, with the same directory flush, that
+    /// [`MAX_RESTORE_PRUNE_DELETES`] exists to bound. A walk whose records are
+    /// *all* unreadable (a regenerated record key makes every sealed record on
+    /// the install unopenable) would otherwise issue one per record with
+    /// nothing counting them.
+    ///
+    /// Only walks that owe the application nothing for a dropped record pass a
+    /// budget. The settlement-paired walks ([`Self::restore_outbox`],
+    /// [`Self::restore_pending_messages`]) deliberately pass `None`: postponing
+    /// their unlink would either settle an id whose record a later launch
+    /// restores and re-drives, or drop an entry while the app still holds an id
+    /// nothing resolves.
+    fn read_state_record_detailed_budgeted(
+        &self,
+        storage: &dyn ProtocolStateStorage,
+        key_type: &str,
+        key_id: &str,
+        mut budget: Option<&mut PruneBudget>,
+    ) -> ProtocolStateResult<StateRecord> {
         let data = match storage.load(key_type, key_id) {
             Ok(Some(data)) => data,
             Ok(None) => return Ok(StateRecord::Missing),
@@ -513,7 +556,9 @@ impl OfflineProtocol {
                     detail = %detail,
                     "Protocol state record reported corrupt by its store; dropping"
                 );
-                let _ = storage.delete(key_type, key_id);
+                if claim_prune(&mut budget) {
+                    let _ = storage.delete(key_type, key_id);
+                }
                 return Ok(StateRecord::Unreadable);
             }
             Err(e) => return Err(e),
@@ -538,7 +583,9 @@ impl OfflineProtocol {
                 limit,
                 "Dropping oversized protocol state record"
             );
-            let _ = storage.delete(key_type, key_id);
+            if claim_prune(&mut budget) {
+                let _ = storage.delete(key_type, key_id);
+            }
             return Ok(StateRecord::Unreadable);
         }
 
@@ -568,7 +615,9 @@ impl OfflineProtocol {
                     sealed = StateRecordCipher::looks_sealed(&data),
                     "Protocol state record failed to open; deleting"
                 );
-                let _ = storage.delete(key_type, key_id);
+                if claim_prune(&mut budget) {
+                    let _ = storage.delete(key_type, key_id);
+                }
                 Ok(StateRecord::Unreadable)
             }
         }
@@ -1470,9 +1519,35 @@ impl OfflineProtocol {
     }
 
     /// Loads a persisted key package for a peer (if present and not expired).
+    ///
+    /// Unbudgeted, for the runtime callers: one expired record dropped while
+    /// resolving a single peer is one provider round trip, not a storm.
     pub(crate) fn load_peer_key_package_from_storage(
         &self,
         peer_id: &str,
+    ) -> Option<ReceivedKeyPackage> {
+        self.load_peer_key_package_bounded(peer_id, None)
+    }
+
+    /// Loads a persisted key package, charging the drop of an expired record to
+    /// `budget` when one is supplied.
+    ///
+    /// Restore supplies one. The expiry drop is a durable delete like any other
+    /// on that path — a synchronous provider round trip that flushes the
+    /// containing directory on all three built-in stores — and it is the
+    /// *common* one there: an over-cap key-package store is over-cap because it
+    /// is old, and [`MAX_KEY_PACKAGE_LIFETIME_MS`] is 30 days, so most of what
+    /// a restore walk finds in such a store has expired. Left unbudgeted it
+    /// also bypassed the over-cap prune entirely, because an expired record
+    /// never enters `pending_key_packages` and so never makes the cap bind.
+    ///
+    /// A record the budget spares is still not returned — it has expired either
+    /// way — it is simply left on disk for a later launch to drop, which is the
+    /// same idempotent-and-resumable property the rest of the prune relies on.
+    fn load_peer_key_package_bounded(
+        &self,
+        peer_id: &str,
+        budget: Option<&mut PruneBudget>,
     ) -> Option<ReceivedKeyPackage> {
         let storage = self.protocol_state_storage.as_ref()?;
         let data = self
@@ -1481,7 +1556,13 @@ impl OfflineProtocol {
         let pkg: ReceivedKeyPackage = serde_json::from_slice(&data).ok()?;
         let now_ms = Utc::now().timestamp_millis() as u64;
         if now_ms >= pkg.local_expires_at_ms {
-            let _ = storage.delete(storage_keys::PEER_KEY_PACKAGES, peer_id);
+            let may_delete = match budget {
+                Some(budget) => budget.claim(),
+                None => true,
+            };
+            if may_delete {
+                let _ = storage.delete(storage_keys::PEER_KEY_PACKAGES, peer_id);
+            }
             return None;
         }
         Some(pkg)
@@ -1528,12 +1609,20 @@ impl OfflineProtocol {
         let session_set: std::collections::HashSet<_> = sessions.into_iter().collect();
 
         let mut budget = PruneBudget::default();
+        let mut over_cap_pruned = 0usize;
         // Bounded like every other category walk, and the prune inside it is
         // bounded again by `MAX_RESTORE_PRUNE_DELETES` — the walk bounds reads,
         // the budget bounds deletes, and a delete is the far more expensive of
         // the two (a synchronous provider round trip that flushes a directory
         // on all three built-in stores). Both tails drain over successive
         // launches rather than stranding.
+        //
+        // *Both* kinds of delete this walk issues share that budget: the
+        // over-cap prune below and the expiry drop inside
+        // `load_peer_key_package_bounded`. They are not alternatives — an
+        // expired record never enters the map, so it never makes the cap bind,
+        // which means an over-cap store full of expired records would otherwise
+        // route every one of its deletes past the budget.
         for peer_id in peer_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if session_set.contains(&peer_id) {
                 continue;
@@ -1555,18 +1644,29 @@ impl OfflineProtocol {
                     break;
                 }
                 self.delete_peer_key_package_from_storage(&peer_id);
+                over_cap_pruned += 1;
                 continue;
             }
-            if let Some(pkg) = self.load_peer_key_package_from_storage(&peer_id) {
+            if let Some(pkg) = self.load_peer_key_package_bounded(&peer_id, Some(&mut budget)) {
                 info!(peer_id = %peer_id, "Restored peer key package from storage");
                 self.pending_key_packages.insert(peer_id, pkg);
             }
         }
-        if budget.spent > 0 {
+        if over_cap_pruned > 0 {
             warn!(
                 cap = MAX_PENDING_KEY_PACKAGES,
-                pruned = budget.spent,
+                pruned = over_cap_pruned,
                 "Peer key package store exceeded the cap on restore; pruned overflow from durable storage"
+            );
+        }
+        // Routine, unlike the over-cap prune above: cached packages expire and
+        // nothing else collects them, so this is the ordinary way the store
+        // shrinks. Reported at debug so a normal launch stays quiet.
+        let expired_pruned = budget.spent.saturating_sub(over_cap_pruned);
+        if expired_pruned > 0 {
+            debug!(
+                pruned = expired_pruned,
+                "Dropped expired peer key packages from durable storage on restore"
             );
         }
         if budget.exhausted {
@@ -2517,22 +2617,34 @@ impl OfflineProtocol {
     /// Restores persisted media transfer descriptors on startup.
     ///
     /// Recovery rules mirror [`Self::restore_outbox`]:
-    /// - corrupted entries are dropped from storage and skipped;
+    /// - a record that will not open, or that the store itself calls corrupt,
+    ///   is dropped and skipped;
+    /// - so is one whose bytes are not a descriptor;
     /// - entries older than the outbox lifetime are dropped — the app has
     ///   long settled that message's fate, a resend signal would be noise;
     /// - the total is pruned to `MAX_MEDIA_DESCRIPTORS`, keeping the newest
     ///   by `queued_at` (overflow deleted from storage).
     ///
-    /// All three of those deletes share one [`MAX_RESTORE_PRUNE_DELETES`]
-    /// budget. A descriptor is advisory, so a record the budget spared is
-    /// simply re-walked and dropped on a later launch.
+    /// **All four** of those deletes share one [`MAX_RESTORE_PRUNE_DELETES`]
+    /// budget, including the first — which this walk does not issue itself, so
+    /// it is the one that went uncounted: it happens inside
+    /// [`Self::read_state_record_detailed`], which is why the budget is handed
+    /// to the reader rather than only claimed around the explicit calls below.
+    /// Descriptors are a sealed category, so a regenerated record key makes
+    /// *every* record on the install take that path at once.
+    ///
+    /// A descriptor is advisory, so a record the budget spared is simply
+    /// re-walked and dropped on a later launch.
     ///
     /// The survivors are parked in `restored_media_descriptors`; `start()`
     /// emits one `MediaResendRequired` each once the event pipeline is live,
     /// leaving entries parked until a same-`file_id` resend consumes them or
     /// the restore TTL prunes them.
     pub(crate) fn restore_media_descriptors(&mut self) -> Result<()> {
-        let Some(storage) = &self.protocol_state_storage else {
+        // Cloned rather than borrowed, like `restore_outbox`: the walk below
+        // reads through this handle while holding a mutable borrow of the
+        // prune budget and calling `&self` delete helpers.
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return Ok(());
         };
 
@@ -2543,12 +2655,14 @@ impl OfflineProtocol {
         let now = Utc::now();
 
         let mut restored: Vec<MediaTransferDescriptor> = Vec::new();
-        // Every delete below — corrupt, expired, over-cap — is budgeted
-        // together: a descriptor is purely advisory (the app re-initiates the
-        // transfer), so a record left on disk one launch longer costs nothing,
-        // while the device barrier each delete carries is the most expensive
-        // thing this walk can do. Skipped records are simply re-walked next
-        // launch and dropped then.
+        // Every delete this walk causes — unreadable, unparseable, expired,
+        // over-cap — is budgeted together: a descriptor is purely advisory (the
+        // app re-initiates the transfer), so a record left on disk one launch
+        // longer costs nothing, while the device barrier each delete carries is
+        // the most expensive thing this walk can do. Skipped records are simply
+        // re-walked next launch and dropped then. "Causes" rather than
+        // "issues": the first of the four happens inside the reader, which is
+        // why the budget is handed to it below.
         let mut budget = PruneBudget::default();
         // Bounded, but deliberately by the wide ceiling rather than a multiple
         // of `MAX_MEDIA_DESCRIPTORS`: that cap is applied here, on restore, and
@@ -2560,13 +2674,19 @@ impl OfflineProtocol {
         // transfer — so there is nothing to settle here; only the walk itself
         // needs a ceiling.
         for file_id in file_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
-            let loaded = self.protocol_state_storage.as_ref().and_then(|s| {
-                self.read_state_record(s.as_ref(), storage_keys::MEDIA_DESCRIPTORS, &file_id)
-                    .ok()
-                    .flatten()
-            });
-            let Some(data) = loaded else {
-                continue;
+            // The reader takes the budget because it is the reader that deletes
+            // a record it cannot return — absent, unreadable, and
+            // unreadable-this-session are all "nothing to park" here, so this
+            // walk only has to distinguish them from a record it can decode.
+            let data = match self.read_state_record_detailed_budgeted(
+                storage.as_ref(),
+                storage_keys::MEDIA_DESCRIPTORS,
+                &file_id,
+                Some(&mut budget),
+            ) {
+                Ok(StateRecord::Present(data)) => data,
+                Ok(StateRecord::Missing | StateRecord::Unreadable | StateRecord::Unavailable)
+                | Err(_) => continue,
             };
 
             let descriptor = match serde_json::from_slice::<MediaTransferDescriptor>(&data) {

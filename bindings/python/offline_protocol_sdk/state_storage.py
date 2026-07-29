@@ -385,12 +385,15 @@ class AppStateStorage(ProtocolStateStorageProvider):
         they accumulate for the life of the install, in a directory the
         application cannot reasonably be asked to clean itself.
 
-        Safe to unlink unconditionally: ``store`` holds the instance lock for
-        the whole write, so no temporary this instance is using can be visible
-        here. Runs once per type directory per process — the caller is the
-        first store into that category, which keeps it off the restore path
-        — and is best effort, since losing the race with another process's
-        rename costs nothing.
+        Safe to unlink unconditionally *because the lock is process-wide*:
+        ``store`` holds ``_STORE_LOCK`` for the whole write, so no temporary any
+        writer in this process is using can be visible here. That is the entire
+        safety argument, and it is why the lock is module-level rather than per
+        instance — an instance lock cannot order two providers over one root.
+        Runs once per type directory per instance — the caller is the first
+        store into that category, which keeps it off the restore path — and is
+        best effort, since losing the race with another process's rename costs
+        nothing.
         """
 
         if directory in self._swept:

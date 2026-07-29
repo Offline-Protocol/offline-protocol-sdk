@@ -15877,6 +15877,144 @@ fn test_restore_prune_is_bounded_per_launch_and_drains_over_launches() {
 }
 
 #[test]
+fn test_restore_key_package_expiry_prune_is_bounded_per_launch() {
+    // The sibling test above seeds packages that never expire, so every delete
+    // it observes takes the *over-cap* branch — the one that was budgeted. An
+    // over-cap key-package store is over-cap because it is old, and the cached
+    // lifetime is 30 days, so the records a real one holds have expired: they
+    // go down the expiry branch instead, which is a durable delete just the
+    // same.
+    //
+    // The two branches are also mutually exclusive, which is what made this
+    // sharp rather than merely inconsistent. An expired record never enters
+    // `pending_key_packages`, so the map never reaches the cap, so the budgeted
+    // branch is never reached at all — every delete in an all-expired store
+    // took the unbudgeted path, which is precisely the store the budget exists
+    // for.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let beyond_budget = 10;
+    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+
+    {
+        let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
+        writer.initialize_mls_for_test(storage.clone()).unwrap();
+        let pkg = ReceivedKeyPackage {
+            key_package_data: vec![0],
+            // Long expired. Well under the cap in count, so nothing here can
+            // reach the over-cap branch.
+            local_expires_at_ms: 1,
+        };
+        for i in 0..total {
+            // Zero-padded so the providers' sorted listing order is the same
+            // one this test reasons about.
+            writer.persist_peer_key_package(&format!("peer_{i:05}"), &pkg);
+        }
+    }
+
+    let remaining_after = |storage: &Arc<InMemoryStorage>| {
+        storage
+            .list_keys(storage_keys::PEER_KEY_PACKAGES)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        remaining_after(&storage),
+        total,
+        "precondition: durable store holds more expired records than one \
+         launch may drop"
+    );
+
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls_for_test(storage.clone()).unwrap();
+    assert!(
+        first.pending_key_packages.is_empty(),
+        "an expired package is never restored, budget or no budget"
+    );
+    assert_eq!(
+        remaining_after(&storage),
+        total - MAX_RESTORE_PRUNE_DELETES,
+        "one launch must drop exactly its budget of expired records, not all \
+         of them"
+    );
+
+    // Spared, not stranded: the drop is idempotent and resumable, exactly like
+    // the over-cap prune.
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls_for_test(storage.clone()).unwrap();
+    assert_eq!(
+        remaining_after(&storage),
+        0,
+        "the remainder is under the budget, so the second launch finishes"
+    );
+}
+
+#[test]
+fn test_restore_media_descriptor_drop_is_bounded_per_launch() {
+    // `restore_media_descriptors` budgets the three deletes it issues itself.
+    // It does not issue the fourth: a record that will not open is dropped
+    // *inside* `read_state_record_detailed`, which the walk reaches through
+    // `read_state_record` and which counted nothing.
+    //
+    // That is not the rare path it looks like. Media descriptors are a sealed
+    // category, so the moment the per-install record key is regenerated —
+    // `restore_or_init_state_record_key`'s wrong-length branch — every
+    // descriptor on the install fails to open at once and the whole category
+    // is dropped in a single launch, one device barrier at a time.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let beyond_budget = 10;
+    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+
+    // Mint the record key the way a first launch does, then write records that
+    // are *not* sealed under it. That is what a regenerated key leaves behind,
+    // without needing to corrupt the key entry itself.
+    {
+        let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
+        writer.initialize_mls_for_test(storage.clone()).unwrap();
+    }
+    for i in 0..total {
+        storage
+            .store(
+                storage_keys::MEDIA_DESCRIPTORS,
+                &format!("file_{i:05}"),
+                b"not sealed under this install's record key",
+            )
+            .unwrap();
+    }
+
+    let remaining_after = |storage: &Arc<InMemoryStorage>| {
+        storage
+            .list_keys(storage_keys::MEDIA_DESCRIPTORS)
+            .unwrap()
+            .len()
+    };
+    assert_eq!(remaining_after(&storage), total, "precondition");
+
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls_for_test(storage.clone()).unwrap();
+    assert!(
+        first.restored_media_descriptors.is_empty(),
+        "a record that will not open parks nothing, budget or no budget"
+    );
+    assert_eq!(
+        remaining_after(&storage),
+        total - MAX_RESTORE_PRUNE_DELETES,
+        "the reader's own drop must be charged to the walk's budget"
+    );
+
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls_for_test(storage.clone()).unwrap();
+    assert_eq!(
+        remaining_after(&storage),
+        0,
+        "the remainder is under the budget, so the second launch finishes"
+    );
+}
+
+#[test]
 fn test_establishment_state_returns_correct_states() {
     let storage = Arc::new(InMemoryStorage::new());
     let bob_storage = Arc::new(InMemoryStorage::new());

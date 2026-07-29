@@ -681,6 +681,11 @@ impl OfflineProtocol {
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
+        // The debounce watermark travels with the clock: `restore_lamport_clock`
+        // sets both, so rolling back only the clock leaves a watermark ahead of
+        // it and `persist_lamport_clock`'s `wrapping_sub` reads that as an
+        // enormous delta — writing on every tick instead of every interval.
+        let previous_last_persisted_lamport = self.last_persisted_lamport;
         let previous_tofu_keys = self.known_peer_public_keys.clone();
         let previous_blocked_users = self.blocked_users.clone();
         let previous_outbox = self.outbox.clone();
@@ -771,6 +776,7 @@ impl OfflineProtocol {
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
+            self.last_persisted_lamport = previous_last_persisted_lamport;
             self.known_peer_public_keys = previous_tofu_keys;
             self.blocked_users = previous_blocked_users;
             self.outbox = previous_outbox;
