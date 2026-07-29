@@ -17,11 +17,11 @@ final class ProtocolStateStorageTests: XCTestCase {
         try storage.store(
             keyType: "pending/messages",
             keyId: "peer with punctuation",
-            data: [0, 1, 255]
+            data: Data([0, 1, 255])
         )
         XCTAssertEqual(
             try storage.load(keyType: "pending/messages", keyId: "peer with punctuation"),
-            [0, 1, 255]
+            Data([0, 1, 255])
         )
         XCTAssertEqual(
             try storage.listKeys(keyType: "pending/messages"),
@@ -31,11 +31,11 @@ final class ProtocolStateStorageTests: XCTestCase {
         try storage.store(
             keyType: "pending/messages",
             keyId: "peer with punctuation",
-            data: [4, 5]
+            data: Data([4, 5])
         )
         XCTAssertEqual(
             try storage.load(keyType: "pending/messages", keyId: "peer with punctuation"),
-            [4, 5]
+            Data([4, 5])
         )
 
         try storage.delete(keyType: "pending/messages", keyId: "peer with punctuation")
@@ -56,11 +56,11 @@ final class ProtocolStateStorageTests: XCTestCase {
             root: parent.appendingPathComponent("bob", isDirectory: true)
         )
 
-        try alice.store(keyType: "outbox", keyId: "message-1", data: [1, 2, 3])
+        try alice.store(keyType: "outbox", keyId: "message-1", data: Data([1, 2, 3]))
 
         XCTAssertEqual(
             try alice.load(keyType: "outbox", keyId: "message-1"),
-            [1, 2, 3]
+            Data([1, 2, 3])
         )
         XCTAssertNil(try bob.load(keyType: "outbox", keyId: "message-1"))
     }
@@ -69,13 +69,13 @@ final class ProtocolStateStorageTests: XCTestCase {
         let root = temporaryRoot("restart")
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
         let first = try AppContainerProtocolStateStorage(root: root)
-        try first.store(keyType: "outbox", keyId: "message-1", data: [7, 8, 9])
+        try first.store(keyType: "outbox", keyId: "message-1", data: Data([7, 8, 9]))
 
         let restarted = try AppContainerProtocolStateStorage(root: root)
 
         XCTAssertEqual(
             try restarted.load(keyType: "outbox", keyId: "message-1"),
-            [7, 8, 9]
+            Data([7, 8, 9])
         )
     }
 
@@ -90,11 +90,11 @@ final class ProtocolStateStorageTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
         let storage = try AppContainerProtocolStateStorage(root: root)
 
-        try storage.store(keyType: "outbox", keyId: "AAG", data: [1])
-        try storage.store(keyType: "outbox", keyId: "AAa", data: [2])
+        try storage.store(keyType: "outbox", keyId: "AAG", data: Data([1]))
+        try storage.store(keyType: "outbox", keyId: "AAa", data: Data([2]))
 
-        XCTAssertEqual(try storage.load(keyType: "outbox", keyId: "AAG"), [1])
-        XCTAssertEqual(try storage.load(keyType: "outbox", keyId: "AAa"), [2])
+        XCTAssertEqual(try storage.load(keyType: "outbox", keyId: "AAG"), Data([1]))
+        XCTAssertEqual(try storage.load(keyType: "outbox", keyId: "AAa"), Data([2]))
         XCTAssertEqual(try storage.listKeys(keyType: "outbox"), ["AAG", "AAa"])
     }
 
@@ -107,9 +107,9 @@ final class ProtocolStateStorageTests: XCTestCase {
         let storage = try AppContainerProtocolStateStorage(root: root)
 
         let longId = String(repeating: "u", count: 256)
-        try storage.store(keyType: "outbox", keyId: longId, data: [9])
+        try storage.store(keyType: "outbox", keyId: longId, data: Data([9]))
 
-        XCTAssertEqual(try storage.load(keyType: "outbox", keyId: longId), [9])
+        XCTAssertEqual(try storage.load(keyType: "outbox", keyId: longId), Data([9]))
         XCTAssertEqual(try storage.listKeys(keyType: "outbox"), [longId])
         XCTAssertEqual(
             ProtocolStateRecord.entryName(keyType: "outbox", keyId: longId).count,
@@ -134,7 +134,7 @@ final class ProtocolStateStorageTests: XCTestCase {
         let framed = try ProtocolStateRecord.frame(
             keyType: "outbox",
             keyId: "m-1",
-            value: [0xAA, 0xBB]
+            value: Data([0xAA, 0xBB])
         )
         XCTAssertEqual(
             [UInt8](framed),
@@ -157,7 +157,7 @@ final class ProtocolStateStorageTests: XCTestCase {
             "k_db5fcc2398ef2863d4269a61be6ea2de1f80d2889f34670c9a57c79cbe8058a1"
         )
 
-        let header = try XCTUnwrap(ProtocolStateRecord.parseHeader([UInt8](framed)))
+        let header = try XCTUnwrap(ProtocolStateRecord.parseHeader(framed))
         XCTAssertEqual(header.keyType, "outbox")
         XCTAssertEqual(header.keyId, "m-1")
         XCTAssertEqual(header.valueOffset, 17)
@@ -168,9 +168,9 @@ final class ProtocolStateStorageTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
         let storage = try AppContainerProtocolStateStorage(root: root)
 
-        try storage.store(keyType: "blocked_users", keyId: "peer-1", data: [])
+        try storage.store(keyType: "blocked_users", keyId: "peer-1", data: Data())
 
-        XCTAssertEqual(try storage.load(keyType: "blocked_users", keyId: "peer-1"), [])
+        XCTAssertEqual(try storage.load(keyType: "blocked_users", keyId: "peer-1"), Data())
         XCTAssertEqual(try storage.listKeys(keyType: "blocked_users"), ["peer-1"])
     }
 
@@ -183,7 +183,7 @@ final class ProtocolStateStorageTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
         let storage = try AppContainerProtocolStateStorage(root: root)
 
-        try storage.store(keyType: "outbox", keyId: "message-1", data: [1, 2, 3])
+        try storage.store(keyType: "outbox", keyId: "message-1", data: Data([1, 2, 3]))
 
         let path = root
             .appendingPathComponent(ProtocolStateRecord.typeDirectoryName("outbox"))
@@ -205,7 +205,7 @@ final class ProtocolStateStorageTests: XCTestCase {
             try ProtocolStateRecord.frame(
                 keyType: "outbox",
                 keyId: "m-1",
-                value: [UInt8](repeating: 0, count: ProtocolStateRecord.maxValueBytes + 1)
+                value: Data(repeating: 0, count: ProtocolStateRecord.maxValueBytes + 1)
             )
         )
     }
@@ -218,7 +218,7 @@ final class ProtocolStateStorageTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
         let storage = try AppContainerProtocolStateStorage(root: root)
 
-        try storage.store(keyType: "outbox", keyId: "message-1", data: [1, 2, 3])
+        try storage.store(keyType: "outbox", keyId: "message-1", data: Data([1, 2, 3]))
 
         let path = root
             .appendingPathComponent(ProtocolStateRecord.typeDirectoryName("outbox"))
@@ -237,7 +237,7 @@ final class ProtocolStateStorageTests: XCTestCase {
     /// is indistinguishable from a record that was never written and leaves
     /// that id unresolved forever.
     private func assertCorrupted(
-        _ expression: @autoclosure () throws -> [UInt8]?,
+        _ expression: @autoclosure () throws -> Data?,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
@@ -255,7 +255,7 @@ final class ProtocolStateStorageTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
         let storage = try AppContainerProtocolStateStorage(root: root)
 
-        try storage.store(keyType: "outbox", keyId: "message-1", data: [1])
+        try storage.store(keyType: "outbox", keyId: "message-1", data: Data([1]))
 
         let directory = root
             .appendingPathComponent(ProtocolStateRecord.typeDirectoryName("outbox"))
@@ -277,7 +277,7 @@ final class ProtocolStateStorageTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
         let storage = try AppContainerProtocolStateStorage(root: root)
 
-        try storage.store(keyType: "outbox", keyId: "message-1", data: [1])
+        try storage.store(keyType: "outbox", keyId: "message-1", data: Data([1]))
 
         let directory = root
             .appendingPathComponent(ProtocolStateRecord.typeDirectoryName("outbox"))
@@ -301,7 +301,7 @@ final class ProtocolStateStorageTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent()) }
         let storage = try AppContainerProtocolStateStorage(root: root)
 
-        try storage.store(keyType: "outbox", keyId: "message-1", data: [1, 2, 3])
+        try storage.store(keyType: "outbox", keyId: "message-1", data: Data([1, 2, 3]))
 
         let directory = root
             .appendingPathComponent(ProtocolStateRecord.typeDirectoryName("outbox"))

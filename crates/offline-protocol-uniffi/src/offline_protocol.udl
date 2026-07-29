@@ -52,12 +52,20 @@ callback interface MlsStorageProvider {
 // message id sendMessage returned for it, while absence is simply nothing to
 // restore. Reserve CorruptedData for permanent losses; a transient read failure
 // is LoadFailed, which leaves the record in place for a later launch.
+//
+// Values are `bytes`, not the `sequence<u8>` MlsStorageProvider uses above.
+// That interface carries key material a few hundred bytes at a time, where the
+// difference does not matter; these records reach megabytes. `sequence<u8>`
+// generates List<UByte> on Kotlin, which boxes every element with no valueOf
+// cache — on the order of two million short-lived objects per call for a 2 MiB
+// record, on the way in and again on the way out — and [UInt8] rather than Data
+// on Swift. `bytes` maps to ByteArray / Data / bytes with no per-element cost.
 callback interface ProtocolStateStorageProvider {
     [Throws=MlsStorageError]
-    void store(string key_type, string key_id, sequence<u8> data);
+    void store(string key_type, string key_id, bytes data);
 
     [Throws=MlsStorageError]
-    sequence<u8>? load(string key_type, string key_id);
+    bytes? load(string key_type, string key_id);
 
     [Throws=MlsStorageError]
     void delete(string key_type, string key_id);

@@ -234,10 +234,9 @@ pub(crate) const MAX_MESSAGE_CONTENT_BYTES: usize = 256 * 1024;
 /// Pending messages are persisted as one record *per recipient*, so every
 /// enqueue rewrites that peer's whole queue: filling one peer to this budget
 /// costs on the order of `budget × entries / 2` bytes written in total, not
-/// `budget`. On Android each of those writes also crosses UniFFI as a
-/// `List<UByte>` and is unboxed to a `ByteArray`, so a 2 MiB record is roughly
-/// two million short-lived boxed objects on the way in *and* again on the way
-/// out.
+/// `budget`. The crossing itself is cheap — `ProtocolStateStorageProvider`
+/// declares its values as `bytes`, so a record reaches Kotlin as a `ByteArray`
+/// and Swift as `Data` with no per-element cost — but the write volume is not.
 ///
 /// That is why this budget is sized to bound a pathological queue rather than
 /// to describe a normal one — real queues hold a handful of short messages

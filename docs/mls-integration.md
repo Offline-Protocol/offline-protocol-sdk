@@ -369,6 +369,13 @@ Do not implement the protocol-state provider with Keychain,
 EncryptedSharedPreferences backed by a surviving Keystore namespace, or any
 other store that can outlive the app container.
 
+**Protocol-state values are `ByteArray` / `Data` / `bytes`**, not the
+element-wise sequence `MlsStorageProvider` uses. That interface carries key
+material a few hundred bytes at a time; these records reach megabytes, where a
+boxed-per-element representation costs on the order of a million short-lived
+objects per call on Kotlin. Store and return the bytes verbatim — never inspect,
+re-encode, or truncate them, since the sensitive categories arrive sealed.
+
 **Writes must be atomic *and* durable before `store` returns.** The SDK treats a
 successful `store` as persisted and immediately writes state that depends on it
 — most sharply the per-install record-sealing key, after which sealed records

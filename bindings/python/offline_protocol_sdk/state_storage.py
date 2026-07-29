@@ -191,8 +191,8 @@ class AppStateStorage(ProtocolStateStorageProvider):
                 f"failed to create protocol-state directory: {exc}"
             ) from exc
 
-    def store(self, key_type: str, key_id: str, data: list[int]) -> None:
-        framed = _frame(key_type, key_id, bytes(data))
+    def store(self, key_type: str, key_id: str, data: bytes) -> None:
+        framed = _frame(key_type, key_id, data)
         with self._lock:
             directory = self._type_directory(key_type)
             try:
@@ -216,7 +216,7 @@ class AppStateStorage(ProtocolStateStorageProvider):
                     f"failed to persist protocol state: {exc}"
                 ) from exc
 
-    def load(self, key_type: str, key_id: str) -> list[int] | None:
+    def load(self, key_type: str, key_id: str) -> bytes | None:
         with self._lock:
             path = self._entry_path(key_type, key_id)
             try:
@@ -249,7 +249,7 @@ class AppStateStorage(ProtocolStateStorageProvider):
                 raise self._discard(
                     path, f"record framing does not name {key_type}/{key_id}"
                 )
-            return list(raw[header[2] :])
+            return raw[header[2] :]
 
     def delete(self, key_type: str, key_id: str) -> None:
         with self._lock:

@@ -2253,10 +2253,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available() != 5919.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store() != 25634.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store() != 46080.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load() != 5303.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load() != 11563.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete() != 43686.toShort()) {
@@ -2718,6 +2718,25 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
         val byteBuf = toUtf8(value)
         buf.putInt(byteBuf.limit())
         buf.put(byteBuf)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
+    override fun read(buf: ByteBuffer): ByteArray {
+        val len = buf.getInt()
+        val byteArr = ByteArray(len)
+        buf.get(byteArr)
+        return byteArr
+    }
+    override fun allocationSize(value: ByteArray): ULong {
+        return 4UL + value.size.toULong()
+    }
+    override fun write(value: ByteArray, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        buf.put(value)
     }
 }
 
@@ -9249,9 +9268,9 @@ public object FfiConverterTypeNostrTransportCallback: FfiConverterCallbackInterf
 
 public interface ProtocolStateStorageProvider {
     
-    fun `store`(`keyType`: kotlin.String, `keyId`: kotlin.String, `data`: List<kotlin.UByte>)
+    fun `store`(`keyType`: kotlin.String, `keyId`: kotlin.String, `data`: kotlin.ByteArray)
     
-    fun `load`(`keyType`: kotlin.String, `keyId`: kotlin.String): List<kotlin.UByte>?
+    fun `load`(`keyType`: kotlin.String, `keyId`: kotlin.String): kotlin.ByteArray?
     
     fun `delete`(`keyType`: kotlin.String, `keyId`: kotlin.String)
     
@@ -9271,7 +9290,7 @@ internal object uniffiCallbackInterfaceProtocolStateStorageProvider {
                 uniffiObj.`store`(
                     FfiConverterString.lift(`keyType`),
                     FfiConverterString.lift(`keyId`),
-                    FfiConverterSequenceUByte.lift(`data`),
+                    FfiConverterByteArray.lift(`data`),
                 )
             }
             val writeReturn = { _: Unit -> Unit }
@@ -9292,7 +9311,7 @@ internal object uniffiCallbackInterfaceProtocolStateStorageProvider {
                     FfiConverterString.lift(`keyId`),
                 )
             }
-            val writeReturn = { value: List<kotlin.UByte>? -> uniffiOutReturn.setValue(FfiConverterOptionalSequenceUByte.lower(value)) }
+            val writeReturn = { value: kotlin.ByteArray? -> uniffiOutReturn.setValue(FfiConverterOptionalByteArray.lower(value)) }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
@@ -9925,6 +9944,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
+    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterByteArray.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ByteArray?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterByteArray.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterByteArray.write(value, buf)
         }
     }
 }

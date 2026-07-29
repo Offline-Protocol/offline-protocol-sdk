@@ -23,15 +23,12 @@ class ProtocolStateStorageTest {
     private fun namespace(label: String): String =
         StorageNamespace.account("protocol-state-test-${UUID.randomUUID()}", label)
 
-    // Robolectric loads Android code in a sandbox classloader. UByte is an
-    // inline class, so comparing the provider's boxed List<UByte> directly to
-    // a test-created list can fail solely because the boxed classes came from
-    // different classloaders. Compare their stable numeric values instead.
+    // ByteArray has identity equality, so compare stable numeric values.
     private fun loadedBytes(
         storage: AppContainerProtocolStateStorage,
         keyType: String,
         keyId: String
-    ): List<Int>? = storage.load(keyType, keyId)?.map { it.toInt() }
+    ): List<Int>? = storage.load(keyType, keyId)?.map { it.toInt() and 0xff }
 
     private fun entryFile(account: String, keyType: String, keyId: String): File =
         File(
@@ -47,7 +44,7 @@ class ProtocolStateStorageTest {
     fun roundTripOverwriteListingAndIdempotentDelete() {
         val storage = AppContainerProtocolStateStorage(context, namespace("round-trip"))
 
-        storage.store("pending/messages", "peer with punctuation", listOf(0u, 1u, 255u))
+        storage.store("pending/messages", "peer with punctuation", byteArrayOf(0, 1, -1))
         assertEquals(
             listOf(0, 1, 255),
             loadedBytes(storage, "pending/messages", "peer with punctuation")
@@ -57,7 +54,7 @@ class ProtocolStateStorageTest {
             storage.listKeys("pending/messages")
         )
 
-        storage.store("pending/messages", "peer with punctuation", listOf(4u, 5u))
+        storage.store("pending/messages", "peer with punctuation", byteArrayOf(4, 5))
         assertEquals(
             listOf(4, 5),
             loadedBytes(storage, "pending/messages", "peer with punctuation")
@@ -74,7 +71,7 @@ class ProtocolStateStorageTest {
         val alice = AppContainerProtocolStateStorage(context, namespace("alice"))
         val bob = AppContainerProtocolStateStorage(context, namespace("bob"))
 
-        alice.store("outbox", "message-1", listOf(1u, 2u, 3u))
+        alice.store("outbox", "message-1", byteArrayOf(1, 2, 3))
 
         assertEquals(listOf(1, 2, 3), loadedBytes(alice, "outbox", "message-1"))
         assertNull(loadedBytes(bob, "outbox", "message-1"))
@@ -84,7 +81,7 @@ class ProtocolStateStorageTest {
     fun restartReopensTheSameInstallRoot() {
         val account = namespace("restart")
         val first = AppContainerProtocolStateStorage(context, account)
-        first.store("outbox", "message-1", listOf(7u, 8u, 9u))
+        first.store("outbox", "message-1", byteArrayOf(7, 8, 9))
 
         val restarted = AppContainerProtocolStateStorage(context, account)
 
@@ -103,8 +100,8 @@ class ProtocolStateStorageTest {
     fun caseFoldingIdsAreDistinctRecords() {
         val storage = AppContainerProtocolStateStorage(context, namespace("case-fold"))
 
-        storage.store("outbox", "AAG", listOf(1u))
-        storage.store("outbox", "AAa", listOf(2u))
+        storage.store("outbox", "AAG", byteArrayOf(1))
+        storage.store("outbox", "AAa", byteArrayOf(2))
 
         assertEquals(listOf(1), loadedBytes(storage, "outbox", "AAG"))
         assertEquals(listOf(2), loadedBytes(storage, "outbox", "AAa"))
@@ -121,7 +118,7 @@ class ProtocolStateStorageTest {
         val storage = AppContainerProtocolStateStorage(context, namespace("long-ids"))
         val longId = "u".repeat(256)
 
-        storage.store("outbox", longId, listOf(9u))
+        storage.store("outbox", longId, byteArrayOf(9))
 
         assertEquals(listOf(9), loadedBytes(storage, "outbox", longId))
         assertEquals(listOf(longId), storage.listKeys("outbox"))
@@ -179,7 +176,7 @@ class ProtocolStateStorageTest {
     fun emptyValueRoundTrips() {
         val storage = AppContainerProtocolStateStorage(context, namespace("empty"))
 
-        storage.store("blocked_users", "peer-1", emptyList())
+        storage.store("blocked_users", "peer-1", ByteArray(0))
 
         assertEquals(emptyList<Int>(), loadedBytes(storage, "blocked_users", "peer-1"))
         assertEquals(listOf("peer-1"), storage.listKeys("blocked_users"))
@@ -195,7 +192,7 @@ class ProtocolStateStorageTest {
     fun oversizedFileIsRejectedWithoutBeingRead() {
         val account = namespace("oversized")
         val storage = AppContainerProtocolStateStorage(context, account)
-        storage.store("outbox", "message-1", listOf(1u, 2u, 3u))
+        storage.store("outbox", "message-1", byteArrayOf(1, 2, 3))
 
         // Sparse file: the ceiling is enforced on the *reported* size, so this
         // never occupies real disk in CI.
@@ -234,7 +231,7 @@ class ProtocolStateStorageTest {
     fun malformedRecordIsDroppedRatherThanReturned() {
         val account = namespace("malformed")
         val storage = AppContainerProtocolStateStorage(context, account)
-        storage.store("outbox", "message-1", listOf(1u, 2u, 3u))
+        storage.store("outbox", "message-1", byteArrayOf(1, 2, 3))
 
         entryFile(account, "outbox", "message-1")
             .writeBytes(byteArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8))
@@ -249,7 +246,7 @@ class ProtocolStateStorageTest {
     fun unframedStrayFilesAreIgnoredByListing() {
         val account = namespace("stray")
         val storage = AppContainerProtocolStateStorage(context, account)
-        storage.store("outbox", "message-1", listOf(1u))
+        storage.store("outbox", "message-1", byteArrayOf(1))
 
         val directory = entryFile(account, "outbox", "message-1").parentFile!!
         File(directory, "k_not-a-record").writeBytes(byteArrayOf(1, 2, 3))
@@ -267,7 +264,7 @@ class ProtocolStateStorageTest {
     fun enumerationBoundCountsEntriesExaminedNotKeysReturned() {
         val account = namespace("bounded-listing")
         val storage = AppContainerProtocolStateStorage(context, account)
-        storage.store("outbox", "message-1", listOf(1u))
+        storage.store("outbox", "message-1", byteArrayOf(1))
 
         val directory = entryFile(account, "outbox", "message-1").parentFile!!
         for (index in 0 until 10) {
@@ -293,7 +290,7 @@ class ProtocolStateStorageTest {
     fun listingDedupesARecordReachableUnderTwoNames() {
         val account = namespace("duplicate-names")
         val storage = AppContainerProtocolStateStorage(context, account)
-        storage.store("outbox", "message-1", listOf(1u, 2u, 3u))
+        storage.store("outbox", "message-1", byteArrayOf(1, 2, 3))
 
         val original = entryFile(account, "outbox", "message-1")
         File(original.parentFile!!, "k_copy-of-message-1").writeBytes(original.readBytes())

@@ -17,19 +17,19 @@ BOB = "account-" + "b" * 64
 def test_state_storage_round_trip_and_listing(tmp_path) -> None:
     storage = AppStateStorage(tmp_path / "state")
 
-    storage.store("pending_messages", "peer/with punctuation", [0, 1, 255])
+    storage.store("pending_messages", "peer/with punctuation", bytes([0, 1, 255]))
 
-    assert storage.load("pending_messages", "peer/with punctuation") == [0, 1, 255]
+    assert storage.load("pending_messages", "peer/with punctuation") == bytes([0, 1, 255])
     assert storage.list_keys("pending_messages") == ["peer/with punctuation"]
 
 
 def test_state_storage_overwrite_is_atomic_and_delete_is_idempotent(tmp_path) -> None:
     storage = AppStateStorage(tmp_path / "state")
 
-    storage.store("outbox", "message-1", [1, 2, 3])
-    storage.store("outbox", "message-1", [4, 5])
+    storage.store("outbox", "message-1", bytes([1, 2, 3]))
+    storage.store("outbox", "message-1", bytes([4, 5]))
 
-    assert storage.load("outbox", "message-1") == [4, 5]
+    assert storage.load("outbox", "message-1") == bytes([4, 5])
     assert not list((tmp_path / "state").rglob(".write-*"))
 
     storage.delete("outbox", "message-1")
@@ -55,7 +55,7 @@ def test_state_storage_flushes_the_directory_after_rename_and_unlink(
     monkeypatch.setattr(state_storage_module, "_sync_directory", recording_sync)
 
     storage = AppStateStorage(tmp_path / "state")
-    storage.store("outbox", "message-1", [1, 2, 3])
+    storage.store("outbox", "message-1", bytes([1, 2, 3]))
     assert len(synced) == 1
 
     storage.delete("outbox", "message-1")
@@ -85,9 +85,9 @@ def test_state_storage_namespaces_accounts(tmp_path) -> None:
     alice = AppStateStorage(tmp_path / "state", namespace=ALICE)
     bob = AppStateStorage(tmp_path / "state", namespace=BOB)
 
-    alice.store("outbox", "message-1", [1, 2, 3])
+    alice.store("outbox", "message-1", bytes([1, 2, 3]))
 
-    assert alice.load("outbox", "message-1") == [1, 2, 3]
+    assert alice.load("outbox", "message-1") == bytes([1, 2, 3])
     assert bob.load("outbox", "message-1") is None
 
 
@@ -110,7 +110,7 @@ def test_state_storage_uses_configured_install_root(monkeypatch, tmp_path) -> No
     monkeypatch.setenv("OFFLINE_PROTOCOL_STATE_ROOT", str(install_root))
 
     before_reinstall = AppStateStorage(namespace=ALICE)
-    before_reinstall.store("outbox", "message-1", [1, 2, 3])
+    before_reinstall.store("outbox", "message-1", bytes([1, 2, 3]))
 
     monkeypatch.setenv(
         "OFFLINE_PROTOCOL_STATE_ROOT",
@@ -131,11 +131,11 @@ def test_case_folding_ids_are_distinct_records(tmp_path) -> None:
     # overwrites the other. A digest name cannot collide this way.
     storage = AppStateStorage(tmp_path / "state")
 
-    storage.store("outbox", "AAG", [1])
-    storage.store("outbox", "AAa", [2])
+    storage.store("outbox", "AAG", bytes([1]))
+    storage.store("outbox", "AAa", bytes([2]))
 
-    assert storage.load("outbox", "AAG") == [1]
-    assert storage.load("outbox", "AAa") == [2]
+    assert storage.load("outbox", "AAG") == bytes([1])
+    assert storage.load("outbox", "AAa") == bytes([2])
     assert storage.list_keys("outbox") == ["AAG", "AAa"]
 
 
@@ -146,9 +146,9 @@ def test_maximum_length_ids_round_trip(tmp_path) -> None:
     storage = AppStateStorage(tmp_path / "state")
     long_id = "u" * 256
 
-    storage.store("outbox", long_id, [9])
+    storage.store("outbox", long_id, bytes([9]))
 
-    assert storage.load("outbox", long_id) == [9]
+    assert storage.load("outbox", long_id) == bytes([9])
     assert storage.list_keys("outbox") == [long_id]
     assert len(state_storage_module._entry_name("outbox", long_id)) == 66
 
@@ -189,9 +189,9 @@ def test_framing_golden_vector() -> None:
 def test_empty_value_round_trips(tmp_path) -> None:
     storage = AppStateStorage(tmp_path / "state")
 
-    storage.store("blocked_users", "peer-1", [])
+    storage.store("blocked_users", "peer-1", bytes([]))
 
-    assert storage.load("blocked_users", "peer-1") == []
+    assert storage.load("blocked_users", "peer-1") == bytes([])
     assert storage.list_keys("blocked_users") == ["peer-1"]
 
 
@@ -202,7 +202,7 @@ def test_oversized_file_is_rejected_without_being_read(tmp_path) -> None:
     # A record over the ceiling cannot have been written through store(), so it
     # must be dropped by size alone — never read into memory first.
     storage = AppStateStorage(tmp_path / "state")
-    storage.store("outbox", "message-1", [1, 2, 3])
+    storage.store("outbox", "message-1", bytes([1, 2, 3]))
 
     path = (
         tmp_path
@@ -236,7 +236,7 @@ def test_malformed_record_is_dropped_rather_than_returned(tmp_path) -> None:
     # record that was never written, which would leave that id unresolved
     # forever.
     storage = AppStateStorage(tmp_path / "state")
-    storage.store("outbox", "message-1", [1, 2, 3])
+    storage.store("outbox", "message-1", bytes([1, 2, 3]))
 
     path = (
         tmp_path
@@ -253,7 +253,7 @@ def test_malformed_record_is_dropped_rather_than_returned(tmp_path) -> None:
 
 def test_unframed_stray_files_are_ignored_by_listing(tmp_path) -> None:
     storage = AppStateStorage(tmp_path / "state")
-    storage.store("outbox", "message-1", [1])
+    storage.store("outbox", "message-1", bytes([1]))
 
     directory = tmp_path / "state" / state_storage_module._type_directory_name("outbox")
     (directory / "k_not-a-record").write_bytes(b"\x01\x02\x03")
@@ -267,7 +267,7 @@ def test_enumeration_bound_counts_entries_examined_not_keys_returned(tmp_path) -
     # exactly the ones that yield no key. Counting keys collected would leave
     # every one of these opened on every launch while the counter sat at zero.
     storage = AppStateStorage(tmp_path / "state")
-    storage.store("outbox", "message-1", [1])
+    storage.store("outbox", "message-1", bytes([1]))
 
     directory = tmp_path / "state" / state_storage_module._type_directory_name("outbox")
     for index in range(10):
@@ -284,7 +284,7 @@ def test_listing_dedupes_a_record_reachable_under_two_names(tmp_path) -> None:
     # come from a copy planted in the container. Restore must not walk the id
     # twice because of it.
     storage = AppStateStorage(tmp_path / "state")
-    storage.store("outbox", "message-1", [1, 2, 3])
+    storage.store("outbox", "message-1", bytes([1, 2, 3]))
 
     directory = tmp_path / "state" / state_storage_module._type_directory_name("outbox")
     original = directory / state_storage_module._entry_name("outbox", "message-1")

@@ -22,8 +22,8 @@ enum MlsStorageError: Error, Equatable {
 }
 
 protocol ProtocolStateStorageProvider {
-    func store(keyType: String, keyId: String, data: [UInt8]) throws
-    func load(keyType: String, keyId: String) throws -> [UInt8]?
+    func store(keyType: String, keyId: String, data: Data) throws
+    func load(keyType: String, keyId: String) throws -> Data?
     func delete(keyType: String, keyId: String) throws
     func listKeys(keyType: String) throws -> [String]
 }
@@ -105,7 +105,7 @@ enum ProtocolStateRecord {
         "k_" + digest([keyType, keyId])
     }
 
-    static func frame(keyType: String, keyId: String, value: [UInt8]) throws -> Data {
+    static func frame(keyType: String, keyId: String, value: Data) throws -> Data {
         let typeBytes = Array(keyType.utf8)
         let idBytes = Array(keyId.utf8)
         guard typeBytes.count <= maxComponentBytes, idBytes.count <= maxComponentBytes else {
@@ -134,16 +134,23 @@ enum ProtocolStateRecord {
 
     /// Header of a framed record: the key it belongs to and where its value
     /// starts. `nil` means the bytes are not a record this SDK wrote.
-    static func parseHeader(_ bytes: [UInt8]) -> (keyType: String, keyId: String, valueOffset: Int)? {
-        guard bytes.count >= 8, Array(bytes[0..<4]) == magic else {
+    ///
+    /// `valueOffset` is relative to the record's own start, so it stays correct
+    /// for a `Data` slice whose indices are not zero-based.
+    static func parseHeader(_ bytes: Data) -> (keyType: String, keyId: String, valueOffset: Int)? {
+        let base = bytes.startIndex
+        guard bytes.count >= 8, bytes[base..<(base + 4)].elementsEqual(magic) else {
             return nil
         }
-        let typeLen = Int(bytes[4]) << 8 | Int(bytes[5])
-        let idLen = Int(bytes[6]) << 8 | Int(bytes[7])
+        let typeLen = Int(bytes[base + 4]) << 8 | Int(bytes[base + 5])
+        let idLen = Int(bytes[base + 6]) << 8 | Int(bytes[base + 7])
         guard typeLen <= maxComponentBytes, idLen <= maxComponentBytes,
               bytes.count >= 8 + typeLen + idLen,
-              let keyType = String(bytes: bytes[8..<(8 + typeLen)], encoding: .utf8),
-              let keyId = String(bytes: bytes[(8 + typeLen)..<(8 + typeLen + idLen)], encoding: .utf8)
+              let keyType = String(bytes: bytes[(base + 8)..<(base + 8 + typeLen)], encoding: .utf8),
+              let keyId = String(
+                  bytes: bytes[(base + 8 + typeLen)..<(base + 8 + typeLen + idLen)],
+                  encoding: .utf8
+              )
         else {
             return nil
         }
@@ -210,7 +217,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         }
     }
 
-    func store(keyType: String, keyId: String, data: [UInt8]) throws {
+    func store(keyType: String, keyId: String, data: Data) throws {
         let framed = try ProtocolStateRecord.frame(
             keyType: keyType,
             keyId: keyId,
@@ -237,7 +244,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         flushDirectory(at: directory)
     }
 
-    func load(keyType: String, keyId: String) throws -> [UInt8]? {
+    func load(keyType: String, keyId: String) throws -> Data? {
         lock.lock()
         defer { lock.unlock() }
 
@@ -270,8 +277,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
             throw discard(url, reason: "record is \(raw.count) bytes, over the ceiling")
         }
 
-        let bytes = [UInt8](raw)
-        guard let header = ProtocolStateRecord.parseHeader(bytes),
+        guard let header = ProtocolStateRecord.parseHeader(raw),
               header.keyType == keyType,
               header.keyId == keyId
         else {
@@ -279,7 +285,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
             // either way this is not the entry that was asked for.
             throw discard(url, reason: "record framing does not name \(keyType)/\(keyId)")
         }
-        return Array(bytes[header.valueOffset...])
+        return Data(raw[(raw.startIndex + header.valueOffset)...])
     }
 
     func delete(keyType: String, keyId: String) throws {
@@ -360,7 +366,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         }
         defer { handle.closeFile() }
         let prefix = handle.readData(ofLength: ProtocolStateRecord.maxHeaderBytes)
-        guard let header = ProtocolStateRecord.parseHeader([UInt8](prefix)) else {
+        guard let header = ProtocolStateRecord.parseHeader(prefix) else {
             return nil
         }
         return (header.keyType, header.keyId)

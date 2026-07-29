@@ -170,12 +170,8 @@ class AppContainerProtocolStateStorage(
         }
     }
 
-    override fun store(keyType: String, keyId: String, data: List<UByte>) {
-        val framed = ProtocolStateRecord.frame(
-            keyType,
-            keyId,
-            data.map { it.toByte() }.toByteArray()
-        )
+    override fun store(keyType: String, keyId: String, data: ByteArray) {
+        val framed = ProtocolStateRecord.frame(keyType, keyId, data)
 
         synchronized(LOCK) {
             val directory = typeDirectory(keyType)
@@ -202,7 +198,7 @@ class AppContainerProtocolStateStorage(
         }
     }
 
-    override fun load(keyType: String, keyId: String): List<UByte>? {
+    override fun load(keyType: String, keyId: String): ByteArray? {
         synchronized(LOCK) {
             val file = entryFile(keyType, keyId)
             val atomicFile = AtomicFile(file)
@@ -239,7 +235,7 @@ class AppContainerProtocolStateStorage(
                 // record: either way this is not the entry that was asked for.
                 throw discard(atomicFile, "record framing does not name $keyType/$keyId")
             }
-            return raw.copyOfRange(header.valueOffset, raw.size).map { it.toUByte() }
+            return raw.copyOfRange(header.valueOffset, raw.size)
         }
     }
 

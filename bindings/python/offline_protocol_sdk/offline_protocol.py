@@ -8099,14 +8099,59 @@ class _UniffiTraitImplMlsStorageProviderImpl:
 # The _UniffiConverter which transforms the Callbacks in to Handles to pass to Rust.
 _UniffiFfiConverterTypeMlsStorageProvider = _UniffiCallbackInterfaceFfiConverter()
 
+class _UniffiFfiConverterBytes(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        size = buf.read_i32()
+        if size < 0:
+            raise InternalError("Unexpected negative byte string length")
+        return buf.read(size)
+
+    @staticmethod
+    def check_lower(value):
+        try:
+            memoryview(value)
+        except TypeError:
+            raise TypeError("a bytes-like object is required, not {!r}".format(type(value).__name__))
+
+    @staticmethod
+    def write(value, buf):
+        buf.write_i32(len(value))
+        buf.write(value)
+
+class _UniffiFfiConverterOptionalBytes(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterBytes.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterBytes.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterBytes.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 
 
 
 class ProtocolStateStorageProvider(typing.Protocol):
     
-    def store(self, key_type: str,key_id: str,data: typing.List[int]) -> None:
+    def store(self, key_type: str,key_id: str,data: bytes) -> None:
         raise NotImplementedError
-    def load(self, key_type: str,key_id: str) -> typing.Optional[typing.List[int]]:
+    def load(self, key_type: str,key_id: str) -> typing.Optional[bytes]:
         raise NotImplementedError
     def delete(self, key_type: str,key_id: str) -> None:
         raise NotImplementedError
@@ -8127,7 +8172,7 @@ class _UniffiTraitImplProtocolStateStorageProviderImpl:
         ):
         uniffi_obj = _UniffiFfiConverterTypeProtocolStateStorageProvider._handle_map.get(uniffi_handle)
         def make_call():
-            uniffi_args = (_UniffiFfiConverterString.lift(key_type), _UniffiFfiConverterString.lift(key_id), _UniffiFfiConverterSequenceUInt8.lift(data), )
+            uniffi_args = (_UniffiFfiConverterString.lift(key_type), _UniffiFfiConverterString.lift(key_id), _UniffiFfiConverterBytes.lift(data), )
             uniffi_method = uniffi_obj.store
             return uniffi_method(*uniffi_args)
         write_return_value = lambda v: None
@@ -8153,7 +8198,7 @@ class _UniffiTraitImplProtocolStateStorageProviderImpl:
             uniffi_method = uniffi_obj.load
             return uniffi_method(*uniffi_args)
         def write_return_value(v):
-            uniffi_out_return[0] = _UniffiFfiConverterOptionalSequenceUInt8.lower(v)
+            uniffi_out_return[0] = _UniffiFfiConverterOptionalBytes.lower(v)
         _uniffi_trait_interface_call_with_error(
                 uniffi_call_status_ptr.contents,
                 make_call,

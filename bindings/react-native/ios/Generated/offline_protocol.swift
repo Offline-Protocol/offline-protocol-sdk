@@ -599,6 +599,24 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
 
 
 
@@ -7794,9 +7812,9 @@ public func FfiConverterCallbackInterfaceNostrTransportCallback_lower(_ v: Nostr
 
 public protocol ProtocolStateStorageProvider: AnyObject, Sendable {
     
-    func store(keyType: String, keyId: String, data: [UInt8]) throws 
+    func store(keyType: String, keyId: String, data: Data) throws 
     
-    func load(keyType: String, keyId: String) throws  -> [UInt8]?
+    func load(keyType: String, keyId: String) throws  -> Data?
     
     func delete(keyType: String, keyId: String) throws 
     
@@ -7844,7 +7862,7 @@ fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
                 return try uniffiObj.store(
                      keyType: try FfiConverterString.lift(keyType),
                      keyId: try FfiConverterString.lift(keyId),
-                     data: try FfiConverterSequenceUInt8.lift(data)
+                     data: try FfiConverterData.lift(data)
                 )
             }
 
@@ -7865,7 +7883,7 @@ fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
             let makeCall = {
-                () throws -> [UInt8]? in
+                () throws -> Data? in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceProtocolStateStorageProvider.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
@@ -7876,7 +7894,7 @@ fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
             }
 
             
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionSequenceUInt8.lower($0) }
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -8740,6 +8758,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -9977,10 +10019,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available() != 5919) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store() != 25634) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store() != 46080) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load() != 5303) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load() != 11563) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete() != 43686) {
