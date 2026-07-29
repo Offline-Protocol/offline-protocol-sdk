@@ -5521,6 +5521,75 @@ fn test_sealed_records_do_not_open_under_a_rotated_record_key() {
 }
 
 #[test]
+fn test_blocked_user_listing_failure_fails_init_rather_than_unblocking_everyone() {
+    // A listing failure is indistinguishable from an empty store, so swallowing
+    // it comes up with an empty block list and tells no one — every blocked
+    // peer silently unblocked, from a transient error. Blocking is a safety
+    // control: it has to fail closed like every other restore.
+    struct FailingBlockedUserListStorage {
+        inner: Arc<crate::mls::InMemoryStorage>,
+    }
+
+    impl MlsStorage for FailingBlockedUserListStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            self.inner.load(key_type, key_id)
+        }
+
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            if key_type == storage_keys::BLOCKED_USERS {
+                return Err(offline_protocol_mls::StorageError::LoadFailed(
+                    "forced blocked-user listing failure".to_string(),
+                ));
+            }
+            self.inner.list_keys(key_type)
+        }
+    }
+
+    let backing = Arc::new(crate::mls::InMemoryStorage::new());
+    backing
+        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .unwrap();
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let result = protocol.initialize_mls_for_test(Arc::new(FailingBlockedUserListStorage {
+        inner: backing.clone(),
+    }));
+
+    assert!(
+        result.is_err(),
+        "a block list that could not be read must fail initialization"
+    );
+    assert!(
+        !protocol.is_mls_initialized(),
+        "initialization must roll back rather than run unprotected"
+    );
+}
+
+#[test]
 fn test_failed_init_does_not_leave_the_previous_stores_record_cipher_installed() {
     // The record cipher belongs to the secure store it was loaded from, so it
     // is part of the same transaction as the storage handles. If an init loads

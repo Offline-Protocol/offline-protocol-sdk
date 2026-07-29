@@ -63,6 +63,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Malformed or unresolved recipient tokens are rejected before any queue, outbox, clock, or transport side effect.** All outbound user-targeted APIs, plus `invite_to_group`, now validate the recipient at the SDK boundary, preventing app-owned unresolved identifiers such as `unresolved:token` from becoming indefinitely retried protocol state. Group *removal* and *role* mutation are deliberately exempt: admission is where a gate belongs, and one on the removal path would turn "a member with a stale-format id is on the roster" into "that member can never be removed or demoted".
 
+- **A blocked-user listing failure now fails initialization instead of coming up unblocked.** A listing error is indistinguishable from an empty store, so swallowing it started the SDK with an empty block list and told no one — every blocked peer silently unblocked, from a transient error, which is the same outcome the downgrade warning above exists for. This state also just moved from the credential store into the app container, where a read can fail for far more ordinary reasons. `restore_blocked_users` now propagates like every other category walk, so `initialize_mls` rolls back and the application finds out rather than running unprotected.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed

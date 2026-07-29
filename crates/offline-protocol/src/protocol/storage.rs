@@ -1974,17 +1974,20 @@ impl OfflineProtocol {
     /// Restores blocked users from persistent storage.
     ///
     /// Skips entries with invalid user IDs (best-effort restore).
-    pub(crate) fn restore_blocked_users(&mut self) {
+    ///
+    /// A *listing* failure is not best-effort: it is indistinguishable from an
+    /// empty store, so swallowing it would come up with an empty block list and
+    /// tell no one — every peer the user blocked silently unblocked, from a
+    /// transient error. That is the same outcome this branch's release notes
+    /// call out as the reason a downgrade is not a rollback. Propagating rolls
+    /// `initialize_mls` back instead, so the app finds out rather than running
+    /// unprotected. Blocking is a safety control; it fails closed.
+    pub(crate) fn restore_blocked_users(&mut self) -> Result<()> {
         let Some(storage) = &self.protocol_state_storage else {
-            return;
+            return Ok(());
         };
-        let user_ids = match Self::list_state_keys(storage.as_ref(), storage_keys::BLOCKED_USERS) {
-            Ok(keys) => keys,
-            Err(e) => {
-                warn!(error = %e, "Failed to list blocked users from storage");
-                return;
-            }
-        };
+        let user_ids = Self::list_state_keys(storage.as_ref(), storage_keys::BLOCKED_USERS)
+            .map_err(|e| Error::Other(format!("Failed to list blocked users: {}", e)))?;
         let listed = user_ids.len();
         for user_id in user_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if offline_protocol_core::UserId::new(user_id).is_err() {
@@ -2006,6 +2009,7 @@ impl OfflineProtocol {
                 "Restored blocked users from storage"
             );
         }
+        Ok(())
     }
 
     // ========================================================================

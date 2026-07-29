@@ -255,7 +255,7 @@ mod tests {
         proto.blocked_users.clear();
         assert!(!proto.is_user_blocked("bob"));
 
-        proto.restore_blocked_users();
+        proto.restore_blocked_users().unwrap();
         assert!(proto.is_user_blocked("bob"));
     }
 
@@ -1286,7 +1286,7 @@ mod tests {
         storage.store("blocked_users", "", &[]).unwrap(); // invalid: empty user ID
 
         proto.blocked_users.clear();
-        proto.restore_blocked_users();
+        proto.restore_blocked_users().unwrap();
 
         // "bob" should be restored, "" should be skipped
         assert!(proto.is_user_blocked("bob"));

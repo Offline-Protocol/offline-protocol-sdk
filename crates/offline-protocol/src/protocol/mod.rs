@@ -686,7 +686,7 @@ impl OfflineProtocol {
             self.restore_pending_messages()?;
             self.restore_lamport_clock();
             self.restore_tofu_keys();
-            self.restore_blocked_users();
+            self.restore_blocked_users()?;
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
             // Must precede start(): flush_restored_confirmed_pending_messages
@@ -754,7 +754,7 @@ impl OfflineProtocol {
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
         self.restore_tofu_keys();
-        self.restore_blocked_users();
+        self.restore_blocked_users()?;
         self.restore_outbox()?;
         self.restore_media_descriptors()?;
         Ok(())
