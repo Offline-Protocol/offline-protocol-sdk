@@ -29383,3 +29383,241 @@ fn test_enqueue_writes_only_its_own_record() {
         "each enqueue must write exactly its own record"
     );
 }
+
+#[test]
+fn test_flushed_pending_message_leaves_no_record_behind() {
+    // A dispatched message is handed to the outbox, which persists it under the
+    // same id. Leaving the pending copy behind would make the next launch
+    // restore and re-flush it: receivers dedup it on the id, but the sender
+    // re-emits `MessageSent` for traffic it already delivered, and nothing would
+    // say why.
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let queued_id = MessageId::new();
+    alice.queue_pending_message(
+        "bob",
+        "queued",
+        MessagePriority::Medium,
+        queued_id.clone(),
+        None,
+        None,
+        ContentType::default(),
+        None,
+        None,
+    );
+    let state = alice.protocol_state_storage.clone().unwrap();
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGE_ENTRIES, &queued_id.as_str())
+            .unwrap()
+            .is_some(),
+        "the enqueue must have written a record to delete"
+    );
+
+    alice.flush_pending_messages("bob").unwrap();
+
+    assert!(alice.pending_encrypted_messages.get("bob").is_none());
+    assert!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .is_empty(),
+        "a dispatched message must not leave its pending record behind"
+    );
+    assert!(
+        state
+            .load(storage_keys::OUTBOX, &queued_id.as_str())
+            .unwrap()
+            .is_some(),
+        "the outbox must have taken over under the same id"
+    );
+}
+
+#[test]
+fn test_pending_record_that_does_not_name_its_own_key_is_dropped() {
+    // A record addressed under one id and naming another is worse than merely
+    // unparseable: every runtime delete addresses its own message id, so nothing
+    // outside restore could ever remove it, and admitting it would queue a
+    // message the application has no id for. Treat it as the loss it is.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let key_id = MessageId::new();
+    let mut message = PendingMessage {
+        content: "mismatched".to_string(),
+        priority: MessagePriority::Medium,
+        message_id: MessageId::new(),
+        reply_to_msg: None,
+        forwarded_from: None,
+        content_type: ContentType::Text,
+        media_metadata: None,
+        rich: None,
+        queued_at: Utc::now(),
+        serialized_bytes: 0,
+    };
+    message.measure();
+    let record = serde_json::to_vec(&PendingMessageRecord {
+        recipient: "bob".to_string(),
+        message,
+    })
+    .unwrap();
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGE_ENTRIES,
+        &key_id.as_str(),
+        &record,
+    );
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+    let events = started_protocol_events(&mut protocol);
+
+    assert!(
+        protocol.pending_encrypted_messages.is_empty(),
+        "a record that does not name its own key must not be queued"
+    );
+    assert!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .is_empty(),
+        "and it must be deleted, since nothing else ever could"
+    );
+    let settled: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        settled.contains(&key_id.as_str()),
+        "the loss settles under the key the application is holding; got {settled:?}"
+    );
+}
+
+#[test]
+fn test_migration_does_not_persist_entries_the_caps_drop() {
+    // The migration writes after admission, not during the walk. A pre-cap
+    // legacy install holds queues the current bounds do not admit, and writing
+    // every entry out only to delete it again moments later is the one shape
+    // that turns an ordinary upgrade into thousands of device barriers on the
+    // boot path.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let over_cap = 8;
+    let (ids, queue) = legacy_pending_queue(
+        MAX_PENDING_MESSAGES_PER_PEER + over_cap,
+        Utc::now() - ChronoDuration::minutes(5),
+    );
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+    let events = started_protocol_events(&mut protocol);
+
+    assert_eq!(
+        protocol.pending_encrypted_messages["bob"].len(),
+        MAX_PENDING_MESSAGES_PER_PEER,
+        "the restored queue is held to the live per-peer cap"
+    );
+    assert_eq!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .len(),
+        MAX_PENDING_MESSAGES_PER_PEER,
+        "only the survivors get a record — the dropped entries are never written"
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "the legacy record still goes, once its survivors are durable"
+    );
+
+    // Oldest-first, and each dropped id still settles for the app holding it.
+    let settled: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for id in &ids[..over_cap] {
+        assert!(
+            settled.contains(&id.as_str()),
+            "a capacity-dropped entry must still be settled; got {settled:?}"
+        );
+    }
+}
+
+#[test]
+fn test_pending_expiry_is_bounded_per_pass() {
+    // Each expiry is a settlement *and* a durable delete, and entries queued
+    // together come due together — so one tick of the 100 ms bindings loop must
+    // not turn into thousands of synchronous deletes. What is left behind is
+    // still past its deadline, so the next tick drains another pass.
+    let mut protocol = pending_queue_protocol();
+    let lifetime_ms = protocol
+        .config
+        .reliability
+        .retry
+        .pending_message_max_lifetime_ms;
+    let long_expired =
+        Utc::now() - ChronoDuration::milliseconds(lifetime_ms as i64) - ChronoDuration::hours(1);
+
+    let per_peer = MAX_PENDING_EXPIRIES_PER_PASS / 2 + 5;
+    for recipient in ["bob", "carol"] {
+        for index in 0..per_peer {
+            protocol.queue_pending_message_at(
+                recipient,
+                &format!("expired {index}"),
+                MessagePriority::Medium,
+                MessageId::new(),
+                None,
+                None,
+                ContentType::Text,
+                None,
+                None,
+                long_expired,
+            );
+        }
+    }
+    let total = per_peer * 2;
+    assert_eq!(protocol.total_pending_message_count(), total);
+
+    protocol.cleanup_expired_pending_messages();
+    assert_eq!(
+        protocol.total_pending_message_count(),
+        total - MAX_PENDING_EXPIRIES_PER_PASS,
+        "one pass must expire at most its bound, however many are due"
+    );
+
+    protocol.cleanup_expired_pending_messages();
+    assert_eq!(
+        protocol.total_pending_message_count(),
+        0,
+        "and the remainder must drain on the following pass, not be stranded"
+    );
+}

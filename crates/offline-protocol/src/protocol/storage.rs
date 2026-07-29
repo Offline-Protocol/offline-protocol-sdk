@@ -479,15 +479,24 @@ struct PendingRestoreWalk {
     /// Ids the per-message pass has already accounted for — recovered, or
     /// examined and settled as destroyed.
     ///
-    /// The migration pass skips these. Recovered ones because it writes the new
-    /// records before deleting the legacy one, so a crash in between leaves a
-    /// queue present in both layouts and the migrated copy is the one to keep;
-    /// settled ones because re-filing an id the application was just told had
-    /// failed would deliver a message after its own terminal event.
+    /// The migration pass skips these. Recovered ones because a crash between
+    /// its writes and its delete leaves a queue present in both layouts and the
+    /// migrated copy is the one to keep; settled ones because re-filing an id
+    /// the app was just told had failed would deliver a message after its own
+    /// terminal event.
     seen: HashSet<String>,
     /// Ids of per-message records that were examined and destroyed. Settleable
     /// individually, because the key is the id.
     lost_ids: Vec<String>,
+    /// Ids recovered from a legacy queue, which therefore have no record of
+    /// their own yet.
+    ///
+    /// Persisted after admission rather than during the walk, so the entries the
+    /// caps drop are never written at all — see [`OfflineProtocol::restore_pending_messages`].
+    migrated: HashSet<String>,
+    /// Legacy records whose entries have been recovered, to drop once those
+    /// entries are durable under their own ids.
+    migrated_recipients: Vec<String>,
     /// Recipients whose whole legacy queue died inside a record that would not
     /// open. Only reportable per peer — every id was inside it.
     lost_recipients: Vec<String>,
@@ -1699,13 +1708,16 @@ impl OfflineProtocol {
     ///    destroyed and is settled with a `message_failed` for exactly that id —
     ///    the reason the layout exists.
     /// 2. **Legacy per-recipient records** ([`storage_keys::PENDING_MESSAGES`]),
-    ///    migrated forward: read the queue, write each entry as its own record,
-    ///    then drop the legacy one. A loss there is still only reportable per
-    ///    peer, because every id was inside the record that would not open.
+    ///    migrated forward: read the queue, and once the caps have been applied
+    ///    write each *surviving* entry as its own record and drop the legacy one
+    ///    ([`Self::persist_migrated_pending_queues`]). A loss there is still only
+    ///    reportable per peer, because every id was inside the record that would
+    ///    not open.
     ///
     /// The migration writes before it deletes, so a crash in between leaves the
     /// entries in *both* layouts rather than neither. Pass 1 runs first and
-    /// claims those ids, so pass 2 skips them and the next launch converges.
+    /// claims those ids — recovered or settled — so pass 2 skips them and the
+    /// next launch converges.
     ///
     /// Neither pass needs the freeze the per-recipient walk did. Nothing outside
     /// this walk writes or deletes the legacy category any more, and a
@@ -1739,6 +1751,56 @@ impl OfflineProtocol {
         self.restore_pending_message_entries(storage.as_ref(), &mut budget, &mut walk)?;
         self.migrate_legacy_pending_queues(storage.as_ref(), &mut budget, &mut walk)?;
 
+        // Records come back in whatever order the store enumerates them, which
+        // carries no ordering information at all, so the canonical order has to
+        // be re-imposed before the oldest-first trims below mean anything.
+        // Recipients are visited in a stable order for the same reason: the
+        // global caps evict across peers, so a map's iteration order would make
+        // *which* entries survive a coin flip.
+        let mut admission = RestoredPendingAdmission::default();
+        let mut grouped: Vec<(String, Vec<PendingMessage>)> =
+            std::mem::take(&mut walk.grouped).into_iter().collect();
+        grouped.sort_by(|left, right| left.0.cmp(&right.0));
+        for (recipient, mut messages) in grouped {
+            sort_pending_queue(&mut messages);
+            self.admit_restored_pending_queue(&recipient, messages, &mut admission);
+        }
+
+        let RestoredPendingAdmission {
+            capacity_evicted, ..
+        } = admission;
+
+        // Every id the caps dropped had its own record, so the record goes with
+        // the settlement rather than the survivors being rewritten around it —
+        // unless it came out of a legacy queue, which has no per-message record
+        // yet because the persist below writes only what survived.
+        //
+        // Budgeted like the outbox's capacity drain, and stopped between entries
+        // for the same reason: an entry the pool cannot fund is already out of
+        // memory and is left on disk **unsettled**, so a later launch restores
+        // it, re-caps it, and owns both halves then. Stopping here also stops the
+        // legacy deletes below, so a migrated entry settled above always has its
+        // source record deleted in the same launch.
+        let mut capacity_settlements = Vec::new();
+        for message_id in capacity_evicted {
+            if !walk.migrated.contains(&message_id.as_str()) {
+                if budget.is_spent() {
+                    walk.prune_bound_reached = true;
+                    break;
+                }
+                budget.claim();
+                self.delete_pending_message_from_storage(&message_id);
+            }
+            capacity_settlements.push(Event::message_failed(
+                message_id,
+                "Pending session queue capacity exceeded".to_string(),
+                0,
+            ));
+        }
+        self.settle_restored_message_failures(capacity_settlements);
+
+        self.persist_migrated_pending_queues(&mut budget, &mut walk);
+
         if walk.entry_bound_reached {
             warn!(
                 examined = walk.examined_entries,
@@ -1756,34 +1818,6 @@ impl OfflineProtocol {
             );
         }
 
-        // Records come back in whatever order the store enumerates them, which
-        // carries no ordering information at all, so the canonical order has to
-        // be re-imposed before the oldest-first trims below mean anything.
-        // Recipients are visited in a stable order for the same reason: the
-        // global caps evict across peers, so a map's iteration order would make
-        // *which* entries survive a coin flip.
-        let mut admission = RestoredPendingAdmission::default();
-        let mut grouped: Vec<(String, Vec<PendingMessage>)> = walk.grouped.into_iter().collect();
-        grouped.sort_by(|left, right| left.0.cmp(&right.0));
-        for (recipient, mut messages) in grouped {
-            sort_pending_queue(&mut messages);
-            self.admit_restored_pending_queue(&recipient, messages, &mut admission);
-        }
-
-        let RestoredPendingAdmission {
-            capacity_evicted, ..
-        } = admission;
-
-        // Every id the caps dropped had its own record, so the record goes with
-        // the settlement rather than the survivors being rewritten around it.
-        self.delete_pending_messages_from_storage(capacity_evicted.iter());
-        self.settle_restored_message_failures(capacity_evicted.into_iter().map(|message_id| {
-            Event::message_failed(
-                message_id,
-                "Pending session queue capacity exceeded".to_string(),
-                0,
-            )
-        }));
         self.settle_restored_message_failures(walk.unaddressable.into_iter().map(|message_id| {
             Event::message_failed(
                 message_id,
@@ -1815,6 +1849,46 @@ impl OfflineProtocol {
         self.recompute_next_pending_message_expiry();
         self.cleanup_expired_pending_messages();
         Ok(())
+    }
+
+    /// Gives every migrated entry that survived admission a record of its own,
+    /// then drops the legacy records those entries came out of.
+    ///
+    /// Deliberately after the caps rather than during the walk. A pre-cap legacy
+    /// install can hold far more than the current bounds admit, and writing each
+    /// entry out only to delete it again moments later is the one shape that
+    /// turns an ordinary upgrade into thousands of device barriers on the boot
+    /// path. Writing only the survivors makes the burst bounded by
+    /// [`MAX_PENDING_MESSAGES_GLOBAL`], and it is still write-before-delete: the
+    /// legacy record stays on disk until its survivors are durable, so a crash
+    /// in between leaves the entries in both layouts rather than neither.
+    fn persist_migrated_pending_queues(
+        &self,
+        budget: &mut PruneBudget<'_>,
+        walk: &mut PendingRestoreWalk,
+    ) {
+        if walk.migrated_recipients.is_empty() {
+            return;
+        }
+        for (recipient, messages) in &self.pending_encrypted_messages {
+            for message in messages {
+                if walk.migrated.contains(&message.message_id.as_str()) {
+                    self.persist_pending_message(recipient, message);
+                }
+            }
+        }
+        // Charged like every other delete this walk issues, and stopped between
+        // records: a legacy record the pool cannot fund is simply read again by
+        // a later launch, which finds its entries already claimed by the
+        // per-message pass and completes the delete then.
+        for recipient in &walk.migrated_recipients {
+            if budget.is_spent() {
+                walk.prune_bound_reached = true;
+                break;
+            }
+            budget.claim();
+            self.delete_legacy_pending_queue(recipient);
+        }
     }
 
     /// Reads the per-message pending records, grouping them by recipient.
@@ -1935,7 +2009,11 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// Migrates legacy per-recipient queues into per-message records.
+    /// Recovers legacy per-recipient queues so the caps can be applied to them.
+    ///
+    /// Recovery only — [`Self::persist_migrated_pending_queues`] does the writing
+    /// and the legacy delete, after admission, so entries the caps drop are never
+    /// written at all.
     ///
     /// One-shot upgrade scaffolding, like `adopt_legacy_protocol_state`: once a
     /// launch has walked every legacy record the listing comes back empty and
@@ -2035,34 +2113,34 @@ impl OfflineProtocol {
             };
             walk.examined_entries = walk.examined_entries.saturating_add(messages.len());
 
-            // Write the new records *before* dropping the legacy one, so a crash
-            // in between leaves the entries in both layouts rather than neither.
+            // Recovered, not yet written. The caller persists what survives the
+            // caps and then drops this record, so a queue too big for the
+            // current bounds is never written out only to be deleted again.
             let mut migrated = 0usize;
             for message in messages {
                 let message_id = message.message_id.as_str();
                 if walk.seen.contains(&message_id) {
                     // Already accounted for by the pass before this one — either
-                    // a previous launch migrated this queue and died before the
-                    // delete below, or the per-message record was examined and
+                    // a previous launch migrated this queue and died before
+                    // dropping it, or the per-message record was examined and
                     // settled. Re-filing a settled id would put a message on the
                     // wire after the app was told it failed.
                     continue;
                 }
-                self.persist_pending_message(&recipient, &message);
-                walk.seen.insert(message_id);
+                walk.seen.insert(message_id.clone());
+                walk.migrated.insert(message_id);
                 walk.grouped
                     .entry(recipient.clone())
                     .or_default()
                     .push(message);
                 migrated = migrated.saturating_add(1);
             }
-            budget.claim();
-            self.delete_legacy_pending_queue(&recipient);
             info!(
                 recipient = %recipient,
                 migrated,
-                "Migrated legacy pending queue to per-message records"
+                "Recovered legacy pending queue for migration"
             );
+            walk.migrated_recipients.push(recipient);
         }
 
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
@@ -2598,7 +2676,7 @@ impl OfflineProtocol {
     /// — every launch, for as long as that one file stays unreadable, on an
     /// install that can then never send. Every other category on this path
     /// already treats a per-record read failure as recoverable and continues
-    /// ([`Self::restore_outbox`], [`Self::load_pending_messages_detailed`],
+    /// ([`Self::restore_outbox`], [`Self::load_legacy_pending_queue`],
     /// [`Self::restore_media_descriptors`], [`Self::load_peer_capabilities`]).
     /// These two were the outliers, and moving both categories out of the
     /// credential store and into the app container — where `ENOSPC`, `EIO`, and

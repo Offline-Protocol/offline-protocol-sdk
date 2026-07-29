@@ -205,6 +205,21 @@ pub(crate) const MAX_PENDING_MESSAGES_PER_PEER: usize = 64;
 /// Paired with [`MAX_PENDING_MESSAGE_BYTES_GLOBAL`], as above.
 pub(crate) const MAX_PENDING_MESSAGES_GLOBAL: usize = 4096;
 
+/// Maximum pending entries expired in one `process()` tick.
+///
+/// Each expiry is a settlement *and* a durable delete, and the two have to stay
+/// paired — so what gets bounded is how many entries expire per pass, not how
+/// many deletes it may issue. Messages queued in a burst share a `queued_at` and
+/// so come due in a burst; without this, one tick of the 100 ms bindings loop
+/// could issue up to [`MAX_PENDING_MESSAGES_GLOBAL`] synchronous deletes, each a
+/// device barrier on every built-in provider.
+///
+/// The remainder is not deferred indefinitely: the entries left behind are still
+/// past their deadline, so `recompute_next_pending_message_expiry` leaves
+/// `next_pending_message_expiry` in the past and the very next tick drains
+/// another pass.
+pub(crate) const MAX_PENDING_EXPIRIES_PER_PASS: usize = 64;
+
 /// Maximum terminal settlements parked by restore for `start()` to drain.
 ///
 /// The restore caps already bound how many can be produced, but they bound it

@@ -8,10 +8,10 @@ use super::{
     PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras,
     SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
     MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES, MAX_PENDING_CONNECTION_REQUESTS,
-    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
-    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
-    MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL, RICH_PAYLOAD_V1,
-    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
+    MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
+    MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
+    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
+    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use crate::constants::{
@@ -2674,7 +2674,13 @@ impl OfflineProtocol {
         for (recipient, messages) in &mut self.pending_encrypted_messages {
             let previous_len = messages.len();
             messages.retain(|pending| {
-                if lifetime_expired(now, pending.queued_at, lifetime_ms) {
+                // Bounded per pass: each expiry costs a durable delete, and a
+                // burst of entries queued together comes due together. The
+                // remainder stays queued past its deadline and drains on the
+                // next tick — see `MAX_PENDING_EXPIRIES_PER_PASS`.
+                if expired_ids.len() < MAX_PENDING_EXPIRIES_PER_PASS
+                    && lifetime_expired(now, pending.queued_at, lifetime_ms)
+                {
                     expired_ids.push(pending.message_id.clone());
                     false
                 } else {
