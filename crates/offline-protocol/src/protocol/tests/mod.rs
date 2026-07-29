@@ -6356,6 +6356,77 @@ fn test_unreadable_outbox_entry_is_settled_rather_than_dropped_silently() {
 }
 
 #[test]
+fn test_settlements_parked_while_paused_are_drained_on_resume() {
+    // `settle_restored_message_failure` parks anything it produces while the
+    // protocol is not `Running`, and `start()` used to be the only drain. But
+    // `update_retry_config` reaches that path at runtime: shortening
+    // `pending_message_max_lifetime_ms` expires queued messages and settles
+    // them. Called while the app is backgrounded — the whole reason `pause()`
+    // exists — the terminal `message_failed` would sit in the deferred queue
+    // until a `start()` that a resumed process never performs, so the app
+    // holds an id that never resolves.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let events = started_protocol_events(&mut protocol);
+    let message_id = MessageId::new();
+    protocol.queue_pending_message(
+        "bob",
+        "queued before the pause",
+        MessagePriority::Medium,
+        message_id.clone(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+    );
+    events.lock().unwrap().clear();
+
+    protocol.pause().unwrap();
+
+    // Expire the queue from the background, exactly as an app tuning its
+    // reliability config while suspended would.
+    let mut retry = protocol.config.reliability.retry.clone();
+    retry.pending_message_max_lifetime_ms = 1;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    protocol.update_retry_config(retry).unwrap();
+
+    assert!(
+        protocol.pending_encrypted_messages.get("bob").is_none(),
+        "the fixture must actually expire the queue"
+    );
+    assert!(
+        !events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id: id, .. } if *id == message_id.as_str()
+        )),
+        "a paused protocol has no live event pipeline, so the settlement parks"
+    );
+    assert_eq!(protocol.deferred_restore_settlements.len(), 1);
+
+    protocol.resume().unwrap();
+
+    assert!(
+        protocol.deferred_restore_settlements.is_empty(),
+        "resume is an edge back into Running and owes the same drain start() does"
+    );
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id: id, .. } if *id == message_id.as_str()
+        )),
+        "the parked settlement must reach the app once the pipeline is live again"
+    );
+}
+
+#[test]
 fn test_unreadable_pending_queue_is_surfaced_per_recipient() {
     // The ids live inside the record that would not open, so they cannot be
     // settled individually — but the loss must not read as "nothing was

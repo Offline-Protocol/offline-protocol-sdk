@@ -1016,18 +1016,7 @@ impl OfflineProtocol {
         // process died; without this they would never resolve to anything.
         // Drained before the flush below so an app sees the failures first and
         // cannot mistake a restored send for the settlement of a lost one.
-        for event in std::mem::take(&mut self.deferred_restore_settlements) {
-            self.emit_event(event);
-        }
-        let suppressed = std::mem::take(&mut self.suppressed_restore_settlements);
-        if suppressed > 0 {
-            warn!(
-                suppressed,
-                cap = MAX_DEFERRED_RESTORE_SETTLEMENTS,
-                "Restore produced more terminal settlements than any legitimate run can produce; \
-                 the ids past the cap were not reported individually"
-            );
-        }
+        self.drain_deferred_restore_settlements();
 
         self.flush_restored_confirmed_pending_messages();
         self.kick_pending_session_reconciliation("start");
@@ -1111,16 +1100,48 @@ impl OfflineProtocol {
 
     /// Resumes the protocol from pause.
     pub fn resume(&mut self) -> Result<()> {
-        let mut state = lock_shared_state(&self.shared_state)?;
+        {
+            let mut state = lock_shared_state(&self.shared_state)?;
 
-        if state.state != ProtocolState::Paused {
-            return Err(Error::InvalidConfiguration(
-                "Protocol is not paused".to_string(),
-            ));
+            if state.state != ProtocolState::Paused {
+                return Err(Error::InvalidConfiguration(
+                    "Protocol is not paused".to_string(),
+                ));
+            }
+
+            state.state = ProtocolState::Running;
         }
 
-        state.state = ProtocolState::Running;
+        // A pause is the other edge back into a live event pipeline, so it owes
+        // the same drain `start()` does. `settle_restored_message_failure` parks
+        // anything it produces while the protocol is not `Running`, and
+        // `update_retry_config` reaches it at runtime: shortening
+        // `pending_message_max_lifetime_ms` in the background expires queued
+        // messages and parks their terminal `message_failed`. Without this the
+        // app would hold those ids until a `start()` that may never come again.
+        self.drain_deferred_restore_settlements();
         Ok(())
+    }
+
+    /// Emits every terminal settlement parked while the event pipeline was not
+    /// live, and reports the count of any the cap dropped.
+    ///
+    /// Called from both edges into `Running` ([`Self::start`] and
+    /// [`Self::resume`]) so a parked settlement has no state to be stranded in.
+    /// Idempotent: draining an empty queue emits nothing.
+    fn drain_deferred_restore_settlements(&mut self) {
+        for event in std::mem::take(&mut self.deferred_restore_settlements) {
+            self.emit_event(event);
+        }
+        let suppressed = std::mem::take(&mut self.suppressed_restore_settlements);
+        if suppressed > 0 {
+            warn!(
+                suppressed,
+                cap = MAX_DEFERRED_RESTORE_SETTLEMENTS,
+                "Restore produced more terminal settlements than any legitimate run can produce; \
+                 the ids past the cap were not reported individually"
+            );
+        }
     }
 
     /// Called when a new neighbor is discovered.
