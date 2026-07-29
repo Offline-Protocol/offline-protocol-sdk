@@ -29787,3 +29787,301 @@ fn test_capacity_drop_from_an_unmigrated_queue_is_not_settled() {
         );
     }
 }
+
+/// A `ProtocolStateStorage` whose per-message pending *writes* fail on demand
+/// while every delete succeeds — the ENOSPC shape: a full disk fails `store`
+/// and lets `delete` through.
+struct PendingWriteRefusingState {
+    inner: Arc<InMemoryStorage>,
+    refuse: Mutex<bool>,
+}
+
+impl crate::ProtocolStateStorage for PendingWriteRefusingState {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        if key_type == storage_keys::PENDING_MESSAGE_ENTRIES && *self.refuse.lock().unwrap() {
+            return Err(crate::ProtocolStateError::StoreFailed(
+                "provider refused".to_string(),
+            ));
+        }
+        self.inner
+            .store(key_type, key_id, data)
+            .map_err(map_test_storage_error)
+    }
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        self.inner
+            .load(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .delete(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        self.inner
+            .list_keys(key_type)
+            .map_err(map_test_storage_error)
+    }
+}
+
+#[test]
+fn test_migration_whose_writes_fail_keeps_the_legacy_record_and_settles_nothing() {
+    // The migration's writes are as fallible as its delete, and the failure
+    // shapes differ: a full disk fails `store` and lets `delete` through.
+    // Deleting the legacy record on top of failed writes would leave the queue
+    // in RAM only — every id the app holds gone at the next launch with no
+    // `message_failed` — which is the exact loss class this layout exists to
+    // eliminate. A recipient with any failed write must be abandoned like one
+    // whose delete failed: nothing settled, the legacy record still the one
+    // durable copy.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (ids, queue) = legacy_pending_queue(2, Utc::now() - ChronoDuration::minutes(5));
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    let refusing = Arc::new(PendingWriteRefusingState {
+        inner: state.clone(),
+        refuse: Mutex::new(true),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_some(),
+        "the legacy record must survive a migration whose writes failed"
+    );
+    assert!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .is_empty(),
+        "no half-written per-message records may be left behind"
+    );
+    assert!(
+        protocol.pending_encrypted_messages.get("bob").is_none(),
+        "entries whose legacy record survived must not stay in memory to flush"
+    );
+    let settled: Vec<String> = protocol
+        .deferred_restore_settlements
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for id in &ids {
+        assert!(
+            !settled.contains(&id.as_str()),
+            "no id may be settled while the legacy record can still deliver it; got {settled:?}"
+        );
+    }
+
+    // A later launch with the provider healthy migrates the whole queue.
+    *refusing.refuse.lock().unwrap() = false;
+    let mut later = OfflineProtocol::new(create_test_config()).unwrap();
+    later
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+    assert_eq!(
+        later.pending_encrypted_messages["bob"]
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect::<Vec<_>>(),
+        ids,
+        "the deferred migration must recover the whole queue, in order"
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "and complete the migration this time"
+    );
+}
+
+#[test]
+fn test_settlement_is_withheld_while_a_surviving_legacy_record_can_refile_the_id() {
+    // The cross-launch half of what
+    // `test_migration_does_not_resurrect_an_id_the_first_pass_settled` pins
+    // within one launch. Pass 1 settles an id whose per-message record would
+    // not open — but the same id also sits inside a legacy record, and that
+    // record's delete fails. The record survives, so the next launch re-files
+    // and *sends* the id; a `message_failed` emitted now would be a terminal
+    // answer that launch overturns. The settlement must be withheld — the next
+    // launch owns both halves.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (ids, queue) = legacy_pending_queue(2, Utc::now() - ChronoDuration::minutes(5));
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+    // An interrupted earlier migration wrote ids[0]'s per-message record, and
+    // it is now unopenable — examined, unrecoverable, and normally settled.
+    state
+        .store(
+            storage_keys::PENDING_MESSAGE_ENTRIES,
+            &ids[0].as_str(),
+            b"not sealed under this install's record key",
+        )
+        .unwrap();
+
+    let refusing = Arc::new(LegacyDeleteRefusingState {
+        inner: state.clone(),
+        refuse: Mutex::new(true),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+
+    let settled: Vec<String> = protocol
+        .deferred_restore_settlements
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !settled.contains(&ids[0].as_str()),
+        "a settlement the surviving legacy record would overturn must be withheld; got {settled:?}"
+    );
+
+    // The next launch, healthy again, re-files the whole queue — which is why
+    // the settlement had to be withheld: the message is deliverable after all.
+    *refusing.refuse.lock().unwrap() = false;
+    let mut later = OfflineProtocol::new(create_test_config()).unwrap();
+    later
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+    assert_eq!(
+        later.pending_encrypted_messages["bob"]
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect::<Vec<_>>(),
+        ids,
+        "the next launch must recover the id it was never lied to about"
+    );
+    assert!(
+        later
+            .deferred_restore_settlements
+            .iter()
+            .all(|event| !matches!(event, Event::MessageFailed { .. })),
+        "nothing may settle on the launch that recovers the queue"
+    );
+}
+
+#[test]
+fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
+    // The expiry pass is bounded per tick (`MAX_PENDING_EXPIRIES_PER_PASS`),
+    // so a restore can hand `flush_pending_messages` entries already past
+    // their deadline. Dispatching one would settle it `MessageSent` after the
+    // absolute pending lifetime promised `message_failed` — the deadline has
+    // to hold where delivery is decided, not only in the bounded cleanup.
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let lifetime_ms = alice
+        .config
+        .reliability
+        .retry
+        .pending_message_max_lifetime_ms;
+    let expired_id = MessageId::new();
+    alice.queue_pending_message_at(
+        "bob",
+        "expired",
+        MessagePriority::Medium,
+        expired_id.clone(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+        Utc::now() - ChronoDuration::milliseconds(lifetime_ms as i64) - ChronoDuration::hours(1),
+    );
+    let fresh_id = MessageId::new();
+    alice.queue_pending_message(
+        "bob",
+        "fresh",
+        MessagePriority::Medium,
+        fresh_id.clone(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+    );
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    alice.on_event(move |event| handle.lock().unwrap().push(event));
+
+    alice.flush_pending_messages("bob").unwrap();
+
+    assert!(
+        alice.outbox.contains_key(&fresh_id),
+        "the in-lifetime sibling must still flush normally"
+    );
+    assert!(
+        !alice.outbox.contains_key(&expired_id),
+        "a past-deadline entry must never reach dispatch"
+    );
+    assert_eq!(
+        alice.pending_encrypted_messages.get("bob").map(|messages| {
+            messages
+                .iter()
+                .map(|m| m.message_id.clone())
+                .collect::<Vec<_>>()
+        }),
+        Some(vec![expired_id.clone()]),
+        "it stays queued, record intact, for the expiry pass to settle"
+    );
+
+    alice.cleanup_expired_pending_messages();
+    assert!(
+        alice.pending_encrypted_messages.get("bob").is_none(),
+        "the expiry pass drains it"
+    );
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id, .. } if *message_id == expired_id.as_str()
+        )),
+        "and settles it as failed, never as sent"
+    );
+    assert!(
+        !events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageSent { message_id, .. } if *message_id == expired_id.as_str()
+        )),
+        "no MessageSent may exist for an entry past its lifetime"
+    );
+}

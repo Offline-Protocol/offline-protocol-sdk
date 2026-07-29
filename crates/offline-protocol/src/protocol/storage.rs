@@ -430,20 +430,19 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// # This bounds deletes, and deletes are not the only durable cost
 ///
 /// A *write* flushes the record **and** its directory, so it is strictly more
-/// expensive than a delete. Two write paths on the restore walk are unbounded
-/// on purpose, for the same reason `restore_outbox`'s deletes are: each is
-/// paired with a settlement that cannot be separated from it.
+/// expensive than a delete. Two write paths on the restore walk spend outside
+/// this budget on purpose:
 ///
-/// - `restore_pending_messages` re-persists every recipient whose queue lost
-///   entries to a capacity cap. Skipping one would leave its durable record
-///   listing messages already settled as `message_failed`, which the next launch
-///   would restore and deliver.
-/// - `restore_outbox` re-persists refreshed and orphaned entries for the same
-///   reason.
+/// - `restore_pending_messages` writes each legacy entry that survives
+///   admission under its own id before dropping the per-recipient record it
+///   came out of (`persist_migrated_pending_queues`). Those
+///   writes have their own per-launch cap,
+///   [`MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH`].
+/// - `restore_outbox` re-persists refreshed and orphaned entries. Each is
+///   paired with a settlement that cannot be separated from it, and the volume
+///   is bounded transitively by [`OUTBOX_RESTORE_KEY_CAP`].
 ///
-/// Both are bounded transitively — by [`MAX_PENDING_RESTORE_ENTRIES`] and
-/// [`OUTBOX_RESTORE_KEY_CAP`] respectively — not by this constant. Tightening
-/// the write volume means tightening those, not budgeting here.
+/// Tightening the write volume means tightening those, not budgeting here.
 pub(super) const MAX_RESTORE_PRUNE_DELETES: usize = 512;
 
 /// Everything one pending-queue restore walk accumulates across recipients.
@@ -487,8 +486,17 @@ struct PendingRestoreWalk {
     /// terminal event.
     seen: HashSet<String>,
     /// Ids of per-message records that were examined and destroyed. Settleable
-    /// individually, because the key is the id.
+    /// individually, because the key is the id — *unless* a surviving legacy
+    /// record also holds the id; see `seen_in_legacy`.
     lost_ids: Vec<String>,
+    /// Ids the migration pass skipped as `seen`, mapped to the legacy recipient
+    /// whose record holds them.
+    ///
+    /// A `lost_ids` settlement is only honest while nothing can re-file the id.
+    /// An id also inside a legacy record whose delete then fails *can* be
+    /// re-filed — the next launch recovers and sends it — so its settlement is
+    /// withheld and the next launch owns both halves.
+    seen_in_legacy: HashMap<String, String>,
     /// Ids recovered from a legacy queue, mapped to the record they came out
     /// of, and which therefore have no record of their own yet.
     ///
@@ -1429,18 +1437,27 @@ impl OfflineProtocol {
     // PENDING MESSAGES PERSISTENCE
     // ========================================================================
 
-    /// Persists one queued message, keyed by its own id.
+    /// Persists one queued message, keyed by its own id, returning whether the
+    /// record is durably on disk.
     ///
-    /// Best-effort and infallible, like [`Self::persist_outbox_entry`]: the send
-    /// path cannot propagate storage errors, so a failed write is logged and
-    /// swallowed. The message still lives in the in-memory queue and still
-    /// flushes when the session establishes; it just will not survive a restart.
+    /// Best-effort on the send path, like [`Self::persist_outbox_entry`]: it
+    /// cannot propagate storage errors, so a failed write is logged and the
+    /// return ignored. The message still lives in the in-memory queue and still
+    /// flushes when the session establishes; it just will not survive a
+    /// restart. The migration path must honour the return instead — its next
+    /// step is deleting the legacy record these entries came out of, and doing
+    /// that on top of a failed write would destroy the only surviving copy (see
+    /// [`Self::persist_migrated_pending_queues`]).
     ///
     /// Re-persisting an id already on disk is an ordinary overwrite of its own
     /// record, which is what makes the flush-time re-queue path idempotent.
-    pub(crate) fn persist_pending_message(&self, recipient: &str, message: &PendingMessage) {
+    pub(crate) fn persist_pending_message(
+        &self,
+        recipient: &str,
+        message: &PendingMessage,
+    ) -> bool {
         let Some(storage) = &self.protocol_state_storage else {
-            return;
+            return false;
         };
         let record = PendingMessageRecord {
             recipient: recipient.to_string(),
@@ -1460,7 +1477,9 @@ impl OfflineProtocol {
                         error = %e,
                         "Failed to persist pending message"
                     );
+                    return false;
                 }
+                true
             }
             Err(e) => {
                 warn!(
@@ -1469,6 +1488,7 @@ impl OfflineProtocol {
                     error = %e,
                     "Failed to serialize pending message"
                 );
+                false
             }
         }
     }
@@ -1608,13 +1628,16 @@ impl OfflineProtocol {
     /// Only ever called with a record this session has already *read*, which is
     /// what makes it safe without the freeze the old whole-queue clear needed:
     /// nothing outside the migration walk touches this category any more, so a
-    /// record no walk reached is simply read by a later launch.
+    /// record no walk reached is simply read by a later launch. (The one other
+    /// writer, `adopt_legacy_protocol_state`, moves pre-split records *into*
+    /// this category — but it runs earlier in the same launch, before this
+    /// walk, so it is not an exception to the conclusion.)
     ///
     /// Returns whether the record is gone. Nothing else ever writes this
-    /// category, so a delete that failed is permanent for the session — the
-    /// caller has to undo the migration rather than log and move on, or the
-    /// surviving record re-files its whole queue on a later launch. See
-    /// [`Self::forget_migrated_entries`].
+    /// category during or after the walk, so a delete that failed is permanent
+    /// for the session — the caller has to undo the migration rather than log
+    /// and move on, or the surviving record re-files its whole queue on a later
+    /// launch. See [`Self::forget_migrated_entries`].
     fn delete_legacy_pending_queue(&self, recipient: &str) -> bool {
         if let Some(storage) = &self.protocol_state_storage {
             if let Err(e) = storage.delete(storage_keys::PENDING_MESSAGES, recipient) {
@@ -1860,14 +1883,28 @@ impl OfflineProtocol {
                 0,
             )
         }));
-        self.settle_restored_message_failures(walk.lost_ids.iter().map(|key| {
-            Self::unrecoverable_message_settlement(
-                key,
-                "Queued message awaiting session establishment could not be recovered \
-                 from protocol-state storage",
-                0,
-            )
-        }));
+        // Withheld, not emitted, when a surviving legacy record also holds the
+        // id: that record re-files it next launch, so a terminal answer now
+        // would be overturned — the same rule the `capacity_evicted` loop above
+        // applies through `abandoned`.
+        self.settle_restored_message_failures(
+            walk.lost_ids
+                .iter()
+                .filter(|key| {
+                    !walk
+                        .seen_in_legacy
+                        .get(*key)
+                        .is_some_and(|recipient| abandoned.contains(recipient))
+                })
+                .map(|key| {
+                    Self::unrecoverable_message_settlement(
+                        key,
+                        "Queued message awaiting session establishment could not be recovered \
+                         from protocol-state storage",
+                        0,
+                    )
+                }),
+        );
         for recipient in &walk.lost_recipients {
             warn!(recipient = %recipient, "Persisted legacy pending queue was unreadable and has been dropped");
         }
@@ -1896,14 +1933,18 @@ impl OfflineProtocol {
     ///
     /// # Why it has to be all or nothing
     ///
-    /// Nothing outside this walk writes or deletes the legacy category, so a
+    /// Nothing outside this walk writes or deletes the legacy category — the
+    /// adoption sweep does write it, but strictly earlier in the same launch
+    /// (see [`Self::delete_legacy_pending_queue`]) — so a
     /// legacy record left behind is left behind for good. The per-message pass
     /// claiming its ids only converges while those per-message records exist,
     /// and they do not survive the flush this launch is about to perform:
     /// dispatch deletes each one. A later launch would then find the legacy
     /// record with nothing claiming it and re-file — and re-send — a queue that
-    /// was already delivered. So a recipient whose delete does not land is not
-    /// half-migrated; it is not migrated.
+    /// was already delivered. So a recipient whose delete does not land — or
+    /// whose *writes* do not all land, since the legacy record must then keep
+    /// holding the entries the writes lost — is not half-migrated; it is not
+    /// migrated.
     ///
     /// Undoing is cheap because the funding checks come *before* the writes: a
     /// recipient this launch cannot pay for has nothing on disk to take back.
@@ -1950,12 +1991,25 @@ impl OfflineProtocol {
                 continue;
             }
 
+            // The writes are fallible too, not just the delete. Deleting the
+            // legacy record on top of a failed write (a full disk fails the
+            // `store` and lets the `delete` through) would destroy the only
+            // durable copy of every entry the write did not land — so a
+            // recipient with any failed write is abandoned exactly like one
+            // whose delete failed, and the writes that did land are taken
+            // back.
+            let mut wrote_all = true;
             if let Some(messages) = self.pending_encrypted_messages.get(&recipient) {
                 for message in messages {
                     if walk.migrated.contains_key(&message.message_id.as_str()) {
-                        self.persist_pending_message(&recipient, message);
+                        wrote_all &= self.persist_pending_message(&recipient, message);
                     }
                 }
+            }
+            if !wrote_all {
+                self.forget_migrated_entries(&recipient, &walk.migrated, true);
+                abandoned.insert(recipient);
+                continue;
             }
             written = written.saturating_add(survivors);
 
@@ -2006,11 +2060,18 @@ impl OfflineProtocol {
         if persisted {
             self.delete_pending_messages_from_storage(removed.iter());
         }
-        warn!(
-            recipient = %recipient,
-            count = removed.len(),
-            "Legacy pending queue could not be migrated this launch; leaving it on disk for a later one"
-        );
+        // Nothing taken back means nothing was recovered from this record this
+        // launch — a previous launch's interrupted migration already claimed
+        // every id in it, and only the leftover delete failed (already logged).
+        // Warning "could not be migrated" there would report a success as an
+        // error.
+        if !removed.is_empty() {
+            warn!(
+                recipient = %recipient,
+                count = removed.len(),
+                "Legacy pending queue could not be migrated this launch; leaving it on disk for a later one"
+            );
+        }
     }
 
     /// Reads the per-message pending records, grouping them by recipient.
@@ -2137,6 +2198,14 @@ impl OfflineProtocol {
     /// and the legacy delete, after admission, so entries the caps drop are never
     /// written at all.
     ///
+    /// Shares the walk's entry bound and delete budget with the per-message
+    /// pass, which runs first — so a store holding
+    /// [`MAX_PENDING_RESTORE_ENTRIES`] or more per-message entries starves this
+    /// pass for the whole launch. Nothing is lost: this category is read-only
+    /// and never grows, and the per-message population drains over successive
+    /// launches (flushes, expiries, capacity evictions), so the migration
+    /// eventually gets its turn.
+    ///
     /// One-shot upgrade scaffolding, like `adopt_legacy_protocol_state`: once a
     /// launch has walked every legacy record the listing comes back empty and
     /// this costs one `list_keys`. Retire it on the same trigger as that sweep —
@@ -2204,8 +2273,13 @@ impl OfflineProtocol {
                 warn!(recipient = %recipient, "Dropping legacy pending queue for an invalid recipient");
                 // Charged, never refused: the settlement this delete pairs with
                 // was already recorded above, so the record has to go with it.
+                // The return is deliberately not honoured, unlike at the
+                // migration call sites: this queue is unaddressable, so a
+                // surviving record cannot re-*send* anything — the next launch
+                // merely reads it and settles the same ids again, and a
+                // duplicate terminal event is the acceptable end of that.
                 budget.claim();
-                self.delete_legacy_pending_queue(&recipient);
+                let _ = self.delete_legacy_pending_queue(&recipient);
                 continue;
             }
 
@@ -2246,7 +2320,11 @@ impl OfflineProtocol {
                     // a previous launch migrated this queue and died before
                     // dropping it, or the per-message record was examined and
                     // settled. Re-filing a settled id would put a message on the
-                    // wire after the app was told it failed.
+                    // wire after the app was told it failed. Remember where the
+                    // legacy copy lives: if this record's delete fails, a
+                    // settlement for the id has to be withheld, because the
+                    // surviving record re-files it next launch.
+                    walk.seen_in_legacy.insert(message_id, recipient.clone());
                     continue;
                 }
                 walk.seen.insert(message_id.clone());

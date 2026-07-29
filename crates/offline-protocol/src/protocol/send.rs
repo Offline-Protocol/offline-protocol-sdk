@@ -1628,8 +1628,27 @@ impl OfflineProtocol {
             let original_order: Vec<String> =
                 pending.iter().map(|m| m.message_id.as_str()).collect();
             let mut remaining = Vec::new();
+            let now = Utc::now();
+            let lifetime_ms = self
+                .config
+                .reliability
+                .retry
+                .pending_message_max_lifetime_ms;
 
             for msg in pending {
+                // The absolute pending lifetime is enforced here as well as in
+                // the expiry pass, because that pass is bounded per tick
+                // (`MAX_PENDING_EXPIRIES_PER_PASS`) — a restore can hand this
+                // flush entries already past their deadline, and dispatching
+                // one would settle it `MessageSent` after the lifetime promised
+                // `message_failed`. Back into `remaining` instead: the entry
+                // keeps its record, and the next expiry pass settles and
+                // deletes it as a pair.
+                if lifetime_expired(now, msg.queued_at, lifetime_ms) {
+                    remaining.push(msg);
+                    continue;
+                }
+
                 // With stable ids the deduplicator now guards against a
                 // double flush (e.g. a stale storage snapshot restored after
                 // the message already went out): a dedup hit means this id
