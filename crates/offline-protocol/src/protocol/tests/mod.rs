@@ -5292,12 +5292,21 @@ fn pending_queue_byte_budgets_admit_any_boundary_legal_message() {
     };
     worst_case.measure();
 
+    // Extras are counted *twice*, because the fattest boundary-legal message
+    // is a forward: `forward_message` bounds one `RichSendExtras` at
+    // `MAX_RICH_EXTRAS_BYTES` and then puts the original `media_metadata` on
+    // the outer `PendingMessage` field as well, as the cleartext legacy
+    // fallback (`send.rs`, the `prepare_outbound_content` call). Asserting a
+    // single copy would leave the real worst case unpinned — a future bump to
+    // `MAX_RICH_EXTRAS_BYTES` could break admission without failing here.
+    let boundary_legal_extras = 2 * MAX_RICH_EXTRAS_BYTES;
     assert!(
-        worst_case.serialized_bytes + MAX_RICH_EXTRAS_BYTES < MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+        worst_case.serialized_bytes + boundary_legal_extras < MAX_PENDING_MESSAGE_BYTES_PER_PEER,
         "one boundary-legal message must fit the per-peer byte budget, even \
-         fully JSON-escaped: {} + {} is not under {}",
+         fully JSON-escaped and carrying its extras on both the sealed and \
+         the outer field: {} + {} is not under {}",
         worst_case.serialized_bytes,
-        MAX_RICH_EXTRAS_BYTES,
+        boundary_legal_extras,
         MAX_PENDING_MESSAGE_BYTES_PER_PEER
     );
     assert!(
