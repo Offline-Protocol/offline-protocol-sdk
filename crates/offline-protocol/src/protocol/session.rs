@@ -283,7 +283,11 @@ impl OfflineProtocol {
         };
 
         for peer_id in sessions {
-            let state = match self.load_session_state_entry(&peer_id)? {
+            // Restore-path read: a record whose bytes will not decode is
+            // dropped and re-bootstrapped as `Pending` rather than failing
+            // initialization forever. The send path deliberately keeps the
+            // strict loader — see `load_restorable_state_record`.
+            let state = match self.load_session_state_for_restore(&peer_id)? {
                 Some(state) => state,
                 None => self.bootstrap_missing_session_state(&peer_id)?,
             };

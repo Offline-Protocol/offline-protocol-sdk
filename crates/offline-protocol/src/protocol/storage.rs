@@ -16,6 +16,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{LamportClock, MessageId};
 use offline_protocol_mls::{MlsManager, MlsStorage};
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
+use serde::de::DeserializeOwned;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
@@ -47,6 +48,12 @@ pub(crate) enum StateCategory {
     BlockedUsers,
     BothCreateAwaitingDecrypt,
     LamportClock,
+    /// The value-less marker recording that the pre-split adoption sweep
+    /// completed. Post-split only, so it is deliberately absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] — but it *is* written to
+    /// protocol-state storage, so it belongs to the sealing decision like
+    /// every other category.
+    StateAdoption,
 }
 
 impl StateCategory {
@@ -64,6 +71,7 @@ impl StateCategory {
             storage_keys::BLOCKED_USERS => Self::BlockedUsers,
             storage_keys::BOTH_CREATE_AWAITING_DECRYPT => Self::BothCreateAwaitingDecrypt,
             storage_keys::LAMPORT_CLOCK => Self::LamportClock,
+            storage_keys::STATE_ADOPTION => Self::StateAdoption,
             _ => return None,
         })
     }
@@ -98,7 +106,8 @@ impl StateCategory {
             | Self::WelcomeLifecycles
             | Self::BlockedUsers
             | Self::BothCreateAwaitingDecrypt
-            | Self::LamportClock => false,
+            | Self::LamportClock
+            | Self::StateAdoption => false,
         }
     }
 }
@@ -628,7 +637,8 @@ impl OfflineProtocol {
             return;
         }
 
-        if let Err(e) = state.store(
+        if let Err(e) = self.write_state_record(
+            state.as_ref(),
             storage_keys::STATE_ADOPTION,
             storage_keys::STATE_ADOPTION_ID,
             &[],
@@ -1056,6 +1066,12 @@ impl OfflineProtocol {
         let mut changed_recipients = std::collections::HashSet::new();
         // Running totals, maintained rather than recomputed: the global caps
         // below would otherwise re-walk the whole queue once per eviction.
+        //
+        // They start at zero rather than from the in-memory queue because that
+        // queue is necessarily empty here: `queue_message_for_session_establishment`
+        // is gated on `should_auto_encrypt()`, which requires an MLS manager,
+        // and `initialize_mls` returns early once one is published — so nothing
+        // can have been queued before the restore that publishes it.
         let mut global_count = 0usize;
         let mut global_bytes = 0usize;
         // Entries opened so far, which is what actually bounds the work here —
@@ -1612,10 +1628,105 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // RESTORE-PATH RECORD DECODING
+    // ========================================================================
+
+    /// Reads and decodes one JSON protocol-state record *for a restore walk*,
+    /// dropping a record whose bytes are not this category's type rather than
+    /// failing the walk.
+    ///
+    /// A record that parses as garbage is the same permanent loss as one that
+    /// fails to open, and every other restore on this path already treats it
+    /// that way ([`Self::restore_outbox`], [`Self::restore_pending_messages`],
+    /// [`Self::restore_peer_capabilities`]). Session states and Welcome
+    /// lifecycles were the two that did not: their loaders map a serde failure
+    /// to an error, and their restores propagate it, so one unparseable record
+    /// failed `initialize_mls` outright — and, because nothing deleted it,
+    /// failed it again on every launch after that. With `require_encryption`
+    /// on by default that install can no longer send anything, and there is no
+    /// in-app recovery. Both categories are unsealed, so they carry no
+    /// integrity protection at all, and both now live in the app container
+    /// rather than the credential store — the same threat model every restore
+    /// walk here is bounded against.
+    ///
+    /// Deliberately *not* folded into the loaders themselves. Those are also
+    /// read at runtime, where `is_session_confirmed` propagates the error on
+    /// purpose so a send fails closed instead of silently reading a Confirmed
+    /// session as Pending. Restore is the only caller that must survive the
+    /// record; the runtime one must not.
+    ///
+    /// Storage failures still propagate: a read that failed is not a record
+    /// that decoded to nothing, and restore rolls initialization back for it
+    /// exactly as before.
+    fn load_restorable_state_record<T: DeserializeOwned>(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> Result<Option<T>> {
+        let Some(storage) = &self.protocol_state_storage else {
+            return Ok(None);
+        };
+
+        let Some(data) = self
+            .read_state_record(storage.as_ref(), key_type, key_id)
+            .map_err(|e| {
+                Error::Other(format!("Failed to load {} for {}: {}", key_type, key_id, e))
+            })?
+        else {
+            return Ok(None);
+        };
+
+        match serde_json::from_slice::<T>(&data) {
+            Ok(value) => Ok(Some(value)),
+            Err(e) => {
+                warn!(
+                    key_type = %key_type,
+                    key_id = %key_id,
+                    error = %e,
+                    "Dropping a protocol-state record whose bytes are not the type \
+                     its category holds"
+                );
+                let _ = storage.delete(key_type, key_id);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Restore-path read of a peer's session state. See
+    /// [`Self::load_restorable_state_record`] for why this is separate from
+    /// [`Self::load_session_state_entry`].
+    pub(crate) fn load_session_state_for_restore(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<SessionState>> {
+        self.load_restorable_state_record(storage_keys::SESSION_STATES, peer_id)
+    }
+
+    /// Reads a peer's Welcome lifecycle. See
+    /// [`Self::load_restorable_state_record`].
+    ///
+    /// Unlike session states, this category has no strict twin: restore is its
+    /// only reader (`welcome_lifecycles` is an in-memory map from then on), so
+    /// there is no send-path decision that has to fail closed on a record that
+    /// will not decode.
+    fn load_welcome_lifecycle_for_restore(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<WelcomeLifecycleRecord>> {
+        self.load_restorable_state_record(storage_keys::WELCOME_LIFECYCLES, peer_id)
+    }
+
+    // ========================================================================
     // SESSION STATE PERSISTENCE
     // ========================================================================
 
     /// Loads a persisted session state entry (if present).
+    ///
+    /// A record that will not deserialize is an error here, not an absent
+    /// record: `is_session_confirmed` reads this on the send path and must
+    /// fail closed rather than treat a Confirmed session as Pending. The
+    /// restore walk, which must not be blocked by one poison record, goes
+    /// through [`Self::load_session_state_for_restore`] instead.
     pub(crate) fn load_session_state_entry(&self, peer_id: &str) -> Result<Option<SessionState>> {
         let Some(storage) = &self.protocol_state_storage else {
             return Ok(None);
@@ -1702,35 +1813,6 @@ impl OfflineProtocol {
     // WELCOME LIFECYCLE PERSISTENCE
     // ========================================================================
 
-    pub(crate) fn load_welcome_lifecycle_entry(
-        &self,
-        peer_id: &str,
-    ) -> Result<Option<WelcomeLifecycleRecord>> {
-        let Some(storage) = &self.protocol_state_storage else {
-            return Ok(None);
-        };
-
-        let Some(data) = self
-            .read_state_record(storage.as_ref(), storage_keys::WELCOME_LIFECYCLES, peer_id)
-            .map_err(|e| {
-                Error::Other(format!(
-                    "Failed to load welcome lifecycle for {}: {}",
-                    peer_id, e
-                ))
-            })?
-        else {
-            return Ok(None);
-        };
-
-        let record = serde_json::from_slice::<WelcomeLifecycleRecord>(&data).map_err(|e| {
-            Error::Other(format!(
-                "Failed to deserialize welcome lifecycle for {}: {}",
-                peer_id, e
-            ))
-        })?;
-        Ok(Some(record))
-    }
-
     pub(crate) fn persist_welcome_lifecycle_entry(
         &self,
         record: &WelcomeLifecycleRecord,
@@ -1781,7 +1863,7 @@ impl OfflineProtocol {
         let listed = peers.len();
 
         for peer_id in peers.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
-            if let Some(mut record) = self.load_welcome_lifecycle_entry(&peer_id)? {
+            if let Some(mut record) = self.load_welcome_lifecycle_for_restore(&peer_id)? {
                 if matches!(
                     record.state,
                     WelcomeDeliveryState::Created | WelcomeDeliveryState::SendAttempted

@@ -1158,6 +1158,18 @@ pub(crate) mod storage_keys {
     /// A new protocol-state category added *after* the split must NOT be added
     /// here: there is no pre-split data for it to inherit, and listing it would
     /// only cost a pointless enumeration of the credential store.
+    ///
+    /// # Removal
+    ///
+    /// This list, `OfflineProtocol::adopt_legacy_protocol_state`, and the
+    /// `STATE_ADOPTION` marker are one-shot migration scaffolding for installs
+    /// upgrading *across* the storage split. They stop doing anything once no
+    /// supported install can still be running a pre-split build — an install
+    /// that skips the split release entirely still needs them, so the trigger
+    /// is not "one release later". Delete them only when the oldest supported
+    /// upgrade path starts at or after the release that introduced the split,
+    /// and delete all three together: leaving the marker behind without the
+    /// sweep would make a later re-introduction silently skip itself.
     pub const ADOPTABLE_STATE_KEY_TYPES: &[&str] = &[
         BLOCKED_USERS,
         OUTBOX,

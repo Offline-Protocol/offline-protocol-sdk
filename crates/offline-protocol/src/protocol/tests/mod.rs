@@ -12969,6 +12969,105 @@ fn test_restore_session_state_migrates_legacy_session_to_pending_without_inferen
 }
 
 #[test]
+fn test_corrupt_welcome_lifecycle_record_does_not_fail_initialization() {
+    // A record whose bytes will not decode is a permanent loss, and every other
+    // restore on this path drops it and carries on. This one propagated the
+    // serde error instead, so `initialize_mls` failed — and, because nothing
+    // deleted the record, failed again on every launch after that. With
+    // `require_encryption` on by default that install can no longer send at
+    // all, with no in-app recovery. The category is unsealed, so it carries no
+    // integrity protection, and it now lives in the app container.
+    let storage = Arc::new(InMemoryStorage::new());
+    storage
+        .store(storage_keys::WELCOME_LIFECYCLES, "bob", b"not json")
+        .unwrap();
+
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    protocol
+        .initialize_mls_for_test(storage.clone())
+        .expect("one undecodable welcome lifecycle must not fail initialization");
+
+    assert!(
+        storage
+            .list_keys(storage_keys::WELCOME_LIFECYCLES)
+            .unwrap()
+            .is_empty(),
+        "the poison record must be deleted, not re-read on every launch"
+    );
+}
+
+#[test]
+fn test_corrupt_session_state_record_does_not_fail_initialization() {
+    // Same defect at the second site. Reached only when the MLS manager lists a
+    // session for the peer, since that is what the restore walk iterates.
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    {
+        let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        let welcome = manager.create_session("bob").unwrap();
+        bob_manager.join_session(&welcome).unwrap();
+    }
+
+    storage
+        .store(storage_keys::SESSION_STATES, "bob", b"not json")
+        .unwrap();
+
+    let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    restarted.config.encryption.enabled = true;
+    restarted.config.encryption.store_pending = true;
+    restarted
+        .initialize_mls_for_test(storage)
+        .expect("one undecodable session state must not fail initialization");
+
+    // Dropped, then re-bootstrapped the safe way round: a session whose
+    // confirmation cannot be read comes back Pending, never Confirmed.
+    assert_eq!(
+        restarted.load_session_state_entry("bob").unwrap().unwrap(),
+        SessionState::Pending
+    );
+}
+
+#[test]
+fn test_corrupt_session_state_still_fails_closed_on_the_send_path() {
+    // The restore path drops an undecodable record so one poison entry cannot
+    // brick initialization. The *send* path must keep propagating it: reading a
+    // Confirmed session as Pending because its record would not decode is a
+    // silent downgrade, which is why `is_session_confirmed` uses the strict
+    // loader. Pinned here so the two cannot be collapsed back together.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    protocol.initialize_mls_for_test(storage.clone()).unwrap();
+
+    storage
+        .store(storage_keys::SESSION_STATES, "bob", b"not json")
+        .unwrap();
+
+    assert!(
+        protocol.load_session_state_entry("bob").is_err(),
+        "the send-path loader must fail closed on a record that will not decode"
+    );
+    assert!(
+        storage
+            .load(storage_keys::SESSION_STATES, "bob")
+            .unwrap()
+            .is_some(),
+        "the strict loader must not delete: only the restore walk may drop it"
+    );
+}
+
+#[test]
 fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
     let mut config = create_test_config_for_user("alice");
     config.encryption.enabled = true;
