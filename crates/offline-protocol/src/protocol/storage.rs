@@ -334,13 +334,23 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// different things
 ///
 /// A **cache or advisory** walk ([`PruneAllowance::refusing`]) may simply
-/// refuse a delete once the pool is empty: dropping a cached key package, a
-/// capability record, a Welcome lifecycle, or a media descriptor costs a
-/// recoverable re-exchange, so the record is left on disk and nothing is owed
-/// to anyone. All four therefore share **one** pool, created by
-/// `initialize_mls` and threaded through them: starving one advisory walk with
-/// another's deletes is harmless, because a spared record is simply re-walked
-/// on a later launch.
+/// refuse a delete once its share is gone: dropping a session-state record, a
+/// cached key package, a capability record, a Welcome lifecycle, or a media
+/// descriptor costs a recoverable re-exchange or a re-bootstrap, so the record
+/// is left on disk and nothing is owed to anyone. All [`ADVISORY_PRUNE_WALKS`]
+/// of them therefore share **one** pool, created by `initialize_mls` and
+/// threaded through them, so their deletes add up against a single allowance.
+///
+/// Sharing a pool is not the same as sharing it *fairly*, and the difference
+/// matters because the walks draw in a fixed order. Each therefore leaves the
+/// walks after it a [`MIN_ADVISORY_PRUNE_DELETES`] floor rather than being free
+/// to empty the pool — without which the first walk alone could starve the rest
+/// on every launch. Being *starved* is not the same as being *deferred*: a
+/// deferred record is re-walked next launch, while a walk that never draws
+/// again defers nothing, and these prunes are the only thing that ever deletes
+/// those records. Within that floor the allowance stays elastic: a walk may
+/// take everything except what it owes the ones still to come, so a launch with
+/// clean early categories still lets a later one draw deeply.
 ///
 /// A **settlement-paired** walk ([`PruneAllowance::counting`]) cannot refuse.
 /// Refusing an individual delete there would either settle an id whose record a
@@ -388,9 +398,18 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// `test_outbox_capacity_prune_stays_inside_the_launch_budget` and
 /// `test_outbox_absolute_expiry_prune_stays_inside_the_launch_budget` pin them.
 ///
-/// One caveat remains, because it cannot be budgeted away: a settlement-paired
-/// walk stops *between* records, so the record it is already inside may push a
-/// little past its pool.
+/// Two caveats remain, because neither can be budgeted away.
+///
+/// A settlement-paired walk stops *between* records, so the record it is
+/// already inside may push a little past its pool.
+///
+/// And the ceiling is over the restore walks, not over every durable delete
+/// `initialize_mls` can cause. `adopt_legacy_protocol_state` runs before them
+/// and deletes from the *secure* store as it moves each record across, bounded
+/// by its own truncated-and-resumable pass rather than by this constant. It is
+/// a one-time upgrade sweep on a different provider, so it is deliberately
+/// outside the pools — but a reader deriving "the most barriers one launch can
+/// issue" should count it separately rather than reading `3 ×` as the total.
 ///
 /// # This bounds deletes, and deletes are not the only durable cost
 ///
@@ -434,15 +453,68 @@ struct RestoredPendingAdmission {
     changed_recipients: std::collections::HashSet<String>,
 }
 
+/// Advisory restore walks that draw on the shared pool, in the order
+/// `initialize_mls` runs them.
+///
+/// Keep this in step with that call site. It is the divisor behind
+/// [`MIN_ADVISORY_PRUNE_DELETES`], so adding a walk without bumping it means
+/// the last walk in the sequence has no reservation left and can be starved —
+/// the exact failure the floor exists to prevent.
+/// `test_a_flooded_advisory_category_cannot_starve_the_walks_after_it` fails if
+/// the two disagree.
+pub(super) const ADVISORY_PRUNE_WALKS: usize = 5;
+
+/// Deletes each advisory walk is guaranteed, whatever the walks before it did.
+///
+/// The shared pool alone bounds the launch but says nothing about *who* gets to
+/// spend it, and the walks draw in a fixed order. Without a floor the first one
+/// can empty the pool on its own: `restore_peer_key_packages` refuses only once
+/// the pool is gone, so a key-package store over its cap by more than
+/// [`MAX_RESTORE_PRUNE_DELETES`] — which the flood-eviction exemption makes an
+/// ordinary state, not a tampered one — leaves the four walks after it with
+/// nothing, on every launch, for as long as it stays over cap. Their prunes are
+/// the only thing that ever deletes those records, so "deferred to a later
+/// launch" would have quietly meant "never".
+///
+/// Reserving is elastic rather than a fixed split: each walk may spend
+/// everything in the pool *except* the floor owed to the walks still to come,
+/// so a launch where the early categories are clean still lets a later one draw
+/// deeply.
+///
+/// The number is deliberately well under an even share of
+/// [`MAX_RESTORE_PRUNE_DELETES`]. An even split would be the wrong trade: the
+/// category that floods is the one that needs to converge fastest, while the
+/// categories it would starve hold small counts (crash-orphaned media
+/// descriptors, records that will not decode, session states the bootstrap
+/// write repairs anyway). So the floor is set at what makes a starved walk
+/// converge in a bounded number of launches rather than at what makes the split
+/// fair, leaving the rest of the pool elastic for whichever category is
+/// actually large. With five walks that reserves 320 of 512 and leaves the
+/// first flooded walk 320 rather than 102.
+pub(super) const MIN_ADVISORY_PRUNE_DELETES: usize = 64;
+
+const _: () = assert!(
+    ADVISORY_PRUNE_WALKS * MIN_ADVISORY_PRUNE_DELETES <= MAX_RESTORE_PRUNE_DELETES,
+    "the advisory floors must fit inside one pool, or the first walk's ceiling \
+     underflows to zero and it can never prune at all"
+);
+
 /// A pool of durable restore-path deletes, drawn on by one or more walks.
 ///
 /// The unit the [`MAX_RESTORE_PRUNE_DELETES`] bound is actually about. A pool
-/// outlives the walk that spends from it, which is the whole point: the four
+/// outlives the walk that spends from it, which is the whole point: the five
 /// advisory walks share one pool for the length of an `initialize_mls`, so
 /// their deletes add up against a single allowance instead of each getting a
 /// private one.
 pub(crate) struct PruneAllowance {
     remaining: usize,
+    /// Advisory walks that have not yet drawn from this pool.
+    ///
+    /// Decremented by each [`Self::refusing`] draw, and what that draw reserves
+    /// for is the walks *after* it — see [`MIN_ADVISORY_PRUNE_DELETES`]. Kept
+    /// on the pool rather than passed in per call so no walk has to know its
+    /// own position in the sequence.
+    advisory_walks_left: usize,
 }
 
 impl PruneAllowance {
@@ -463,13 +535,22 @@ impl PruneAllowance {
     pub(crate) fn pool() -> Self {
         Self {
             remaining: MAX_RESTORE_PRUNE_DELETES,
+            advisory_walks_left: ADVISORY_PRUNE_WALKS,
         }
     }
 
     /// A budget for a walk whose records are caches or advisory signals, which
     /// may refuse a delete outright and leave the record for a later launch.
-    fn refusing(&mut self) -> PruneBudget<'_> {
-        PruneBudget::new(&mut self.remaining, true)
+    ///
+    /// Capped so the walks after this one keep their
+    /// [`MIN_ADVISORY_PRUNE_DELETES`] floor. The two settlement-paired pools
+    /// never call this, so their `advisory_walks_left` is simply never spent.
+    pub(super) fn refusing(&mut self) -> PruneBudget<'_> {
+        let later = self.advisory_walks_left.saturating_sub(1);
+        self.advisory_walks_left = later;
+        let reserved = later.saturating_mul(MIN_ADVISORY_PRUNE_DELETES);
+        let ceiling = self.remaining.saturating_sub(reserved);
+        PruneBudget::new(&mut self.remaining, ceiling, true)
     }
 
     /// A budget for a settlement-paired walk, which counts every delete but
@@ -477,9 +558,11 @@ impl PruneAllowance {
     ///
     /// Refusing mid-record would break the pairing between a delete and the
     /// terminal event that names what it destroyed. The caller instead polls
-    /// [`PruneBudget::is_spent`] between records and stops there.
+    /// [`PruneBudget::is_spent`] between records and stops there. Reserves
+    /// nothing: each of these owns its pool outright.
     fn counting(&mut self) -> PruneBudget<'_> {
-        PruneBudget::new(&mut self.remaining, false)
+        let ceiling = self.remaining;
+        PruneBudget::new(&mut self.remaining, ceiling, false)
     }
 }
 
@@ -489,49 +572,61 @@ impl PruneAllowance {
 /// *refuse* a delete or only *count* it is the whole safety question, so it has
 /// to be answered at the point the budget is drawn from a pool rather than
 /// inherited from whichever answer happened to be the zero value.
-struct PruneBudget<'a> {
+pub(super) struct PruneBudget<'a> {
     /// Deletes the pool can still fund. Shared with every other walk drawing
     /// on the same [`PruneAllowance`].
     remaining: &'a mut usize,
+    /// The most *this* walk may take out of the pool, leaving the rest for the
+    /// walks after it — see [`MIN_ADVISORY_PRUNE_DELETES`].
+    ceiling: usize,
+    /// Taken from the pool so far, which is what the ceiling bounds.
+    drawn: usize,
     /// What *this* walk spent, for its own log line. Distinct from the pool, so
-    /// one walk's report never includes another's deletes.
-    spent: usize,
-    exhausted: bool,
-    /// Whether [`Self::claim`] may turn a delete down once the pool is empty.
-    /// False for settlement-paired walks — see [`MAX_RESTORE_PRUNE_DELETES`].
+    /// one walk's report never includes another's deletes, and distinct from
+    /// [`Self::drawn`] because a counting walk keeps deleting past its ceiling.
+    pub(super) spent: usize,
+    pub(super) exhausted: bool,
+    /// Whether [`Self::claim`] may turn a delete down once this walk's share is
+    /// gone. False for settlement-paired walks — see
+    /// [`MAX_RESTORE_PRUNE_DELETES`].
     refusable: bool,
 }
 
 impl<'a> PruneBudget<'a> {
-    fn new(remaining: &'a mut usize, refusable: bool) -> Self {
+    fn new(remaining: &'a mut usize, ceiling: usize, refusable: bool) -> Self {
         Self {
             remaining,
+            ceiling,
+            drawn: 0,
             spent: 0,
             exhausted: false,
             refusable,
         }
     }
 
-    /// Claims one delete. Refuses — and records that the pool is empty — only
-    /// for a refusing budget; a counting one always allows the delete and just
-    /// charges for it.
+    /// Claims one delete. Refuses — and records that this walk's share is gone
+    /// — only for a refusing budget; a counting one always allows the delete
+    /// and just charges for it.
     fn claim(&mut self) -> bool {
-        if *self.remaining == 0 {
+        if self.is_spent() {
             self.exhausted = true;
             if self.refusable {
                 return false;
             }
         } else {
             *self.remaining -= 1;
+            self.drawn = self.drawn.saturating_add(1);
         }
         self.spent = self.spent.saturating_add(1);
         true
     }
 
-    /// Whether the pool is empty. A counting caller checks this at each record
-    /// boundary to decide whether to walk any further.
+    /// Whether this walk's share is used up — either the pool is empty or the
+    /// walk has drawn everything it may without eating a later walk's floor. A
+    /// counting caller checks this at each record boundary to decide whether to
+    /// walk any further.
     fn is_spent(&self) -> bool {
-        *self.remaining == 0
+        *self.remaining == 0 || self.drawn >= self.ceiling
     }
 }
 
@@ -716,9 +811,12 @@ impl OfflineProtocol {
     /// event together and stops at its next record boundary instead.
     ///
     /// `None` is for the runtime callers, which are not on a restore walk and
-    /// issue at most one delete per call. Every restore walk passes a budget —
-    /// including [`Self::restore_outbox`], whose walk bound was once argued to
-    /// be ceiling enough and is not. See [`MAX_RESTORE_PRUNE_DELETES`].
+    /// issue at most one delete per call. **Every** restore walk passes a
+    /// budget, and the two that once did not are why that is worth stating: a
+    /// walk bound was argued to be ceiling enough for [`Self::restore_outbox`],
+    /// and a bounded-by-the-peer-count argument for
+    /// `restore_session_states_from_manager`. Neither was. See
+    /// [`MAX_RESTORE_PRUNE_DELETES`].
     fn read_state_record_detailed_budgeted(
         &self,
         storage: &dyn ProtocolStateStorage,
@@ -1938,8 +2036,9 @@ impl OfflineProtocol {
         }
         if budget.exhausted {
             warn!(
+                deleted = budget.spent,
                 budget = MAX_RESTORE_PRUNE_DELETES,
-                "Peer key package prune hit the launch delete budget; the rest is left on disk for a later launch"
+                "Peer key package prune hit its share of the launch delete budget; the rest is left on disk for a later launch"
             );
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
@@ -2222,8 +2321,9 @@ impl OfflineProtocol {
         }
         if budget.exhausted {
             warn!(
+                deleted = budget.spent,
                 budget = MAX_RESTORE_PRUNE_DELETES,
-                "Peer capability prune hit the launch delete budget; the rest is left on disk for a later launch"
+                "Peer capability prune hit its share of the launch delete budget; the rest is left on disk for a later launch"
             );
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
@@ -2356,14 +2456,29 @@ impl OfflineProtocol {
     /// [`Self::load_restorable_state_record`] for why this is separate from
     /// [`Self::load_session_state_entry`].
     ///
-    /// Unbudgeted: its caller walks the *MLS session list*, not a
-    /// protocol-state category, so the volume is bounded by sessions this
-    /// install actually has rather than by whatever the container holds.
-    pub(crate) fn load_session_state_for_restore(
+    /// Budgeted, though its caller walks the *MLS session list* rather than a
+    /// protocol-state category. The walk bound was once argued to be enough on
+    /// the grounds that the volume is bounded by sessions this install actually
+    /// has — but the MLS session list carries no restore cap of its own, so
+    /// "bounded" there means "bounded by the peer count", and a store that
+    /// reports every session-state record corrupt (or holds bytes that will not
+    /// decode) turns that into one device barrier per peer on the boot path
+    /// with nothing counting them. That is the same argument-from-the-wrong-
+    /// number that exempted `restore_outbox`.
+    ///
+    /// A [`PruneAllowance::refusing`] budget is right here, and refusing costs
+    /// less than anywhere else on the path: a spared record still reads
+    /// [`StateRecord::Unreadable`] → [`RestorableRecord::Absent`], so the
+    /// caller re-bootstraps and persists a fresh `Pending` **over** it. The
+    /// record is repaired by that write whether or not the delete was funded —
+    /// which makes refusing strictly cheaper than claiming, since it saves a
+    /// barrier rather than deferring one.
+    pub(super) fn load_session_state_for_restore(
         &self,
         peer_id: &str,
+        budget: Option<&mut PruneBudget<'_>>,
     ) -> RestorableRecord<SessionState> {
-        self.load_restorable_state_record(storage_keys::SESSION_STATES, peer_id, None)
+        self.load_restorable_state_record(storage_keys::SESSION_STATES, peer_id, budget)
     }
 
     /// Reads a peer's Welcome lifecycle. See
@@ -2688,8 +2803,9 @@ impl OfflineProtocol {
         }
         if budget.exhausted {
             warn!(
+                deleted = budget.spent,
                 budget = MAX_RESTORE_PRUNE_DELETES,
-                "Welcome lifecycle restore hit the launch delete budget; the rest is left on disk for a later launch"
+                "Welcome lifecycle restore hit its share of the launch delete budget; the rest is left on disk for a later launch"
             );
         }
 
@@ -3256,8 +3372,9 @@ impl OfflineProtocol {
 
         if budget.exhausted {
             warn!(
+                deleted = budget.spent,
                 budget = MAX_RESTORE_PRUNE_DELETES,
-                "Media descriptor prune hit the launch delete budget; the rest is left on disk for a later launch"
+                "Media descriptor prune hit its share of the launch delete budget; the rest is left on disk for a later launch"
             );
         }
 

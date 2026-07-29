@@ -15918,6 +15918,28 @@ fn test_restore_peer_key_packages_prunes_overflow_from_storage() {
     );
 }
 
+/// Position of each advisory restore walk in the order `initialize_mls` runs
+/// them, which is what decides how much of the shared pool it may draw.
+///
+/// They share one [`PruneAllowance`], and each leaves the walks after it a
+/// `MIN_ADVISORY_PRUNE_DELETES` floor — so a walk's ceiling is a function of
+/// where it sits in the sequence, not of the constant alone. Naming the
+/// positions keeps the tests below reading as "this walk's share" rather than
+/// as unexplained arithmetic.
+const ADVISORY_WALK_KEY_PACKAGES: usize = 1;
+const ADVISORY_WALK_CAPABILITIES: usize = 2;
+const ADVISORY_WALK_WELCOME_LIFECYCLES: usize = 3;
+
+/// The most the `index`-th advisory walk may draw from a pool the walks *before*
+/// it left untouched: everything except the floor still owed to the ones after.
+fn advisory_share(index: usize) -> usize {
+    use super::storage::{
+        ADVISORY_PRUNE_WALKS, MAX_RESTORE_PRUNE_DELETES, MIN_ADVISORY_PRUNE_DELETES,
+    };
+    MAX_RESTORE_PRUNE_DELETES
+        .saturating_sub((ADVISORY_PRUNE_WALKS - 1 - index) * MIN_ADVISORY_PRUNE_DELETES)
+}
+
 #[test]
 fn test_restore_prune_is_bounded_per_launch_and_drains_over_launches() {
     // The walk bound limits how many records a restore *reads*. It does not
@@ -15931,11 +15953,15 @@ fn test_restore_prune_is_bounded_per_launch_and_drains_over_launches() {
     // So the prune has its own budget. Verified in both directions, because
     // either half alone is worthless: a budget that never binds does not bound
     // anything, and one that binds without draining strands the tail forever.
-    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+    // Sized to this walk's *share* of the shared pool rather than to the whole
+    // constant: the advisory walks draw in order and each leaves the ones after
+    // it a floor, so "its budget" is `advisory_share`, not
+    // `MAX_RESTORE_PRUNE_DELETES`.
+    let share = advisory_share(ADVISORY_WALK_KEY_PACKAGES);
 
     let storage = Arc::new(InMemoryStorage::new());
     let beyond_budget = 10;
-    let total = MAX_PENDING_KEY_PACKAGES + MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+    let total = MAX_PENDING_KEY_PACKAGES + share + beyond_budget;
 
     {
         let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
@@ -15972,8 +15998,9 @@ fn test_restore_prune_is_bounded_per_launch_and_drains_over_launches() {
     );
     assert_eq!(
         remaining_after(&storage),
-        total - MAX_RESTORE_PRUNE_DELETES,
-        "one launch must prune exactly its budget, not the whole overflow"
+        total - share,
+        "one launch must prune exactly its share of the budget, not the whole \
+         overflow"
     );
 
     // The tail is not stranded: pruning is idempotent and resumable, so the
@@ -16003,11 +16030,10 @@ fn test_restore_key_package_expiry_prune_is_bounded_per_launch() {
     // branch is never reached at all — every delete in an all-expired store
     // took the unbudgeted path, which is precisely the store the budget exists
     // for.
-    use super::storage::MAX_RESTORE_PRUNE_DELETES;
-
     let storage = Arc::new(InMemoryStorage::new());
     let beyond_budget = 10;
-    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+    let share = advisory_share(ADVISORY_WALK_KEY_PACKAGES);
+    let total = share + beyond_budget;
 
     {
         let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
@@ -16046,8 +16072,8 @@ fn test_restore_key_package_expiry_prune_is_bounded_per_launch() {
     );
     assert_eq!(
         remaining_after(&storage),
-        total - MAX_RESTORE_PRUNE_DELETES,
-        "one launch must drop exactly its budget of expired records, not all \
+        total - share,
+        "one launch must drop exactly its share of expired records, not all \
          of them"
     );
 
@@ -16242,13 +16268,13 @@ fn test_restore_peer_capability_reader_drop_is_bounded_per_launch() {
     // happens inside the reader when the store itself calls a record corrupt,
     // and it reached that reader through the unbudgeted `read_state_record` —
     // the same gap `restore_media_descriptors` had.
-    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+    let share = advisory_share(ADVISORY_WALK_CAPABILITIES);
 
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
 
     let beyond_budget = 10;
-    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+    let total = share + beyond_budget;
     for index in 0..total {
         // Well under `MAX_KEY_PACKAGE_SENT_TO`, so nothing here can reach the
         // over-cap branch that was already budgeted.
@@ -16310,13 +16336,13 @@ fn test_restore_welcome_lifecycle_drop_is_bounded_per_launch() {
     // flush behind it like any other. The Welcome-lifecycle restore walks up to
     // `MAX_RESTORE_KEYS_PER_CATEGORY` container-listed keys, so nothing else
     // bounded how many of those one launch could issue.
-    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+    let share = advisory_share(ADVISORY_WALK_WELCOME_LIFECYCLES);
 
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
 
     let beyond_budget = 10;
-    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+    let total = share + beyond_budget;
     for index in 0..total {
         // Unsealed category, so the bytes reach serde exactly as written — and
         // these are not a `WelcomeLifecycleRecord`.
@@ -16475,11 +16501,17 @@ fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
     // walk, or letting one allocate its own pool again, moves this number
     // without moving any per-walk assertion.
     //
-    // Every one of the six restore categories is seeded past its own pool here,
+    // Every restore category that can delete is seeded past its own pool here,
     // so all three pools bind at once:
     //
-    // - advisory (shared): peer key packages, peer capabilities, Welcome
-    //   lifecycles, media descriptors — 4 × 200 potential deletes, 512 funded;
+    // - advisory (shared): session states, peer key packages, peer
+    //   capabilities, Welcome lifecycles, media descriptors — 200 potential
+    //   deletes each, 512 funded between them. Session states is the one
+    //   category this fixture cannot flood: its walk iterates the MLS session
+    //   list, and there are no sessions here, so it draws nothing and the four
+    //   after it divide the pool. That is why it is summed in below at zero
+    //   rather than left out — a walk that starts deleting would move the
+    //   total, and this assertion is what would catch it.
     // - pending messages (private): 600 potential, 512 funded;
     // - outbox (private): 600 potential, 512 funded.
     use super::storage::MAX_RESTORE_PRUNE_DELETES;
@@ -16557,7 +16589,8 @@ fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
         .initialize_mls(secure_handle, state_handle)
         .expect("a store this far over every cap must still launch");
 
-    let advisory = counting.deletes_for(storage_keys::PEER_KEY_PACKAGES)
+    let advisory = counting.deletes_for(storage_keys::SESSION_STATES)
+        + counting.deletes_for(storage_keys::PEER_KEY_PACKAGES)
         + counting.deletes_for(storage_keys::PEER_CAPABILITIES)
         + counting.deletes_for(storage_keys::WELCOME_LIFECYCLES)
         + counting.deletes_for(storage_keys::MEDIA_DESCRIPTORS);
@@ -16605,6 +16638,217 @@ fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
 }
 
 #[test]
+fn test_session_state_restore_deletes_come_out_of_the_shared_pool() {
+    // `restore_session_states_from_manager` was the last restore walk issuing
+    // deletes nothing counted, exempted because it iterates the *MLS session
+    // list* rather than a protocol-state category. But that list carries no
+    // restore cap of its own, so "bounded by the sessions this install has"
+    // means "bounded by the peer count" — and a store that reports every
+    // session-state record unreadable turns it into one device barrier per peer
+    // on the synchronous boot path.
+    //
+    // Driving that bound to its limit would need hundreds of real MLS sessions,
+    // so what is asserted here is the property that makes the bound exist at
+    // all: these deletes now come out of the *shared* pool, so the walk after
+    // this one sees a pool three smaller. Against the unbudgeted code the
+    // key-package walk gets its full share and this fails.
+    let sessions = ["bob", "carol", "dave"];
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    {
+        let (secure_handle, state_handle) = split_storage(&secure, &state);
+        let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
+        writer.initialize_mls(secure_handle, state_handle).unwrap();
+        for peer in sessions {
+            let peer_storage = Arc::new(InMemoryStorage::new());
+            let peer_manager = MlsManager::new(peer, peer_storage).unwrap();
+            let key_package = peer_manager.get_or_create_key_package().unwrap();
+            let manager = writer.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package(peer, &key_package.key_package_data)
+                .unwrap();
+            let welcome = manager.create_session(peer).unwrap();
+            peer_manager.join_session(&welcome).unwrap();
+        }
+    }
+
+    // Unsealed category, so these bytes reach serde exactly as written and take
+    // the drop inside `load_restorable_state_record`. One delete per session.
+    for peer in sessions {
+        state
+            .store(storage_keys::SESSION_STATES, peer, b"{not json")
+            .unwrap();
+    }
+
+    // The walk immediately after this one, seeded past whatever it can draw so
+    // its ceiling — and therefore the pool the session walk left it — is what
+    // the delete count reports.
+    let package_share = advisory_share(ADVISORY_WALK_KEY_PACKAGES);
+    let expired = ReceivedKeyPackage {
+        key_package_data: vec![0],
+        local_expires_at_ms: 1,
+    };
+    for i in 0..package_share {
+        state
+            .store(
+                storage_keys::PEER_KEY_PACKAGES,
+                &format!("pkg{i:05}"),
+                &serde_json::to_vec(&expired).unwrap(),
+            )
+            .unwrap();
+    }
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut restarted = OfflineProtocol::new(create_test_config()).unwrap();
+    restarted
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let packages_left = state
+        .list_keys(storage_keys::PEER_KEY_PACKAGES)
+        .unwrap()
+        .len();
+    assert_eq!(
+        package_share - packages_left,
+        package_share - sessions.len(),
+        "the session-state walk's deletes must reduce what the walk after it \
+         may draw; unbudgeted, the key-package walk still gets its full share"
+    );
+
+    // And the records are repaired rather than merely dropped: an unreadable
+    // session state reads as absent, so the bootstrap persists a fresh Pending
+    // over it. That is what makes refusing one of these deletes cheap — the
+    // write repairs the record whether or not the delete was funded.
+    for peer in sessions {
+        let record = state
+            .load(storage_keys::SESSION_STATES, peer)
+            .unwrap()
+            .expect("the bootstrap must have re-persisted a record");
+        assert!(
+            String::from_utf8_lossy(&record).contains("Pending"),
+            "a record that would not decode is re-bootstrapped as Pending"
+        );
+    }
+}
+
+#[test]
+fn test_a_flooded_advisory_category_cannot_starve_the_walks_after_it() {
+    // The hazard a shared pool creates that per-walk budgets did not: the
+    // advisory walks draw in a fixed order, so without a reservation the first
+    // one empties the pool and every walk behind it deletes *nothing*.
+    //
+    // Starved is not deferred. "The tail is re-walked next launch" — the
+    // argument every prune on this path leans on — only holds if the walk draws
+    // again. A category permanently behind a flooded one never does, and these
+    // prunes are the only thing that ever deletes those records, so "deferred"
+    // would quietly have meant "never". A key-package flood is remote-fed and
+    // can be sustained across launches, so this is not a one-off state to wait
+    // out.
+    //
+    // Every advisory category before the last is flooded here, so the last one
+    // is left with exactly its floor — and with zero if the reservation is
+    // removed.
+    use super::storage::{
+        MAX_RESTORE_KEYS_PER_CATEGORY, MAX_RESTORE_PRUNE_DELETES, MIN_ADVISORY_PRUNE_DELETES,
+    };
+
+    // Comfortably more than any one walk's share, so each upstream category
+    // would happily take the whole pool if allowed to.
+    let flood = MAX_RESTORE_PRUNE_DELETES;
+    assert!(
+        flood < MAX_RESTORE_KEYS_PER_CATEGORY,
+        "precondition: the read walk bound must not bind before the pool does"
+    );
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    // Key packages (walk 1): valid records, all expired — the ordinary way that
+    // store shrinks, and every one of them a budgeted delete.
+    let expired = ReceivedKeyPackage {
+        key_package_data: vec![0],
+        local_expires_at_ms: 1,
+    };
+    // Capabilities (walk 2) and Welcome lifecycles (walk 3): unsealed
+    // categories, so bytes that will not decode reach the drop directly.
+    for i in 0..flood {
+        state
+            .store(
+                storage_keys::PEER_KEY_PACKAGES,
+                &format!("pkg{i:05}"),
+                &serde_json::to_vec(&expired).unwrap(),
+            )
+            .unwrap();
+        state
+            .store(
+                storage_keys::PEER_CAPABILITIES,
+                &format!("cap{i:05}"),
+                b"{not json",
+            )
+            .unwrap();
+        state
+            .store(
+                storage_keys::WELCOME_LIFECYCLES,
+                &format!("wl{i:05}"),
+                b"{not json",
+            )
+            .unwrap();
+        // Media descriptors (walk 4, last): a sealed category, so raw bytes are
+        // what a regenerated record key leaves behind and the reader drops each.
+        state
+            .store(
+                storage_keys::MEDIA_DESCRIPTORS,
+                &format!("file{i:05}"),
+                b"not a sealed record",
+            )
+            .unwrap();
+    }
+
+    let descriptors_before = state
+        .list_keys(storage_keys::MEDIA_DESCRIPTORS)
+        .unwrap()
+        .len();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let descriptors_after = state
+        .list_keys(storage_keys::MEDIA_DESCRIPTORS)
+        .unwrap()
+        .len();
+    assert_eq!(
+        descriptors_before - descriptors_after,
+        MIN_ADVISORY_PRUNE_DELETES,
+        "the last advisory walk must still get its floor with every walk \
+         before it flooded; an unreserved pool leaves it 0"
+    );
+
+    // And the launch as a whole still respects the pool it is sharing — a floor
+    // that came out of thin air would satisfy the assertion above and break the
+    // bound this whole mechanism exists for.
+    let advisory_deleted = (0..4)
+        .map(|i| {
+            let key_type = [
+                storage_keys::PEER_KEY_PACKAGES,
+                storage_keys::PEER_CAPABILITIES,
+                storage_keys::WELCOME_LIFECYCLES,
+                storage_keys::MEDIA_DESCRIPTORS,
+            ][i];
+            flood - state.list_keys(key_type).unwrap().len()
+        })
+        .sum::<usize>();
+    assert_eq!(
+        advisory_deleted, MAX_RESTORE_PRUNE_DELETES,
+        "the floors divide one pool rather than adding to it"
+    );
+}
+
+#[test]
 fn test_advisory_restore_prunes_share_one_launch_delete_budget() {
     // `MAX_RESTORE_PRUNE_DELETES` exists because a device-barrier storm kills
     // the launch — a property of the whole `initialize_mls` call. Giving each
@@ -16615,7 +16859,14 @@ fn test_advisory_restore_prunes_share_one_launch_delete_budget() {
     // Both halves are asserted, because either alone would pass against the
     // broken code: the *sum* across two over-cap advisory categories is one
     // budget, and the tail still drains over later launches.
-    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+    //
+    // Sharing is not the same as sharing fairly, so the per-category deltas are
+    // asserted too. The key-package walk runs first and is flooded here, and
+    // the assertion that it left the capability walk behind it exactly its
+    // `MIN_ADVISORY_PRUNE_DELETES` floor is the one a pool with no reservation
+    // fails — there, the first walk empties it and the second deletes nothing,
+    // every launch, for as long as the first stays over cap.
+    use super::storage::{MAX_RESTORE_PRUNE_DELETES, MIN_ADVISORY_PRUNE_DELETES};
 
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
@@ -16664,12 +16915,23 @@ fn test_advisory_restore_prunes_share_one_launch_delete_budget() {
     first.initialize_mls(secure_handle, state_handle).unwrap();
 
     let (packages_after, capabilities_after) = counts(&state);
-    let deleted = (packages_before - packages_after) + (capabilities_before - capabilities_after);
+    let package_deletes = packages_before - packages_after;
+    let capability_deletes = capabilities_before - capabilities_after;
     assert_eq!(
-        deleted,
-        MAX_RESTORE_PRUNE_DELETES,
+        package_deletes,
+        advisory_share(ADVISORY_WALK_KEY_PACKAGES),
+        "the first flooded walk takes the pool minus the floor it owes the \
+         walks after it — not the whole pool, and not a private one"
+    );
+    assert_eq!(
+        capability_deletes, MIN_ADVISORY_PRUNE_DELETES,
+        "the walk behind a flooded one still gets its floor; with an \
+         unreserved pool this is 0 on every launch"
+    );
+    assert!(
+        package_deletes + capability_deletes <= MAX_RESTORE_PRUNE_DELETES,
         "the advisory walks share one launch allowance; with a budget each \
-         they would have deleted {} between them",
+         they would have deleted up to {} between them",
         2 * MAX_RESTORE_PRUNE_DELETES
     );
 

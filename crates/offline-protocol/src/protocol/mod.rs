@@ -748,9 +748,13 @@ impl OfflineProtocol {
         // any single walk in it, so no walk may hand itself a pool — see
         // `PruneAllowance::pool`. Three of them, and the ceiling is their sum:
         //
-        // - `advisory_prunes` is shared by the four walks whose prunes are
-        //   caches or advisory signals. Starving one with another's deletes is
-        //   harmless: a spared record is re-walked next launch.
+        // - `advisory_prunes` is shared by the `ADVISORY_PRUNE_WALKS` walks
+        //   whose prunes are caches or advisory signals. They draw in the order
+        //   written below, and that order is part of the contract: each leaves
+        //   the ones after it a `MIN_ADVISORY_PRUNE_DELETES` floor and may take
+        //   the rest, so an earlier walk gets first call on whatever the later
+        //   ones do not reserve. Reordering them, or adding a sixth without
+        //   bumping `ADVISORY_PRUNE_WALKS`, changes who gets pruned under load.
         // - `pending_prunes` and `outbox_prunes` are private to the two
         //   settlement-paired walks, because being starved there defers a
         //   diagnostic or a *delivery* rather than a cache eviction, and
@@ -768,7 +772,7 @@ impl OfflineProtocol {
             self.restore_lamport_clock();
             self.restore_tofu_keys();
             self.restore_blocked_users()?;
-            self.restore_session_states_from_manager(manager.clone())?;
+            self.restore_session_states_from_manager(manager.clone(), &mut advisory_prunes)?;
             self.restore_peer_key_packages(&manager, &mut advisory_prunes)?;
             // Must precede start(): flush_restored_confirmed_pending_messages
             // re-makes the rich seal decision against these sets, and an
