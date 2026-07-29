@@ -1756,6 +1756,18 @@ impl OfflineProtocol {
                     "Dropping flush failures for aborted pending session"
                 );
             } else {
+                // Every other path into `pending_encrypted_messages` notes the
+                // entry's deadline. This one is a *re*-insertion of entries the
+                // queue already held, so today the cached minimum is still
+                // correct without it — but only because nothing recomputes that
+                // cache while a flush is in progress. Noting them keeps
+                // "`next_pending_message_expiry` is never later than the true
+                // minimum" an invariant of the code rather than of the call
+                // graph: if it ever broke, these entries would stop being
+                // scanned and would never expire, silently, on the one queue the
+                // absolute pending lifetime exists to bound.
+                let merged_deadlines: Vec<DateTime<Utc>> =
+                    remaining.iter().map(|m| m.queued_at).collect();
                 let queue = self
                     .pending_encrypted_messages
                     .entry(recipient.to_string())
@@ -1770,6 +1782,9 @@ impl OfflineProtocol {
                         .position(|id| *id == m.message_id.as_str())
                         .unwrap_or(usize::MAX)
                 });
+                for queued_at in merged_deadlines {
+                    self.note_pending_message_expiry(queued_at);
+                }
                 self.persist_pending_messages_for_recipient(recipient);
             }
         }
