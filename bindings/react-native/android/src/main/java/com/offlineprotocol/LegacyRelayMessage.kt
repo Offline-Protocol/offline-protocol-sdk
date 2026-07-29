@@ -13,13 +13,22 @@ package com.offlineprotocol
  * Mirrors ios/LegacyRelayMessage.swift — keep in sync.
  */
 object LegacyRelayMessage {
+    /**
+     * [requiresAck] defaults to true for frames that a real peer actually
+     * transmitted (legacy JS-relay senders), whose sender is waiting on a
+     * delivery confirmation. Bridge-synthesized frames pass `false`: nothing
+     * crossed a wire, so nobody awaits an ACK — and the core would otherwise
+     * address that ACK to the frame's `sender`, which for a relay answer is a
+     * placeholder, not a reachable peer.
+     */
     fun buildJson(
         senderId: String,
         recipientId: String,
         content: String,
         timestampMs: Long,
         messageId: String? = null,
-        replyToMsg: String? = null
+        replyToMsg: String? = null,
+        requiresAck: Boolean = true
     ): org.json.JSONObject = org.json.JSONObject().apply {
         put(
             "id",
@@ -36,7 +45,7 @@ object LegacyRelayMessage {
         put("priority", "medium")
         put("ttl", 8)
         put("hop_count", 0)
-        put("requires_ack", true)
+        put("requires_ack", requiresAck)
         put("timestamp", timestampMs)
         if (!replyToMsg.isNullOrEmpty()) {
             put("reply_to_msg", replyToMsg)

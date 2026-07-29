@@ -102,4 +102,28 @@ final class LegacyRelayMessageTests: XCTestCase {
         XCTAssertEqual(dict["ttl"] as? Int, 8)
         XCTAssertEqual(dict["requires_ack"] as? Bool, true)
     }
+
+    /// Bridge-synthesized frames (injectGroupInternalMessage) opt out of the
+    /// ACK: nothing transmitted them, so no sender awaits a delivery
+    /// confirmation — and the core addresses that ACK to the frame's
+    /// `sender`, which for a relay answer is a placeholder, not a reachable
+    /// peer. Regression pin for the phantom-peer bug, where every injected
+    /// frame produced an undeliverable outbound DM to "relay".
+    func testRequiresAckIsOptOutForSynthesizedFrames() {
+        let dict = LegacyRelayMessage.buildDict(
+            senderId: "relay",
+            recipientId: "bob",
+            content: "__GROUP_CREATED__{}",
+            timestampMs: 1_700_000_000_000,
+            requiresAck: false
+        )
+        XCTAssertEqual(dict["requires_ack"] as? Bool, false)
+        // The opt-out must not disturb the required-field set.
+        for key in [
+            "id", "sender", "recipient", "content", "app_id",
+            "priority", "ttl", "hop_count", "requires_ack", "timestamp"
+        ] {
+            XCTAssertNotNil(dict[key], "required field '\(key)' missing")
+        }
+    }
 }

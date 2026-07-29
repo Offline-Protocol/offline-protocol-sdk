@@ -3400,6 +3400,20 @@ impl OfflineProtocol {
     /// Mesh-relayed frames (`hop_count > 0`) are exempt: there the uploader
     /// is the carrier, not the origin. An empty `sender_id` falls back to
     /// unattributed ingest so the message is still processed best-effort.
+    ///
+    /// **`sender_id` is a reachability assertion, not just an attribution.**
+    /// A non-empty value routes through [`Self::notify_neighbor_reachable`],
+    /// so the core starts tracking it as a live neighbor: outbox flush,
+    /// Welcome re-arm, auto key exchange (an outbound key-package DM),
+    /// `NeighborDiscovered`, and service-discovery fan-out. Bridges that
+    /// inject *locally synthesized* frames — relay server answers such as
+    /// `__GROUP_CREATED__`/`__GROUP_ERROR__`, which no peer transmitted —
+    /// must pass an empty `sender_id`, and must build those frames with
+    /// `requires_ack: false` so the receive path does not address a delivery
+    /// ACK to their placeholder `sender` either. Passing a placeholder
+    /// identity here manufactures a phantom peer whose undeliverable DMs the
+    /// relay answers with `DeliveryError` forever (see
+    /// `test_synthesized_relay_frame_creates_no_phantom_peer`).
     pub fn internet_message_received(
         &self,
         sender_id: String,
@@ -6903,6 +6917,82 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("neighbor_discovered") && e.contains("sender-user")),
             "inbound internet message must still emit NeighborDiscovered"
+        );
+    }
+
+    /// Bridge-synthesized relay answers (GroupCreated/GroupError/group
+    /// snapshots) name no real peer: nothing transmitted them, so the
+    /// placeholder in their body must stay inert.
+    ///
+    /// Regression (phantom peer): the platform bridges used to pass a literal
+    /// `"relay"` as the FFI `sender_id` and stamp `requires_ack: true`. That
+    /// fed `notify_neighbor_reachable`, so the core tracked `relay` as a live
+    /// neighbor (auto key-package DM, `NeighborDiscovered`, service-discovery
+    /// fan-out) *and* returned a delivery ACK addressed to it for every single
+    /// injected frame. Both produced undeliverable outbound DMs, whose relay
+    /// `DeliveryError`s pinned `relay` in the bridge's presence-watch set
+    /// indefinitely.
+    ///
+    /// The last assertion is the load-bearing one: it catches both vectors at
+    /// once, and stays honest regardless of how the fix is implemented.
+    #[test]
+    fn test_synthesized_relay_frame_creates_no_phantom_peer() {
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+        receiver.internet_status_changed(true).unwrap();
+        // Ignore whatever startup produced; only post-injection effects matter.
+        drained_events(&receiver);
+        while receiver.internet_get_next_message().is_some() {}
+
+        // Exactly what `injectGroupInternalMessage(actorId: nil, …)` builds:
+        // placeholder `sender` in the body (Rust `UserId` rejects empty), no
+        // ACK requested, and ingested unattributed via an empty `sender_id`.
+        let frame = serde_json::json!({
+            "id": "6dd7f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f",
+            "sender": "relay",
+            "recipient": "receiver-user",
+            "content": "__GROUP_CREATED__{\"group_id\":\"group-1\",\"name\":\"Test Group\"}",
+            "app_id": "test-app",
+            "priority": "medium",
+            "ttl": 8,
+            "hop_count": 0,
+            "requires_ack": false,
+            "timestamp": 1_700_000_000_000_i64,
+        })
+        .to_string()
+        .into_bytes();
+
+        receiver
+            .internet_message_received(String::new(), frame)
+            .unwrap();
+
+        let events = drained_events(&receiver);
+        assert!(
+            events.iter().any(|e| e.contains("group_created")),
+            "the synthesized relay answer must still be processed and surfaced"
+        );
+        assert!(
+            !receiver.lock_inner().unwrap().is_known_peer("relay"),
+            "a synthesized relay answer must not make its placeholder a tracked neighbor"
+        );
+        assert!(
+            !events.iter().any(|e| e.contains("neighbor_discovered")),
+            "a synthesized relay answer must not emit NeighborDiscovered"
+        );
+
+        let mut outbound_recipients = Vec::new();
+        while let Some(msg) = receiver.internet_get_next_message() {
+            outbound_recipients.push(msg.recipient_id);
+        }
+        assert!(
+            !outbound_recipients.iter().any(|r| r == "relay"),
+            "nothing may be addressed to the placeholder sender (no key package, \
+             no delivery ACK); got outbound recipients: {:?}",
+            outbound_recipients
         );
     }
 

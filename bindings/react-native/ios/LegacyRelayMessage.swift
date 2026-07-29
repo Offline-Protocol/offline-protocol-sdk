@@ -17,13 +17,20 @@
 import Foundation
 
 enum LegacyRelayMessage {
+    /// `requiresAck` defaults to true for frames that a real peer actually
+    /// transmitted (legacy JS-relay senders), whose sender is waiting on a
+    /// delivery confirmation. Bridge-synthesized frames pass `false`: nothing
+    /// crossed a wire, so nobody awaits an ACK — and the core would otherwise
+    /// address that ACK to the frame's `sender`, which for a relay answer is
+    /// a placeholder, not a reachable peer.
     static func buildDict(
         senderId: String,
         recipientId: String,
         content: String,
         timestampMs: Int64,
         messageId: String? = nil,
-        replyToMsg: String? = nil
+        replyToMsg: String? = nil,
+        requiresAck: Bool = true
     ) -> [String: Any] {
         var dict: [String: Any] = [
             "id": (messageId?.isEmpty == false) ? messageId! : UUID().uuidString,
@@ -37,7 +44,7 @@ enum LegacyRelayMessage {
             "priority": "medium",
             "ttl": 8,
             "hop_count": 0,
-            "requires_ack": true,
+            "requires_ack": requiresAck,
             "timestamp": timestampMs
         ]
         if let replyToMsg = replyToMsg, !replyToMsg.isEmpty {
