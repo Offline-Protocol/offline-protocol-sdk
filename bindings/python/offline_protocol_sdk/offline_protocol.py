@@ -811,7 +811,7 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 15033:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 52923:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 26270:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 50236:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -11397,7 +11397,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
             _UniffiFfiConverterTypeDedupConfig.lower(config),
         )
         _uniffi_lift_return = lambda val: None
-        _uniffi_error_converter = None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dedup_config,

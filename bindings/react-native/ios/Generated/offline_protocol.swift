@@ -1082,7 +1082,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func updateAckConfig(config: AckConfig) throws 
     
-    func updateDedupConfig(config: DedupConfig) 
+    func updateDedupConfig(config: DedupConfig) throws 
     
     func updateDorsConfig(config: DorsConfig) throws 
     
@@ -2414,7 +2414,7 @@ open func updateAckConfig(config: AckConfig)throws   {try rustCallWithError(FfiC
 }
 }
     
-open func updateDedupConfig(config: DedupConfig)  {try! rustCall() {
+open func updateDedupConfig(config: DedupConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dedup_config(
             self.uniffiCloneHandle(),
         FfiConverterTypeDedupConfig_lower(config),$0
@@ -9956,7 +9956,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 52736) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 4301) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 33135) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 2649) {

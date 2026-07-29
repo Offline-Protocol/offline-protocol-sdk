@@ -109,9 +109,24 @@ impl OfflineProtocol {
     /// Updates the deduplication configuration at runtime.
     ///
     /// Note: This clears the deduplication cache and applies the new config.
-    pub fn update_dedup_config(&mut self, config: DeduplicatorConfig) {
+    ///
+    /// Validated the same way its two siblings are, and for a reason that only
+    /// appeared once they were. Both of those run the *whole*
+    /// `ProtocolConfig::validate`, which checks the Bloom parameters this
+    /// method installs — so while this one accepted anything, a configuration
+    /// it had already stored could make a perfectly valid
+    /// [`Self::update_retry_config`] fail, complaining about a Bloom filter the
+    /// caller never mentioned. `Deduplicator::with_config` fails safe on those
+    /// values rather than panicking, so the cost was a confusing rejection
+    /// rather than a crash — but a rejection attributed to the wrong call is
+    /// its own kind of expensive.
+    pub fn update_dedup_config(&mut self, config: DeduplicatorConfig) -> crate::Result<()> {
+        let mut candidate = self.config.clone();
+        candidate.reliability.dedup = config.clone();
+        candidate.validate()?;
         self.deduplicator = Deduplicator::with_config(config.clone());
         self.config.reliability.dedup = config;
+        Ok(())
     }
 
     /// Gets deduplicator statistics for monitoring.

@@ -492,6 +492,40 @@ impl ProtocolConfig {
             ));
         }
 
+        // Checked outside the Bloom guard below, and that placement is the
+        // whole point: these two are the *only* dedup fields the UniFFI
+        // `DedupConfig` carries, so every constraint hidden behind
+        // `use_bloom_filter` is unreachable from a binding caller. A zero here
+        // is not a cosmetic problem — `Deduplicator` fails safe on the Bloom
+        // parameters, but nothing fails safe on these. At
+        // `max_tracked_messages == 0` the HashMap branch of `mark_seen` evicts
+        // on every insert, so the map holds one id and duplicate suppression is
+        // effectively off; `retention_time_secs == 0` expires every entry
+        // immediately for the same net result.
+        //
+        // What this rejects is the *degenerate* value, and that is the whole of
+        // the claim: a floor of 1 is not a floor on how well duplicates are
+        // suppressed. `max_tracked_messages == 1` behaves indistinguishably
+        // from `0`, and a two-second retention on a link whose retry backoff is
+        // longer than that suppresses nothing either. Choosing a window wide
+        // enough for the deployment is the application's call — the SDK refuses
+        // only the values that cannot be a choice, because nothing downstream
+        // spells them as a configuration error and the failure they produce
+        // (silently re-delivered messages) does not look like a config bug.
+        // Raising either floor to a policy minimum is a wider behavioural break
+        // and would need its own decision.
+        if self.reliability.dedup.max_tracked_messages == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "reliability.dedup.max_tracked_messages must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.reliability.dedup.retention_time_secs == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "reliability.dedup.retention_time_secs must be greater than 0".to_string(),
+            ));
+        }
+
         if self.reliability.dedup.use_bloom_filter {
             if self.reliability.dedup.bloom_filter_bits == 0 {
                 return Err(crate::Error::InvalidConfiguration(

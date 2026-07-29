@@ -1150,6 +1150,7 @@ interface OfflineProtocol {
     void update_ack_config(AckConfig config);
     [Throws=ProtocolError]
     void update_retry_config(RetryConfig config);
+    [Throws=ProtocolError]
     void update_dedup_config(DedupConfig config);
     
     // Reliability statistics for monitoring

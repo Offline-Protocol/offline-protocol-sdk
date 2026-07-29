@@ -1,10 +1,10 @@
 //! Session confirmation, welcome lifecycle, and pending session reconciliation.
 
 use super::{
-    internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
-    CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS,
-    WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
+    internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle, PruneAllowance,
+    RestorableRecord, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
+    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS,
+    REKEY_INTERVAL_SECS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
     WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
@@ -269,9 +269,14 @@ impl OfflineProtocol {
     }
 
     /// Reconstructs runtime confirmation cache from persisted session states.
+    /// `allowance` is the launch's shared advisory pool — this walk's deletes
+    /// are advisory (a dropped record re-bootstraps to `Pending`, which is the
+    /// safe answer), and they add up against the same allowance as the four
+    /// category walks. See `storage::MAX_RESTORE_PRUNE_DELETES`.
     pub(super) fn restore_session_states_from_manager(
         &mut self,
         mls: Arc<RwLock<MlsManager>>,
+        allowance: &mut PruneAllowance,
     ) -> Result<()> {
         self.confirmed_sessions.clear();
 
@@ -282,14 +287,64 @@ impl OfflineProtocol {
             manager.list_sessions()?
         };
 
+        // The session list itself is deliberately not truncated the way a
+        // container-listed walk is: dropping its tail would silently leave
+        // confirmed peers out of `confirmed_sessions`. What needed bounding was
+        // the *deletes* a bad store makes this walk issue — one device barrier
+        // per peer, with nothing counting them until now.
+        let mut budget = allowance.refusing();
         for peer_id in sessions {
             // Restore-path read: a record whose bytes will not decode is
             // dropped and re-bootstrapped as `Pending` rather than failing
             // initialization forever. The send path deliberately keeps the
             // strict loader — see `load_restorable_state_record`.
-            let state = match self.load_session_state_for_restore(&peer_id)? {
-                Some(state) => state,
-                None => self.bootstrap_missing_session_state(&peer_id)?,
+            let state = match self.load_session_state_for_restore(&peer_id, Some(&mut budget)) {
+                RestorableRecord::Present(state) => state,
+                RestorableRecord::Absent => self.bootstrap_missing_session_state(&peer_id),
+                // A record is still on disk and could not be read *this*
+                // session. Re-bootstrapping would persist `Pending` straight
+                // over one that may say `Confirmed`, and propagating would fail
+                // `initialize_mls` for as long as that single record stays
+                // unreadable — on an install that then cannot send at all.
+                // Skipping is what leaves the record recoverable: the peer is
+                // simply absent from `confirmed_sessions`, and the send path's
+                // own strict loader (`is_session_confirmed`) still fails closed
+                // for it — and re-reads the record, so a transient failure
+                // heals the moment the store answers again.
+                //
+                // Three consequences worth naming rather than rediscovering,
+                // all of them following from the peer being absent from
+                // `confirmed_sessions` for the run:
+                //
+                // 1. The Welcome machinery gates on
+                //    `!confirmed_sessions.contains(peer)` *plus* a live
+                //    `welcome_lifecycles` entry (`welcome_pending_peers`,
+                //    `resend_unconfirmed_sent_welcome`, the retry ladder). So a
+                //    peer whose lifecycle restored as `Sent` while its session
+                //    state did not can draw a redundant Welcome re-send.
+                // 2. `flush_restored_confirmed_pending_messages` will not flush
+                //    this peer's queued pre-session messages this session. They
+                //    stay queued — in memory and on disk — and flush once a
+                //    launch can read the record, or once a live confirmation
+                //    re-adds the peer.
+                // 3. Tier-2 crypto recovery re-seals a resend only for a peer
+                //    in `confirmed_sessions` (`reseal_resend_content`), so a
+                //    resend to this peer replays its original ciphertext for
+                //    the run rather than re-sealing to the current epoch.
+                //
+                // All three are deferrals on an already-degraded store, and all
+                // three are strictly better than the alternative this replaced
+                // — propagating, which failed `initialize_mls` on every launch
+                // for as long as the one record stayed unreadable, on an
+                // install that could then send nothing at all.
+                RestorableRecord::Unavailable => {
+                    warn!(
+                        session_or_group_id = %peer_id,
+                        "Session state could not be read this session; leaving the record in \
+                         place and treating the session as unconfirmed"
+                    );
+                    continue;
+                }
             };
             if matches!(state, SessionState::Confirmed) {
                 self.confirmed_sessions.insert(peer_id.clone());
@@ -304,18 +359,43 @@ impl OfflineProtocol {
             );
         }
 
+        if budget.exhausted {
+            warn!(
+                deleted = budget.spent,
+                budget = super::storage::MAX_RESTORE_PRUNE_DELETES,
+                "Session state restore hit its share of the launch delete budget; the \
+                 unreadable records left behind are re-bootstrapped as Pending anyway and \
+                 dropped on a later launch"
+            );
+        }
+
         Ok(())
     }
 
-    pub(super) fn bootstrap_missing_session_state(&self, peer_id: &str) -> Result<SessionState> {
+    /// The state a session with no readable record starts from.
+    ///
+    /// Infallible: the migration write is best effort, like every other
+    /// persistence call on the restore path. It used to propagate, so one
+    /// `StoreFailed` — a full disk, a container the OS has locked — failed
+    /// `initialize_mls` outright and, with `require_encryption` on by default,
+    /// left the install unable to send. `Pending` is the safe answer in memory
+    /// either way, and a launch that can write re-derives the record.
+    pub(super) fn bootstrap_missing_session_state(&self, peer_id: &str) -> SessionState {
         // Legacy session records without explicit state are treated as Pending.
         // Recovery is driven by probe/ack reconciliation, never by implicit inference.
         let restored_state = SessionState::Pending;
-        self.persist_session_state(
+        if let Err(e) = self.persist_session_state(
             peer_id,
             restored_state,
             "initialize_mls_missing_state_migration",
-        )?;
+        ) {
+            warn!(
+                session_or_group_id = %peer_id,
+                error = %e,
+                "Failed to persist the bootstrapped session state; the session is Pending for \
+                 this run and the record is re-derived on the next launch"
+            );
+        }
         info!(
             event = "session_state_transition",
             session_or_group_id = %peer_id,
@@ -325,7 +405,7 @@ impl OfflineProtocol {
             "session_state_transition"
         );
 
-        Ok(restored_state)
+        restored_state
     }
 
     // ========================================================================

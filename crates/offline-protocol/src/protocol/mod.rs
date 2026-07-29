@@ -18,6 +18,7 @@ mod types;
 pub(crate) use decryption_queue::PendingDecryptionQueue;
 pub use decryption_queue::PendingQueueMetrics;
 pub(crate) use prefixes::*;
+pub(crate) use storage::{PruneAllowance, RestorableRecord};
 pub(crate) use types::*;
 pub use types::{MediaSendOptions, ProtocolState, SendMessageOptions};
 
@@ -742,21 +743,44 @@ impl OfflineProtocol {
         // state, idempotent, and must survive an MLS-restore rollback.
         self.restore_or_init_nostr_signing_secret();
 
+        // The launch's whole durable-delete allowance, in one place because the
+        // bound is on the launch. A device-barrier storm kills *this call*, not
+        // any single walk in it, so no walk may hand itself a pool — see
+        // `PruneAllowance::pool`. Three of them, and the ceiling is their sum:
+        //
+        // - `advisory_prunes` is shared by the `ADVISORY_PRUNE_WALKS` walks
+        //   whose prunes are caches or advisory signals. They draw in the order
+        //   written below, and that order is part of the contract: each leaves
+        //   the ones after it a `MIN_ADVISORY_PRUNE_DELETES` floor and may take
+        //   the rest, so an earlier walk gets first call on whatever the later
+        //   ones do not reserve. Reordering them, or adding a sixth without
+        //   bumping `ADVISORY_PRUNE_WALKS`, changes who gets pruned under load.
+        // - `pending_prunes` and `outbox_prunes` are private to the two
+        //   settlement-paired walks, because being starved there defers a
+        //   diagnostic or a *delivery* rather than a cache eviction, and
+        //   neither may be held hostage to a key-package flood in a category it
+        //   has nothing to do with.
+        //
+        // See `storage::MAX_RESTORE_PRUNE_DELETES`.
+        let mut advisory_prunes = PruneAllowance::pool();
+        let mut pending_prunes = PruneAllowance::pool();
+        let mut outbox_prunes = PruneAllowance::pool();
+
         // Restore state from previous session
         let restore_result = (|| {
-            self.restore_pending_messages()?;
+            self.restore_pending_messages(&mut pending_prunes)?;
             self.restore_lamport_clock();
             self.restore_tofu_keys();
             self.restore_blocked_users()?;
-            self.restore_session_states_from_manager(manager.clone())?;
-            self.restore_peer_key_packages(&manager)?;
+            self.restore_session_states_from_manager(manager.clone(), &mut advisory_prunes)?;
+            self.restore_peer_key_packages(&manager, &mut advisory_prunes)?;
             // Must precede start(): flush_restored_confirmed_pending_messages
             // re-makes the rich seal decision against these sets, and an
             // empty set there silently drops queued rich extras.
-            self.restore_peer_capabilities(&manager);
-            self.restore_welcome_lifecycles()?;
-            self.restore_outbox()?;
-            self.restore_media_descriptors()?;
+            self.restore_peer_capabilities(&manager, &mut advisory_prunes);
+            self.restore_welcome_lifecycles(&mut advisory_prunes)?;
+            self.restore_outbox(&mut outbox_prunes)?;
+            self.restore_media_descriptors(&mut advisory_prunes)?;
             self.restore_both_create_awaiting_decrypt();
             Ok(())
         })();
@@ -815,12 +839,16 @@ impl OfflineProtocol {
         self.restore_or_init_state_record_key();
         self.restore_or_init_scrub_secret();
         self.restore_or_init_nostr_signing_secret();
-        self.restore_pending_messages()?;
+        // Same three pools as `initialize_mls_inner`, for the same reason.
+        let mut advisory_prunes = PruneAllowance::pool();
+        let mut pending_prunes = PruneAllowance::pool();
+        let mut outbox_prunes = PruneAllowance::pool();
+        self.restore_pending_messages(&mut pending_prunes)?;
         self.restore_lamport_clock();
         self.restore_tofu_keys();
         self.restore_blocked_users()?;
-        self.restore_outbox()?;
-        self.restore_media_descriptors()?;
+        self.restore_outbox(&mut outbox_prunes)?;
+        self.restore_media_descriptors(&mut advisory_prunes)?;
         Ok(())
     }
 
