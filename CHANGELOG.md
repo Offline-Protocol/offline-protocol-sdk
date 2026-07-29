@@ -93,6 +93,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **The TOFU restore walk is now bounded like every other category walk.** It read whatever `list_keys` returned from start to finish, loading every entry into memory before applying `MAX_TOFU_PEERS` — the one restore with no ceiling, in a release whose other five walks were all bounded against exactly this. Living in the credential store rather than the app container is a weaker threat model, not an absent one, and the bound is about work on the boot path either way. The tail is deliberately *ignored*, never pruned, unlike the two cache restores: a dropped key package costs a re-exchange, whereas deleting a TOFU entry silently re-arms trust-on-first-use for that peer, so the next key it offers is accepted with no mismatch warning. Stranding an over-cap pin is the strictly safer failure.
 
+- **Terminal settlements parked by restore are now explicitly capped.** The restore caps bound how many can be produced, but they bound it as a sum across every category, and nothing drains the queue until `start()` — which an application that only calls `initialize_mls`, or that retries it against a store that keeps failing, may never reach. The queue now stops at twice the pending queue's own global cap, keeping the oldest (dropping those in favour of later ones would bias the survivors by backend listing order) and reporting the suppressed count when `start()` drains.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed

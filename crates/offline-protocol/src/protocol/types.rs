@@ -205,6 +205,17 @@ pub(crate) const MAX_PENDING_MESSAGES_PER_PEER: usize = 64;
 /// Paired with [`MAX_PENDING_MESSAGE_BYTES_GLOBAL`], as above.
 pub(crate) const MAX_PENDING_MESSAGES_GLOBAL: usize = 4096;
 
+/// Maximum terminal settlements parked by restore for `start()` to drain.
+///
+/// The restore caps already bound how many can be produced, but they bound it
+/// as a sum across every category, and nothing drains this queue until
+/// `start()` — which an application that only calls `initialize_mls`, or that
+/// retries it against a store that keeps failing, may never reach. Sized above
+/// the largest single-category restore ([`MAX_PENDING_MESSAGES_GLOBAL`], the
+/// pending queue's own global cap) so no legitimate restore is ever truncated;
+/// past that point the count is reported instead of the events.
+pub(crate) const MAX_DEFERRED_RESTORE_SETTLEMENTS: usize = 2 * MAX_PENDING_MESSAGES_GLOBAL;
+
 /// Maximum size of application-supplied message content accepted at the public
 /// send boundary, in bytes.
 ///

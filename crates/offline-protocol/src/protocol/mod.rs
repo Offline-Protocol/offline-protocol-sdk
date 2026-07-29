@@ -149,8 +149,18 @@ pub struct OfflineProtocol {
     /// installing an event callback — so a `message_failed` emitted there would
     /// be dropped, and the app would keep an id that never resolves. `start()`
     /// drains this, mirroring how restored media descriptors already wait to be
-    /// announced. Bounded by the restore caps that produce it.
+    /// announced.
+    ///
+    /// Explicitly capped at [`MAX_DEFERRED_RESTORE_SETTLEMENTS`] rather than
+    /// left to the restore caps that feed it. Those caps do bound it, but they
+    /// bound it as a *sum* across every category, and nothing drains this until
+    /// `start()` — which an app that only ever calls `initialize_mls`, or that
+    /// retries it against a failing store, may never reach.
     deferred_restore_settlements: Vec<Event>,
+
+    /// Number of settlements suppressed by the cap above, so the count is
+    /// reported even though the individual events are not.
+    suppressed_restore_settlements: usize,
 
     /// Earliest wall-clock expiry in `pending_encrypted_messages`.
     ///
@@ -538,6 +548,7 @@ impl OfflineProtocol {
             pending_encrypted_messages: HashMap::new(),
             pending_queues_unreadable_this_session: HashSet::new(),
             deferred_restore_settlements: Vec::new(),
+            suppressed_restore_settlements: 0,
             next_pending_message_expiry: None,
             pending_key_packages: HashMap::new(),
             key_package_sent_to: std::collections::HashSet::new(),
@@ -693,6 +704,7 @@ impl OfflineProtocol {
         // the app will ever get about them, because nothing can re-derive a
         // settlement for a record that no longer exists.
         let previous_restore_settlements = self.deferred_restore_settlements.clone();
+        let previous_suppressed_settlements = self.suppressed_restore_settlements;
 
         // Load the persistent scrub secret outside the transactional restore
         // below: it is independent of MLS state, and a later MLS-restore
@@ -734,6 +746,7 @@ impl OfflineProtocol {
             // decided to settle; a retry re-derives them. Adoption's
             // settlements are in the baseline (see above) and survive.
             self.deferred_restore_settlements = previous_restore_settlements;
+            self.suppressed_restore_settlements = previous_suppressed_settlements;
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
@@ -984,6 +997,15 @@ impl OfflineProtocol {
         // cannot mistake a restored send for the settlement of a lost one.
         for event in std::mem::take(&mut self.deferred_restore_settlements) {
             self.emit_event(event);
+        }
+        let suppressed = std::mem::take(&mut self.suppressed_restore_settlements);
+        if suppressed > 0 {
+            warn!(
+                suppressed,
+                cap = MAX_DEFERRED_RESTORE_SETTLEMENTS,
+                "Restore produced more terminal settlements than any legitimate run can produce; \
+                 the ids past the cap were not reported individually"
+            );
         }
 
         self.flush_restored_confirmed_pending_messages();
@@ -2366,9 +2388,19 @@ impl OfflineProtocol {
             .unwrap_or(false);
         if running {
             self.emit_event(event);
-        } else {
-            self.deferred_restore_settlements.push(event);
+            return;
         }
+        // Every other accumulation on the restore path has an explicit ceiling
+        // and logs what it dropped; this one is retained until `start()`, which
+        // may never come, so it gets the same treatment. Keeping the *oldest*
+        // is deliberate: the settlements a restore produces first are the ones
+        // for records it examined first, and dropping those in favour of later
+        // ones would bias the survivors by backend listing order.
+        if self.deferred_restore_settlements.len() >= MAX_DEFERRED_RESTORE_SETTLEMENTS {
+            self.suppressed_restore_settlements += 1;
+            return;
+        }
+        self.deferred_restore_settlements.push(event);
     }
 
     /// Returns an iterator over outbox messages (test-only).
