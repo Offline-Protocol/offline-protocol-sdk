@@ -122,8 +122,9 @@ pub struct OfflineProtocol {
     /// Pending messages waiting for session establishment (recipient -> messages).
     pending_encrypted_messages: HashMap<String, Vec<PendingMessage>>,
 
-    /// Recipients whose persisted pending queue could not be read *this
-    /// session* and is still on disk (`PendingRestore::Unavailable`).
+    /// Recipients whose persisted pending queue was not read *this session* and
+    /// is still on disk: either the read failed (`PendingRestore::Unavailable`)
+    /// or the restore walk stopped at one of its bounds before reaching it.
     ///
     /// The pending queue is persisted as one record per recipient holding the
     /// whole queue, so honoring `Unavailable` at restore is not enough on its
@@ -132,7 +133,11 @@ pub struct OfflineProtocol {
     /// empty-plus-one view straight over it — destroying queued messages the
     /// app is still holding ids for, with no settlement at all. That is the
     /// silent loss the three-state read exists to prevent, arriving through
-    /// the runtime path instead of the restore path.
+    /// the runtime path instead of the restore path. A record the walk simply
+    /// never opened is the same record in the same state, so it is frozen for
+    /// the same reason — a bound that promises to leave the tail "for a later
+    /// launch" has to mean it for the whole session, not just until the next
+    /// send.
     ///
     /// So a recipient recorded here is *frozen on disk* for the rest of the
     /// session: writes and deletes for its record are refused, and the

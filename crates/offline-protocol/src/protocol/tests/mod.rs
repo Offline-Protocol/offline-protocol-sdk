@@ -26945,6 +26945,148 @@ fn test_restore_stops_admitting_pending_entries_at_the_entry_bound() {
     );
 }
 
+/// A tail the restore walk never reached must stay on disk for the *session*,
+/// not just until the next ordinary write.
+///
+/// Both of the pending walk's bounds promise to leave the remainder "for a
+/// later launch", but a pending record holds a recipient's whole queue: an
+/// enqueue for an unwalked recipient persists the in-memory view — one message
+/// — straight over it, and `block_user` / the aborted-session path delete it
+/// outright. Either way the ids inside a record nobody has opened are destroyed
+/// and settled to no one, which is the loss the `Unavailable` freeze already
+/// prevents through the other door (see
+/// `test_unreadable_pending_queue_is_not_overwritten_or_cleared_by_later_writes`).
+#[test]
+fn test_pending_tail_the_restore_walk_never_reached_is_frozen_for_the_session() {
+    use super::storage::MAX_PENDING_RESTORE_ENTRIES;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let cipher = state_record_cipher_for(&secure);
+
+    let per_peer = MAX_PENDING_MESSAGES_PER_PEER;
+    let recipients = (MAX_PENDING_RESTORE_ENTRIES / per_peer) + 8;
+    for index in 0..recipients {
+        let recipient = format!("peer{index}");
+        let queue: Vec<PendingMessage> = (0..per_peer)
+            .map(|n| PendingMessage {
+                content: format!("m{n}"),
+                priority: MessagePriority::Medium,
+                message_id: MessageId::new(),
+                reply_to_msg: None,
+                forwarded_from: None,
+                content_type: ContentType::Text,
+                media_metadata: None,
+                rich: None,
+                queued_at: Utc::now(),
+                serialized_bytes: 0,
+            })
+            .collect();
+        let sealed = cipher
+            .seal(
+                storage_keys::PENDING_MESSAGES,
+                &recipient,
+                &serde_json::to_vec(&queue).unwrap(),
+            )
+            .unwrap();
+        state
+            .store(storage_keys::PENDING_MESSAGES, &recipient, &sealed)
+            .unwrap();
+    }
+
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let state_as_mls: Arc<dyn MlsStorage> = state.clone();
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
+        storage: state_as_mls,
+    });
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    // Pick a recipient the walk never opened: still on disk, nothing in memory.
+    let untouched = (0..recipients)
+        .map(|index| format!("peer{index}"))
+        .find(|recipient| {
+            state
+                .load(storage_keys::PENDING_MESSAGES, recipient)
+                .unwrap()
+                .is_some()
+                && !protocol.pending_encrypted_messages.contains_key(recipient)
+        })
+        .expect("the walk must stop before the end of the listing");
+    let sealed_before = state
+        .load(storage_keys::PENDING_MESSAGES, &untouched)
+        .unwrap()
+        .expect("the untouched tail record must still be on disk");
+
+    // A fresh send to that peer while its session is still unavailable.
+    protocol.queue_pending_message(
+        &untouched,
+        "queued after the restart",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+    );
+    assert_eq!(
+        protocol
+            .pending_encrypted_messages
+            .get(&untouched)
+            .map(Vec::len),
+        Some(1),
+        "the new message still queues in memory and flushes from there"
+    );
+    assert_eq!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, &untouched)
+            .unwrap(),
+        Some(sealed_before.clone()),
+        "an enqueue must not persist over a queue this restore never opened"
+    );
+
+    // The delete paths (block_user, aborted pending session) must not destroy
+    // it either — those ids have still never been named.
+    protocol.clear_pending_messages_from_storage(&untouched);
+    assert_eq!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, &untouched)
+            .unwrap(),
+        Some(sealed_before),
+        "clearing must not destroy a queue this restore never opened"
+    );
+
+    // The freeze is per recipient: a peer the walk did restore still persists.
+    let walked = protocol
+        .pending_encrypted_messages
+        .keys()
+        .next()
+        .cloned()
+        .expect("restore must have admitted some recipients");
+    protocol.queue_pending_message(
+        &walked,
+        "ordinary",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, &walked)
+            .unwrap()
+            .is_some(),
+        "a recipient the walk reached must still persist normally"
+    );
+}
+
 /// A protocol-state category whose sensitivity has not been decided must fail
 /// closed rather than land in the app container in the clear.
 #[test]

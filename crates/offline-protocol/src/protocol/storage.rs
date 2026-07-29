@@ -247,6 +247,14 @@ const OUTBOX_RESTORE_KEY_CAP: usize = 4 * MAX_OUTBOX_ENTRIES;
 /// would be an unsettleable loss. Sized at the same generous multiple of the
 /// live cap the rest of this module uses, so no store this SDK wrote is ever
 /// truncated.
+///
+/// "Ignored" has to mean ignored *for the session*, not just for the walk. Both
+/// of this category's bounds therefore freeze the recipients they did not reach
+/// (`pending_queues_unreadable_this_session`), because one record holds a
+/// recipient's whole queue and an ordinary enqueue would otherwise write the
+/// in-memory view over it. The outbox and media-descriptor tails need no
+/// equivalent: those are keyed per message and per file, so a later write only
+/// ever touches a different key.
 pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
 
 impl OfflineProtocol {
@@ -1031,12 +1039,13 @@ impl OfflineProtocol {
             return Ok(());
         };
 
-        let recipients = Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_MESSAGES)
-            .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
+        let mut recipients =
+            Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_MESSAGES)
+                .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
         let listed = recipients.len();
 
         // Rebuilt from this pass: a recipient is frozen on disk only while
-        // *this* restore could not read its record.
+        // *this* restore could not read — or did not reach — its record.
         self.pending_queues_unreadable_this_session.clear();
 
         let mut capacity_evicted = Vec::new();
@@ -1053,11 +1062,20 @@ impl OfflineProtocol {
         // see [`MAX_PENDING_RESTORE_ENTRIES`].
         let mut examined_entries = 0usize;
         let mut entry_bound_reached = false;
-        for recipient in recipients.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+        // How far the walk got. Everything from here on is the tail neither
+        // bound below let this pass reach, and is frozen for the session — see
+        // the freeze right after the loop.
+        let mut walked = 0usize;
+        while walked < recipients.len() {
+            if walked >= MAX_RESTORE_KEYS_PER_CATEGORY {
+                break;
+            }
             if examined_entries >= MAX_PENDING_RESTORE_ENTRIES {
                 entry_bound_reached = true;
                 break;
             }
+            let recipient = recipients[walked].clone();
+            walked += 1;
             if Self::validate_outbound_recipient(&recipient).is_err() {
                 // The queue is unaddressable — nothing can ever be sent to this
                 // recipient again — so it is dropped, but the app still holds
@@ -1190,19 +1208,40 @@ impl OfflineProtocol {
             }
         }
 
+        // Leaving the tail on disk is only worth anything if nothing this
+        // session can then destroy it. A pending record holds a recipient's
+        // *whole* queue, so an ordinary enqueue for an unwalked recipient
+        // persists the in-memory view — one message — straight over it, and
+        // `block_user` / the aborted-session path delete it outright. Either
+        // way the ids inside a record nobody has opened are gone, settled to no
+        // one: exactly the loss the `Unavailable` freeze exists to prevent, and
+        // the walk bounds are the one path into it that had no freeze.
+        //
+        // Freezing is per recipient and per session, so the cost is that a new
+        // send to an unwalked peer stays in memory for this run; the next
+        // launch re-lists and may walk a different subset. Draining moves the
+        // ids the listing already materialized, so this adds no allocation the
+        // walk had not already paid for.
+        let unwalked = recipients.len().saturating_sub(walked);
+        self.pending_queues_unreadable_this_session
+            .extend(recipients.drain(walked..));
+
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
             warn!(
                 listed,
                 cap = MAX_RESTORE_KEYS_PER_CATEGORY,
-                "Pending message store listed more recipients than any legitimate run can produce; ignoring the tail"
+                frozen = unwalked,
+                "Pending message store listed more recipients than any legitimate run can \
+                 produce; the tail is left on disk and frozen for this session"
             );
         }
         if entry_bound_reached {
             warn!(
                 examined = examined_entries,
                 cap = MAX_PENDING_RESTORE_ENTRIES,
+                frozen = unwalked,
                 "Pending message store held more queued entries than one restore may walk; \
-                 leaving the remaining recipients on disk for a later launch"
+                 the remaining recipients are left on disk and frozen for this session"
             );
         }
 
