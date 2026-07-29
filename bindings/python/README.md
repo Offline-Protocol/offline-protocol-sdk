@@ -103,6 +103,18 @@ MLS cryptographic key material is stored using the `keyring` library:
 | Linux | Secret Service (GNOME Keyring / KWallet) |
 | Windows | Windows Credential Locker |
 
+On a host with none of those available, `keyring` falls back to a null or
+plaintext backend. `SecureStorage` logs a warning when it detects one, but it
+does not refuse to run — and on Python that warning is louder than it looks.
+The credential store also holds `protocol_state_record_key`, the per-install key
+that seals pending messages, outbox entries, and media descriptors before they
+reach `AppStateStorage`. On a plaintext backend that key sits in a readable
+file, so the sealing gives you separation of *lifecycle* but not of
+*confidentiality*: anyone who can read the credential store can open every
+sealed protocol-state record. Install a real secret service (gnome-keyring,
+kwallet) for any deployment where that matters, or supply your own
+`MlsStorageProvider`.
+
 Restartable message-plane state is kept separately by `AppStateStorage`, outside
 the credential store. The built-in stores derive an opaque account namespace
 from both `app_id` and `user_id`, so multiple `ProtocolManager` instances do

@@ -26742,3 +26742,276 @@ fn test_cache_restores_stop_at_the_category_bound() {
         );
     }
 }
+
+/// Restore's settlements must survive an initialization rollback, because the
+/// records they describe do not.
+///
+/// The rollback restores in-memory state; it restores no *storage* state,
+/// because restore has none to give back. By the time a later step fails, an
+/// earlier one has already deleted an unaddressable pending queue. Rolling its
+/// settlement back leaves the application holding an id that resolves to
+/// nothing — not on this launch, and not on any retry, since the record it
+/// would be re-derived from is gone.
+#[test]
+fn test_restore_settlements_survive_an_initialization_rollback() {
+    struct FailsOnBlockedUsersList {
+        inner: Arc<InMemoryStorage>,
+    }
+    impl crate::ProtocolStateStorage for FailsOnBlockedUsersList {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .store(key_type, key_id, data)
+                .map_err(crate::protocol::map_test_storage_error)
+        }
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+            self.inner
+                .load(key_type, key_id)
+                .map_err(crate::protocol::map_test_storage_error)
+        }
+        fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .delete(key_type, key_id)
+                .map_err(crate::protocol::map_test_storage_error)
+        }
+        fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+            // Fails *after* `restore_pending_messages` has already destroyed a
+            // record — the ordering that makes this reachable.
+            if key_type == storage_keys::BLOCKED_USERS {
+                return Err(crate::ProtocolStateError::LoadFailed(
+                    "forced blocked-user listing failure".to_string(),
+                ));
+            }
+            self.inner
+                .list_keys(key_type)
+                .map_err(crate::protocol::map_test_storage_error)
+        }
+    }
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let cipher = state_record_cipher_for(&secure);
+
+    // A queue for a recipient that no longer validates: restore drops it, and
+    // owes a settlement for the id inside it.
+    let doomed = MessageId::new();
+    let queued = vec![PendingMessage {
+        content: "queued before the id rules tightened".to_string(),
+        priority: MessagePriority::Medium,
+        message_id: doomed.clone(),
+        reply_to_msg: None,
+        forwarded_from: None,
+        content_type: ContentType::Text,
+        media_metadata: None,
+        rich: None,
+        queued_at: Utc::now(),
+        serialized_bytes: 0,
+    }];
+    let sealed = cipher
+        .seal(
+            storage_keys::PENDING_MESSAGES,
+            "bad:recipient",
+            &serde_json::to_vec(&queued).unwrap(),
+        )
+        .unwrap();
+    state
+        .store(storage_keys::PENDING_MESSAGES, "bad:recipient", &sealed)
+        .unwrap();
+
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(FailsOnBlockedUsersList {
+        inner: state.clone(),
+    });
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    assert!(
+        protocol
+            .initialize_mls(secure_handle, state_handle)
+            .is_err(),
+        "a blocked-user listing failure must roll initialization back"
+    );
+
+    // Precondition: the record really is gone, so nothing can re-derive it.
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bad:recipient")
+            .unwrap()
+            .is_none(),
+        "restore deleted the unaddressable queue before the failure"
+    );
+
+    let settled: Vec<_> = protocol
+        .deferred_restore_settlements
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        settled.contains(&doomed.as_str()),
+        "the settlement for a destroyed record must survive the rollback, got {settled:?}"
+    );
+}
+
+/// The pending-queue restore walk is bounded by *entries*, not just by records.
+///
+/// Each record holds a whole recipient's queue, so a record-count bound alone
+/// admits `MAX_RESTORE_KEYS_PER_CATEGORY × MAX_PENDING_MESSAGES_PER_PEER`
+/// entries — and every entry past the global cap costs a full scan of the
+/// in-memory queue to find the oldest one to evict. That is the boot path, and
+/// it is reachable without tampering: the pre-split build had no pending-queue
+/// caps at all.
+#[test]
+fn test_restore_stops_admitting_pending_entries_at_the_entry_bound() {
+    use super::storage::MAX_PENDING_RESTORE_ENTRIES;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let cipher = state_record_cipher_for(&secure);
+
+    // Deliberately more entries than one restore may walk, spread over records
+    // the pre-split build could legitimately have written.
+    let per_peer = MAX_PENDING_MESSAGES_PER_PEER;
+    let recipients = (MAX_PENDING_RESTORE_ENTRIES / per_peer) + 8;
+    for index in 0..recipients {
+        let recipient = format!("peer{index}");
+        let queue: Vec<PendingMessage> = (0..per_peer)
+            .map(|n| PendingMessage {
+                content: format!("m{n}"),
+                priority: MessagePriority::Medium,
+                message_id: MessageId::new(),
+                reply_to_msg: None,
+                forwarded_from: None,
+                content_type: ContentType::Text,
+                media_metadata: None,
+                rich: None,
+                queued_at: Utc::now(),
+                serialized_bytes: 0,
+            })
+            .collect();
+        let sealed = cipher
+            .seal(
+                storage_keys::PENDING_MESSAGES,
+                &recipient,
+                &serde_json::to_vec(&queue).unwrap(),
+            )
+            .unwrap();
+        state
+            .store(storage_keys::PENDING_MESSAGES, &recipient, &sealed)
+            .unwrap();
+    }
+
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let state_as_mls: Arc<dyn MlsStorage> = state.clone();
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
+        storage: state_as_mls,
+    });
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    // The walk stopped, so the untouched tail is still on disk — ignored, never
+    // pruned: its ids live inside records nothing has opened, so deleting them
+    // would be an unsettleable loss.
+    let remaining = (0..recipients)
+        .filter(|index| {
+            state
+                .load(storage_keys::PENDING_MESSAGES, &format!("peer{index}"))
+                .unwrap()
+                .is_some()
+        })
+        .count();
+    assert!(
+        remaining > 0,
+        "the tail past the entry bound must be left on disk for a later launch"
+    );
+
+    // And the global cap still holds for what was admitted.
+    assert!(
+        protocol.total_pending_message_count() <= MAX_PENDING_MESSAGES_GLOBAL,
+        "restore admitted {} entries, over the global cap",
+        protocol.total_pending_message_count()
+    );
+}
+
+/// A protocol-state category whose sensitivity has not been decided must fail
+/// closed rather than land in the app container in the clear.
+#[test]
+fn test_unknown_state_category_is_refused_rather_than_written_in_the_clear() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    let state: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
+        storage: storage.clone() as Arc<dyn MlsStorage>,
+    });
+    let result = protocol.write_state_record(
+        state.as_ref(),
+        "a_category_nobody_classified",
+        "id",
+        b"secret",
+    );
+
+    assert!(
+        result.is_err(),
+        "an unclassified category must not be persisted"
+    );
+    assert!(
+        storage
+            .load("a_category_nobody_classified", "id")
+            .unwrap()
+            .is_none(),
+        "nothing may reach the store for a category with no sealing decision"
+    );
+}
+
+/// An outbox record whose key is not a parseable message id is still surfaced
+/// when restore has to destroy it — the same fallback the adoption sweep uses.
+#[test]
+fn test_restore_settles_an_unreadable_outbox_record_whose_key_is_not_a_message_id() {
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let _ = state_record_cipher_for(&secure);
+
+    // Not a valid seal envelope, so the read destroys it; and not a UUID, so
+    // the loss cannot be named as a message id.
+    state
+        .store(storage_keys::OUTBOX, "not-a-uuid", b"garbage")
+        .unwrap();
+
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let state_as_mls: Arc<dyn MlsStorage> = state.clone();
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(TestProtocolStateStorage {
+        storage: state_as_mls,
+    });
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert!(
+        protocol.deferred_restore_settlements.iter().any(|event| {
+            matches!(
+                event,
+                Event::ConvergenceDiag { stage, peer_id, .. }
+                    if stage == "pending_state_lost" && peer_id == "not-a-uuid"
+            )
+        }),
+        "a destroyed outbox record with an unparseable key must not vanish silently: {:?}",
+        protocol.deferred_restore_settlements
+    );
+}

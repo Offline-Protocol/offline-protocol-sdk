@@ -20,30 +20,94 @@ use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
-/// Whether a protocol-state category's values must be sealed before they reach
-/// the install-scoped store.
+/// Every protocol-state category the SDK writes through
+/// [`OfflineProtocol::write_state_record`].
 ///
-/// The single place record sensitivity is decided — adding a category means
-/// deciding here, not at each call site. Sealed categories are the ones whose
-/// values can carry message plaintext, user content, or media key material:
+/// The enum exists for [`Self::requires_sealing`], which is an exhaustive
+/// `match`: adding a variant is a compile error until someone decides whether
+/// that category's values are sensitive. The previous spelling was a `matches!`
+/// over `&str`, which silently answers "not sensitive" for a category nobody
+/// remembered to list — and that answer means message plaintext or cloud-media
+/// key material written to the app container in the clear, which is the one
+/// thing this module exists to prevent.
 ///
-/// - [`storage_keys::PENDING_MESSAGES`]: original plaintext, plus rich extras
-///   that can include `MediaMetadata::encryption_key`/`iv`.
-/// - [`storage_keys::OUTBOX`]: the outgoing `Message` — ciphertext for encrypted
-///   sends, but plaintext when the app opted out of encryption, and its outer
-///   `media_metadata` carries the cloud-media secrets on the forward path.
-/// - [`storage_keys::MEDIA_DESCRIPTORS`]: file names and recipients of
-///   in-flight transfers.
-///
-/// Everything else is public wire material (key packages, advertised capability
-/// versions), a small state enum, a logical clock, or a value-less marker whose
-/// only information is the key id — which sealing cannot hide anyway, because
-/// the store addresses records by it.
+/// [`Self::from_key_type`] still has to cope with an unrecognised string,
+/// because the storage API is keyed by `&str`. It answers `None`, and
+/// `write_state_record` refuses to write that: a category the sealing decision
+/// does not cover fails closed and loudly rather than open and quietly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StateCategory {
+    PendingMessages,
+    Outbox,
+    MediaDescriptors,
+    PeerKeyPackages,
+    PeerCapabilities,
+    SessionStates,
+    WelcomeLifecycles,
+    BlockedUsers,
+    BothCreateAwaitingDecrypt,
+    LamportClock,
+}
+
+impl StateCategory {
+    /// The category a storage key type names, or `None` for a key type the
+    /// sealing decision below does not cover.
+    pub(crate) fn from_key_type(key_type: &str) -> Option<Self> {
+        Some(match key_type {
+            storage_keys::PENDING_MESSAGES => Self::PendingMessages,
+            storage_keys::OUTBOX => Self::Outbox,
+            storage_keys::MEDIA_DESCRIPTORS => Self::MediaDescriptors,
+            storage_keys::PEER_KEY_PACKAGES => Self::PeerKeyPackages,
+            storage_keys::PEER_CAPABILITIES => Self::PeerCapabilities,
+            storage_keys::SESSION_STATES => Self::SessionStates,
+            storage_keys::WELCOME_LIFECYCLES => Self::WelcomeLifecycles,
+            storage_keys::BLOCKED_USERS => Self::BlockedUsers,
+            storage_keys::BOTH_CREATE_AWAITING_DECRYPT => Self::BothCreateAwaitingDecrypt,
+            storage_keys::LAMPORT_CLOCK => Self::LamportClock,
+            _ => return None,
+        })
+    }
+
+    /// Whether this category's values must be sealed before they reach the
+    /// install-scoped store.
+    ///
+    /// The single place record sensitivity is decided — adding a category means
+    /// deciding here, not at each call site. Sealed categories are the ones
+    /// whose values can carry message plaintext, user content, or media key
+    /// material:
+    ///
+    /// - [`storage_keys::PENDING_MESSAGES`]: original plaintext, plus rich
+    ///   extras that can include `MediaMetadata::encryption_key`/`iv`.
+    /// - [`storage_keys::OUTBOX`]: the outgoing `Message` — ciphertext for
+    ///   encrypted sends, but plaintext when the app opted out of encryption,
+    ///   and its outer `media_metadata` carries the cloud-media secrets on the
+    ///   forward path.
+    /// - [`storage_keys::MEDIA_DESCRIPTORS`]: file names and recipients of
+    ///   in-flight transfers.
+    ///
+    /// Everything else is public wire material (key packages, advertised
+    /// capability versions), a small state enum, a logical clock, or a
+    /// value-less marker whose only information is the key id — which sealing
+    /// cannot hide anyway, because the store addresses records by it.
+    fn requires_sealing(self) -> bool {
+        match self {
+            Self::PendingMessages | Self::Outbox | Self::MediaDescriptors => true,
+            Self::PeerKeyPackages
+            | Self::PeerCapabilities
+            | Self::SessionStates
+            | Self::WelcomeLifecycles
+            | Self::BlockedUsers
+            | Self::BothCreateAwaitingDecrypt
+            | Self::LamportClock => false,
+        }
+    }
+}
+
+/// Whether a key type's values must be sealed. Unknown key types answer `false`
+/// only for *reads*, where nothing this SDK wrote can be waiting — the write
+/// side refuses them outright.
 fn record_requires_sealing(key_type: &str) -> bool {
-    matches!(
-        key_type,
-        storage_keys::PENDING_MESSAGES | storage_keys::OUTBOX | storage_keys::MEDIA_DESCRIPTORS
-    )
+    StateCategory::from_key_type(key_type).is_some_and(StateCategory::requires_sealing)
 }
 
 /// Outcome of reading one protocol-state record.
@@ -159,6 +223,32 @@ pub(super) const MAX_RESTORE_KEYS_PER_CATEGORY: usize = 4 * MAX_PENDING_MESSAGES
 /// only a tight prefix would keep the wrong ones and strand the rest forever.
 const OUTBOX_RESTORE_KEY_CAP: usize = 4 * MAX_OUTBOX_ENTRIES;
 
+/// Restore-walk bound for the pending queue, counted in *entries* rather than
+/// records.
+///
+/// [`MAX_RESTORE_KEYS_PER_CATEGORY`] bounds how many pending-queue *records*
+/// one pass opens, and each record holds a whole recipient's queue — up to
+/// [`MAX_PENDING_MESSAGES_PER_PEER`] entries after the trim. Bounding only the
+/// record count therefore admits `16384 × 64` entries, and holding the global
+/// caps across them is not free: `evict_oldest_pending_message` scans the whole
+/// in-memory queue to find the oldest entry, so every entry past
+/// [`MAX_PENDING_MESSAGES_GLOBAL`] costs an O(`MAX_PENDING_MESSAGES_GLOBAL`)
+/// pass. That is roughly four billion comparisons on the *synchronous* boot
+/// path, before counting one provider load per record.
+///
+/// This is the same lesson the built-in providers' `list_keys` bound learned:
+/// count the work, not the results. And it is reachable without tampering — the
+/// pre-split build had no pending-queue caps at all, so an upgraded install can
+/// legitimately hold far more than the caps now admit, and the adoption sweep
+/// moves all of it into the store this walk reads.
+///
+/// The tail is *ignored*, never pruned, exactly like the record-count tail
+/// above it: those ids live inside records nothing has opened, so deleting them
+/// would be an unsettleable loss. Sized at the same generous multiple of the
+/// live cap the rest of this module uses, so no store this SDK wrote is ever
+/// truncated.
+pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
+
 impl OfflineProtocol {
     // ========================================================================
     // PROTOCOL-STATE RECORD I/O (SEALING + SIZE POLICY CHOKEPOINT)
@@ -186,7 +276,19 @@ impl OfflineProtocol {
             )));
         }
 
-        if !record_requires_sealing(key_type) {
+        // Fail closed on a category the sealing decision does not cover. The
+        // alternative is writing it in the clear because the default answer to
+        // "is this sensitive?" happened to be "no", which is exactly the
+        // silent-plaintext outcome `StateCategory` exists to make impossible.
+        let Some(category) = StateCategory::from_key_type(key_type) else {
+            return Err(ProtocolStateError::StoreFailed(format!(
+                "unknown protocol-state category '{}'; refusing to persist \
+                 a record whose sensitivity has not been decided",
+                key_type
+            )));
+        };
+
+        if !category.requires_sealing() {
             return storage.store(key_type, key_id, data);
         }
 
@@ -641,23 +743,10 @@ impl OfflineProtocol {
     /// of this module spends its time enforcing.
     fn unadoptable_record_settlement(key_type: &str, key_id: &str) -> Option<Event> {
         match key_type {
-            storage_keys::OUTBOX => Some(MessageId::from_str(key_id).map_or_else(
-                |_| {
-                    Event::convergence_diag(
-                        "pending_state_lost".to_string(),
-                        key_id.to_string(),
-                        "An outbox record from a previous version was too large to migrate and \
-                         its message id could not be recovered from the record key"
-                            .to_string(),
-                    )
-                },
-                |message_id| {
-                    Event::message_failed(
-                        message_id,
-                        "Outbox entry from a previous version was too large to migrate".to_string(),
-                        0,
-                    )
-                },
+            storage_keys::OUTBOX => Some(Self::unrecoverable_outbox_settlement(
+                key_id,
+                "Outbox entry from a previous version was too large to migrate",
+                0,
             )),
             storage_keys::PENDING_MESSAGES => Some(Event::convergence_diag(
                 "pending_state_lost".to_string(),
@@ -668,6 +757,32 @@ impl OfflineProtocol {
             )),
             _ => None,
         }
+    }
+
+    /// The settlement owed for an outbox record that has been destroyed and
+    /// cannot be recovered.
+    ///
+    /// The record key *is* the message id, so the loss is nameable without
+    /// opening the record — but only if the key parses. A key that does not is
+    /// reported as the same `pending_state_lost` diagnostic the pending queue
+    /// uses, carrying the raw key, rather than as silence. It should not exist
+    /// (this SDK has only ever keyed the outbox by message id), but "should not
+    /// exist" is exactly the class of record every caller of this is handling,
+    /// and the record is deleted either way. A settlement nobody can act on
+    /// still beats a destruction nobody is told about.
+    fn unrecoverable_outbox_settlement(key_id: &str, reason: &str, attempts: u32) -> Event {
+        MessageId::from_str(key_id).map_or_else(
+            |_| {
+                Event::convergence_diag(
+                    "pending_state_lost".to_string(),
+                    key_id.to_string(),
+                    format!(
+                        "{reason}, and its message id could not be recovered from the record key"
+                    ),
+                )
+            },
+            |message_id| Event::message_failed(message_id, reason.to_string(), attempts),
+        )
     }
 
     // ========================================================================
@@ -828,10 +943,6 @@ impl OfflineProtocol {
 
     /// Loads pending messages for a recipient from storage.
     ///
-    /// The derived `serialized_bytes` is recomputed here — it is deliberately
-    /// not persisted — so restored entries carry their real weight into the
-    /// queue byte budgets instead of reading as free.
-    ///
     /// Production restore goes through [`Self::load_pending_messages_detailed`]
     /// instead: collapsing "nothing queued" into "the queue is gone" is exactly
     /// the distinction restore has to act on.
@@ -841,7 +952,12 @@ impl OfflineProtocol {
         recipient: &str,
     ) -> Option<Vec<PendingMessage>> {
         match self.load_pending_messages_detailed(recipient) {
-            PendingRestore::Restored(messages) => Some(messages),
+            PendingRestore::Restored(mut messages) => {
+                for message in &mut messages {
+                    message.measure();
+                }
+                Some(messages)
+            }
             PendingRestore::Absent | PendingRestore::Lost | PendingRestore::Unavailable => None,
         }
     }
@@ -849,6 +965,13 @@ impl OfflineProtocol {
     /// Loads a recipient's pending queue, distinguishing "nothing queued" from
     /// "a queue existed and its contents are gone" from "a queue exists and
     /// cannot be read this session".
+    ///
+    /// Entries come back *unmeasured*: the derived `serialized_bytes` is
+    /// deliberately not persisted, and measuring re-serializes every entry, so
+    /// the caller measures only what it decides to keep rather than paying for
+    /// entries the per-peer count trim is about to drop. Anything that enters
+    /// `pending_encrypted_messages` must be measured first or it reads as free
+    /// against the queue byte budgets.
     fn load_pending_messages_detailed(&self, recipient: &str) -> PendingRestore {
         let Some(storage) = self.protocol_state_storage.as_ref() else {
             return PendingRestore::Absent;
@@ -867,16 +990,13 @@ impl OfflineProtocol {
             // be contradicted by the next launch restoring it.
             Ok(StateRecord::Unavailable) | Err(_) => return PendingRestore::Unavailable,
         };
-        let Ok(mut messages) = serde_json::from_slice::<Vec<PendingMessage>>(&data) else {
+        let Ok(messages) = serde_json::from_slice::<Vec<PendingMessage>>(&data) else {
             // Parsed-as-garbage is the same loss as failed-to-open. Drop the
             // record so it is not re-parsed on every boot.
             warn!(recipient = %recipient, "Dropping corrupted pending message record");
             let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
             return PendingRestore::Lost;
         };
-        for message in &mut messages {
-            message.measure();
-        }
         PendingRestore::Restored(messages)
     }
 
@@ -929,7 +1049,15 @@ impl OfflineProtocol {
         // below would otherwise re-walk the whole queue once per eviction.
         let mut global_count = 0usize;
         let mut global_bytes = 0usize;
+        // Entries opened so far, which is what actually bounds the work here —
+        // see [`MAX_PENDING_RESTORE_ENTRIES`].
+        let mut examined_entries = 0usize;
+        let mut entry_bound_reached = false;
         for recipient in recipients.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+            if examined_entries >= MAX_PENDING_RESTORE_ENTRIES {
+                entry_bound_reached = true;
+                break;
+            }
             if Self::validate_outbound_recipient(&recipient).is_err() {
                 // The queue is unaddressable — nothing can ever be sent to this
                 // recipient again — so it is dropped, but the app still holds
@@ -938,6 +1066,7 @@ impl OfflineProtocol {
                 // gets the same three-way treatment as every other restore.
                 match self.load_pending_messages_detailed(&recipient) {
                     PendingRestore::Restored(messages) => {
+                        examined_entries = examined_entries.saturating_add(messages.len());
                         unaddressable.extend(messages.into_iter().map(|m| m.message_id));
                     }
                     PendingRestore::Absent => {}
@@ -996,11 +1125,20 @@ impl OfflineProtocol {
                 }
             };
             {
+                examined_entries = examined_entries.saturating_add(messages.len());
                 let overflow = messages.len().saturating_sub(MAX_PENDING_MESSAGES_PER_PEER);
                 if overflow > 0 {
                     capacity_evicted
                         .extend(messages.drain(..overflow).map(|message| message.message_id));
                     changed_recipients.insert(recipient.clone());
+                }
+                // Measure only the survivors: `serialized_bytes` is derived, and
+                // deriving it re-serializes the entry, so the entries the count
+                // trim just dropped must not be paid for. Everything below —
+                // the byte budgets and the map insert — depends on this having
+                // run, since an unmeasured entry reads as free.
+                for message in &mut messages {
+                    message.measure();
                 }
                 // Bound the restored queue by bytes as well as by count,
                 // mirroring the live admission path: a record written by an
@@ -1059,34 +1197,44 @@ impl OfflineProtocol {
                 "Pending message store listed more recipients than any legitimate run can produce; ignoring the tail"
             );
         }
+        if entry_bound_reached {
+            warn!(
+                examined = examined_entries,
+                cap = MAX_PENDING_RESTORE_ENTRIES,
+                "Pending message store held more queued entries than one restore may walk; \
+                 leaving the remaining recipients on disk for a later launch"
+            );
+        }
 
         for recipient in changed_recipients {
             self.persist_or_clear_pending_messages(&recipient);
         }
-        for message_id in capacity_evicted {
-            self.settle_restored_message_failure(Event::message_failed(
+        self.settle_restored_message_failures(capacity_evicted.into_iter().map(|message_id| {
+            Event::message_failed(
                 message_id,
                 "Pending session queue capacity exceeded".to_string(),
                 0,
-            ));
-        }
-        for message_id in unaddressable {
-            self.settle_restored_message_failure(Event::message_failed(
+            )
+        }));
+        self.settle_restored_message_failures(unaddressable.into_iter().map(|message_id| {
+            Event::message_failed(
                 message_id,
                 "Recipient is not a valid user ID; queued message cannot be delivered".to_string(),
                 0,
-            ));
-        }
-        for recipient in lost_recipients {
+            )
+        }));
+        for recipient in &lost_recipients {
             warn!(recipient = %recipient, "Persisted pending queue was unreadable and has been dropped");
-            self.settle_restored_message_failure(Event::convergence_diag(
+        }
+        self.settle_restored_message_failures(lost_recipients.into_iter().map(|recipient| {
+            Event::convergence_diag(
                 "pending_state_lost".to_string(),
                 recipient,
                 "Queued messages awaiting session establishment could not be recovered \
                  from protocol-state storage and have been dropped"
                     .to_string(),
-            ));
-        }
+            )
+        }));
 
         self.recompute_next_pending_message_expiry();
         self.cleanup_expired_pending_messages();
@@ -1780,7 +1928,11 @@ impl OfflineProtocol {
     /// - pre-existing in-memory entries not yet in storage are persisted, so
     ///   memory and storage are consistent once restore returns.
     pub(crate) fn restore_outbox(&mut self) -> Result<()> {
-        let Some(storage) = &self.protocol_state_storage else {
+        // Cloned rather than borrowed: the loop below both reads through this
+        // handle and calls `&mut self` settlement paths, so holding a borrow of
+        // `self` across it is what forced the awkward per-iteration re-fetch
+        // this replaced.
+        let Some(storage) = self.protocol_state_storage.clone() else {
             return Ok(());
         };
 
@@ -1791,20 +1943,23 @@ impl OfflineProtocol {
         let listed = message_ids.len();
 
         let mut restored: Vec<OutboxEntry> = Vec::new();
-        // Entries the app was told were queued but that cannot be recovered.
-        // Unlike the pending queue, an outbox record is keyed *by* its message
-        // id, so each loss is individually settleable without opening it.
-        let mut unrecoverable: Vec<MessageId> = Vec::new();
+        // Record keys the app was told were queued but that cannot be
+        // recovered. Unlike the pending queue, an outbox record is keyed *by*
+        // its message id, so each loss is individually settleable without
+        // opening it — kept as the raw key so one that does not parse as a
+        // `MessageId` still gets a diagnostic instead of silence.
+        let mut unrecoverable: Vec<String> = Vec::new();
         for message_id in message_ids.into_iter().take(OUTBOX_RESTORE_KEY_CAP) {
-            let loaded = self.protocol_state_storage.as_ref().map(|s| {
-                self.read_state_record_detailed(s.as_ref(), storage_keys::OUTBOX, &message_id)
-            });
-            let data = match loaded {
-                Some(Ok(StateRecord::Present(data))) => data,
-                Some(Ok(StateRecord::Missing)) | None => continue,
-                Some(Ok(StateRecord::Unreadable)) => {
+            let data = match self.read_state_record_detailed(
+                storage.as_ref(),
+                storage_keys::OUTBOX,
+                &message_id,
+            ) {
+                Ok(StateRecord::Present(data)) => data,
+                Ok(StateRecord::Missing) => continue,
+                Ok(StateRecord::Unreadable) => {
                     warn!(message_id = %message_id, "Dropping unreadable outbox entry");
-                    unrecoverable.extend(MessageId::from_str(&message_id).ok());
+                    unrecoverable.push(message_id);
                     continue;
                 }
                 // Still on disk and probably intact — the record key is not
@@ -1814,7 +1969,7 @@ impl OfflineProtocol {
                 // would see `message_failed` and then a delivery (plus a second
                 // copy if the user re-sent by hand, which mints a new id that
                 // dedup cannot collapse). Leave it be.
-                Some(Ok(StateRecord::Unavailable)) | Some(Err(_)) => {
+                Ok(StateRecord::Unavailable) | Err(_) => {
                     warn!(
                         message_id = %message_id,
                         "Outbox entry could not be read this session; leaving it in place"
@@ -1828,7 +1983,7 @@ impl OfflineProtocol {
                 Err(e) => {
                     warn!(message_id = %message_id, error = %e, "Dropping corrupted outbox entry");
                     self.delete_outbox_key(&message_id);
-                    unrecoverable.extend(MessageId::from_str(&message_id).ok());
+                    unrecoverable.push(message_id);
                     continue;
                 }
             };
@@ -1895,13 +2050,13 @@ impl OfflineProtocol {
             }
         }
 
-        for message_id in unrecoverable {
-            self.settle_restored_message_failure(Event::message_failed(
-                message_id,
-                "Outbox entry could not be recovered from protocol-state storage".to_string(),
+        self.settle_restored_message_failures(unrecoverable.iter().map(|key| {
+            Self::unrecoverable_outbox_settlement(
+                key,
+                "Outbox entry could not be recovered from protocol-state storage",
                 0,
-            ));
-        }
+            )
+        }));
         if listed > OUTBOX_RESTORE_KEY_CAP {
             warn!(
                 listed,

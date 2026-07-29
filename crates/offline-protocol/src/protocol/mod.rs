@@ -666,6 +666,13 @@ impl OfflineProtocol {
         let previous_unreadable_pending_queues =
             self.pending_queues_unreadable_this_session.clone();
         let previous_pending_message_expiry = self.next_pending_message_expiry;
+        // Populated by restore steps that run before other fallible ones, so
+        // they belong in the transaction like everything else: a failed init
+        // must not leave a key-package cache, parked media descriptors, or an
+        // owner gate sourced from a store the rollback has just detached.
+        let previous_pending_key_packages = self.pending_key_packages.clone();
+        let previous_restored_media_descriptors = self.restored_media_descriptors.clone();
+        let previous_both_create_awaiting_decrypt = self.both_create_awaiting_decrypt.clone();
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
@@ -695,17 +702,26 @@ impl OfflineProtocol {
             self.adopt_legacy_protocol_state();
         }
 
-        // Baseline the settlement queue *after* adoption, not with the other
-        // rollback captures above. A rolled-back restore never happened, so
-        // nothing it decided to settle happened either and a retry re-derives
-        // it — but adoption is deliberately outside that transaction: the
-        // records it moved are moved and the ones it had to destroy are
-        // destroyed. Rolling its settlements back would discard the only signal
-        // the app will ever get about them, because nothing can re-derive a
-        // settlement for a record that no longer exists.
-        let previous_restore_settlements = self.deferred_restore_settlements.clone();
-        let previous_suppressed_settlements = self.suppressed_restore_settlements;
-
+        // The settlement queue is deliberately NOT captured for rollback, and
+        // that is the whole point rather than an omission.
+        //
+        // The rollback below restores *in-memory* state. It restores no storage
+        // state, because restore has none to give back: by the time a later
+        // step fails, an earlier one has already deleted an unaddressable
+        // pending queue, dropped a record its store reported corrupt, and
+        // rewritten a peer's snapshot without the entries it evicted for
+        // capacity. Those records are gone. So the invariant adoption is
+        // documented with — nothing can re-derive a settlement for a record
+        // that no longer exists — is not special to adoption; it holds for
+        // every settlement produced under this transaction, and rolling any of
+        // them back means the application keeps an id that resolves to nothing,
+        // on this launch and on every launch after it.
+        //
+        // The cost of not rolling back is that a retry which re-examines a
+        // still-present record can settle the same id twice. `message_failed`
+        // is terminal and idempotent for any reasonable consumer, and a
+        // duplicate terminal event is a far smaller lie than silence.
+        //
         // Load the persistent scrub secret outside the transactional restore
         // below: it is independent of MLS state, and a later MLS-restore
         // rollback must not undo it (the secret is idempotent and reused on
@@ -742,11 +758,11 @@ impl OfflineProtocol {
             self.pending_encrypted_messages = previous_pending_messages;
             self.pending_queues_unreadable_this_session = previous_unreadable_pending_queues;
             self.next_pending_message_expiry = previous_pending_message_expiry;
-            // A rolled-back restore never happened, so neither did anything it
-            // decided to settle; a retry re-derives them. Adoption's
-            // settlements are in the baseline (see above) and survive.
-            self.deferred_restore_settlements = previous_restore_settlements;
-            self.suppressed_restore_settlements = previous_suppressed_settlements;
+            // `deferred_restore_settlements` is deliberately left alone — see
+            // the comment where the other baselines are captured.
+            self.pending_key_packages = previous_pending_key_packages;
+            self.restored_media_descriptors = previous_restored_media_descriptors;
+            self.both_create_awaiting_decrypt = previous_both_create_awaiting_decrypt;
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
@@ -2383,9 +2399,30 @@ impl OfflineProtocol {
     /// forever. Once running, this is a plain emit — the same call is used from
     /// `process()`-driven expiry, where no deferral is wanted.
     pub(crate) fn settle_restored_message_failure(&mut self, event: Event) {
-        let running = lock_shared_state(&self.shared_state)
+        let running = self.event_pipeline_is_live();
+        self.settle_one_restored_message_failure(event, running);
+    }
+
+    /// Settles a batch, taking the shared-state lock once rather than once per
+    /// event. Restore emits these in loops that a tampered or pre-split store
+    /// can drive into the thousands.
+    pub(crate) fn settle_restored_message_failures(
+        &mut self,
+        events: impl IntoIterator<Item = Event>,
+    ) {
+        let running = self.event_pipeline_is_live();
+        for event in events {
+            self.settle_one_restored_message_failure(event, running);
+        }
+    }
+
+    fn event_pipeline_is_live(&self) -> bool {
+        lock_shared_state(&self.shared_state)
             .map(|state| state.state == ProtocolState::Running)
-            .unwrap_or(false);
+            .unwrap_or(false)
+    }
+
+    fn settle_one_restored_message_failure(&mut self, event: Event, running: bool) {
         if running {
             self.emit_event(event);
             return;
