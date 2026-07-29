@@ -333,3 +333,38 @@ def test_listing_dedupes_a_record_reachable_under_two_names(tmp_path) -> None:
     (directory / "k_copy-of-message-1").write_bytes(original.read_bytes())
 
     assert storage.list_keys("outbox") == ["message-1"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes only")
+def test_directories_are_owner_only(tmp_path) -> None:
+    # iOS and Android get container isolation from the OS; Python's container is
+    # whatever directory the application names, created at the process umask. A
+    # world-listable one leaks the entry count and — the filename digest being
+    # unsalted — confirms any guessable peer or message id.
+    root = tmp_path / "state"
+    storage = AppStateStorage(root)
+    storage.store("outbox", "message-1", bytes([1, 2, 3]))
+
+    directory = root / state_storage_module._type_directory_name("outbox")
+    entry = directory / state_storage_module._entry_name("outbox", "message-1")
+
+    assert oct(root.stat().st_mode & 0o777) == oct(0o700)
+    assert oct(directory.stat().st_mode & 0o777) == oct(0o700)
+    assert entry.stat().st_mode & 0o077 == 0, "record files must stay owner-only"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes only")
+def test_a_permissive_store_from_an_earlier_version_is_tightened(tmp_path) -> None:
+    # `mkdir(mode=...)` does nothing when the directory already exists, so the
+    # explicit chmod is what makes this deterministic for a store an earlier
+    # build of this provider created at the umask.
+    root = tmp_path / "state"
+    root.mkdir(mode=0o755)
+    directory = root / state_storage_module._type_directory_name("outbox")
+    directory.mkdir(mode=0o755)
+
+    storage = AppStateStorage(root)
+    storage.store("outbox", "message-1", bytes([1]))
+
+    assert oct(root.stat().st_mode & 0o777) == oct(0o700)
+    assert oct(directory.stat().st_mode & 0o777) == oct(0o700)

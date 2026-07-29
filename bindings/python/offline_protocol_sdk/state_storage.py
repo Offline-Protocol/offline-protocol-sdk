@@ -151,6 +151,40 @@ def _default_root() -> Path:
     )
 
 
+#: Mode for every directory this provider creates: owner-only.
+#:
+#: iOS and Android get container isolation from the OS. Python's container is
+#: whatever directory the application names, which on a shared host is created
+#: at the process umask — typically world-listable. Record *files* are already
+#: owner-only (``mkstemp`` creates them 0600 and ``os.replace`` preserves that),
+#: so contents are safe either way; what a listable directory leaks is the entry
+#: count and, because the filename digest is unsalted, a confirmation oracle for
+#: any guessable peer or message id. That is the peer graph the confidentiality
+#: notes tell applications to treat as exposed only to someone who can already
+#: read the container.
+_DIRECTORY_MODE = 0o700
+
+
+def _private_mkdir(directory: Path) -> None:
+    """Create *directory* owner-only, tightening it if it already exists.
+
+    ``mkdir(mode=...)`` is masked by the process umask and does nothing at all
+    when the directory is already there, so the explicit ``chmod`` is what makes
+    the mode deterministic — including for a store created by an earlier version
+    of this provider. Parents are left alone: they are application-chosen paths
+    that this provider does not own.
+
+    Best effort on the ``chmod``: filesystems without POSIX permissions (and
+    Windows) refuse it, and there the directory mode was never a control anyway.
+    """
+
+    directory.mkdir(mode=_DIRECTORY_MODE, parents=True, exist_ok=True)
+    try:
+        directory.chmod(_DIRECTORY_MODE)
+    except OSError:
+        pass
+
+
 def _sync_directory(directory: Path) -> None:
     """Flush a directory entry so a rename or unlink in it survives a crash.
 
@@ -197,7 +231,7 @@ class AppStateStorage(ProtocolStateStorageProvider):
         #: process. One sweep per category per process, off the restore path.
         self._swept: set[Path] = set()
         try:
-            self._root.mkdir(parents=True, exist_ok=True)
+            _private_mkdir(self._root)
         except OSError as exc:
             raise MlsStorageError.StoreFailed(
                 f"failed to create protocol-state directory: {exc}"
@@ -208,7 +242,7 @@ class AppStateStorage(ProtocolStateStorageProvider):
         with self._lock:
             directory = self._type_directory(key_type)
             try:
-                directory.mkdir(parents=True, exist_ok=True)
+                _private_mkdir(directory)
                 self._sweep_temporaries(directory)
                 descriptor, temporary = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=directory)
                 try:
