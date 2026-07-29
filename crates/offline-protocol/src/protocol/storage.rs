@@ -115,12 +115,24 @@ enum PendingRestore {
 /// easier to come by. Sealing already keeps a forged record from ever
 /// deserializing; this bounds the *work* as well as the result.
 ///
-/// **Restores** stop there and *ignore* the tail — they do not delete it, and
-/// because `list_keys` order is backend-defined a later launch may walk a
-/// different subset. **Adoption** treats hitting this bound as an incomplete
-/// pass instead: it deletes each record it moves, so withholding its completion
-/// marker drains the remainder over successive launches rather than abandoning
-/// it in the credential store (see `adopt_legacy_protocol_state`).
+/// Every walk stops here; what happens to the tail depends on the category:
+///
+/// - Most **restores** simply *ignore* it — they do not delete it, and because
+///   `list_keys` order is backend-defined a later launch may walk a different
+///   subset.
+/// - The two **cache** categories (`restore_peer_key_packages`,
+///   `restore_peer_capabilities`) prune the overflow *inside* the prefix down
+///   to their own much smaller live caps, so each launch shrinks the store by
+///   up to this bound minus that cap and the tail drains over a handful of
+///   launches. Losing a cached key package or capability record only costs a
+///   recoverable re-exchange, which is what makes deleting the overflow the
+///   right policy there — but the *walk* still has to stop, because every
+///   pruned entry is a synchronous provider delete (a directory fsync on all
+///   three built-in providers) on the boot path.
+/// - **Adoption** treats hitting this bound as an incomplete pass instead: it
+///   deletes each record it moves, so withholding its completion marker drains
+///   the remainder over successive launches rather than abandoning it in the
+///   credential store (see `adopt_legacy_protocol_state`).
 ///
 /// Categories whose live insert path is capped get a tighter bound derived from
 /// that cap instead (see [`OUTBOX_RESTORE_KEY_CAP`]).
@@ -1131,6 +1143,7 @@ impl OfflineProtocol {
 
         let peer_ids = Self::list_state_keys(storage.as_ref(), storage_keys::PEER_KEY_PACKAGES)
             .map_err(|e| Error::Other(format!("Failed to list peer key packages: {}", e)))?;
+        let listed = peer_ids.len();
 
         let sessions = {
             let manager = mls
@@ -1141,7 +1154,14 @@ impl OfflineProtocol {
         let session_set: std::collections::HashSet<_> = sessions.into_iter().collect();
 
         let mut pruned = 0usize;
-        for peer_id in peer_ids {
+        // Bounded like every other category walk. The prune below deletes each
+        // over-cap entry, and a delete is a synchronous provider round trip
+        // that fsyncs a directory on all three built-in stores — so an
+        // unbounded walk over a tampered container would turn tens of
+        // thousands of those into boot-path latency. Stopping at the bound
+        // still shrinks the store by `bound - cap` per launch, so the tail
+        // drains over a handful of launches instead of stranding.
+        for peer_id in peer_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if session_set.contains(&peer_id) {
                 continue;
             }
@@ -1169,6 +1189,13 @@ impl OfflineProtocol {
                 cap = MAX_PENDING_KEY_PACKAGES,
                 pruned,
                 "Peer key package store exceeded the cap on restore; pruned overflow from durable storage"
+            );
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Peer key package store listed more peers than any legitimate run can produce; deferring the tail to a later launch"
             );
         }
 
@@ -1298,6 +1325,7 @@ impl OfflineProtocol {
             .and_then(|manager| manager.list_sessions().ok())
             .map(|sessions| sessions.into_iter().collect())
             .unwrap_or_default();
+        let listed = peer_ids.len();
         let (mut peer_ids, non_session_ids): (Vec<_>, Vec<_>) = peer_ids
             .into_iter()
             .partition(|peer_id| session_set.contains(peer_id));
@@ -1305,7 +1333,12 @@ impl OfflineProtocol {
 
         let mut kept = 0usize;
         let mut pruned = 0usize;
-        for peer_id in peer_ids {
+        // Bounded like `restore_peer_key_packages`, for the same reason: the
+        // prune below is a provider delete per over-cap entry. The take comes
+        // *after* the session-peer partition, so the records this restore
+        // exists for are always inside the prefix however the backend ordered
+        // its listing.
+        for peer_id in peer_ids.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if kept >= MAX_KEY_PACKAGE_SENT_TO {
                 self.delete_peer_capabilities_from_storage(&peer_id);
                 pruned += 1;
@@ -1356,6 +1389,13 @@ impl OfflineProtocol {
                 cap = MAX_KEY_PACKAGE_SENT_TO,
                 pruned,
                 "Peer capability store exceeded the cap on restore; pruned overflow from durable storage"
+            );
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Peer capability store listed more peers than any legitimate run can produce; deferring the tail to a later launch"
             );
         }
     }

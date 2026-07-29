@@ -26476,3 +26476,111 @@ fn test_peer_presence_offline_defers_to_mesh_carrier() {
 
     protocol.stop().unwrap();
 }
+
+/// A [`crate::ProtocolStateStorage`] that reports a category as holding far
+/// more entries than any legitimate run could produce, and counts the provider
+/// round trips a restore then makes against it.
+///
+/// The synthetic ids are never materialized as records: the point is the *walk*,
+/// and each id a restore reaches costs at least one provider call — a load to
+/// recover it or a delete to prune it.
+struct CountingStorage {
+    inner: Arc<InMemoryStorage>,
+    /// Category whose listing is padded with synthetic ids.
+    padded: &'static str,
+    padding: usize,
+    /// Loads plus deletes against `padded`, i.e. entries actually reached.
+    touches: Mutex<usize>,
+}
+
+impl crate::ProtocolStateStorage for CountingStorage {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .store(key_type, key_id, data)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        if key_type == self.padded {
+            *self.touches.lock().unwrap() += 1;
+        }
+        self.inner
+            .load(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        if key_type == self.padded {
+            *self.touches.lock().unwrap() += 1;
+        }
+        self.inner
+            .delete(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        let mut keys = self
+            .inner
+            .list_keys(key_type)
+            .map_err(crate::protocol::map_test_storage_error)?;
+        if key_type == self.padded {
+            keys.extend((0..self.padding).map(|index| format!("padded-{index:06}")));
+        }
+        Ok(keys)
+    }
+}
+
+/// Walks the cache categories and returns how many entries the restore reached.
+fn touches_restoring(padded: &'static str, padding: usize) -> usize {
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let counting = Arc::new(CountingStorage {
+        inner: state,
+        padded,
+        padding,
+        touches: Mutex::new(0),
+    });
+
+    let secure_handle: Arc<dyn MlsStorage> = secure;
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = counting.clone();
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let touches = *counting.touches.lock().unwrap();
+    touches
+}
+
+#[test]
+fn test_cache_restores_stop_at_the_category_bound() {
+    // Peer key packages and capabilities are the two restores that *prune*
+    // their overflow rather than ignoring it — dropping a cached entry only
+    // costs a recoverable re-exchange, so shrinking the store to the live cap
+    // in one boot is the right policy. The walk still has to stop: every
+    // pruned entry is a synchronous provider delete, and all three built-in
+    // stores fsync the type directory on one. Unbounded, a tampered container
+    // turns tens of thousands of those into boot-path latency — the exact
+    // threat model every other category walk here is bounded against, and one
+    // that applies more strongly now that this state lives in the app
+    // container rather than the credential store.
+    use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
+
+    let padding = 4 * MAX_RESTORE_KEYS_PER_CATEGORY;
+
+    for category in [
+        storage_keys::PEER_KEY_PACKAGES,
+        storage_keys::PEER_CAPABILITIES,
+    ] {
+        let touches = touches_restoring(category, padding);
+        assert!(
+            touches <= MAX_RESTORE_KEYS_PER_CATEGORY,
+            "{category} restore reached {touches} entries, over the \
+             {MAX_RESTORE_KEYS_PER_CATEGORY} bound"
+        );
+        assert!(
+            touches > 0,
+            "{category} restore must still walk the bounded prefix"
+        );
+    }
+}
