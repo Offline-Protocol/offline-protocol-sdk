@@ -16255,6 +16255,321 @@ fn test_restore_welcome_lifecycle_drop_is_bounded_per_launch() {
     );
 }
 
+/// A protocol-state store that refuses to load one specific record, the way a
+/// provider reports an `EIO`, an ACL, or a container the OS has locked.
+///
+/// Deliberately *not* `Corrupted`: that variant means permanent, and the SDK
+/// answers it by deleting and settling. This is the transient case, where the
+/// record is still perfectly good and only this read failed.
+struct FailingRecordLoadStorage {
+    inner: Arc<InMemoryStorage>,
+    fail_type: &'static str,
+    fail_id: String,
+}
+
+impl crate::ProtocolStateStorage for FailingRecordLoadStorage {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .store(key_type, key_id, data)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        if key_type == self.fail_type && key_id == self.fail_id {
+            return Err(crate::ProtocolStateError::LoadFailed(
+                "injected".to_string(),
+            ));
+        }
+        self.inner
+            .load(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .delete(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        self.inner
+            .list_keys(key_type)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+}
+
+#[test]
+fn test_advisory_restore_prunes_share_one_launch_delete_budget() {
+    // `MAX_RESTORE_PRUNE_DELETES` exists because a device-barrier storm kills
+    // the launch — a property of the whole `initialize_mls` call. Giving each
+    // walk a private allowance of that size therefore did not bound the thing
+    // the bound is about: four advisory walks cost four times it, while every
+    // one of them truthfully reported staying inside its own.
+    //
+    // Both halves are asserted, because either alone would pass against the
+    // broken code: the *sum* across two over-cap advisory categories is one
+    // budget, and the tail still drains over later launches.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    // Both cache categories are seeded far enough over their live caps that
+    // either one alone could spend the whole budget.
+    let package_overflow = MAX_RESTORE_PRUNE_DELETES + 10;
+    let capability_overflow = MAX_RESTORE_PRUNE_DELETES + 10;
+    {
+        let (secure_handle, state_handle) = split_storage(&secure, &state);
+        let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
+        writer.initialize_mls(secure_handle, state_handle).unwrap();
+        let pkg = ReceivedKeyPackage {
+            key_package_data: vec![0],
+            local_expires_at_ms: u64::MAX,
+        };
+        // Zero-padded: providers list sorted, so this is the order the walk sees.
+        for i in 0..(MAX_PENDING_KEY_PACKAGES + package_overflow) {
+            writer.persist_peer_key_package(&format!("peer_{i:05}"), &pkg);
+        }
+        let caps = PeerCapabilities {
+            env_versions: vec![MLS_ENVELOPE_COMPACT_V1],
+            ..Default::default()
+        };
+        for i in 0..(MAX_KEY_PACKAGE_SENT_TO + capability_overflow) {
+            writer.persist_peer_capabilities(&format!("cap_{i:05}"), &caps);
+        }
+    }
+
+    let counts = |state: &Arc<InMemoryStorage>| {
+        (
+            state
+                .list_keys(storage_keys::PEER_KEY_PACKAGES)
+                .unwrap()
+                .len(),
+            state
+                .list_keys(storage_keys::PEER_CAPABILITIES)
+                .unwrap()
+                .len(),
+        )
+    };
+    let (packages_before, capabilities_before) = counts(&state);
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls(secure_handle, state_handle).unwrap();
+
+    let (packages_after, capabilities_after) = counts(&state);
+    let deleted = (packages_before - packages_after) + (capabilities_before - capabilities_after);
+    assert_eq!(
+        deleted,
+        MAX_RESTORE_PRUNE_DELETES,
+        "the advisory walks share one launch allowance; with a budget each \
+         they would have deleted {} between them",
+        2 * MAX_RESTORE_PRUNE_DELETES
+    );
+
+    // Still bounded in memory: sharing the *delete* pool must not let an
+    // over-cap store re-inflate the in-memory caps it is unrelated to.
+    assert_eq!(first.pending_key_packages.len(), MAX_PENDING_KEY_PACKAGES);
+
+    // The tail is deferred, not stranded — the same idempotent-and-resumable
+    // property every other prune leans on.
+    let mut launches = 1;
+    while counts(&state) != (MAX_PENDING_KEY_PACKAGES, MAX_KEY_PACKAGE_SENT_TO) {
+        let (secure_handle, state_handle) = split_storage(&secure, &state);
+        let mut next = OfflineProtocol::new(create_test_config()).unwrap();
+        next.initialize_mls(secure_handle, state_handle).unwrap();
+        launches += 1;
+        assert!(launches < 12, "the prune must converge, not stall");
+    }
+}
+
+#[test]
+fn test_restore_outbox_delete_budget_bounds_a_launch_and_drains() {
+    // `restore_outbox` was exempted from the budget on the grounds that its
+    // walk bound caps it near 1.5k deletes — a number that came from the
+    // capacity prune. The outbox is a *sealed* category, so a record key that
+    // has to be regenerated makes every entry on the install fail to open at
+    // once, and each one is dropped by the reader: the full walk bound, in
+    // device barriers, on the synchronous boot path.
+    //
+    // It is settlement-paired, so an individual delete may never be refused —
+    // but stopping *between* records is safe, and that is what is asserted
+    // here. No freeze is needed for the tail: outbox records are keyed per
+    // message id, so nothing this session can write over one.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let beyond_budget = 10;
+    let total = MAX_RESTORE_PRUNE_DELETES + beyond_budget;
+    let mut ids = Vec::new();
+    for _ in 0..total {
+        let id = MessageId::default();
+        // Sealed under a *different* key than the one this install will load,
+        // which is exactly what a regenerated record key leaves behind.
+        let foreign = state_crypto::StateRecordCipher::new(&[9u8; 32]);
+        let sealed = foreign
+            .seal(storage_keys::OUTBOX, &id.as_str(), b"{}")
+            .unwrap();
+        state
+            .store(storage_keys::OUTBOX, &id.as_str(), &sealed)
+            .unwrap();
+        ids.push(id);
+    }
+
+    let remaining =
+        |state: &Arc<InMemoryStorage>| state.list_keys(storage_keys::OUTBOX).unwrap().len();
+    assert_eq!(remaining(&state), total, "precondition");
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.initialize_mls(secure_handle, state_handle).unwrap();
+    assert_eq!(
+        remaining(&state),
+        beyond_budget,
+        "one launch must spend exactly its delete budget, not the whole store"
+    );
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.initialize_mls(secure_handle, state_handle).unwrap();
+    assert_eq!(
+        remaining(&state),
+        0,
+        "the remainder is under the budget, so the second launch finishes"
+    );
+}
+
+#[test]
+fn test_unreadable_welcome_lifecycle_record_does_not_fail_initialization() {
+    // A record the *store* could not read this session is not a record that
+    // decoded to nothing. Propagating it failed `initialize_mls` outright — and
+    // since nothing deletes such a record, it failed again on every launch
+    // after, on an install that (with `require_encryption` on by default) can
+    // then never send. Every other category on the restore path already treats
+    // a per-record read failure as recoverable; these two were the outliers,
+    // and moving them into the app container is what made it reachable.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let lifecycle = |peer: &str| WelcomeLifecycleRecord {
+        peer_id: peer.to_string(),
+        group_id: format!("session:user123:{peer}"),
+        state: WelcomeDeliveryState::Sent,
+        attempt: 1,
+        unreachable_parks: 0,
+        welcome_message: Message::new(
+            UserId::new("user123").unwrap(),
+            UserId::new(peer).unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__MLS_WELCOME__{}",
+        ),
+        next_retry_at: None,
+        last_reason_code: None,
+        last_transport_error: None,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + ChronoDuration::seconds(60),
+    };
+    for peer in ["bob", "carol"] {
+        state
+            .store(
+                storage_keys::WELCOME_LIFECYCLES,
+                peer,
+                &serde_json::to_vec(&lifecycle(peer)).unwrap(),
+            )
+            .unwrap();
+    }
+
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(FailingRecordLoadStorage {
+        inner: state.clone(),
+        fail_type: storage_keys::WELCOME_LIFECYCLES,
+        fail_id: "bob".to_string(),
+    });
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .expect("one unreadable Welcome lifecycle must not fail initialization");
+
+    assert!(
+        !protocol.welcome_lifecycles.contains_key("bob"),
+        "the unreadable record restores nothing this session"
+    );
+    assert!(
+        protocol.welcome_lifecycles.contains_key("carol"),
+        "the walk must continue past it, not abort"
+    );
+    assert!(
+        state
+            .load(storage_keys::WELCOME_LIFECYCLES, "bob")
+            .unwrap()
+            .is_some(),
+        "an unreadable-this-session record is left on disk for a later launch"
+    );
+}
+
+#[test]
+fn test_unreadable_session_state_record_is_neither_fatal_nor_overwritten() {
+    // The session-state twin of the test above, with a second obligation: an
+    // unreadable record must not be re-bootstrapped either. `Absent` means
+    // "persist a fresh Pending", which over a record that says `Confirmed` is a
+    // silent downgrade *and* a destructive write — which is why the reader
+    // keeps `Unavailable` apart from `Absent` rather than collapsing them.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    {
+        let (secure_handle, state_handle) = split_storage(&secure, &state);
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol
+            .initialize_mls(secure_handle, state_handle)
+            .unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            let welcome = manager.create_session("bob").unwrap();
+            bob_manager.join_session(&welcome).unwrap();
+        }
+        protocol
+            .persist_session_state("bob", SessionState::Confirmed, "test")
+            .unwrap();
+    }
+
+    let confirmed = state
+        .load(storage_keys::SESSION_STATES, "bob")
+        .unwrap()
+        .expect("precondition: a Confirmed record is on disk");
+
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(FailingRecordLoadStorage {
+        inner: state.clone(),
+        fail_type: storage_keys::SESSION_STATES,
+        fail_id: "bob".to_string(),
+    });
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let mut restarted = OfflineProtocol::new(create_test_config()).unwrap();
+    restarted
+        .initialize_mls(secure_handle, state_handle)
+        .expect("one unreadable session state must not fail initialization");
+
+    assert!(
+        !restarted.confirmed_sessions.contains("bob"),
+        "a confirmation that could not be read must not be assumed"
+    );
+    assert_eq!(
+        state.load(storage_keys::SESSION_STATES, "bob").unwrap(),
+        Some(confirmed),
+        "the record is left exactly as it was, so a later launch still reads \
+         Confirmed rather than a Pending this launch wrote over it"
+    );
+}
+
 #[test]
 fn test_establishment_state_returns_correct_states() {
     let storage = Arc::new(InMemoryStorage::new());
@@ -24293,7 +24608,9 @@ fn test_media_descriptor_restore_prunes_expired() {
     };
     alice.persist_media_descriptor(&stale);
 
-    alice.restore_media_descriptors().unwrap();
+    alice
+        .restore_media_descriptors(&mut PruneAllowance::for_launch())
+        .unwrap();
 
     assert!(
         !alice.restored_media_descriptors.contains_key("file_stale"),

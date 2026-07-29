@@ -18,6 +18,7 @@ mod types;
 pub(crate) use decryption_queue::PendingDecryptionQueue;
 pub use decryption_queue::PendingQueueMetrics;
 pub(crate) use prefixes::*;
+pub(crate) use storage::{PruneAllowance, RestorableRecord};
 pub(crate) use types::*;
 pub use types::{MediaSendOptions, ProtocolState, SendMessageOptions};
 
@@ -742,6 +743,16 @@ impl OfflineProtocol {
         // state, idempotent, and must survive an MLS-restore rollback.
         self.restore_or_init_nostr_signing_secret();
 
+        // One pool of durable deletes for this whole launch, shared by every
+        // walk whose prunes are advisory. The bound exists because a
+        // device-barrier storm kills the launch, which is a property of this
+        // call and not of any single walk — so the walks share an allowance
+        // rather than each holding a private copy of it. The two
+        // settlement-paired walks (pending messages, outbox) hold their own,
+        // because being starved there defers a diagnostic or a delivery rather
+        // than a cache eviction. See `storage::MAX_RESTORE_PRUNE_DELETES`.
+        let mut prune_allowance = PruneAllowance::for_launch();
+
         // Restore state from previous session
         let restore_result = (|| {
             self.restore_pending_messages()?;
@@ -749,14 +760,14 @@ impl OfflineProtocol {
             self.restore_tofu_keys();
             self.restore_blocked_users()?;
             self.restore_session_states_from_manager(manager.clone())?;
-            self.restore_peer_key_packages(&manager)?;
+            self.restore_peer_key_packages(&manager, &mut prune_allowance)?;
             // Must precede start(): flush_restored_confirmed_pending_messages
             // re-makes the rich seal decision against these sets, and an
             // empty set there silently drops queued rich extras.
-            self.restore_peer_capabilities(&manager);
-            self.restore_welcome_lifecycles()?;
+            self.restore_peer_capabilities(&manager, &mut prune_allowance);
+            self.restore_welcome_lifecycles(&mut prune_allowance)?;
             self.restore_outbox()?;
-            self.restore_media_descriptors()?;
+            self.restore_media_descriptors(&mut prune_allowance)?;
             self.restore_both_create_awaiting_decrypt();
             Ok(())
         })();
@@ -815,12 +826,13 @@ impl OfflineProtocol {
         self.restore_or_init_state_record_key();
         self.restore_or_init_scrub_secret();
         self.restore_or_init_nostr_signing_secret();
+        let mut prune_allowance = PruneAllowance::for_launch();
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
         self.restore_tofu_keys();
         self.restore_blocked_users()?;
         self.restore_outbox()?;
-        self.restore_media_descriptors()?;
+        self.restore_media_descriptors(&mut prune_allowance)?;
         Ok(())
     }
 
