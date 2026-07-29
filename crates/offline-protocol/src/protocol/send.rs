@@ -1761,8 +1761,9 @@ impl OfflineProtocol {
             // clobbering the entry. Nothing to clear when neither survives: each
             // entry that left the queue already took its own record with it.
             if remaining.is_empty() {
-                // Nothing to do.
-            } else if self.has_terminal_welcome_failure(recipient) {
+                return Ok(());
+            }
+            if self.has_terminal_welcome_failure(recipient) {
                 // A prepare failure above came from a terminal Welcome
                 // failure: abort_pending_session_for_peer already cleared
                 // the queue and its storage and settled the peer with

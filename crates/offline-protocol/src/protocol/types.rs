@@ -220,6 +220,22 @@ pub(crate) const MAX_PENDING_MESSAGES_GLOBAL: usize = 4096;
 /// another pass.
 pub(crate) const MAX_PENDING_EXPIRIES_PER_PASS: usize = 64;
 
+/// Maximum per-message records one launch writes migrating legacy queues.
+///
+/// The migration's writes are the one part of the pending restore that is not
+/// already bounded by a delete budget, and a `store` is the more expensive of
+/// the two: every built-in provider flushes the record *and* its directory. A
+/// pre-split install sitting near [`MAX_PENDING_MESSAGES_GLOBAL`] would
+/// otherwise pay thousands of device barriers inside `initialize_mls`, on the
+/// launch path, where a mobile watchdog is watching.
+///
+/// Sized to match [`crate::protocol::storage::MAX_RESTORE_PRUNE_DELETES`], so
+/// the whole walk's barrier count stays the same order of magnitude whichever
+/// half of it does the work. Checked per recipient and before its first write,
+/// so a queue is either migrated whole or left entirely on disk for the next
+/// launch — never split across the two layouts with nothing to reconcile it.
+pub(crate) const MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH: usize = 512;
+
 /// Maximum terminal settlements parked by restore for `start()` to drain.
 ///
 /// The restore caps already bound how many can be produced, but they bound it

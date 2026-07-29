@@ -29621,3 +29621,169 @@ fn test_pending_expiry_is_bounded_per_pass() {
         "and the remainder must drain on the following pass, not be stranded"
     );
 }
+
+/// A `ProtocolStateStorage` whose legacy-pending deletes fail on demand.
+struct LegacyDeleteRefusingState {
+    inner: Arc<InMemoryStorage>,
+    refuse: Mutex<bool>,
+}
+
+impl crate::ProtocolStateStorage for LegacyDeleteRefusingState {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .store(key_type, key_id, data)
+            .map_err(map_test_storage_error)
+    }
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        self.inner
+            .load(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        if key_type == storage_keys::PENDING_MESSAGES && *self.refuse.lock().unwrap() {
+            return Err(crate::ProtocolStateError::DeleteFailed(
+                "provider refused".to_string(),
+            ));
+        }
+        self.inner
+            .delete(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        self.inner
+            .list_keys(key_type)
+            .map_err(map_test_storage_error)
+    }
+}
+
+#[test]
+fn test_legacy_queue_whose_delete_failed_is_not_migrated_at_all() {
+    // The migration is all or nothing per recipient, and this is why. Nothing
+    // outside the migration walk writes or deletes the legacy category, so a
+    // record whose delete did not land is there for good. "The per-message pass
+    // claims those ids next launch" only converges while those per-message
+    // records exist — and they do not survive the flush: dispatch deletes each
+    // one. A half-migrated queue would therefore be re-filed *and re-sent* by a
+    // later launch, long after it was delivered.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (ids, queue) = legacy_pending_queue(2, Utc::now() - ChronoDuration::minutes(5));
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    let refusing = Arc::new(LegacyDeleteRefusingState {
+        inner: state.clone(),
+        refuse: Mutex::new(true),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+
+    // The queue stays in exactly one place: the legacy record it was already in.
+    assert!(
+        protocol.pending_encrypted_messages.get("bob").is_none(),
+        "entries whose legacy record survived must not stay in memory to flush"
+    );
+    assert!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .is_empty(),
+        "and the per-message records written before the failed delete must go back"
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_some(),
+        "the legacy record is what still holds the queue"
+    );
+
+    // A later launch, with the provider healthy again, migrates it once — and
+    // recovers every id, because none of them were ever half-settled.
+    *refusing.refuse.lock().unwrap() = false;
+    let mut later = OfflineProtocol::new(create_test_config()).unwrap();
+    later
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+
+    assert_eq!(
+        later.pending_encrypted_messages["bob"]
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect::<Vec<_>>(),
+        ids,
+        "the deferred migration must recover the whole queue, in order"
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "and complete the delete this time"
+    );
+}
+
+#[test]
+fn test_capacity_drop_from_an_unmigrated_queue_is_not_settled() {
+    // A settlement is terminal, so it may only be emitted for an entry that is
+    // really gone. An entry the caps dropped out of a legacy queue has no record
+    // of its own — the legacy record is the only copy — so settling it while
+    // that record is still on disk would be a `message_failed` the next launch
+    // overturns by re-filing and sending the message.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let over_cap = 4;
+    let (ids, queue) = legacy_pending_queue(
+        MAX_PENDING_MESSAGES_PER_PEER + over_cap,
+        Utc::now() - ChronoDuration::minutes(5),
+    );
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    let refusing = Arc::new(LegacyDeleteRefusingState {
+        inner: state.clone(),
+        refuse: Mutex::new(true),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+    let events = started_protocol_events(&mut protocol);
+
+    let settled: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for id in &ids {
+        assert!(
+            !settled.contains(&id.as_str()),
+            "no id may be settled while the record that can re-file it is on disk; got {settled:?}"
+        );
+    }
+}
