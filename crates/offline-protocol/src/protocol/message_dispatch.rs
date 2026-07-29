@@ -117,9 +117,7 @@ impl OfflineProtocol {
                                 debug!(sender = %sender, error = %e, "No MLS session to clean up for session reset");
                             }
                             // Clear outbound pending messages (encrypted for the old session)
-                            if self.pending_encrypted_messages.remove(sender).is_some() {
-                                self.clear_pending_messages_from_storage(sender);
-                            }
+                            self.drop_pending_queue_for_peer(sender);
                             // Drain inbound pending decryption queue (old ciphertexts)
                             self.pending_queue
                                 .drain_for_peer(&self.config.encryption.pending_queue, sender);

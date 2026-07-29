@@ -205,6 +205,37 @@ pub(crate) const MAX_PENDING_MESSAGES_PER_PEER: usize = 64;
 /// Paired with [`MAX_PENDING_MESSAGE_BYTES_GLOBAL`], as above.
 pub(crate) const MAX_PENDING_MESSAGES_GLOBAL: usize = 4096;
 
+/// Maximum pending entries expired in one `process()` tick.
+///
+/// Each expiry is a settlement *and* a durable delete, and the two have to stay
+/// paired — so what gets bounded is how many entries expire per pass, not how
+/// many deletes it may issue. Messages queued in a burst share a `queued_at` and
+/// so come due in a burst; without this, one tick of the 100 ms bindings loop
+/// could issue up to [`MAX_PENDING_MESSAGES_GLOBAL`] synchronous deletes, each a
+/// device barrier on every built-in provider.
+///
+/// The remainder is not deferred indefinitely: the entries left behind are still
+/// past their deadline, so `recompute_next_pending_message_expiry` leaves
+/// `next_pending_message_expiry` in the past and the very next tick drains
+/// another pass.
+pub(crate) const MAX_PENDING_EXPIRIES_PER_PASS: usize = 64;
+
+/// Maximum per-message records one launch writes migrating legacy queues.
+///
+/// The migration's writes are the one part of the pending restore that is not
+/// already bounded by a delete budget, and a `store` is the more expensive of
+/// the two: every built-in provider flushes the record *and* its directory. A
+/// pre-split install sitting near [`MAX_PENDING_MESSAGES_GLOBAL`] would
+/// otherwise pay thousands of device barriers inside `initialize_mls`, on the
+/// launch path, where a mobile watchdog is watching.
+///
+/// Sized to match [`crate::protocol::storage::MAX_RESTORE_PRUNE_DELETES`], so
+/// the whole walk's barrier count stays the same order of magnitude whichever
+/// half of it does the work. Checked per recipient and before its first write,
+/// so a queue is either migrated whole or left entirely on disk for the next
+/// launch — never split across the two layouts with nothing to reconcile it.
+pub(crate) const MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH: usize = 512;
+
 /// Maximum terminal settlements parked by restore for `start()` to drain.
 ///
 /// The restore caps already bound how many can be produced, but they bound it
@@ -240,22 +271,28 @@ pub(crate) const MAX_MESSAGE_CONTENT_BYTES: usize = 256 * 1024;
 /// boundary-legal message always fits in an empty queue and admission can never
 /// livelock (pinned by `pending_queue_byte_budgets_admit_any_boundary_legal_message`).
 ///
-/// # Write amplification
+/// # Durable cost
 ///
-/// Pending messages are persisted as one record *per recipient*, so every
-/// enqueue rewrites that peer's whole queue: filling one peer to this budget
-/// costs on the order of `budget × entries / 2` bytes written in total, not
-/// `budget`. The crossing itself is cheap — `ProtocolStateStorageProvider`
-/// declares its values as `bytes`, so a record reaches Kotlin as a `ByteArray`
-/// and Swift as `Data` with no per-element cost — but the write volume is not.
+/// Pending messages are persisted one record per message
+/// ([`storage_keys::PENDING_MESSAGE_ENTRIES`]), so an enqueue writes its own
+/// entry and nothing else: filling one peer to this budget costs `budget` bytes
+/// written, not `budget × entries / 2`. The per-recipient layout this replaced
+/// re-serialized the peer's whole queue on every enqueue, which made the byte
+/// cost quadratic in the entry count.
 ///
-/// That is why this budget is sized to bound a pathological queue rather than
-/// to describe a normal one — real queues hold a handful of short messages
-/// waiting on a handshake. Raising it raises the write cost quadratically;
-/// lowering it below `MAX_MESSAGE_CONTENT_BYTES + MAX_RICH_EXTRAS_BYTES` breaks
-/// admission outright. Making large queues genuinely cheap needs a per-message
-/// record layout, which is a storage-format change and deliberately not part of
-/// the split.
+/// Bytes were never the expensive half, though, and sizing this budget off them
+/// would be reading the wrong meter. Every built-in provider pays two device
+/// barriers per `store` (the record's own flush plus its directory's) and one
+/// per `delete`, *regardless of record size* — so a 500-byte write and a 2 MiB
+/// write cost the same in the resource that actually dominates. What the
+/// per-message layout buys is not primarily speed but that a record which will
+/// not open still names the message it lost; see
+/// [`storage_keys::PENDING_MESSAGE_ENTRIES`].
+///
+/// So this budget is still sized to bound a pathological queue rather than to
+/// describe a normal one — real queues hold a handful of short messages waiting
+/// on a handshake. Lowering it below `MAX_MESSAGE_CONTENT_BYTES +
+/// MAX_RICH_EXTRAS_BYTES` breaks admission outright.
 pub(crate) const MAX_PENDING_MESSAGE_BYTES_PER_PEER: usize = 2 * 1024 * 1024;
 
 /// Maximum total serialized bytes of the pending-session queue across all
@@ -268,9 +305,16 @@ pub(crate) const MAX_PENDING_MESSAGE_BYTES_GLOBAL: usize = 16 * 1024 * 1024;
 /// Enforced on both sides of [`crate::ProtocolStateStorage`]: the SDK refuses to
 /// write a larger record, and refuses to *deserialize* a larger one on restore
 /// (dropping it instead), so a corrupted or tampered state file cannot turn
-/// into an unbounded allocation during initialization. Sized above
-/// [`MAX_PENDING_MESSAGE_BYTES_PER_PEER`] — the largest legitimate record is one
-/// peer's full pending queue — with room for JSON and seal overhead.
+/// into an unbounded allocation during initialization.
+///
+/// Sized above [`MAX_PENDING_MESSAGE_BYTES_PER_PEER`] with room for JSON and
+/// seal overhead. That was once tight rather than generous: under the
+/// per-recipient pending layout the largest legitimate record *was* one peer's
+/// full queue, so the two constants were one bound apart. Now that pending
+/// messages are keyed per id the largest legitimate record is a single message
+/// ([`MAX_MESSAGE_CONTENT_BYTES`] plus [`MAX_RICH_EXTRAS_BYTES`]) or one outbox
+/// entry, and the headroom is real. Keep the ordering anyway — a legacy
+/// per-recipient record still has to be readable for long enough to migrate it.
 pub(crate) const MAX_PROTOCOL_STATE_RECORD_BYTES: usize = 4 * 1024 * 1024;
 
 /// Maximum number of peers remembered in `key_package_sent_to` (the "already
@@ -958,6 +1002,24 @@ pub(crate) struct PendingMessage {
     pub(crate) serialized_bytes: usize,
 }
 
+/// One persisted pending-queue record: a single queued message plus the peer
+/// it is queued for.
+///
+/// The recipient rides *inside* the record because the key is the message id,
+/// and the in-memory queue is a map keyed by recipient that has to be rebuilt
+/// from records read in whatever order the store enumerates them. Same shape as
+/// [`OutboxEntry`], whose recipient likewise travels in the record (inside its
+/// `Message`) rather than in the key.
+///
+/// Deliberately a wrapper rather than a `recipient` field on [`PendingMessage`]:
+/// in memory the recipient is already the map key, and a second copy there
+/// would be free to drift from it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PendingMessageRecord {
+    pub(crate) recipient: String,
+    pub(crate) message: PendingMessage,
+}
+
 impl PendingMessage {
     /// Recomputes [`Self::serialized_bytes`] from the current field values.
     ///
@@ -1083,8 +1145,25 @@ pub(crate) struct WelcomeLifecycleRecord {
 
 /// Storage key types for message persistence.
 pub(crate) mod storage_keys {
-    /// Key type for pending encrypted messages.
+    /// Legacy key type for pending encrypted messages, keyed by *recipient*,
+    /// each record holding that peer's whole queue.
+    ///
+    /// Superseded by [`PENDING_MESSAGE_ENTRIES`]. Nothing writes this category
+    /// any more: `restore_pending_messages` reads it, migrates each queue into
+    /// the per-message layout, and deletes the record. It is read-only
+    /// migration scaffolding, and retires on the same trigger as the
+    /// [`ADOPTABLE_STATE_KEY_TYPES`] sweep — an install that skips the
+    /// migrating release entirely still needs it.
     pub const PENDING_MESSAGES: &str = "pending_messages";
+    /// Key type for pending encrypted messages, keyed by message id — one
+    /// record per queued message, like [`OUTBOX`].
+    ///
+    /// Keying by id rather than by recipient is what makes a lost record
+    /// *individually settleable*: the id the application is holding is the key,
+    /// so a record that will not open still names the message it destroyed. The
+    /// per-recipient layout could only report the loss per peer, because every
+    /// id was inside the record that would not open.
+    pub const PENDING_MESSAGE_ENTRIES: &str = "pending_message_entries";
     /// Key type for persisted per-peer MLS session confirmation state.
     pub const SESSION_STATES: &str = "session_states";
     /// Key type for persisted per-peer received key packages (survives restart).

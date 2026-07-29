@@ -114,6 +114,22 @@ fn seed_sealed_state_record(
     storage.store(key_type, key_id, &sealed).unwrap();
 }
 
+/// Seals with the *secure* store's record key (where `initialize_mls` reads it
+/// from) and files the record in the protocol-state store — the split-storage
+/// spelling of [`seed_sealed_state_record`], which assumes one backing store.
+fn seed_split_sealed_state_record(
+    secure: &InMemoryStorage,
+    state: &InMemoryStorage,
+    key_type: &str,
+    key_id: &str,
+    plaintext: &[u8],
+) {
+    let sealed = state_record_cipher_for(secure)
+        .seal(key_type, key_id, plaintext)
+        .unwrap();
+    state.store(key_type, key_id, &sealed).unwrap();
+}
+
 fn pending_test_message(sender: &str, content: &str) -> Message {
     Message::new(
         UserId::new(sender).unwrap(),
@@ -366,14 +382,14 @@ fn test_secure_and_protocol_state_storage_are_routed_separately() {
         .load(storage_keys::SCRUB_SECRET, storage_keys::SCRUB_SECRET_ID)
         .unwrap()
         .is_none());
-    assert!(state
-        .load(storage_keys::PENDING_MESSAGES, "bob")
+    assert!(!state
+        .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
         .unwrap()
-        .is_some());
+        .is_empty());
     assert!(secure
-        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
         .unwrap()
-        .is_none());
+        .is_empty());
     assert!(state
         .load(storage_keys::OUTBOX, &outbox_id.as_str())
         .unwrap()
@@ -408,10 +424,10 @@ fn test_fresh_protocol_state_does_not_restore_pre_reinstall_pending_messages() {
         before_reinstall
             .send_connection_request("carol", "Alice", None, None)
             .unwrap();
-        assert!(old_state
-            .load(storage_keys::PENDING_MESSAGES, "bob")
+        assert!(!old_state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
             .unwrap()
-            .is_some());
+            .is_empty());
         assert!(!old_state
             .list_keys(storage_keys::OUTBOX)
             .unwrap()
@@ -432,7 +448,7 @@ fn test_fresh_protocol_state_does_not_restore_pre_reinstall_pending_messages() {
     assert!(after_reinstall.pending_encrypted_messages.is_empty());
     assert!(after_reinstall.outbox.is_empty());
     assert!(fresh_state
-        .list_keys(storage_keys::PENDING_MESSAGES)
+        .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
         .unwrap()
         .is_empty());
     assert!(fresh_state
@@ -5332,7 +5348,8 @@ fn test_flush_requeue_preserves_the_original_queued_at() {
     // Age the queued entry (and its persisted copy) well past its first hour.
     let first_queued_at = Utc::now() - ChronoDuration::hours(6);
     protocol.pending_encrypted_messages.get_mut("bob").unwrap()[0].queued_at = first_queued_at;
-    protocol.persist_pending_messages_for_recipient("bob");
+    let aged = protocol.pending_encrypted_messages["bob"][0].clone();
+    protocol.persist_pending_message("bob", &aged);
 
     protocol.flush_pending_messages("bob").unwrap();
 
@@ -5647,8 +5664,14 @@ fn test_protocol_state_backing_bytes_hide_plaintext_and_media_keys() {
         .unwrap();
 
     let state_storage = protocol.protocol_state_storage.clone().unwrap();
+    let pending_key = state_storage
+        .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("the pending message must have been persisted");
     let stored = state_storage
-        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .load(storage_keys::PENDING_MESSAGE_ENTRIES, &pending_key)
         .unwrap()
         .expect("the pending message must have been persisted");
 
@@ -5839,13 +5862,16 @@ fn test_unaddressable_pending_queue_is_kept_when_its_ids_cannot_be_read() {
 
 #[test]
 fn test_unreadable_pending_queue_is_not_overwritten_or_cleared_by_later_writes() {
-    // Leaving an unreadable queue on disk only protects it while nothing
-    // writes over it. The record holds the recipient's *whole* queue, so the
-    // next enqueue for that peer persists the in-memory view — one message —
-    // straight over the messages the app is still holding ids for, settled to
-    // no one. Honoring `Unavailable` at restore and then clobbering it at
-    // runtime is the same silent loss, one layer down. `block_user` and the
-    // aborted-session path delete the record outright, which is worse.
+    // Leaving an unreadable legacy queue on disk only protects it while nothing
+    // writes over it. That record holds a recipient's *whole* queue, so a
+    // runtime path that wrote or deleted it would take messages the app is
+    // still holding ids for with it, settled to no one.
+    //
+    // Under the per-recipient layout this needed an explicit per-session freeze.
+    // It is now structural: the only thing that touches the legacy category is
+    // the migration walk, and every runtime path writes and deletes per-message
+    // records under their own message ids. This test pins that — the same
+    // guarantee, from a mechanism that cannot be forgotten at a new call site.
     //
     // Reachable while the record key loads perfectly well: this is a per-record
     // provider failure, not a locked credential store (that case fails closed
@@ -5948,21 +5974,24 @@ fn test_unreadable_pending_queue_is_not_overwritten_or_cleared_by_later_writes()
         "an enqueue must not persist over a queue that could not be read"
     );
 
-    // The delete paths (block_user, aborted pending session) must not destroy
-    // it either — those ids have still never been named.
-    protocol.clear_pending_messages_from_storage("bob");
+    // The delete paths (block_user, aborted pending session, session reset) must
+    // not destroy it either — those ids have still never been named. They delete
+    // per-message records for the ids they hold in memory, and the unread legacy
+    // queue's ids are not among them.
+    protocol.drop_pending_queue_for_peer("bob");
     assert_eq!(
         backing.load(storage_keys::PENDING_MESSAGES, "bob").unwrap(),
         Some(sealed_before),
         "clearing must not destroy a queue that could not be read"
     );
 
-    // A readable peer is unaffected: the freeze is per recipient, not global.
+    // A readable peer is unaffected: one unreadable record strands one record.
+    let carol_id = MessageId::new();
     protocol.queue_pending_message(
         "carol",
         "ordinary",
         MessagePriority::Medium,
-        MessageId::new(),
+        carol_id.clone(),
         None,
         None,
         ContentType::Text,
@@ -5971,7 +6000,7 @@ fn test_unreadable_pending_queue_is_not_overwritten_or_cleared_by_later_writes()
     );
     assert!(
         backing
-            .load(storage_keys::PENDING_MESSAGES, "carol")
+            .load(storage_keys::PENDING_MESSAGE_ENTRIES, &carol_id.as_str())
             .unwrap()
             .is_some(),
         "an unrelated recipient must still persist normally"
@@ -6332,8 +6361,14 @@ fn test_pre_split_protocol_state_is_adopted_out_of_secure_storage() {
 
     // And what landed in the app container is sealed, not the plaintext that
     // was safe only because the credential store was protecting it.
-    let adopted = state
+    // Adopted *and* migrated forward on the same launch: the legacy
+    // per-recipient record is gone and the entry now lives under its own id.
+    assert!(state
         .load(storage_keys::PENDING_MESSAGES, "bob")
+        .unwrap()
+        .is_none());
+    let adopted = state
+        .load(storage_keys::PENDING_MESSAGE_ENTRIES, &pending_id.as_str())
         .unwrap()
         .unwrap();
     assert!(
@@ -16153,7 +16188,7 @@ fn test_restore_media_descriptor_drop_is_bounded_per_launch() {
 }
 
 #[test]
-fn test_restore_pending_delete_budget_freezes_the_tail_and_drains_over_launches() {
+fn test_restore_pending_delete_budget_stops_the_walk_and_drains_over_launches() {
     // The pending walk is the widest in the module — its record bound is the
     // same `MAX_RESTORE_KEYS_PER_CATEGORY` the budgeted cache walks use, eight
     // times looser than the outbox's — and it can delete once per record. It
@@ -16211,20 +16246,17 @@ fn test_restore_pending_delete_budget_freezes_the_tail_and_drains_over_launches(
         "one launch must spend exactly its delete budget, not empty the store"
     );
     // Stopping is only safe if the untouched tail cannot then be destroyed by
-    // an ordinary enqueue — a pending record holds a recipient's whole queue,
-    // so a one-message snapshot written over it would take the rest with it.
-    assert_eq!(
-        first.pending_queues_unreadable_this_session.len(),
-        beyond_budget,
-        "every recipient the walk did not reach must be frozen for the session"
-    );
+    // an ordinary enqueue. Nothing outside the migration walk writes or deletes
+    // the legacy category, so it cannot be — but the tail is exactly where a
+    // regression would show, so pin it.
+    //
     // Which recipients land in the tail depends on the backend's listing order,
-    // so pick one out of the freeze set rather than assuming.
-    let untouched = first
-        .pending_queues_unreadable_this_session
-        .iter()
+    // so find one still on disk rather than assuming.
+    let untouched = state
+        .list_keys(storage_keys::PENDING_MESSAGES)
+        .unwrap()
+        .into_iter()
         .next()
-        .cloned()
         .expect("the walk must stop before the end of the listing");
     first.queue_pending_message(
         &untouched,
@@ -16243,7 +16275,7 @@ fn test_restore_pending_delete_budget_freezes_the_tail_and_drains_over_launches(
             .unwrap()
             .as_deref(),
         Some(b"not sealed under this install's record key".as_slice()),
-        "a frozen recipient's record must survive an enqueue untouched"
+        "an unwalked recipient's legacy record must survive an enqueue untouched"
     );
 
     // Spared, not stranded.
@@ -16254,10 +16286,6 @@ fn test_restore_pending_delete_budget_freezes_the_tail_and_drains_over_launches(
         remaining(&state),
         0,
         "the remainder is under the budget, so the second launch finishes"
-    );
-    assert!(
-        second.pending_queues_unreadable_this_session.is_empty(),
-        "a completed walk freezes nothing"
     );
 }
 
@@ -28723,15 +28751,14 @@ fn test_restore_stops_admitting_pending_entries_at_the_entry_bound() {
 /// not just until the next ordinary write.
 ///
 /// Both of the pending walk's bounds promise to leave the remainder "for a
-/// later launch", but a pending record holds a recipient's whole queue: an
-/// enqueue for an unwalked recipient persists the in-memory view — one message
-/// — straight over it, and `block_user` / the aborted-session path delete it
-/// outright. Either way the ids inside a record nobody has opened are destroyed
-/// and settled to no one, which is the loss the `Unavailable` freeze already
-/// prevents through the other door (see
+/// later launch", and a legacy per-recipient record holds a whole queue — so a
+/// runtime path that wrote or deleted one would destroy ids nobody has opened,
+/// settled to no one. Nothing outside the migration walk touches that category
+/// any more, which is what makes the promise structural rather than a per-session
+/// freeze someone has to remember at each new call site (see
 /// `test_unreadable_pending_queue_is_not_overwritten_or_cleared_by_later_writes`).
 #[test]
-fn test_pending_tail_the_restore_walk_never_reached_is_frozen_for_the_session() {
+fn test_pending_tail_the_restore_walk_never_reached_survives_runtime_writes() {
     use super::storage::MAX_PENDING_RESTORE_ENTRIES;
 
     let secure = Arc::new(InMemoryStorage::new());
@@ -28824,8 +28851,10 @@ fn test_pending_tail_the_restore_walk_never_reached_is_frozen_for_the_session() 
     );
 
     // The delete paths (block_user, aborted pending session) must not destroy
-    // it either — those ids have still never been named.
-    protocol.clear_pending_messages_from_storage(&untouched);
+    // it either — those ids have still never been named. They delete the
+    // per-message records for the ids they hold in memory, and never touch the
+    // legacy category at all.
+    protocol.drop_pending_queue_for_peer(&untouched);
     assert_eq!(
         state
             .load(storage_keys::PENDING_MESSAGES, &untouched)
@@ -28834,18 +28863,20 @@ fn test_pending_tail_the_restore_walk_never_reached_is_frozen_for_the_session() 
         "clearing must not destroy a queue this restore never opened"
     );
 
-    // The freeze is per recipient: a peer the walk did restore still persists.
+    // One unopened record strands one record: a peer the walk did restore is
+    // unaffected.
     let walked = protocol
         .pending_encrypted_messages
         .keys()
         .next()
         .cloned()
         .expect("restore must have admitted some recipients");
+    let walked_id = MessageId::new();
     protocol.queue_pending_message(
         &walked,
         "ordinary",
         MessagePriority::Medium,
-        MessageId::new(),
+        walked_id.clone(),
         None,
         None,
         ContentType::Text,
@@ -28854,7 +28885,7 @@ fn test_pending_tail_the_restore_walk_never_reached_is_frozen_for_the_session() 
     );
     assert!(
         state
-            .load(storage_keys::PENDING_MESSAGES, &walked)
+            .load(storage_keys::PENDING_MESSAGE_ENTRIES, &walked_id.as_str())
             .unwrap()
             .is_some(),
         "a recipient the walk reached must still persist normally"
@@ -28929,5 +28960,1128 @@ fn test_restore_settles_an_unreadable_outbox_record_whose_key_is_not_a_message_i
         }),
         "a destroyed outbox record with an unparseable key must not vanish silently: {:?}",
         protocol.deferred_restore_settlements
+    );
+}
+
+// ============================================================================
+// PER-MESSAGE PENDING RECORDS
+// ============================================================================
+
+/// Builds one legacy per-recipient pending record holding `count` entries,
+/// oldest first, and returns their ids in queue order.
+fn legacy_pending_queue(count: usize, base: DateTime<Utc>) -> (Vec<MessageId>, Vec<u8>) {
+    let mut ids = Vec::new();
+    let mut entries = Vec::new();
+    for index in 0..count {
+        let message_id = MessageId::new();
+        ids.push(message_id.clone());
+        let mut pending = PendingMessage {
+            content: format!("legacy {index}"),
+            priority: MessagePriority::Medium,
+            message_id,
+            reply_to_msg: None,
+            forwarded_from: None,
+            content_type: ContentType::Text,
+            media_metadata: None,
+            rich: None,
+            queued_at: base + ChronoDuration::seconds(index as i64),
+            serialized_bytes: 0,
+        };
+        pending.measure();
+        entries.push(pending);
+    }
+    (ids, serde_json::to_vec(&entries).unwrap())
+}
+
+#[test]
+fn test_legacy_pending_queue_is_migrated_to_per_message_records() {
+    // The upgrade path. A pre-migration install has one record per recipient
+    // holding the whole queue; the first launch on this build has to recover
+    // every entry, re-file it under its own id, and drop the legacy record —
+    // without losing an id the application is still holding.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let base = Utc::now() - ChronoDuration::minutes(5);
+    let (ids, queue) = legacy_pending_queue(3, base);
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let restored = protocol
+        .pending_encrypted_messages
+        .get("bob")
+        .expect("the migrated queue must be in memory");
+    assert_eq!(
+        restored
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect::<Vec<_>>(),
+        ids,
+        "migration must preserve queue order, not storage enumeration order"
+    );
+
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "the legacy record must be dropped once its entries are re-filed"
+    );
+    let mut migrated = state
+        .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+        .unwrap();
+    migrated.sort();
+    let mut expected: Vec<String> = ids.iter().map(|id| id.as_str()).collect();
+    expected.sort();
+    assert_eq!(
+        migrated, expected,
+        "every entry must be re-filed under its own id"
+    );
+}
+
+#[test]
+fn test_migration_does_not_resurrect_an_id_the_first_pass_settled() {
+    // The two passes agree through one set: pass 1 claims the ids it accounts
+    // for and pass 2 skips them. "Accounts for" has to include the ids pass 1
+    // examined and *settled* — a destroyed record still names its message — or
+    // a legacy queue left on disk by an interrupted migration re-files an id the
+    // application was already told had failed, and the message goes out on the
+    // wire after its own terminal event.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (ids, queue) = legacy_pending_queue(2, Utc::now() - ChronoDuration::minutes(5));
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    // The interrupted migration got as far as writing the first entry, and that
+    // record is now unopenable — examined, unrecoverable, settled.
+    state
+        .store(
+            storage_keys::PENDING_MESSAGE_ENTRIES,
+            &ids[0].as_str(),
+            b"not sealed under this install's record key",
+        )
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+    let events = started_protocol_events(&mut protocol);
+
+    let settled: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        settled.contains(&ids[0].as_str()),
+        "the destroyed record must settle its own id; got {settled:?}"
+    );
+
+    let queued: Vec<String> = protocol
+        .pending_encrypted_messages
+        .get("bob")
+        .map(|messages| messages.iter().map(|m| m.message_id.as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        queued,
+        vec![ids[1].as_str()],
+        "the legacy copy must not re-queue an id that was already settled"
+    );
+}
+
+#[test]
+fn test_migration_that_died_before_its_delete_does_not_double_restore() {
+    // The migration writes the new records before dropping the legacy one, so a
+    // crash in between leaves a queue present in *both* layouts. The next launch
+    // must take the migrated copy once, not restore each entry twice.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let base = Utc::now() - ChronoDuration::minutes(5);
+    let (ids, queue) = legacy_pending_queue(2, base);
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    // Replay the half-finished migration: the per-message records exist too.
+    let entries: Vec<PendingMessage> = serde_json::from_slice(&queue).unwrap();
+    for message in &entries {
+        let record = serde_json::to_vec(&PendingMessageRecord {
+            recipient: "bob".to_string(),
+            message: message.clone(),
+        })
+        .unwrap();
+        seed_split_sealed_state_record(
+            &secure,
+            &state,
+            storage_keys::PENDING_MESSAGE_ENTRIES,
+            &message.message_id.as_str(),
+            &record,
+        );
+    }
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let restored = protocol
+        .pending_encrypted_messages
+        .get("bob")
+        .expect("the queue must be restored");
+    assert_eq!(
+        restored.len(),
+        ids.len(),
+        "an entry present in both layouts must be admitted once, not twice"
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "the finishing launch must complete the interrupted delete"
+    );
+}
+
+#[test]
+fn test_unreadable_pending_record_settles_the_exact_message_id() {
+    // The reason the layout changed. Under the per-recipient layout a record
+    // that would not open took every id in it down with it, and the only honest
+    // report was a `pending_state_lost` diagnostic naming the *peer*. Keyed per
+    // message, the key is the id — so the loss settles as a `message_failed` for
+    // exactly the id the application is holding, and a readable sibling in the
+    // same queue is unaffected.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let readable_id = MessageId::new();
+    let mut readable = PendingMessage {
+        content: "readable".to_string(),
+        priority: MessagePriority::Medium,
+        message_id: readable_id.clone(),
+        reply_to_msg: None,
+        forwarded_from: None,
+        content_type: ContentType::Text,
+        media_metadata: None,
+        rich: None,
+        queued_at: Utc::now(),
+        serialized_bytes: 0,
+    };
+    readable.measure();
+    let record = serde_json::to_vec(&PendingMessageRecord {
+        recipient: "bob".to_string(),
+        message: readable,
+    })
+    .unwrap();
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGE_ENTRIES,
+        &readable_id.as_str(),
+        &record,
+    );
+
+    // Sealed under nobody's key: examined, unrecoverable, deleted.
+    let lost_id = MessageId::new();
+    state
+        .store(
+            storage_keys::PENDING_MESSAGE_ENTRIES,
+            &lost_id.as_str(),
+            b"not sealed under this install's record key",
+        )
+        .unwrap();
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+    let events = started_protocol_events(&mut protocol);
+
+    let settled: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        settled.contains(&lost_id.as_str()),
+        "an unreadable record must settle the id it destroyed, not a per-peer diagnostic; got {settled:?}"
+    );
+    assert!(
+        !settled.contains(&readable_id.as_str()),
+        "a readable sibling in the same queue must survive its neighbour's loss"
+    );
+    assert_eq!(
+        protocol.pending_encrypted_messages.get("bob").map(Vec::len),
+        Some(1),
+        "the readable entry must still be queued"
+    );
+}
+
+#[test]
+fn test_restored_queue_order_survives_shuffled_enumeration() {
+    // Records are keyed per id and come back in whatever order the store
+    // enumerates them, which carries no ordering information at all. The queue
+    // order the application sent in has to be rebuilt from `queued_at`, or a
+    // restart would silently reorder a conversation — and every oldest-first
+    // eviction on the restore path would evict the wrong entry.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let base = Utc::now() - ChronoDuration::minutes(5);
+
+    // Written newest-first, so enumeration order cannot accidentally be right.
+    let (ids, queue) = legacy_pending_queue(4, base);
+    let entries: Vec<PendingMessage> = serde_json::from_slice(&queue).unwrap();
+    for message in entries.iter().rev() {
+        let record = serde_json::to_vec(&PendingMessageRecord {
+            recipient: "bob".to_string(),
+            message: message.clone(),
+        })
+        .unwrap();
+        seed_split_sealed_state_record(
+            &secure,
+            &state,
+            storage_keys::PENDING_MESSAGE_ENTRIES,
+            &message.message_id.as_str(),
+            &record,
+        );
+    }
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert_eq!(
+        protocol.pending_encrypted_messages["bob"]
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect::<Vec<_>>(),
+        ids,
+        "a restored queue must be in send order, oldest first"
+    );
+}
+
+#[test]
+fn test_enqueue_writes_only_its_own_record() {
+    // The write-amplification fix, stated as an invariant rather than a
+    // benchmark: an enqueue touches one record, whatever the queue already
+    // holds. The per-recipient layout re-serialized the whole queue on every
+    // enqueue, so this count grew with the queue length.
+    struct CountingStorage {
+        inner: Arc<InMemoryStorage>,
+        stores: Mutex<Vec<String>>,
+    }
+
+    impl crate::ProtocolStateStorage for CountingStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> crate::ProtocolStateResult<()> {
+            if key_type == storage_keys::PENDING_MESSAGE_ENTRIES {
+                self.stores.lock().unwrap().push(key_id.to_string());
+            }
+            self.inner
+                .store(key_type, key_id, data)
+                .map_err(map_test_storage_error)
+        }
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+            self.inner
+                .load(key_type, key_id)
+                .map_err(map_test_storage_error)
+        }
+        fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+            self.inner
+                .delete(key_type, key_id)
+                .map_err(map_test_storage_error)
+        }
+        fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+            self.inner
+                .list_keys(key_type)
+                .map_err(map_test_storage_error)
+        }
+    }
+
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let backing = Arc::new(InMemoryStorage::new());
+    let counting = Arc::new(CountingStorage {
+        inner: backing.clone(),
+        stores: Mutex::new(Vec::new()),
+    });
+    protocol
+        .initialize_mls(backing.clone(), counting.clone())
+        .unwrap();
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+
+    let mut ids = Vec::new();
+    for index in 0..8 {
+        ids.push(
+            protocol
+                .send_message("bob", &format!("msg {index}"), None, None::<String>)
+                .unwrap(),
+        );
+    }
+
+    let stores = counting.stores.lock().unwrap().clone();
+    assert_eq!(
+        stores.len(),
+        ids.len(),
+        "eight enqueues must cost eight pending writes, not {} — one per enqueue, \
+         not one per queue entry per enqueue",
+        stores.len()
+    );
+    assert_eq!(
+        stores,
+        ids.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        "each enqueue must write exactly its own record"
+    );
+}
+
+#[test]
+fn test_flushed_pending_message_leaves_no_record_behind() {
+    // A dispatched message is handed to the outbox, which persists it under the
+    // same id. Leaving the pending copy behind would make the next launch
+    // restore and re-flush it: receivers dedup it on the id, but the sender
+    // re-emits `MessageSent` for traffic it already delivered, and nothing would
+    // say why.
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let queued_id = MessageId::new();
+    alice.queue_pending_message(
+        "bob",
+        "queued",
+        MessagePriority::Medium,
+        queued_id.clone(),
+        None,
+        None,
+        ContentType::default(),
+        None,
+        None,
+    );
+    let state = alice.protocol_state_storage.clone().unwrap();
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGE_ENTRIES, &queued_id.as_str())
+            .unwrap()
+            .is_some(),
+        "the enqueue must have written a record to delete"
+    );
+
+    alice.flush_pending_messages("bob").unwrap();
+
+    assert!(alice.pending_encrypted_messages.get("bob").is_none());
+    assert!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .is_empty(),
+        "a dispatched message must not leave its pending record behind"
+    );
+    assert!(
+        state
+            .load(storage_keys::OUTBOX, &queued_id.as_str())
+            .unwrap()
+            .is_some(),
+        "the outbox must have taken over under the same id"
+    );
+}
+
+#[test]
+fn test_pending_record_that_does_not_name_its_own_key_is_dropped() {
+    // A record addressed under one id and naming another is worse than merely
+    // unparseable: every runtime delete addresses its own message id, so nothing
+    // outside restore could ever remove it, and admitting it would queue a
+    // message the application has no id for. Treat it as the loss it is.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    let key_id = MessageId::new();
+    let mut message = PendingMessage {
+        content: "mismatched".to_string(),
+        priority: MessagePriority::Medium,
+        message_id: MessageId::new(),
+        reply_to_msg: None,
+        forwarded_from: None,
+        content_type: ContentType::Text,
+        media_metadata: None,
+        rich: None,
+        queued_at: Utc::now(),
+        serialized_bytes: 0,
+    };
+    message.measure();
+    let record = serde_json::to_vec(&PendingMessageRecord {
+        recipient: "bob".to_string(),
+        message,
+    })
+    .unwrap();
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGE_ENTRIES,
+        &key_id.as_str(),
+        &record,
+    );
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+    let events = started_protocol_events(&mut protocol);
+
+    assert!(
+        protocol.pending_encrypted_messages.is_empty(),
+        "a record that does not name its own key must not be queued"
+    );
+    assert!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .is_empty(),
+        "and it must be deleted, since nothing else ever could"
+    );
+    let settled: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        settled.contains(&key_id.as_str()),
+        "the loss settles under the key the application is holding; got {settled:?}"
+    );
+}
+
+#[test]
+fn test_migration_does_not_persist_entries_the_caps_drop() {
+    // The migration writes after admission, not during the walk. A pre-cap
+    // legacy install holds queues the current bounds do not admit, and writing
+    // every entry out only to delete it again moments later is the one shape
+    // that turns an ordinary upgrade into thousands of device barriers on the
+    // boot path.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let over_cap = 8;
+    let (ids, queue) = legacy_pending_queue(
+        MAX_PENDING_MESSAGES_PER_PEER + over_cap,
+        Utc::now() - ChronoDuration::minutes(5),
+    );
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+    let events = started_protocol_events(&mut protocol);
+
+    assert_eq!(
+        protocol.pending_encrypted_messages["bob"].len(),
+        MAX_PENDING_MESSAGES_PER_PEER,
+        "the restored queue is held to the live per-peer cap"
+    );
+    assert_eq!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .len(),
+        MAX_PENDING_MESSAGES_PER_PEER,
+        "only the survivors get a record — the dropped entries are never written"
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "the legacy record still goes, once its survivors are durable"
+    );
+
+    // Oldest-first, and each dropped id still settles for the app holding it.
+    let settled: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for id in &ids[..over_cap] {
+        assert!(
+            settled.contains(&id.as_str()),
+            "a capacity-dropped entry must still be settled; got {settled:?}"
+        );
+    }
+}
+
+#[test]
+fn test_pending_expiry_is_bounded_per_pass() {
+    // Each expiry is a settlement *and* a durable delete, and entries queued
+    // together come due together — so one tick of the 100 ms bindings loop must
+    // not turn into thousands of synchronous deletes. What is left behind is
+    // still past its deadline, so the next tick drains another pass.
+    let mut protocol = pending_queue_protocol();
+    let lifetime_ms = protocol
+        .config
+        .reliability
+        .retry
+        .pending_message_max_lifetime_ms;
+    let long_expired =
+        Utc::now() - ChronoDuration::milliseconds(lifetime_ms as i64) - ChronoDuration::hours(1);
+
+    let per_peer = MAX_PENDING_EXPIRIES_PER_PASS / 2 + 5;
+    for recipient in ["bob", "carol"] {
+        for index in 0..per_peer {
+            protocol.queue_pending_message_at(
+                recipient,
+                &format!("expired {index}"),
+                MessagePriority::Medium,
+                MessageId::new(),
+                None,
+                None,
+                ContentType::Text,
+                None,
+                None,
+                long_expired,
+            );
+        }
+    }
+    let total = per_peer * 2;
+    assert_eq!(protocol.total_pending_message_count(), total);
+
+    protocol.cleanup_expired_pending_messages();
+    assert_eq!(
+        protocol.total_pending_message_count(),
+        total - MAX_PENDING_EXPIRIES_PER_PASS,
+        "one pass must expire at most its bound, however many are due"
+    );
+
+    protocol.cleanup_expired_pending_messages();
+    assert_eq!(
+        protocol.total_pending_message_count(),
+        0,
+        "and the remainder must drain on the following pass, not be stranded"
+    );
+}
+
+/// A `ProtocolStateStorage` whose legacy-pending deletes fail on demand.
+struct LegacyDeleteRefusingState {
+    inner: Arc<InMemoryStorage>,
+    refuse: Mutex<bool>,
+}
+
+impl crate::ProtocolStateStorage for LegacyDeleteRefusingState {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .store(key_type, key_id, data)
+            .map_err(map_test_storage_error)
+    }
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        self.inner
+            .load(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        if key_type == storage_keys::PENDING_MESSAGES && *self.refuse.lock().unwrap() {
+            return Err(crate::ProtocolStateError::DeleteFailed(
+                "provider refused".to_string(),
+            ));
+        }
+        self.inner
+            .delete(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        self.inner
+            .list_keys(key_type)
+            .map_err(map_test_storage_error)
+    }
+}
+
+#[test]
+fn test_legacy_queue_whose_delete_failed_is_not_migrated_at_all() {
+    // The migration is all or nothing per recipient, and this is why. Nothing
+    // outside the migration walk writes or deletes the legacy category, so a
+    // record whose delete did not land is there for good. "The per-message pass
+    // claims those ids next launch" only converges while those per-message
+    // records exist — and they do not survive the flush: dispatch deletes each
+    // one. A half-migrated queue would therefore be re-filed *and re-sent* by a
+    // later launch, long after it was delivered.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (ids, queue) = legacy_pending_queue(2, Utc::now() - ChronoDuration::minutes(5));
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    let refusing = Arc::new(LegacyDeleteRefusingState {
+        inner: state.clone(),
+        refuse: Mutex::new(true),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+
+    // The queue stays in exactly one place: the legacy record it was already in.
+    assert!(
+        protocol.pending_encrypted_messages.get("bob").is_none(),
+        "entries whose legacy record survived must not stay in memory to flush"
+    );
+    assert!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .is_empty(),
+        "and the per-message records written before the failed delete must go back"
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_some(),
+        "the legacy record is what still holds the queue"
+    );
+
+    // A later launch, with the provider healthy again, migrates it once — and
+    // recovers every id, because none of them were ever half-settled.
+    *refusing.refuse.lock().unwrap() = false;
+    let mut later = OfflineProtocol::new(create_test_config()).unwrap();
+    later
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+
+    assert_eq!(
+        later.pending_encrypted_messages["bob"]
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect::<Vec<_>>(),
+        ids,
+        "the deferred migration must recover the whole queue, in order"
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "and complete the delete this time"
+    );
+}
+
+#[test]
+fn test_capacity_drop_from_an_unmigrated_queue_is_not_settled() {
+    // A settlement is terminal, so it may only be emitted for an entry that is
+    // really gone. An entry the caps dropped out of a legacy queue has no record
+    // of its own — the legacy record is the only copy — so settling it while
+    // that record is still on disk would be a `message_failed` the next launch
+    // overturns by re-filing and sending the message.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let over_cap = 4;
+    let (ids, queue) = legacy_pending_queue(
+        MAX_PENDING_MESSAGES_PER_PEER + over_cap,
+        Utc::now() - ChronoDuration::minutes(5),
+    );
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    let refusing = Arc::new(LegacyDeleteRefusingState {
+        inner: state.clone(),
+        refuse: Mutex::new(true),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+    let events = started_protocol_events(&mut protocol);
+
+    let settled: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for id in &ids {
+        assert!(
+            !settled.contains(&id.as_str()),
+            "no id may be settled while the record that can re-file it is on disk; got {settled:?}"
+        );
+    }
+}
+
+/// A `ProtocolStateStorage` whose per-message pending *writes* fail on demand
+/// while every delete succeeds — the ENOSPC shape: a full disk fails `store`
+/// and lets `delete` through.
+struct PendingWriteRefusingState {
+    inner: Arc<InMemoryStorage>,
+    refuse: Mutex<bool>,
+}
+
+impl crate::ProtocolStateStorage for PendingWriteRefusingState {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        if key_type == storage_keys::PENDING_MESSAGE_ENTRIES && *self.refuse.lock().unwrap() {
+            return Err(crate::ProtocolStateError::StoreFailed(
+                "provider refused".to_string(),
+            ));
+        }
+        self.inner
+            .store(key_type, key_id, data)
+            .map_err(map_test_storage_error)
+    }
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        self.inner
+            .load(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .delete(key_type, key_id)
+            .map_err(map_test_storage_error)
+    }
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        self.inner
+            .list_keys(key_type)
+            .map_err(map_test_storage_error)
+    }
+}
+
+#[test]
+fn test_migration_whose_writes_fail_keeps_the_legacy_record_and_settles_nothing() {
+    // The migration's writes are as fallible as its delete, and the failure
+    // shapes differ: a full disk fails `store` and lets `delete` through.
+    // Deleting the legacy record on top of failed writes would leave the queue
+    // in RAM only — every id the app holds gone at the next launch with no
+    // `message_failed` — which is the exact loss class this layout exists to
+    // eliminate. A recipient with any failed write must be abandoned like one
+    // whose delete failed: nothing settled, the legacy record still the one
+    // durable copy.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (ids, queue) = legacy_pending_queue(2, Utc::now() - ChronoDuration::minutes(5));
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+
+    let refusing = Arc::new(PendingWriteRefusingState {
+        inner: state.clone(),
+        refuse: Mutex::new(true),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_some(),
+        "the legacy record must survive a migration whose writes failed"
+    );
+    assert!(
+        state
+            .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
+            .unwrap()
+            .is_empty(),
+        "no half-written per-message records may be left behind"
+    );
+    assert!(
+        protocol.pending_encrypted_messages.get("bob").is_none(),
+        "entries whose legacy record survived must not stay in memory to flush"
+    );
+    let settled: Vec<String> = protocol
+        .deferred_restore_settlements
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for id in &ids {
+        assert!(
+            !settled.contains(&id.as_str()),
+            "no id may be settled while the legacy record can still deliver it; got {settled:?}"
+        );
+    }
+
+    // A later launch with the provider healthy migrates the whole queue.
+    *refusing.refuse.lock().unwrap() = false;
+    let mut later = OfflineProtocol::new(create_test_config()).unwrap();
+    later
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+    assert_eq!(
+        later.pending_encrypted_messages["bob"]
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect::<Vec<_>>(),
+        ids,
+        "the deferred migration must recover the whole queue, in order"
+    );
+    assert!(
+        state
+            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .unwrap()
+            .is_none(),
+        "and complete the migration this time"
+    );
+}
+
+#[test]
+fn test_settlement_is_withheld_while_a_surviving_legacy_record_can_refile_the_id() {
+    // The cross-launch half of what
+    // `test_migration_does_not_resurrect_an_id_the_first_pass_settled` pins
+    // within one launch. Pass 1 settles an id whose per-message record would
+    // not open — but the same id also sits inside a legacy record, and that
+    // record's delete fails. The record survives, so the next launch re-files
+    // and *sends* the id; a `message_failed` emitted now would be a terminal
+    // answer that launch overturns. The settlement must be withheld — the next
+    // launch owns both halves.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (ids, queue) = legacy_pending_queue(2, Utc::now() - ChronoDuration::minutes(5));
+    seed_split_sealed_state_record(
+        &secure,
+        &state,
+        storage_keys::PENDING_MESSAGES,
+        "bob",
+        &queue,
+    );
+    // An interrupted earlier migration wrote ids[0]'s per-message record, and
+    // it is now unopenable — examined, unrecoverable, and normally settled.
+    state
+        .store(
+            storage_keys::PENDING_MESSAGE_ENTRIES,
+            &ids[0].as_str(),
+            b"not sealed under this install's record key",
+        )
+        .unwrap();
+
+    let refusing = Arc::new(LegacyDeleteRefusingState {
+        inner: state.clone(),
+        refuse: Mutex::new(true),
+    });
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+
+    let settled: Vec<String> = protocol
+        .deferred_restore_settlements
+        .iter()
+        .filter_map(|event| match event {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !settled.contains(&ids[0].as_str()),
+        "a settlement the surviving legacy record would overturn must be withheld; got {settled:?}"
+    );
+
+    // The next launch, healthy again, re-files the whole queue — which is why
+    // the settlement had to be withheld: the message is deliverable after all.
+    *refusing.refuse.lock().unwrap() = false;
+    let mut later = OfflineProtocol::new(create_test_config()).unwrap();
+    later
+        .initialize_mls(
+            secure.clone() as Arc<dyn MlsStorage>,
+            refusing.clone() as Arc<dyn crate::ProtocolStateStorage>,
+        )
+        .unwrap();
+    assert_eq!(
+        later.pending_encrypted_messages["bob"]
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect::<Vec<_>>(),
+        ids,
+        "the next launch must recover the id it was never lied to about"
+    );
+    assert!(
+        later
+            .deferred_restore_settlements
+            .iter()
+            .all(|event| !matches!(event, Event::MessageFailed { .. })),
+        "nothing may settle on the launch that recovers the queue"
+    );
+}
+
+#[test]
+fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
+    // The expiry pass is bounded per tick (`MAX_PENDING_EXPIRIES_PER_PASS`),
+    // so a restore can hand `flush_pending_messages` entries already past
+    // their deadline. Dispatching one would settle it `MessageSent` after the
+    // absolute pending lifetime promised `message_failed` — the deadline has
+    // to hold where delivery is decided, not only in the bounded cleanup.
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let lifetime_ms = alice
+        .config
+        .reliability
+        .retry
+        .pending_message_max_lifetime_ms;
+    let expired_id = MessageId::new();
+    alice.queue_pending_message_at(
+        "bob",
+        "expired",
+        MessagePriority::Medium,
+        expired_id.clone(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+        Utc::now() - ChronoDuration::milliseconds(lifetime_ms as i64) - ChronoDuration::hours(1),
+    );
+    let fresh_id = MessageId::new();
+    alice.queue_pending_message(
+        "bob",
+        "fresh",
+        MessagePriority::Medium,
+        fresh_id.clone(),
+        None,
+        None,
+        ContentType::Text,
+        None,
+        None,
+    );
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&events);
+    alice.on_event(move |event| handle.lock().unwrap().push(event));
+
+    alice.flush_pending_messages("bob").unwrap();
+
+    assert!(
+        alice.outbox.contains_key(&fresh_id),
+        "the in-lifetime sibling must still flush normally"
+    );
+    assert!(
+        !alice.outbox.contains_key(&expired_id),
+        "a past-deadline entry must never reach dispatch"
+    );
+    assert_eq!(
+        alice.pending_encrypted_messages.get("bob").map(|messages| {
+            messages
+                .iter()
+                .map(|m| m.message_id.clone())
+                .collect::<Vec<_>>()
+        }),
+        Some(vec![expired_id.clone()]),
+        "it stays queued, record intact, for the expiry pass to settle"
+    );
+
+    alice.cleanup_expired_pending_messages();
+    assert!(
+        alice.pending_encrypted_messages.get("bob").is_none(),
+        "the expiry pass drains it"
+    );
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageFailed { message_id, .. } if *message_id == expired_id.as_str()
+        )),
+        "and settles it as failed, never as sent"
+    );
+    assert!(
+        !events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageSent { message_id, .. } if *message_id == expired_id.as_str()
+        )),
+        "no MessageSent may exist for an entry past its lifetime"
     );
 }
