@@ -52,7 +52,7 @@ tokio = "1.35"
 tracing = "0.1"
 
 # Benchmarking
-criterion = "0.5"
+criterion = "0.8"
 
 # MLS (Message Layer Security)
 openmls = "0.7"
