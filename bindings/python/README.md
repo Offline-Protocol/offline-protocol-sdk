@@ -120,14 +120,31 @@ the credential store. The built-in stores derive an opaque account namespace
 from both `app_id` and `user_id`, so multiple `ProtocolManager` instances do
 not share keys, outboxes, or retry state.
 
-Upgrading an install that predates namespacing keeps its MLS identity: the first
-account to launch adopts the old, unscoped keyring service and inherits its
-identity, sessions, and TOFU pins on demand. The old service was shared by every
-account on the install, so only one can inherit it — a second account starts
-from a fresh identity and logs an error saying so. Inspect the outcome with
-`SecureStorage(...).legacy_adoption`, or opt out with
-`adopt_legacy_store=False`. Restartable delivery state is *not* inherited; it is
-re-driven from the outbox and pending queues instead.
+Upgrading an install that predates namespacing keeps both halves of its state,
+by two different mechanisms.
+
+Its **MLS identity** is adopted by read-through: the first account to launch
+claims the old, unscoped keyring service and inherits its identity, sessions,
+and TOFU pins on demand. That service was shared by every account on the
+install, so only one can inherit it — a second account starts from a fresh
+identity and logs an error saying so. Inspect the outcome with
+`SecureStorage(...).legacy_adoption`, or opt out with `adopt_legacy_store=False`.
+
+Its **restartable delivery state** — outbox, pending queue, session and Welcome
+lifecycles, peer key packages and capabilities, media descriptors, blocked
+users, the Lamport clock — is swept out of the credential store into
+`state_root` on the first launch of this release, and the credential-store copy
+is deleted once the move is durable. The sweep is resumable and one-shot, and it
+reads *through* the secure provider, so a `SecureStorage` built without a
+namespace (which cannot claim the legacy service) finds nothing to sweep.
+
+An account that loses the claim above gets neither: no identity *and* no
+delivery state, so it comes up with an empty outbox and an empty block list,
+every previously blocked peer unblocked.
+
+Because the sweep deletes the credential-store copy, **downgrading is not a
+rollback** — an older build reads the old location and finds none of it. Roll
+forward, not back.
 
 Python has no portable app container: `Application Support`, `LOCALAPPDATA`,
 and XDG data directories commonly survive package removal. The SDK therefore
