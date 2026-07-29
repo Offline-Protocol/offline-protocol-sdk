@@ -597,6 +597,71 @@ fn test_runtime_dedup_update_cannot_poison_an_unrelated_config_update() {
 }
 
 #[test]
+fn test_dedup_update_refuses_the_values_a_binding_caller_can_actually_send() {
+    // Making `update_dedup_config` fallible is a break on three published
+    // binding surfaces, so it has to bind on something a binding caller can
+    // reach. Every Bloom constraint sits behind `use_bloom_filter`, and the
+    // UniFFI `DedupConfig` carries only these two fields — filling the rest
+    // from `Default`, where Bloom is off. So without the checks below the
+    // `[Throws]` declaration would be unreachable over Swift, Kotlin and
+    // Python, while the one hazard those two fields *do* carry stayed open.
+    //
+    // It is a real hazard, not a tidiness one: nothing fails safe here the way
+    // `Deduplicator::with_config` does for the Bloom parameters. At
+    // `max_tracked_messages == 0` the HashMap branch of `mark_seen` evicts on
+    // every insert, so the tracker holds a single id and duplicate suppression
+    // — a replay defence — is effectively off.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let original = protocol.config.reliability.dedup.clone();
+    assert!(
+        !original.use_bloom_filter,
+        "precondition: the shape a binding caller sends has Bloom off, which is \
+         what makes every Bloom check unreachable for it"
+    );
+
+    let mut zero_tracked = original.clone();
+    zero_tracked.max_tracked_messages = 0;
+    assert!(
+        matches!(
+            protocol.update_dedup_config(zero_tracked),
+            Err(Error::InvalidConfiguration(_))
+        ),
+        "a zero max_tracked_messages must be refused even with Bloom off"
+    );
+
+    let mut zero_retention = original.clone();
+    zero_retention.retention_time_secs = 0;
+    assert!(
+        matches!(
+            protocol.update_dedup_config(zero_retention),
+            Err(Error::InvalidConfiguration(_))
+        ),
+        "a zero retention_time_secs must be refused even with Bloom off"
+    );
+
+    assert_eq!(
+        protocol.config.reliability.dedup.max_tracked_messages, original.max_tracked_messages,
+        "a refused update must leave the installed configuration alone"
+    );
+    assert_eq!(
+        protocol.config.reliability.dedup.retention_time_secs, original.retention_time_secs,
+        "a refused update must leave the installed configuration alone"
+    );
+
+    // The same constraint at construction, so the runtime path and the
+    // constructor cannot disagree about what a valid dedup config is.
+    let mut config = create_test_config();
+    config.reliability.dedup.max_tracked_messages = 0;
+    assert!(
+        matches!(
+            OfflineProtocol::new(config),
+            Err(Error::InvalidConfiguration(_))
+        ),
+        "the constructor must refuse what the runtime updater refuses"
+    );
+}
+
+#[test]
 fn test_protocol_start_stop() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 

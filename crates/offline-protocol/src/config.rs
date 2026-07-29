@@ -492,6 +492,30 @@ impl ProtocolConfig {
             ));
         }
 
+        // Checked outside the Bloom guard below, and that placement is the
+        // whole point: these two are the *only* dedup fields the UniFFI
+        // `DedupConfig` carries, so every constraint hidden behind
+        // `use_bloom_filter` is unreachable from a binding caller. A zero here
+        // is not a cosmetic problem — `Deduplicator` fails safe on the Bloom
+        // parameters, but nothing fails safe on these. At
+        // `max_tracked_messages == 0` the HashMap branch of `mark_seen` evicts
+        // on every insert, so the map holds one id and duplicate suppression is
+        // effectively off; `retention_time_secs == 0` expires every entry
+        // immediately for the same net result. Replay suppression is a security
+        // primitive, so it must not be switchable off by a config the SDK
+        // accepts in silence.
+        if self.reliability.dedup.max_tracked_messages == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "reliability.dedup.max_tracked_messages must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.reliability.dedup.retention_time_secs == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "reliability.dedup.retention_time_secs must be greater than 0".to_string(),
+            ));
+        }
+
         if self.reliability.dedup.use_bloom_filter {
             if self.reliability.dedup.bloom_filter_bits == 0 {
                 return Err(crate::Error::InvalidConfiguration(
