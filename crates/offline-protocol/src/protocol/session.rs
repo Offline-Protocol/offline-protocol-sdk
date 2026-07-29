@@ -1,10 +1,10 @@
 //! Session confirmation, welcome lifecycle, and pending session reconciliation.
 
 use super::{
-    internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
-    CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS,
-    WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
+    internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle,
+    RestorableRecord, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
+    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS,
+    REKEY_INTERVAL_SECS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
     WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
@@ -287,9 +287,26 @@ impl OfflineProtocol {
             // dropped and re-bootstrapped as `Pending` rather than failing
             // initialization forever. The send path deliberately keeps the
             // strict loader — see `load_restorable_state_record`.
-            let state = match self.load_session_state_for_restore(&peer_id)? {
-                Some(state) => state,
-                None => self.bootstrap_missing_session_state(&peer_id)?,
+            let state = match self.load_session_state_for_restore(&peer_id) {
+                RestorableRecord::Present(state) => state,
+                RestorableRecord::Absent => self.bootstrap_missing_session_state(&peer_id),
+                // A record is still on disk and could not be read *this*
+                // session. Re-bootstrapping would persist `Pending` straight
+                // over one that may say `Confirmed`, and propagating would fail
+                // `initialize_mls` for as long as that single record stays
+                // unreadable — on an install that then cannot send at all.
+                // Skipping is what leaves the record recoverable: the peer is
+                // simply absent from `confirmed_sessions`, and the send path's
+                // own strict loader (`is_session_confirmed`) still fails closed
+                // for it.
+                RestorableRecord::Unavailable => {
+                    warn!(
+                        session_or_group_id = %peer_id,
+                        "Session state could not be read this session; leaving the record in \
+                         place and treating the session as unconfirmed"
+                    );
+                    continue;
+                }
             };
             if matches!(state, SessionState::Confirmed) {
                 self.confirmed_sessions.insert(peer_id.clone());
@@ -307,15 +324,30 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    pub(super) fn bootstrap_missing_session_state(&self, peer_id: &str) -> Result<SessionState> {
+    /// The state a session with no readable record starts from.
+    ///
+    /// Infallible: the migration write is best effort, like every other
+    /// persistence call on the restore path. It used to propagate, so one
+    /// `StoreFailed` — a full disk, a container the OS has locked — failed
+    /// `initialize_mls` outright and, with `require_encryption` on by default,
+    /// left the install unable to send. `Pending` is the safe answer in memory
+    /// either way, and a launch that can write re-derives the record.
+    pub(super) fn bootstrap_missing_session_state(&self, peer_id: &str) -> SessionState {
         // Legacy session records without explicit state are treated as Pending.
         // Recovery is driven by probe/ack reconciliation, never by implicit inference.
         let restored_state = SessionState::Pending;
-        self.persist_session_state(
+        if let Err(e) = self.persist_session_state(
             peer_id,
             restored_state,
             "initialize_mls_missing_state_migration",
-        )?;
+        ) {
+            warn!(
+                session_or_group_id = %peer_id,
+                error = %e,
+                "Failed to persist the bootstrapped session state; the session is Pending for \
+                 this run and the record is re-derived on the next launch"
+            );
+        }
         info!(
             event = "session_state_transition",
             session_or_group_id = %peer_id,
@@ -325,7 +357,7 @@ impl OfflineProtocol {
             "session_state_transition"
         );
 
-        Ok(restored_state)
+        restored_state
     }
 
     // ========================================================================
