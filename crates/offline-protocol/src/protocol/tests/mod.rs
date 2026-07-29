@@ -5271,9 +5271,34 @@ fn pending_queue_byte_budgets_admit_any_boundary_legal_message() {
     // The relationship the eviction loops depend on: a single message that
     // passed the send boundary always fits an empty queue, so admission can
     // never evict everything and still not fit.
+    //
+    // Measured the way admission measures — `PendingMessage::measure`, i.e.
+    // JSON — not by raw content length. The two are not the same number: JSON
+    // escapes an ASCII control byte to `\u00XX`, so worst-case content is six
+    // times its own length by the time it reaches the budget. Comparing the raw
+    // constants would assert an invariant admission does not actually use.
+    let mut worst_case = PendingMessage {
+        // Every byte escapes to six.
+        content: "\u{1}".repeat(MAX_MESSAGE_CONTENT_BYTES),
+        priority: MessagePriority::Medium,
+        message_id: MessageId::default(),
+        reply_to_msg: None,
+        forwarded_from: None,
+        content_type: ContentType::Text,
+        media_metadata: None,
+        rich: None,
+        queued_at: Utc::now(),
+        serialized_bytes: 0,
+    };
+    worst_case.measure();
+
     assert!(
-        MAX_MESSAGE_CONTENT_BYTES + MAX_RICH_EXTRAS_BYTES < MAX_PENDING_MESSAGE_BYTES_PER_PEER,
-        "one boundary-legal message must fit the per-peer byte budget"
+        worst_case.serialized_bytes + MAX_RICH_EXTRAS_BYTES < MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+        "one boundary-legal message must fit the per-peer byte budget, even \
+         fully JSON-escaped: {} + {} is not under {}",
+        worst_case.serialized_bytes,
+        MAX_RICH_EXTRAS_BYTES,
+        MAX_PENDING_MESSAGE_BYTES_PER_PEER
     );
     assert!(
         MAX_PENDING_MESSAGE_BYTES_PER_PEER <= MAX_PENDING_MESSAGE_BYTES_GLOBAL,
