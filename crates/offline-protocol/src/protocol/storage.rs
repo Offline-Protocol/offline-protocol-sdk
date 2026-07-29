@@ -190,9 +190,19 @@ enum PendingRestore {
 ///
 /// Every walk stops here; what happens to the tail depends on the category:
 ///
-/// - Most **restores** simply *ignore* it — they do not delete it, and because
-///   `list_keys` order is backend-defined a later launch may walk a different
-///   subset.
+/// - Most **restores** simply *ignore* it — they do not delete it. A later
+///   launch still reaches it, but *not* because the listing order varies: all
+///   three built-in providers return their keys sorted, so the walked prefix is
+///   deterministic. It drains because the prefix is **consumed** — restored
+///   entries are flushed, expired, or evicted for capacity, and their records
+///   deleted — so each launch lists fewer keys and the walk reaches further.
+///   The categories restore never consumes ([`storage_keys::BLOCKED_USERS`],
+///   [`storage_keys::BOTH_CREATE_AWAITING_DECRYPT`],
+///   [`storage_keys::WELCOME_LIFECYCLES`]) therefore keep the *same* tail on
+///   every launch, indefinitely. That is tolerable only because this bound sits
+///   far above anything this SDK can legitimately write, so reaching it already
+///   means the store was tampered with — do not carry the "a later launch gets
+///   the rest" argument over to a tighter bound.
 /// - The two **cache** categories (`restore_peer_key_packages`,
 ///   `restore_peer_capabilities`) prune the overflow *inside* the prefix down
 ///   to their own much smaller live caps, so each launch shrinks the store by
