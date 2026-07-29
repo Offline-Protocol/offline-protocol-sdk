@@ -1396,7 +1396,6 @@ impl OfflineProtocol {
         let incoming_bytes = pending.serialized_bytes;
 
         let mut evicted = Vec::new();
-        let mut changed_recipients = HashSet::new();
 
         while self
             .pending_encrypted_messages
@@ -1405,7 +1404,6 @@ impl OfflineProtocol {
         {
             if let Some(message) = self.evict_pending_message_at(recipient, 0) {
                 evicted.push(message);
-                changed_recipients.insert(recipient.to_string());
             } else {
                 break;
             }
@@ -1420,43 +1418,48 @@ impl OfflineProtocol {
                 break;
             };
             peer_bytes = peer_bytes.saturating_sub(message.serialized_bytes);
-            changed_recipients.insert(recipient.to_string());
             evicted.push(message);
         }
 
         while self.total_pending_message_count() >= MAX_PENDING_MESSAGES_GLOBAL {
-            let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
+            let Some((_, message)) = self.evict_oldest_pending_message() else {
                 break;
             };
-            changed_recipients.insert(evicted_recipient);
             evicted.push(message);
         }
 
         let mut global_bytes = self.total_pending_message_bytes();
         while global_bytes.saturating_add(incoming_bytes) > MAX_PENDING_MESSAGE_BYTES_GLOBAL {
-            let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
+            let Some((_, message)) = self.evict_oldest_pending_message() else {
                 break;
             };
             global_bytes = global_bytes.saturating_sub(message.serialized_bytes);
-            changed_recipients.insert(evicted_recipient);
             evicted.push(message);
         }
 
         // Push to in-memory queue first, then persist (the in-memory queue
         // is the source of truth; storage is a crash-recovery backup).
+        //
+        // One record per message, so this writes the incoming entry and nothing
+        // else — the queue it joins is already on disk, entry by entry, and the
+        // entries the caps just evicted are deleted by id rather than rewritten
+        // around. Which recipients were touched no longer matters.
         self.pending_encrypted_messages
             .entry(recipient.to_string())
             .or_default()
             .push(pending);
         self.note_pending_message_expiry(queued_at);
 
-        changed_recipients.remove(recipient);
-        for changed_recipient in changed_recipients {
-            self.persist_or_clear_pending_messages(&changed_recipient);
+        if let Some(queued) = self
+            .pending_encrypted_messages
+            .get(recipient)
+            .and_then(|messages| messages.last())
+        {
+            self.persist_pending_message(recipient, queued);
         }
-        self.persist_pending_messages_for_recipient(recipient);
 
         for message in evicted {
+            self.delete_pending_message_from_storage(&message.message_id);
             self.emit_event(Event::message_failed(
                 message.message_id,
                 "Pending session queue capacity exceeded".to_string(),
@@ -1535,12 +1538,19 @@ impl OfflineProtocol {
         Some((recipient, message))
     }
 
-    pub(super) fn persist_or_clear_pending_messages(&self, recipient: &str) {
-        if self.pending_encrypted_messages.contains_key(recipient) {
-            self.persist_pending_messages_for_recipient(recipient);
-        } else {
-            self.clear_pending_messages_from_storage(recipient);
-        }
+    /// Drops a recipient's whole queue from memory *and* from storage.
+    ///
+    /// The storage half is a delete per entry rather than one whole-queue
+    /// delete, which is the cost side of keying records by message id. Callers
+    /// are the paths where every queued message for a peer becomes undeliverable
+    /// at once — blocking, an aborted session, a session reset.
+    pub(super) fn drop_pending_queue_for_peer(&mut self, recipient: &str) -> Vec<PendingMessage> {
+        let messages = self
+            .pending_encrypted_messages
+            .remove(recipient)
+            .unwrap_or_default();
+        self.delete_pending_messages_from_storage(messages.iter().map(|m| &m.message_id));
+        messages
     }
 
     fn pending_message_expiry(queued_at: DateTime<Utc>, lifetime_ms: u64) -> Option<DateTime<Utc>> {
@@ -1604,13 +1614,13 @@ impl OfflineProtocol {
                 // at queue time) — settle each one so the app isn't left
                 // waiting on ids that will never resolve.
                 for msg in &pending {
+                    self.delete_pending_message_from_storage(&msg.message_id);
                     self.emit_event(Event::message_failed(
                         msg.message_id.clone(),
                         "Recipient blocked".to_string(),
                         0,
                     ));
                 }
-                self.clear_pending_messages_from_storage(recipient);
                 return Ok(());
             }
 
@@ -1651,6 +1661,12 @@ impl OfflineProtocol {
                             0,
                         ));
                     }
+                    // Leaves the queue for good either way, so its record goes
+                    // with it. Only the entries that end up back in `remaining`
+                    // below keep theirs — those were never deleted, and their
+                    // contents have not changed, so re-queuing them costs no
+                    // write at all.
+                    self.delete_pending_message_from_storage(&msg.message_id);
                     continue;
                 }
 
@@ -1728,6 +1744,10 @@ impl OfflineProtocol {
                 match self.dispatch_prepared_message(message) {
                     Ok(id) => {
                         debug!(message_id = %id, "Sent pending message");
+                        // Handed off to the outbox, which persists its own
+                        // record under the same id — so the pending copy has to
+                        // go, or a restart would restore and re-flush it.
+                        self.delete_pending_message_from_storage(&id);
                     }
                     Err(e) => {
                         warn!(message_id = %msg.message_id, error = %e, "Failed to send pending message");
@@ -1737,12 +1757,11 @@ impl OfflineProtocol {
             }
 
             // Messages that re-queued above re-inserted themselves into the
-            // map (and persisted) — merge failures in without clobbering the
-            // entry, and only clear storage when neither survives.
+            // map (and rewrote their own record) — merge failures in without
+            // clobbering the entry. Nothing to clear when neither survives: each
+            // entry that left the queue already took its own record with it.
             if remaining.is_empty() {
-                if !self.pending_encrypted_messages.contains_key(recipient) {
-                    self.clear_pending_messages_from_storage(recipient);
-                }
+                // Nothing to do.
             } else if self.has_terminal_welcome_failure(recipient) {
                 // A prepare failure above came from a terminal Welcome
                 // failure: abort_pending_session_for_peer already cleared
@@ -1750,11 +1769,19 @@ impl OfflineProtocol {
                 // secure_session_failed — re-inserting `remaining` would
                 // resurrect messages the abort just settled, on every
                 // future flush, forever.
+                //
+                // The abort could only delete the records of entries still in
+                // the map, and this flush took the queue out of it at the top,
+                // so these records are still on disk and have to go here or the
+                // next launch restores exactly what the abort settled.
                 debug!(
                     recipient = %recipient,
                     count = remaining.len(),
                     "Dropping flush failures for aborted pending session"
                 );
+                for msg in &remaining {
+                    self.delete_pending_message_from_storage(&msg.message_id);
+                }
             } else {
                 // Every other path into `pending_encrypted_messages` notes the
                 // entry's deadline. This one is a *re*-insertion of entries the
@@ -1785,7 +1812,11 @@ impl OfflineProtocol {
                 for queued_at in merged_deadlines {
                     self.note_pending_message_expiry(queued_at);
                 }
-                self.persist_pending_messages_for_recipient(recipient);
+                // No write: these entries never left the queue durably. Their
+                // records were written at enqueue, were not deleted above, and
+                // their contents have not changed — only their position in the
+                // in-memory queue, which the restore ordering rebuilds from
+                // `queued_at` rather than from storage order.
             }
         }
         Ok(())
@@ -2662,11 +2693,12 @@ impl OfflineProtocol {
                 .is_some_and(Vec::is_empty)
             {
                 self.pending_encrypted_messages.remove(&recipient);
-                self.clear_pending_messages_from_storage(&recipient);
-            } else {
-                self.persist_pending_messages_for_recipient(&recipient);
             }
         }
+        // The survivors' records are untouched, so only the expired entries are
+        // written to storage — one delete each, paired with the settlement
+        // below.
+        self.delete_pending_messages_from_storage(expired_ids.iter());
         self.recompute_next_pending_message_expiry();
 
         for message_id in expired_ids {

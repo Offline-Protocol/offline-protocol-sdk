@@ -3,12 +3,12 @@
 use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECORD_KEY_BYTES};
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
-    PeerCapabilities, PendingMessage, ReceivedKeyPackage, SessionState, WelcomeDeliveryState,
-    WelcomeLifecycleRecord, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
-    MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
-    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
-    MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
-    WELCOME_LIFECYCLE_TTL_SECS,
+    PeerCapabilities, PendingMessage, PendingMessageRecord, ReceivedKeyPackage, SessionState,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, MAX_KEY_PACKAGE_SENT_TO,
+    MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
+    MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER,
+    MAX_PERSISTED_CAPABILITY_VERSIONS, MAX_PROTOCOL_STATE_RECORD_BYTES, MLS_ENVELOPE_COMPACT_V1,
+    RICH_PAYLOAD_V1, WELCOME_LIFECYCLE_TTL_SECS,
 };
 use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
@@ -17,6 +17,7 @@ use offline_protocol_core::{LamportClock, MessageId};
 use offline_protocol_mls::{MlsManager, MlsStorage};
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use serde::de::DeserializeOwned;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
@@ -38,7 +39,11 @@ use zeroize::Zeroizing;
 /// does not cover fails closed and loudly rather than open and quietly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StateCategory {
+    /// The legacy per-recipient pending layout. Read-only now — restore
+    /// migrates it into [`Self::PendingMessageEntries`] — but still sealed,
+    /// because reading it means decrypting it.
     PendingMessages,
+    PendingMessageEntries,
     Outbox,
     MediaDescriptors,
     PeerKeyPackages,
@@ -62,6 +67,7 @@ impl StateCategory {
     pub(crate) fn from_key_type(key_type: &str) -> Option<Self> {
         Some(match key_type {
             storage_keys::PENDING_MESSAGES => Self::PendingMessages,
+            storage_keys::PENDING_MESSAGE_ENTRIES => Self::PendingMessageEntries,
             storage_keys::OUTBOX => Self::Outbox,
             storage_keys::MEDIA_DESCRIPTORS => Self::MediaDescriptors,
             storage_keys::PEER_KEY_PACKAGES => Self::PeerKeyPackages,
@@ -84,8 +90,10 @@ impl StateCategory {
     /// whose values can carry message plaintext, user content, or media key
     /// material:
     ///
-    /// - [`storage_keys::PENDING_MESSAGES`]: original plaintext, plus rich
-    ///   extras that can include `MediaMetadata::encryption_key`/`iv`.
+    /// - [`storage_keys::PENDING_MESSAGE_ENTRIES`] and its legacy
+    ///   per-recipient predecessor [`storage_keys::PENDING_MESSAGES`]: original
+    ///   plaintext, plus rich extras that can include
+    ///   `MediaMetadata::encryption_key`/`iv`.
     /// - [`storage_keys::OUTBOX`]: the outgoing `Message` — ciphertext for
     ///   encrypted sends, but plaintext when the app opted out of encryption,
     ///   and its outer `media_metadata` carries the cloud-media secrets on the
@@ -99,7 +107,10 @@ impl StateCategory {
     /// cannot hide anyway, because the store addresses records by it.
     fn requires_sealing(self) -> bool {
         match self {
-            Self::PendingMessages | Self::Outbox | Self::MediaDescriptors => true,
+            Self::PendingMessages
+            | Self::PendingMessageEntries
+            | Self::Outbox
+            | Self::MediaDescriptors => true,
             Self::PeerKeyPackages
             | Self::PeerCapabilities
             | Self::SessionStates
@@ -292,13 +303,17 @@ const OUTBOX_RESTORE_KEY_CAP: usize = 4 * MAX_OUTBOX_ENTRIES;
 /// live cap the rest of this module uses, so no store this SDK wrote is ever
 /// truncated.
 ///
-/// "Ignored" has to mean ignored *for the session*, not just for the walk. Both
-/// of this category's bounds therefore freeze the recipients they did not reach
-/// (`pending_queues_unreadable_this_session`), because one record holds a
-/// recipient's whole queue and an ordinary enqueue would otherwise write the
-/// in-memory view over it. The outbox and media-descriptor tails need no
-/// equivalent: those are keyed per message and per file, so a later write only
-/// ever touches a different key.
+/// The tail needs no freeze, and once did. Under the per-recipient layout a
+/// record held a whole queue, so an ordinary enqueue for an unwalked recipient
+/// wrote the in-memory view straight over it and the bounds' promise to leave
+/// the tail "for a later launch" had to be enforced for the whole session.
+/// Pending records are now keyed per message id, so a later write only ever
+/// touches a different key — the same reason the outbox and media-descriptor
+/// tails never needed one.
+///
+/// Both passes of the walk share this bound, and only the legacy one can still
+/// open many entries per record; for per-message records it is simply the record
+/// count.
 pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_GLOBAL;
 
 /// Durable deletes one *pool* may fund across a launch.
@@ -360,12 +375,12 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// spends, never refuses a delete mid-record, and stops at the next **record
 /// boundary**, where stopping is safe because the untouched remainder is
 /// exactly what a later launch reads.
-/// [`OfflineProtocol::restore_pending_messages`] spends it that way, and
-/// freezes the recipients it did not reach for the session, the same way it
-/// freezes the tail of its two walk bounds.
-/// [`OfflineProtocol::restore_outbox`] spends it that way too, and needs no
-/// freeze: outbox records are keyed per message id, so a later write only ever
-/// touches a different key.
+/// Both [`OfflineProtocol::restore_pending_messages`] and
+/// [`OfflineProtocol::restore_outbox`] spend it that way, and neither needs to
+/// freeze the tail it stops at: both categories are keyed per message id, so a
+/// later write only ever touches a different key. The pending walk did need a
+/// freeze while its records were keyed per recipient and held a whole queue —
+/// see [`MAX_PENDING_RESTORE_ENTRIES`].
 ///
 /// The two settlement-paired walks get a pool **each**, rather than sharing the
 /// advisory one. Starving an advisory walk defers a cache eviction; starving
@@ -447,10 +462,58 @@ struct RestoredPendingAdmission {
     global_count: usize,
     /// Their total serialized footprint.
     global_bytes: usize,
-    /// Ids dropped by a count or byte cap, to settle as failed.
+    /// Ids dropped by a count or byte cap, to settle as failed and delete.
     capacity_evicted: Vec<MessageId>,
-    /// Recipients whose persisted record no longer matches memory.
-    changed_recipients: std::collections::HashSet<String>,
+}
+
+/// What the two pending-restore passes accumulate before the caps are applied.
+///
+/// The passes read two different layouts and both feed one grouped view, so
+/// this exists to keep them from having to know about each other beyond the
+/// `seen` set.
+#[derive(Default)]
+struct PendingRestoreWalk {
+    /// Recovered entries, grouped by recipient but **not yet ordered** — see
+    /// [`sort_pending_queue`], which the caller applies before the trims.
+    grouped: HashMap<String, Vec<PendingMessage>>,
+    /// Ids recovered from the per-message layout.
+    ///
+    /// The migration pass skips these: it writes the new records before deleting
+    /// the legacy one, so a crash in between leaves a queue present in both
+    /// layouts, and the migrated copy is the one to keep.
+    seen: HashSet<String>,
+    /// Ids of per-message records that were examined and destroyed. Settleable
+    /// individually, because the key is the id.
+    lost_ids: Vec<String>,
+    /// Recipients whose whole legacy queue died inside a record that would not
+    /// open. Only reportable per peer — every id was inside it.
+    lost_recipients: Vec<String>,
+    /// Ids queued for a recipient that is no longer a valid user id.
+    unaddressable: Vec<MessageId>,
+    /// Entries opened across both passes — what [`MAX_PENDING_RESTORE_ENTRIES`]
+    /// actually bounds.
+    examined_entries: usize,
+    entry_bound_reached: bool,
+    prune_bound_reached: bool,
+}
+
+/// Puts a recovered queue back into canonical order: oldest first, ties broken
+/// by message id.
+///
+/// The same comparator `evict_oldest_pending_message` uses, so "index 0 is the
+/// oldest" holds for a restored queue exactly as it does for a live one — which
+/// every oldest-first trim on the restore path depends on.
+///
+/// Necessary because records are keyed per message and come back in whatever
+/// order the store enumerates them, which carries no ordering information at
+/// all. The per-recipient layout got this for free from the array it stored, and
+/// paid for it by rewriting that array on every enqueue.
+fn sort_pending_queue(messages: &mut [PendingMessage]) {
+    messages.sort_by(|left, right| {
+        left.queued_at
+            .cmp(&right.queued_at)
+            .then_with(|| left.message_id.as_str().cmp(&right.message_id.as_str()))
+    });
 }
 
 /// Advisory restore walks that draw on the shared pool, in the order
@@ -1179,7 +1242,7 @@ impl OfflineProtocol {
     /// of this module spends its time enforcing.
     fn unadoptable_record_settlement(key_type: &str, key_id: &str) -> Option<Event> {
         match key_type {
-            storage_keys::OUTBOX => Some(Self::unrecoverable_outbox_settlement(
+            storage_keys::OUTBOX => Some(Self::unrecoverable_message_settlement(
                 key_id,
                 "Outbox entry from a previous version was too large to migrate",
                 0,
@@ -1195,18 +1258,18 @@ impl OfflineProtocol {
         }
     }
 
-    /// The settlement owed for an outbox record that has been destroyed and
-    /// cannot be recovered.
+    /// The settlement owed for a message-keyed record that has been destroyed
+    /// and cannot be recovered — an outbox entry or a pending-queue entry.
     ///
     /// The record key *is* the message id, so the loss is nameable without
     /// opening the record — but only if the key parses. A key that does not is
-    /// reported as the same `pending_state_lost` diagnostic the pending queue
-    /// uses, carrying the raw key, rather than as silence. It should not exist
-    /// (this SDK has only ever keyed the outbox by message id), but "should not
-    /// exist" is exactly the class of record every caller of this is handling,
-    /// and the record is deleted either way. A settlement nobody can act on
-    /// still beats a destruction nobody is told about.
-    fn unrecoverable_outbox_settlement(key_id: &str, reason: &str, attempts: u32) -> Event {
+    /// reported as a `pending_state_lost` diagnostic carrying the raw key,
+    /// rather than as silence. It should not exist (this SDK keys both
+    /// categories by message id), but "should not exist" is exactly the class of
+    /// record every caller of this is handling, and the record is deleted either
+    /// way. A settlement nobody can act on still beats a destruction nobody is
+    /// told about.
+    fn unrecoverable_message_settlement(key_id: &str, reason: &str, attempts: u32) -> Event {
         MessageId::from_str(key_id).map_or_else(
             |_| {
                 Event::convergence_diag(
@@ -1347,94 +1410,125 @@ impl OfflineProtocol {
     // PENDING MESSAGES PERSISTENCE
     // ========================================================================
 
-    /// Persists the in-memory pending message queue for a recipient to storage.
+    /// Persists one queued message, keyed by its own id.
     ///
-    /// Uses `pending_encrypted_messages` as the source of truth rather than
-    /// loading from storage first. The caller must push to the in-memory
-    /// queue before calling this method.
-    pub(crate) fn persist_pending_messages_for_recipient(&self, recipient: &str) {
-        if let Some(messages) = self.pending_encrypted_messages.get(recipient) {
-            self.persist_pending_messages_snapshot(recipient, messages);
-        }
-    }
-
-    pub(crate) fn persist_pending_messages_snapshot(
-        &self,
-        recipient: &str,
-        messages: &[PendingMessage],
-    ) {
+    /// Best-effort and infallible, like [`Self::persist_outbox_entry`]: the send
+    /// path cannot propagate storage errors, so a failed write is logged and
+    /// swallowed. The message still lives in the in-memory queue and still
+    /// flushes when the session establishes; it just will not survive a restart.
+    ///
+    /// Re-persisting an id already on disk is an ordinary overwrite of its own
+    /// record, which is what makes the flush-time re-queue path idempotent.
+    pub(crate) fn persist_pending_message(&self, recipient: &str, message: &PendingMessage) {
         let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-
-        // One record holds this recipient's *whole* queue, so writing the
-        // in-memory view over a record restore could not read would destroy
-        // every message in it — ids the app is still holding, settled to no
-        // one. Behave as if no storage were configured for this recipient
-        // until a later launch can read the record and settle it properly.
-        if self
-            .pending_queues_unreadable_this_session
-            .contains(recipient)
-        {
-            warn!(
-                recipient = %recipient,
-                "Not persisting pending messages over a queue that could not be read this session"
-            );
-            return;
-        }
-
-        if messages.is_empty() {
-            if let Err(e) = storage.delete(storage_keys::PENDING_MESSAGES, recipient) {
-                warn!(
-                    recipient = %recipient,
-                    error = %e,
-                    "Failed to clear persisted pending messages"
-                );
-            }
-            return;
-        }
-
-        match serde_json::to_vec(messages) {
+        let record = PendingMessageRecord {
+            recipient: recipient.to_string(),
+            message: message.clone(),
+        };
+        match serde_json::to_vec(&record) {
             Ok(data) => {
                 if let Err(e) = self.write_state_record(
                     storage.as_ref(),
-                    storage_keys::PENDING_MESSAGES,
-                    recipient,
+                    storage_keys::PENDING_MESSAGE_ENTRIES,
+                    &record.message.message_id.as_str(),
                     &data,
                 ) {
-                    warn!(recipient = %recipient, error = %e, "Failed to persist pending messages");
+                    warn!(
+                        recipient = %recipient,
+                        message_id = %record.message.message_id,
+                        error = %e,
+                        "Failed to persist pending message"
+                    );
                 }
             }
             Err(e) => {
-                warn!(recipient = %recipient, error = %e, "Failed to serialize pending messages");
+                warn!(
+                    recipient = %recipient,
+                    message_id = %record.message.message_id,
+                    error = %e,
+                    "Failed to serialize pending message"
+                );
             }
         }
     }
 
-    /// Loads pending messages for a recipient from storage.
+    /// Removes one persisted pending message.
     ///
-    /// Production restore goes through [`Self::load_pending_messages_detailed`]
-    /// instead: collapsing "nothing queued" into "the queue is gone" is exactly
-    /// the distinction restore has to act on.
+    /// Best-effort and logged rather than swallowed, for the reason the old
+    /// whole-queue clear was: a delete that silently failed leaves a record the
+    /// next launch restores and re-flushes. The message carries its original id
+    /// so receivers dedup it, but the sender re-emits `MessageSent` for traffic
+    /// it already delivered, and nothing would say why.
+    pub(crate) fn delete_pending_message_from_storage(&self, message_id: &MessageId) {
+        let Some(storage) = &self.protocol_state_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::PENDING_MESSAGE_ENTRIES, &message_id.as_str())
+        {
+            warn!(
+                message_id = %message_id,
+                error = %e,
+                "Failed to clear persisted pending message"
+            );
+        }
+    }
+
+    /// Removes the persisted copies of a batch of queued messages.
+    pub(crate) fn delete_pending_messages_from_storage<'a>(
+        &self,
+        message_ids: impl IntoIterator<Item = &'a MessageId>,
+    ) {
+        for message_id in message_ids {
+            self.delete_pending_message_from_storage(message_id);
+        }
+    }
+
+    /// Reassembles one recipient's persisted queue from the per-message
+    /// records, in canonical queue order.
+    ///
+    /// Test-only, and deliberately the expensive spelling — it lists the whole
+    /// category and filters. Production restore reads every record once and
+    /// groups them in a single pass ([`Self::restore_pending_messages`]);
+    /// nothing on the runtime path ever needs one peer's queue *from storage*,
+    /// because the in-memory map is the source of truth.
     #[cfg(test)]
     pub(crate) fn load_pending_messages_from_storage(
         &self,
         recipient: &str,
     ) -> Option<Vec<PendingMessage>> {
-        match self.load_pending_messages_detailed(recipient, None) {
-            PendingRestore::Restored(mut messages) => {
-                for message in &mut messages {
-                    message.measure();
-                }
-                Some(messages)
-            }
-            PendingRestore::Absent | PendingRestore::Lost | PendingRestore::Unavailable => None,
+        let storage = self.protocol_state_storage.as_ref()?;
+        let keys =
+            Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_MESSAGE_ENTRIES).ok()?;
+        let mut messages: Vec<PendingMessage> = keys
+            .iter()
+            .filter_map(|key| {
+                let data = self
+                    .read_state_record_detailed(
+                        storage.as_ref(),
+                        storage_keys::PENDING_MESSAGE_ENTRIES,
+                        key,
+                    )
+                    .ok()?
+                    .into_bytes()?;
+                let record = serde_json::from_slice::<PendingMessageRecord>(&data).ok()?;
+                (record.recipient == recipient).then_some(record.message)
+            })
+            .collect();
+        if messages.is_empty() {
+            return None;
         }
+        sort_pending_queue(&mut messages);
+        for message in &mut messages {
+            message.measure();
+        }
+        Some(messages)
     }
 
-    /// Loads a recipient's pending queue, distinguishing "nothing queued" from
-    /// "a queue existed and its contents are gone" from "a queue exists and
-    /// cannot be read this session".
+    /// Loads a recipient's queue from the **legacy** per-recipient record,
+    /// distinguishing "nothing queued" from "a queue existed and its contents
+    /// are gone" from "a queue exists and cannot be read this session".
     ///
     /// Entries come back *unmeasured*: the derived `serialized_bytes` is
     /// deliberately not persisted, and measuring re-serializes every entry, so
@@ -1450,7 +1544,7 @@ impl OfflineProtocol {
     /// `pending_state_lost` the caller emits, and settling a record still
     /// sitting on disk is a claim the next launch contradicts. The caller stops
     /// walking once the budget reads spent instead.
-    fn load_pending_messages_detailed(
+    fn load_legacy_pending_queue(
         &self,
         recipient: &str,
         mut budget: Option<&mut PruneBudget<'_>>,
@@ -1489,35 +1583,20 @@ impl OfflineProtocol {
         PendingRestore::Restored(messages)
     }
 
-    /// Removes pending messages for a recipient from storage.
+    /// Drops a legacy per-recipient record once its entries have been migrated
+    /// into the per-message layout, or once they have been settled.
     ///
-    /// Refuses for a recipient whose queue could not be read this session: the
-    /// delete would destroy messages nothing has been able to name yet, which
-    /// is the same unsettled loss [`Self::persist_pending_messages_snapshot`]
-    /// refuses to cause by overwriting.
-    pub(crate) fn clear_pending_messages_from_storage(&self, recipient: &str) {
-        if self
-            .pending_queues_unreadable_this_session
-            .contains(recipient)
-        {
-            warn!(
-                recipient = %recipient,
-                "Not clearing a persisted pending queue that could not be read this session"
-            );
-            return;
-        }
+    /// Only ever called with a record this session has already *read*, which is
+    /// what makes it safe without the freeze the old whole-queue clear needed:
+    /// nothing outside the migration walk touches this category any more, so a
+    /// record no walk reached is simply read by a later launch.
+    fn delete_legacy_pending_queue(&self, recipient: &str) {
         if let Some(storage) = &self.protocol_state_storage {
-            // Logged, not swallowed, like every other persistence failure in
-            // this module. A clear that silently failed leaves a record the
-            // next launch restores and re-flushes: the messages carry their
-            // original ids so receivers dedup them, but the sender re-emits
-            // `MessageSent` for traffic it already delivered, and nothing
-            // would say why.
             if let Err(e) = storage.delete(storage_keys::PENDING_MESSAGES, recipient) {
                 warn!(
                     recipient = %recipient,
                     error = %e,
-                    "Failed to clear persisted pending messages"
+                    "Failed to clear migrated legacy pending queue"
                 );
             }
         }
@@ -1543,6 +1622,12 @@ impl OfflineProtocol {
     /// 3. **Per-peer byte trim**, oldest-first like every other eviction here.
     /// 4. **Global count and byte trim**, which can evict from a recipient
     ///    admitted on an earlier iteration, hence the shared accumulator.
+    ///
+    /// Every entry this drops goes into `capacity_evicted`, and the caller both
+    /// settles those ids and deletes their records. Under the per-recipient
+    /// layout the trim also had to *rewrite* the survivors' record, so it
+    /// tracked which recipients had changed; now a dropped entry is just its own
+    /// record, and the survivors' records are already correct.
     fn admit_restored_pending_queue(
         &mut self,
         recipient: &str,
@@ -1554,7 +1639,6 @@ impl OfflineProtocol {
             admission
                 .capacity_evicted
                 .extend(messages.drain(..overflow).map(|message| message.message_id));
-            admission.changed_recipients.insert(recipient.to_string());
         }
         for message in &mut messages {
             message.measure();
@@ -1572,7 +1656,6 @@ impl OfflineProtocol {
             dropped_for_bytes += 1;
         }
         if dropped_for_bytes > 0 {
-            admission.changed_recipients.insert(recipient.to_string());
             warn!(
                 recipient = %recipient,
                 dropped = dropped_for_bytes,
@@ -1587,31 +1670,45 @@ impl OfflineProtocol {
             admission.global_bytes += peer_bytes;
             self.pending_encrypted_messages
                 .insert(recipient.to_string(), messages);
-        } else {
-            // Trimmed to nothing. The recipient was just read successfully, so
-            // it is not frozen and this clear cannot be the destructive kind.
-            self.clear_pending_messages_from_storage(recipient);
         }
 
         while admission.global_count > MAX_PENDING_MESSAGES_GLOBAL
             || admission.global_bytes > MAX_PENDING_MESSAGE_BYTES_GLOBAL
         {
-            let Some((evicted_recipient, message)) = self.evict_oldest_pending_message() else {
+            let Some((_, message)) = self.evict_oldest_pending_message() else {
                 break;
             };
             admission.global_count = admission.global_count.saturating_sub(1);
             admission.global_bytes = admission
                 .global_bytes
                 .saturating_sub(message.serialized_bytes);
-            admission.changed_recipients.insert(evicted_recipient);
             admission.capacity_evicted.push(message.message_id);
         }
     }
 
     /// Restores all pending messages from storage on startup.
     ///
-    /// This should be called after initializing storage to recover
-    /// any messages that were pending when the app was terminated.
+    /// Two passes over two layouts:
+    ///
+    /// 1. **Per-message records** ([`storage_keys::PENDING_MESSAGE_ENTRIES`]),
+    ///    which is what this SDK writes. Each is one queued message keyed by its
+    ///    own id, so a record that will not open still *names* the message it
+    ///    destroyed and is settled with a `message_failed` for exactly that id —
+    ///    the reason the layout exists.
+    /// 2. **Legacy per-recipient records** ([`storage_keys::PENDING_MESSAGES`]),
+    ///    migrated forward: read the queue, write each entry as its own record,
+    ///    then drop the legacy one. A loss there is still only reportable per
+    ///    peer, because every id was inside the record that would not open.
+    ///
+    /// The migration writes before it deletes, so a crash in between leaves the
+    /// entries in *both* layouts rather than neither. Pass 1 runs first and
+    /// claims those ids, so pass 2 skips them and the next launch converges.
+    ///
+    /// Neither pass needs the freeze the per-recipient walk did. Nothing outside
+    /// this walk writes or deletes the legacy category any more, and a
+    /// per-message record is only ever written or deleted under its own id — so
+    /// an unwalked record is simply read by a later launch, which is the same
+    /// argument [`Self::restore_outbox`] makes for the outbox.
     ///
     /// `allowance` is this walk's own pool, built by the launch — see
     /// [`PruneAllowance::pool`] and [`MAX_RESTORE_PRUNE_DELETES`].
@@ -1623,199 +1720,60 @@ impl OfflineProtocol {
             return Ok(());
         };
 
-        let mut recipients =
-            Self::list_state_keys(storage.as_ref(), storage_keys::PENDING_MESSAGES)
-                .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
-        let listed = recipients.len();
-
-        // Rebuilt from this pass: a recipient is frozen on disk only while
-        // *this* restore could not read — or did not reach — its record.
-        self.pending_queues_unreadable_this_session.clear();
-
-        // Kept apart from the admission accumulator's `capacity_evicted` so the
-        // two reasons the app sees are the two things that actually happened.
-        let mut unaddressable = Vec::new();
-        let mut lost_recipients = Vec::new();
-        let mut admission = RestoredPendingAdmission::default();
-        // Entries opened so far, which is what actually bounds the work here —
-        // see [`MAX_PENDING_RESTORE_ENTRIES`].
-        let mut examined_entries = 0usize;
-        let mut entry_bound_reached = false;
-        // The third bound, and the one that counts *durable deletes* rather
-        // than reads. This walk is the widest in the module — its record bound
-        // is the same `MAX_RESTORE_KEYS_PER_CATEGORY` the budgeted cache walks
-        // use, eight times looser than the outbox's — and every record it
-        // cannot open costs a provider delete that flushes the containing
-        // directory (`F_FULLFSYNC` on iOS, a full device barrier). A
-        // regenerated record key makes *every* pending record unreadable at
-        // once, since this is a sealed category, and a queue lost that way
-        // contributes no entries, so `MAX_PENDING_RESTORE_ENTRIES` never binds
-        // in exactly that case.
-        //
-        // Counting rather than refusing: each of those deletes is paired with
-        // the `pending_state_lost` emitted below, and a settlement for a record
-        // still on disk is a claim the next launch contradicts. So the walk
-        // spends its allowance, then stops at the next *record boundary* — the
-        // one place stopping is safe — and freezes the rest.
+        // Counting rather than refusing: every delete either pass issues is
+        // paired with a settlement, and a settlement for a record still on disk
+        // is a claim the next launch contradicts. So the walk spends its
+        // allowance, then stops at the next *record boundary* — the one place
+        // stopping is safe — and leaves the rest for a later launch.
         //
         // Its own pool rather than the launch-wide advisory one: being starved
-        // here means every diagnostic this walk owes is deferred, which must
-        // not be a consequence of a key-package flood in an unrelated category.
-        // The pool is passed in rather than built here — see
-        // `PruneAllowance::pool`.
+        // here means every diagnostic this walk owes is deferred, which must not
+        // be a consequence of a key-package flood in an unrelated category. The
+        // pool is passed in rather than built here — see `PruneAllowance::pool`.
         let mut budget = allowance.counting();
-        let mut prune_bound_reached = false;
-        // How far the walk got. Everything from here on is the tail none of the
-        // bounds below let this pass reach, and is frozen for the session — see
-        // the freeze right after the loop.
-        let mut walked = 0usize;
-        while walked < recipients.len() {
-            if walked >= MAX_RESTORE_KEYS_PER_CATEGORY {
-                break;
-            }
-            if examined_entries >= MAX_PENDING_RESTORE_ENTRIES {
-                entry_bound_reached = true;
-                break;
-            }
-            if budget.is_spent() {
-                prune_bound_reached = true;
-                break;
-            }
-            let recipient = recipients[walked].clone();
-            walked += 1;
-            if Self::validate_outbound_recipient(&recipient).is_err() {
-                // The queue is unaddressable — nothing can ever be sent to this
-                // recipient again — so it is dropped, but the app still holds
-                // ids from `send_message*` that must be settled. The record has
-                // to be read *before* deleting it to recover them, and the read
-                // gets the same three-way treatment as every other restore.
-                match self.load_pending_messages_detailed(&recipient, Some(&mut budget)) {
-                    PendingRestore::Restored(messages) => {
-                        examined_entries = examined_entries.saturating_add(messages.len());
-                        unaddressable.extend(messages.into_iter().map(|m| m.message_id));
-                    }
-                    // Listed but no longer there. Nothing was destroyed, so
-                    // nothing is owed — and the delete below would charge the
-                    // budget, log a destruction, and make a provider round trip
-                    // for a record that is already gone.
-                    PendingRestore::Absent => continue,
-                    // Already examined and destroyed by the read; the ids went
-                    // with it, so report the loss per recipient rather than
-                    // letting an unaddressable queue vanish more quietly than
-                    // an addressable one would.
-                    PendingRestore::Lost => {
-                        lost_recipients.push(recipient);
-                        continue;
-                    }
-                    // Intact on disk, just unreadable this session. Deleting it
-                    // now would destroy ids nothing can name; a later launch
-                    // reads the record and settles them properly. Being
-                    // unaddressable is not urgent — nothing will be sent from
-                    // this queue either way.
-                    PendingRestore::Unavailable => {
-                        warn!(
-                            recipient = %recipient,
-                            "Pending queue for an invalid recipient could not be read this session; leaving it in place"
-                        );
-                        self.pending_queues_unreadable_this_session
-                            .insert(recipient);
-                        continue;
-                    }
-                }
-                warn!(recipient = %recipient, "Dropping persisted pending queue for an invalid recipient");
-                // Charged, never refused: the settlement this delete pairs with
-                // was already recorded above, so the record has to go with it.
-                budget.claim();
-                let _ = storage.delete(storage_keys::PENDING_MESSAGES, &recipient);
-                continue;
-            }
-            let messages = match self.load_pending_messages_detailed(&recipient, Some(&mut budget))
-            {
-                PendingRestore::Restored(messages) => messages,
-                PendingRestore::Absent => continue,
-                // A queue existed and its contents are gone. The ids are inside
-                // the record we could not open, so they cannot be settled
-                // individually — surface the loss per recipient instead of
-                // letting it read as "there was nothing queued".
-                PendingRestore::Lost => {
-                    lost_recipients.push(recipient);
-                    continue;
-                }
-                // Not readable this session, but still on disk. Say nothing: a
-                // later launch is expected to restore it, and a loss diagnostic
-                // now would be a claim the next launch contradicts.
-                PendingRestore::Unavailable => {
-                    warn!(
-                        recipient = %recipient,
-                        "Persisted pending queue could not be read this session; leaving it in place"
-                    );
-                    // Leaving the record on disk only helps if nothing
-                    // overwrites it before a later launch can read it. This
-                    // recipient's record is frozen for the session.
-                    self.pending_queues_unreadable_this_session
-                        .insert(recipient);
-                    continue;
-                }
-            };
-            examined_entries = examined_entries.saturating_add(messages.len());
+        let mut walk = PendingRestoreWalk::default();
+
+        self.restore_pending_message_entries(storage.as_ref(), &mut budget, &mut walk)?;
+        self.migrate_legacy_pending_queues(storage.as_ref(), &mut budget, &mut walk)?;
+
+        if walk.entry_bound_reached {
+            warn!(
+                examined = walk.examined_entries,
+                cap = MAX_PENDING_RESTORE_ENTRIES,
+                "Pending message store held more queued entries than one restore may walk; \
+                 the remainder is left on disk for a later launch"
+            );
+        }
+        if walk.prune_bound_reached {
+            warn!(
+                deleted = budget.spent,
+                budget = MAX_RESTORE_PRUNE_DELETES,
+                "Pending message restore spent its per-launch delete budget; the remainder \
+                 is left on disk for a later launch"
+            );
+        }
+
+        // Records come back in whatever order the store enumerates them, which
+        // carries no ordering information at all, so the canonical order has to
+        // be re-imposed before the oldest-first trims below mean anything.
+        // Recipients are visited in a stable order for the same reason: the
+        // global caps evict across peers, so a map's iteration order would make
+        // *which* entries survive a coin flip.
+        let mut admission = RestoredPendingAdmission::default();
+        let mut grouped: Vec<(String, Vec<PendingMessage>)> = walk.grouped.into_iter().collect();
+        grouped.sort_by(|left, right| left.0.cmp(&right.0));
+        for (recipient, mut messages) in grouped {
+            sort_pending_queue(&mut messages);
             self.admit_restored_pending_queue(&recipient, messages, &mut admission);
         }
 
         let RestoredPendingAdmission {
-            capacity_evicted,
-            changed_recipients,
-            ..
+            capacity_evicted, ..
         } = admission;
 
-        // Leaving the tail on disk is only worth anything if nothing this
-        // session can then destroy it. A pending record holds a recipient's
-        // *whole* queue, so an ordinary enqueue for an unwalked recipient
-        // persists the in-memory view — one message — straight over it, and
-        // `block_user` / the aborted-session path delete it outright. Either
-        // way the ids inside a record nobody has opened are gone, settled to no
-        // one: exactly the loss the `Unavailable` freeze exists to prevent, and
-        // the walk bounds are the one path into it that had no freeze.
-        //
-        // Freezing is per recipient and per session, so the cost is that a new
-        // send to an unwalked peer stays in memory for this run; the next
-        // launch re-lists and may walk a different subset. Draining moves the
-        // ids the listing already materialized, so this adds no allocation the
-        // walk had not already paid for.
-        let unwalked = recipients.len().saturating_sub(walked);
-        self.pending_queues_unreadable_this_session
-            .extend(recipients.drain(walked..));
-
-        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
-            warn!(
-                listed,
-                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
-                frozen = unwalked,
-                "Pending message store listed more recipients than any legitimate run can \
-                 produce; the tail is left on disk and frozen for this session"
-            );
-        }
-        if entry_bound_reached {
-            warn!(
-                examined = examined_entries,
-                cap = MAX_PENDING_RESTORE_ENTRIES,
-                frozen = unwalked,
-                "Pending message store held more queued entries than one restore may walk; \
-                 the remaining recipients are left on disk and frozen for this session"
-            );
-        }
-        if prune_bound_reached {
-            warn!(
-                deleted = budget.spent,
-                budget = MAX_RESTORE_PRUNE_DELETES,
-                frozen = unwalked,
-                "Pending message restore spent its per-launch delete budget; the remaining \
-                 recipients are left on disk and frozen for this session"
-            );
-        }
-
-        for recipient in changed_recipients {
-            self.persist_or_clear_pending_messages(&recipient);
-        }
+        // Every id the caps dropped had its own record, so the record goes with
+        // the settlement rather than the survivors being rewritten around it.
+        self.delete_pending_messages_from_storage(capacity_evicted.iter());
         self.settle_restored_message_failures(capacity_evicted.into_iter().map(|message_id| {
             Event::message_failed(
                 message_id,
@@ -1823,17 +1781,25 @@ impl OfflineProtocol {
                 0,
             )
         }));
-        self.settle_restored_message_failures(unaddressable.into_iter().map(|message_id| {
+        self.settle_restored_message_failures(walk.unaddressable.into_iter().map(|message_id| {
             Event::message_failed(
                 message_id,
                 "Recipient is not a valid user ID; queued message cannot be delivered".to_string(),
                 0,
             )
         }));
-        for recipient in &lost_recipients {
-            warn!(recipient = %recipient, "Persisted pending queue was unreadable and has been dropped");
+        self.settle_restored_message_failures(walk.lost_ids.iter().map(|key| {
+            Self::unrecoverable_message_settlement(
+                key,
+                "Queued message awaiting session establishment could not be recovered \
+                 from protocol-state storage",
+                0,
+            )
+        }));
+        for recipient in &walk.lost_recipients {
+            warn!(recipient = %recipient, "Persisted legacy pending queue was unreadable and has been dropped");
         }
-        self.settle_restored_message_failures(lost_recipients.into_iter().map(|recipient| {
+        self.settle_restored_message_failures(walk.lost_recipients.into_iter().map(|recipient| {
             Event::convergence_diag(
                 "pending_state_lost".to_string(),
                 recipient,
@@ -1845,6 +1811,259 @@ impl OfflineProtocol {
 
         self.recompute_next_pending_message_expiry();
         self.cleanup_expired_pending_messages();
+        Ok(())
+    }
+
+    /// Reads the per-message pending records, grouping them by recipient.
+    ///
+    /// Shaped like [`Self::restore_outbox`], because it is now the same problem:
+    /// one record per id, each loss individually settleable, no freeze.
+    fn restore_pending_message_entries(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        budget: &mut PruneBudget<'_>,
+        walk: &mut PendingRestoreWalk,
+    ) -> Result<()> {
+        let keys = Self::list_state_keys(storage, storage_keys::PENDING_MESSAGE_ENTRIES)
+            .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
+        let listed = keys.len();
+
+        for key in keys.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+            if walk.examined_entries >= MAX_PENDING_RESTORE_ENTRIES {
+                walk.entry_bound_reached = true;
+                break;
+            }
+            if budget.is_spent() {
+                walk.prune_bound_reached = true;
+                break;
+            }
+            let data = match self.read_state_record_detailed_budgeted(
+                storage,
+                storage_keys::PENDING_MESSAGE_ENTRIES,
+                &key,
+                Some(budget),
+            ) {
+                Ok(StateRecord::Present(data)) => data,
+                Ok(StateRecord::Missing) => continue,
+                // Examined and destroyed. The key *is* the id the application is
+                // holding, so unlike the legacy layout this is settleable on its
+                // own without having opened the record.
+                Ok(StateRecord::Unreadable) => {
+                    warn!(message_id = %key, "Dropping unreadable pending message");
+                    walk.lost_ids.push(key);
+                    continue;
+                }
+                // Still on disk and probably intact — the record key is not
+                // loaded, or the backend refused this read. Settling it now would
+                // be a terminal answer the next launch overturns by restoring the
+                // entry and flushing it.
+                Ok(StateRecord::Unavailable) | Err(_) => {
+                    warn!(
+                        message_id = %key,
+                        "Pending message could not be read this session; leaving it in place"
+                    );
+                    continue;
+                }
+            };
+            walk.examined_entries = walk.examined_entries.saturating_add(1);
+
+            let record = match serde_json::from_slice::<PendingMessageRecord>(&data) {
+                Ok(record) => record,
+                Err(e) => {
+                    warn!(message_id = %key, error = %e, "Dropping corrupted pending message");
+                    // Charged, never refused: the settlement below is already
+                    // owed, so the record has to go with it.
+                    budget.claim();
+                    let _ = storage.delete(storage_keys::PENDING_MESSAGE_ENTRIES, &key);
+                    walk.lost_ids.push(key);
+                    continue;
+                }
+            };
+
+            // A record whose id disagrees with its key is tampered or corrupt,
+            // and is worse than merely unparseable: it is addressed under one id
+            // and settles under another, so nothing on the runtime path could
+            // ever delete it. Treat it as the loss it is.
+            if record.message.message_id.as_str() != key {
+                warn!(
+                    message_id = %key,
+                    record_id = %record.message.message_id,
+                    "Dropping pending message whose record does not name its own key"
+                );
+                budget.claim();
+                let _ = storage.delete(storage_keys::PENDING_MESSAGE_ENTRIES, &key);
+                walk.lost_ids.push(key);
+                continue;
+            }
+
+            if Self::validate_outbound_recipient(&record.recipient).is_err() {
+                // Nothing can ever be sent to this recipient again, so the record
+                // goes — but the app still holds the id from `send_message*` and
+                // it has to be settled.
+                warn!(
+                    message_id = %key,
+                    "Dropping persisted pending message for an invalid recipient"
+                );
+                budget.claim();
+                let _ = storage.delete(storage_keys::PENDING_MESSAGE_ENTRIES, &key);
+                walk.unaddressable.push(record.message.message_id);
+                continue;
+            }
+
+            walk.seen.insert(key);
+            walk.grouped
+                .entry(record.recipient)
+                .or_default()
+                .push(record.message);
+        }
+
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Pending message store listed more records than any legitimate run can \
+                 produce; the tail is left on disk for a later launch"
+            );
+        }
+        Ok(())
+    }
+
+    /// Migrates legacy per-recipient queues into per-message records.
+    ///
+    /// One-shot upgrade scaffolding, like `adopt_legacy_protocol_state`: once a
+    /// launch has walked every legacy record the listing comes back empty and
+    /// this costs one `list_keys`. Retire it on the same trigger as that sweep —
+    /// when the oldest supported upgrade path starts at or after the release
+    /// that introduced the per-message layout, not merely one release later.
+    fn migrate_legacy_pending_queues(
+        &mut self,
+        storage: &dyn ProtocolStateStorage,
+        budget: &mut PruneBudget<'_>,
+        walk: &mut PendingRestoreWalk,
+    ) -> Result<()> {
+        let recipients = Self::list_state_keys(storage, storage_keys::PENDING_MESSAGES)
+            .map_err(|e| Error::Other(format!("Failed to list legacy pending messages: {}", e)))?;
+        if recipients.is_empty() {
+            return Ok(());
+        }
+        let listed = recipients.len();
+
+        for recipient in recipients.into_iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+            if walk.examined_entries >= MAX_PENDING_RESTORE_ENTRIES {
+                walk.entry_bound_reached = true;
+                break;
+            }
+            if budget.is_spent() {
+                walk.prune_bound_reached = true;
+                break;
+            }
+            if Self::validate_outbound_recipient(&recipient).is_err() {
+                // The queue is unaddressable — nothing can ever be sent to this
+                // recipient again — so it is dropped, but the app still holds
+                // ids from `send_message*` that must be settled. The record has
+                // to be read *before* deleting it to recover them, and the read
+                // gets the same three-way treatment as every other restore.
+                match self.load_legacy_pending_queue(&recipient, Some(budget)) {
+                    PendingRestore::Restored(messages) => {
+                        walk.examined_entries =
+                            walk.examined_entries.saturating_add(messages.len());
+                        walk.unaddressable
+                            .extend(messages.into_iter().map(|m| m.message_id));
+                    }
+                    // Listed but no longer there. Nothing was destroyed, so
+                    // nothing is owed — and the delete below would charge the
+                    // budget, log a destruction, and make a provider round trip
+                    // for a record that is already gone.
+                    PendingRestore::Absent => continue,
+                    // Already examined and destroyed by the read; the ids went
+                    // with it, so report the loss per recipient rather than
+                    // letting an unaddressable queue vanish more quietly than an
+                    // addressable one would.
+                    PendingRestore::Lost => {
+                        walk.lost_recipients.push(recipient);
+                        continue;
+                    }
+                    // Intact on disk, just unreadable this session. Deleting it
+                    // now would destroy ids nothing can name; a later launch
+                    // reads the record and settles them properly.
+                    PendingRestore::Unavailable => {
+                        warn!(
+                            recipient = %recipient,
+                            "Legacy pending queue for an invalid recipient could not be read this session; leaving it in place"
+                        );
+                        continue;
+                    }
+                }
+                warn!(recipient = %recipient, "Dropping legacy pending queue for an invalid recipient");
+                // Charged, never refused: the settlement this delete pairs with
+                // was already recorded above, so the record has to go with it.
+                budget.claim();
+                self.delete_legacy_pending_queue(&recipient);
+                continue;
+            }
+
+            let messages = match self.load_legacy_pending_queue(&recipient, Some(budget)) {
+                PendingRestore::Restored(messages) => messages,
+                PendingRestore::Absent => continue,
+                // A queue existed and its contents are gone. The ids are inside
+                // the record we could not open, so they cannot be settled
+                // individually — surface the loss per recipient instead of
+                // letting it read as "there was nothing queued". This is the
+                // reporting the per-message layout exists to improve on, and it
+                // cannot be improved retroactively.
+                PendingRestore::Lost => {
+                    walk.lost_recipients.push(recipient);
+                    continue;
+                }
+                // Not readable this session, but still on disk. Say nothing: a
+                // later launch is expected to read it, and a loss diagnostic now
+                // would be a claim the next launch contradicts.
+                PendingRestore::Unavailable => {
+                    warn!(
+                        recipient = %recipient,
+                        "Legacy pending queue could not be read this session; leaving it in place"
+                    );
+                    continue;
+                }
+            };
+            walk.examined_entries = walk.examined_entries.saturating_add(messages.len());
+
+            // Write the new records *before* dropping the legacy one, so a crash
+            // in between leaves the entries in both layouts rather than neither.
+            let mut migrated = 0usize;
+            for message in messages {
+                let message_id = message.message_id.as_str();
+                if walk.seen.contains(&message_id) {
+                    // Already recovered from the per-message layout by the pass
+                    // before this one — a previous launch migrated this queue and
+                    // died before the delete below.
+                    continue;
+                }
+                self.persist_pending_message(&recipient, &message);
+                walk.seen.insert(message_id);
+                walk.grouped
+                    .entry(recipient.clone())
+                    .or_default()
+                    .push(message);
+                migrated = migrated.saturating_add(1);
+            }
+            budget.claim();
+            self.delete_legacy_pending_queue(&recipient);
+            info!(
+                recipient = %recipient,
+                migrated,
+                "Migrated legacy pending queue to per-message records"
+            );
+        }
+
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Legacy pending message store listed more recipients than any legitimate run \
+                 can produce; the tail is left on disk for a later launch"
+            );
+        }
         Ok(())
     }
 
@@ -3125,7 +3344,7 @@ impl OfflineProtocol {
         }
 
         self.settle_restored_message_failures(unrecoverable.iter().map(|key| {
-            Self::unrecoverable_outbox_settlement(
+            Self::unrecoverable_message_settlement(
                 key,
                 "Outbox entry could not be recovered from protocol-state storage",
                 0,

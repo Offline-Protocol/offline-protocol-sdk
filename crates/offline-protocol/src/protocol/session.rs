@@ -791,8 +791,7 @@ impl OfflineProtocol {
         peer_id: &str,
         reason: crate::events::WelcomeReasonCode,
     ) {
-        self.pending_encrypted_messages.remove(peer_id);
-        self.clear_pending_messages_from_storage(peer_id);
+        self.drop_pending_queue_for_peer(peer_id);
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::secure_session_failed(
                 peer_id.to_string(),
