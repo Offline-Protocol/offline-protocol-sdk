@@ -561,6 +561,42 @@ fn test_runtime_retry_and_ack_updates_reject_zero_delays() {
 }
 
 #[test]
+fn test_runtime_dedup_update_cannot_poison_an_unrelated_config_update() {
+    // The two updates above validate the *whole* candidate configuration
+    // rather than duplicating `ProtocolConfig::validate`'s checks — which is
+    // right, and is what made this reachable. `validate` also checks the Bloom
+    // parameters, and `update_dedup_config` was the one reliability updater
+    // that installed its config unchecked. So a dedup config nothing rejected
+    // could make a perfectly valid retry update fail, complaining about a Bloom
+    // filter the caller never mentioned.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let original = protocol.config.reliability.dedup.clone();
+
+    let mut dedup = original.clone();
+    dedup.use_bloom_filter = true;
+    dedup.bloom_filter_bits = 0;
+    assert!(
+        matches!(
+            protocol.update_dedup_config(dedup),
+            Err(Error::InvalidConfiguration(_))
+        ),
+        "an invalid Bloom configuration must be refused where it is supplied"
+    );
+    assert_eq!(
+        protocol.config.reliability.dedup.bloom_filter_bits, original.bloom_filter_bits,
+        "a refused update must leave the installed configuration alone"
+    );
+
+    // The point of the above: an unrelated update still succeeds. Before the
+    // refusal, this call failed with a Bloom-filter error.
+    let retry = protocol.config.reliability.retry.clone();
+    assert!(
+        protocol.update_retry_config(retry).is_ok(),
+        "a valid retry update must not be rejected for a dedup field"
+    );
+}
+
+#[test]
 fn test_protocol_start_stop() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 

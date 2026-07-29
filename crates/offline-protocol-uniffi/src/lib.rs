@@ -4706,14 +4706,16 @@ impl OfflineProtocol {
     }
 
     /// Updates the deduplication configuration at runtime.
-    pub fn update_dedup_config(&self, config: DedupConfig) {
+    pub fn update_dedup_config(&self, config: DedupConfig) -> Result<(), ProtocolError> {
         let core_config = offline_protocol::DeduplicatorConfig {
             max_tracked_messages: config.max_tracked_messages as usize,
             retention_time_secs: config.retention_time_secs,
             ..Default::default()
         };
         let mut protocol = recover_mutex(&self.inner, "inner");
-        protocol.update_dedup_config(core_config);
+        protocol
+            .update_dedup_config(core_config)
+            .map_err(ProtocolError::from)
     }
 
     /// Gets deduplicator statistics for monitoring.
