@@ -366,9 +366,13 @@ pub(super) const MAX_PENDING_RESTORE_ENTRIES: usize = 4 * MAX_PENDING_MESSAGES_G
 /// # The derived launch ceiling
 ///
 /// Three pools, so `3 × MAX_RESTORE_PRUNE_DELETES` deletes may be *refused or
-/// counted* in one launch. `restore_prune_deletes_are_bounded_across_a_launch`
-/// pins that against a provider that counts them. Two caveats it also
-/// documents, because neither can be budgeted away:
+/// counted* in one launch. All three are constructed side by side by
+/// `initialize_mls` — see [`PruneAllowance::pool`] for why none of them may be
+/// allocated inside the walk that spends it — and
+/// `test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling` pins the
+/// total against a provider that counts deletes, which is the invariant a
+/// per-walk regression breaks and a per-pool test does not see. Two caveats it
+/// also documents, because neither can be budgeted away:
 ///
 /// - a settlement-paired walk stops *between* records, so the record it is
 ///   already inside may push a little past its pool;
@@ -431,20 +435,21 @@ pub(crate) struct PruneAllowance {
 }
 
 impl PruneAllowance {
-    /// The pool the advisory restore walks share for one `initialize_mls`.
+    /// One pool of [`MAX_RESTORE_PRUNE_DELETES`] deletes.
     ///
-    /// Created by the caller that owns the launch and threaded through
-    /// `restore_peer_key_packages`, `restore_peer_capabilities`,
-    /// `restore_welcome_lifecycles`, and `restore_media_descriptors`.
-    pub(crate) fn for_launch() -> Self {
-        Self {
-            remaining: MAX_RESTORE_PRUNE_DELETES,
-        }
-    }
-
-    /// A private pool for one settlement-paired walk, which must not be
-    /// starved by an advisory one — see [`MAX_RESTORE_PRUNE_DELETES`].
-    fn for_walk() -> Self {
+    /// The **only** constructor, and deliberately so. A separate one for the
+    /// settlement-paired walks let those walks allocate a pool *inside the
+    /// callee* — which is the same shape this type exists to fix, one level
+    /// down: a walk handing itself a private allowance, where a second call in
+    /// the same launch silently doubles the ceiling with nothing to show for
+    /// it. The two constructors had identical bodies, which was the tell.
+    ///
+    /// So every pool is constructed by the caller that owns the launch —
+    /// `initialize_mls` builds all three side by side — and threaded in. The
+    /// launch ceiling reads off that one call site, and
+    /// `test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling` pins
+    /// it.
+    pub(crate) fn pool() -> Self {
         Self {
             remaining: MAX_RESTORE_PRUNE_DELETES,
         }
@@ -699,9 +704,10 @@ impl OfflineProtocol {
     /// ([`Self::restore_pending_messages`]) keeps its delete and its terminal
     /// event together and stops at its next record boundary instead.
     ///
-    /// `None` is for the runtime callers and for [`Self::restore_outbox`],
-    /// whose walk bound already caps the volume — see
-    /// [`MAX_RESTORE_PRUNE_DELETES`].
+    /// `None` is for the runtime callers, which are not on a restore walk and
+    /// issue at most one delete per call. Every restore walk passes a budget —
+    /// including [`Self::restore_outbox`], whose walk bound was once argued to
+    /// be ceiling enough and is not. See [`MAX_RESTORE_PRUNE_DELETES`].
     fn read_state_record_detailed_budgeted(
         &self,
         storage: &dyn ProtocolStateStorage,
@@ -1497,7 +1503,13 @@ impl OfflineProtocol {
     ///
     /// This should be called after initializing storage to recover
     /// any messages that were pending when the app was terminated.
-    pub(crate) fn restore_pending_messages(&mut self) -> Result<()> {
+    ///
+    /// `allowance` is this walk's own pool, built by the launch — see
+    /// [`PruneAllowance::pool`] and [`MAX_RESTORE_PRUNE_DELETES`].
+    pub(crate) fn restore_pending_messages(
+        &mut self,
+        allowance: &mut PruneAllowance,
+    ) -> Result<()> {
         let Some(storage) = self.protocol_state_storage.clone() else {
             return Ok(());
         };
@@ -1540,7 +1552,8 @@ impl OfflineProtocol {
         // Its own pool rather than the launch-wide advisory one: being starved
         // here means every diagnostic this walk owes is deferred, which must
         // not be a consequence of a key-package flood in an unrelated category.
-        let mut allowance = PruneAllowance::for_walk();
+        // The pool is passed in rather than built here — see
+        // `PruneAllowance::pool`.
         let mut budget = allowance.counting();
         let mut prune_bound_reached = false;
         // How far the walk got. Everything from here on is the tail none of the
@@ -1915,7 +1928,7 @@ impl OfflineProtocol {
         if budget.exhausted {
             warn!(
                 budget = MAX_RESTORE_PRUNE_DELETES,
-                "Peer key package prune hit its per-launch delete budget; the rest is left on disk for a later launch"
+                "Peer key package prune hit the launch delete budget; the rest is left on disk for a later launch"
             );
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
@@ -2199,7 +2212,7 @@ impl OfflineProtocol {
         if budget.exhausted {
             warn!(
                 budget = MAX_RESTORE_PRUNE_DELETES,
-                "Peer capability prune hit its per-launch delete budget; the rest is left on disk for a later launch"
+                "Peer capability prune hit the launch delete budget; the rest is left on disk for a later launch"
             );
         }
         if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
@@ -2765,7 +2778,10 @@ impl OfflineProtocol {
     /// of an unrelated key-package flood spending the shared allowance first.
     /// No freeze is needed for the tail — outbox records are keyed per message
     /// id, so a later write only ever touches a different key.
-    pub(crate) fn restore_outbox(&mut self) -> Result<()> {
+    ///
+    /// `allowance` is this walk's own pool, built by the launch — see
+    /// [`PruneAllowance::pool`].
+    pub(crate) fn restore_outbox(&mut self, allowance: &mut PruneAllowance) -> Result<()> {
         // Cloned rather than borrowed: the loop below both reads through this
         // handle and calls `&mut self` settlement paths, so holding a borrow of
         // `self` across it is what forced the awkward per-iteration re-fetch
@@ -2803,7 +2819,9 @@ impl OfflineProtocol {
         // walk: outbox records are keyed per message id, so every later write
         // touches a different key and an unwalked record is simply restored and
         // re-driven on the next launch.
-        let mut allowance = PruneAllowance::for_walk();
+        //
+        // The pool is passed in rather than built here — see
+        // `PruneAllowance::pool`.
         let mut budget = allowance.counting();
         let mut prune_bound_reached = false;
         for message_id in message_ids.into_iter().take(OUTBOX_RESTORE_KEY_CAP) {

@@ -5823,7 +5823,9 @@ fn test_unaddressable_pending_queue_is_kept_when_its_ids_cannot_be_read() {
         "the fixture must reproduce a launch with no record key"
     );
 
-    protocol.restore_pending_messages().unwrap();
+    protocol
+        .restore_pending_messages(&mut PruneAllowance::pool())
+        .unwrap();
 
     assert!(
         backing
@@ -5915,7 +5917,9 @@ fn test_unreadable_pending_queue_is_not_overwritten_or_cleared_by_later_writes()
         "the fixture must reproduce a per-record failure, not a missing key"
     );
 
-    protocol.restore_pending_messages().unwrap();
+    protocol
+        .restore_pending_messages(&mut PruneAllowance::pool())
+        .unwrap();
     assert!(
         protocol.pending_encrypted_messages.get("bob").is_none(),
         "the unreadable queue must not be restored into memory"
@@ -16399,6 +16403,207 @@ impl crate::ProtocolStateStorage for FailingRecordLoadStorage {
     }
 }
 
+/// A protocol-state store that counts the durable deletes it is asked for, per
+/// key type.
+///
+/// A delete is the unit `MAX_RESTORE_PRUNE_DELETES` bounds, because it is the
+/// one that costs a directory flush — `F_FULLFSYNC` on iOS, a full device
+/// barrier. Counting them here is the only way to observe the *launch* ceiling;
+/// the per-pool tests can only see one walk each.
+struct DeleteCountingStorage {
+    inner: Arc<InMemoryStorage>,
+    deletes: Mutex<std::collections::HashMap<String, usize>>,
+}
+
+impl DeleteCountingStorage {
+    fn new(inner: Arc<InMemoryStorage>) -> Self {
+        Self {
+            inner,
+            deletes: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn deletes_for(&self, key_type: &str) -> usize {
+        self.deletes
+            .lock()
+            .unwrap()
+            .get(key_type)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+impl crate::ProtocolStateStorage for DeleteCountingStorage {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> crate::ProtocolStateResult<()> {
+        self.inner
+            .store(key_type, key_id, data)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<Option<Vec<u8>>> {
+        self.inner
+            .load(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> crate::ProtocolStateResult<()> {
+        *self
+            .deletes
+            .lock()
+            .unwrap()
+            .entry(key_type.to_string())
+            .or_insert(0) += 1;
+        self.inner
+            .delete(key_type, key_id)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+
+    fn list_keys(&self, key_type: &str) -> crate::ProtocolStateResult<Vec<String>> {
+        self.inner
+            .list_keys(key_type)
+            .map_err(crate::protocol::map_test_storage_error)
+    }
+}
+
+#[test]
+fn test_one_launch_cannot_exceed_the_derived_restore_delete_ceiling() {
+    // The invariant the whole `PruneAllowance` split exists for, and the one a
+    // per-pool test cannot see: `MAX_RESTORE_PRUNE_DELETES` bounds a *launch*,
+    // because a device-barrier storm kills the synchronous `initialize_mls`
+    // call rather than any single walk in it. Three pools, so the ceiling is
+    // `3 × MAX_RESTORE_PRUNE_DELETES` — and the point is that adding a seventh
+    // walk, or letting one allocate its own pool again, moves this number
+    // without moving any per-walk assertion.
+    //
+    // Every one of the six restore categories is seeded past its own pool here,
+    // so all three pools bind at once:
+    //
+    // - advisory (shared): peer key packages, peer capabilities, Welcome
+    //   lifecycles, media descriptors — 4 × 200 potential deletes, 512 funded;
+    // - pending messages (private): 600 potential, 512 funded;
+    // - outbox (private): 600 potential, 512 funded.
+    use super::storage::MAX_RESTORE_PRUNE_DELETES;
+
+    const ADVISORY_SEED: usize = 200;
+    const SETTLEMENT_SEED: usize = MAX_RESTORE_PRUNE_DELETES + 88;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let backing = Arc::new(InMemoryStorage::new());
+
+    // Sealed categories (pending messages, outbox, media descriptors): raw
+    // bytes that are not a sealed envelope, which is what a regenerated record
+    // key leaves behind — the reader cannot open them and drops each one.
+    for i in 0..SETTLEMENT_SEED {
+        backing
+            .store(
+                storage_keys::PENDING_MESSAGES,
+                &format!("peer{i:05}"),
+                b"not a sealed record",
+            )
+            .unwrap();
+        backing
+            .store(
+                storage_keys::OUTBOX,
+                &format!("msg{i:05}"),
+                b"not a sealed record",
+            )
+            .unwrap();
+    }
+    for i in 0..ADVISORY_SEED {
+        backing
+            .store(
+                storage_keys::MEDIA_DESCRIPTORS,
+                &format!("file{i:05}"),
+                b"not a sealed record",
+            )
+            .unwrap();
+        // Unsealed categories. A key package must *parse* to reach a budgeted
+        // delete (an unparseable one is left alone), so these are valid records
+        // that have expired — which is the ordinary way that store shrinks.
+        let expired = ReceivedKeyPackage {
+            key_package_data: vec![0],
+            local_expires_at_ms: 1,
+        };
+        backing
+            .store(
+                storage_keys::PEER_KEY_PACKAGES,
+                &format!("pkg{i:05}"),
+                &serde_json::to_vec(&expired).unwrap(),
+            )
+            .unwrap();
+        // Capabilities and Welcome lifecycles both drop a record whose bytes
+        // will not decode, and both charge the pool for it.
+        backing
+            .store(
+                storage_keys::PEER_CAPABILITIES,
+                &format!("cap{i:05}"),
+                b"{not json",
+            )
+            .unwrap();
+        backing
+            .store(
+                storage_keys::WELCOME_LIFECYCLES,
+                &format!("wl{i:05}"),
+                b"{not json",
+            )
+            .unwrap();
+    }
+
+    let counting = Arc::new(DeleteCountingStorage::new(backing.clone()));
+    let state_handle: Arc<dyn crate::ProtocolStateStorage> = counting.clone();
+    let secure_handle: Arc<dyn MlsStorage> = secure.clone();
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .expect("a store this far over every cap must still launch");
+
+    let advisory = counting.deletes_for(storage_keys::PEER_KEY_PACKAGES)
+        + counting.deletes_for(storage_keys::PEER_CAPABILITIES)
+        + counting.deletes_for(storage_keys::WELCOME_LIFECYCLES)
+        + counting.deletes_for(storage_keys::MEDIA_DESCRIPTORS);
+    let pending = counting.deletes_for(storage_keys::PENDING_MESSAGES);
+    let outbox = counting.deletes_for(storage_keys::OUTBOX);
+
+    assert_eq!(
+        advisory,
+        MAX_RESTORE_PRUNE_DELETES,
+        "the four advisory walks draw on one pool; a pool each would have \
+         spent {}",
+        4 * MAX_RESTORE_PRUNE_DELETES
+    );
+    assert_eq!(
+        pending, MAX_RESTORE_PRUNE_DELETES,
+        "the pending walk gets its own pool and stops at a record boundary"
+    );
+    assert_eq!(
+        outbox, MAX_RESTORE_PRUNE_DELETES,
+        "so does the outbox walk — its walk bound alone is not the ceiling"
+    );
+    assert_eq!(
+        advisory + pending + outbox,
+        3 * MAX_RESTORE_PRUNE_DELETES,
+        "the launch ceiling is the sum of the pools, and nothing else on this \
+         path may issue an unbudgeted delete"
+    );
+
+    // Deferred, not stranded: the remainder is exactly what a later launch
+    // reads. Asserted because a ceiling that leaked records would satisfy every
+    // bound above and still lose the store.
+    assert_eq!(
+        backing.list_keys(storage_keys::OUTBOX).unwrap().len(),
+        SETTLEMENT_SEED - MAX_RESTORE_PRUNE_DELETES,
+        "the tail the outbox walk did not reach is left on disk"
+    );
+    assert_eq!(
+        backing
+            .list_keys(storage_keys::PENDING_MESSAGES)
+            .unwrap()
+            .len(),
+        SETTLEMENT_SEED - MAX_RESTORE_PRUNE_DELETES,
+        "the tail the pending walk did not reach is left on disk"
+    );
+}
+
 #[test]
 fn test_advisory_restore_prunes_share_one_launch_delete_budget() {
     // `MAX_RESTORE_PRUNE_DELETES` exists because a device-barrier storm kills
@@ -24710,7 +24915,7 @@ fn test_media_descriptor_restore_prunes_expired() {
     alice.persist_media_descriptor(&stale);
 
     alice
-        .restore_media_descriptors(&mut PruneAllowance::for_launch())
+        .restore_media_descriptors(&mut PruneAllowance::pool())
         .unwrap();
 
     assert!(

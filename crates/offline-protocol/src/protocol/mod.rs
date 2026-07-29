@@ -743,31 +743,40 @@ impl OfflineProtocol {
         // state, idempotent, and must survive an MLS-restore rollback.
         self.restore_or_init_nostr_signing_secret();
 
-        // One pool of durable deletes for this whole launch, shared by every
-        // walk whose prunes are advisory. The bound exists because a
-        // device-barrier storm kills the launch, which is a property of this
-        // call and not of any single walk — so the walks share an allowance
-        // rather than each holding a private copy of it. The two
-        // settlement-paired walks (pending messages, outbox) hold their own,
-        // because being starved there defers a diagnostic or a delivery rather
-        // than a cache eviction. See `storage::MAX_RESTORE_PRUNE_DELETES`.
-        let mut prune_allowance = PruneAllowance::for_launch();
+        // The launch's whole durable-delete allowance, in one place because the
+        // bound is on the launch. A device-barrier storm kills *this call*, not
+        // any single walk in it, so no walk may hand itself a pool — see
+        // `PruneAllowance::pool`. Three of them, and the ceiling is their sum:
+        //
+        // - `advisory_prunes` is shared by the four walks whose prunes are
+        //   caches or advisory signals. Starving one with another's deletes is
+        //   harmless: a spared record is re-walked next launch.
+        // - `pending_prunes` and `outbox_prunes` are private to the two
+        //   settlement-paired walks, because being starved there defers a
+        //   diagnostic or a *delivery* rather than a cache eviction, and
+        //   neither may be held hostage to a key-package flood in a category it
+        //   has nothing to do with.
+        //
+        // See `storage::MAX_RESTORE_PRUNE_DELETES`.
+        let mut advisory_prunes = PruneAllowance::pool();
+        let mut pending_prunes = PruneAllowance::pool();
+        let mut outbox_prunes = PruneAllowance::pool();
 
         // Restore state from previous session
         let restore_result = (|| {
-            self.restore_pending_messages()?;
+            self.restore_pending_messages(&mut pending_prunes)?;
             self.restore_lamport_clock();
             self.restore_tofu_keys();
             self.restore_blocked_users()?;
             self.restore_session_states_from_manager(manager.clone())?;
-            self.restore_peer_key_packages(&manager, &mut prune_allowance)?;
+            self.restore_peer_key_packages(&manager, &mut advisory_prunes)?;
             // Must precede start(): flush_restored_confirmed_pending_messages
             // re-makes the rich seal decision against these sets, and an
             // empty set there silently drops queued rich extras.
-            self.restore_peer_capabilities(&manager, &mut prune_allowance);
-            self.restore_welcome_lifecycles(&mut prune_allowance)?;
-            self.restore_outbox()?;
-            self.restore_media_descriptors(&mut prune_allowance)?;
+            self.restore_peer_capabilities(&manager, &mut advisory_prunes);
+            self.restore_welcome_lifecycles(&mut advisory_prunes)?;
+            self.restore_outbox(&mut outbox_prunes)?;
+            self.restore_media_descriptors(&mut advisory_prunes)?;
             self.restore_both_create_awaiting_decrypt();
             Ok(())
         })();
@@ -826,13 +835,16 @@ impl OfflineProtocol {
         self.restore_or_init_state_record_key();
         self.restore_or_init_scrub_secret();
         self.restore_or_init_nostr_signing_secret();
-        let mut prune_allowance = PruneAllowance::for_launch();
-        self.restore_pending_messages()?;
+        // Same three pools as `initialize_mls_inner`, for the same reason.
+        let mut advisory_prunes = PruneAllowance::pool();
+        let mut pending_prunes = PruneAllowance::pool();
+        let mut outbox_prunes = PruneAllowance::pool();
+        self.restore_pending_messages(&mut pending_prunes)?;
         self.restore_lamport_clock();
         self.restore_tofu_keys();
         self.restore_blocked_users()?;
-        self.restore_outbox()?;
-        self.restore_media_descriptors(&mut prune_allowance)?;
+        self.restore_outbox(&mut outbox_prunes)?;
+        self.restore_media_descriptors(&mut advisory_prunes)?;
         Ok(())
     }
 
