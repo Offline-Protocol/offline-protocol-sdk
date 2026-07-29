@@ -110,35 +110,56 @@ final class MlsSecureStorage: MlsStorageProvider {
 
     // MARK: - Legacy adoption
 
-    /// Resolves — and, when the legacy store is unclaimed, records — this
-    /// account's right to inherit it.
+    /// Resolves — and, when the legacy store is unclaimed, records and then
+    /// *verifies* — this account's right to inherit it.
+    ///
+    /// The claim is read back rather than assumed, because a write that failed
+    /// silently would leave the store looking unclaimed to the next account,
+    /// which would then adopt the same identity. See
+    /// `LegacyStoreAdoption.confirmClaim`.
     private func resolveLegacyAdoption(
         namespace: String,
         legacy: String
     ) -> LegacyStoreAdoption.Decision {
-        let existing = (try? load(
-            keyType: LegacyStoreAdoption.claimKeyType,
-            keyId: LegacyStoreAdoption.claimKeyId,
-            from: legacy
-        )).flatMap { $0 }.flatMap { String(bytes: $0, encoding: .utf8) }
-
         let decision = LegacyStoreAdoption.decide(
-            existingClaim: existing,
+            existingClaim: readLegacyClaim(from: legacy),
             namespace: namespace
         )
-        if decision == .adopt {
-            try? store(
+        guard decision == .adopt else {
+            return decision
+        }
+
+        do {
+            try store(
                 keyType: LegacyStoreAdoption.claimKeyType,
                 keyId: LegacyStoreAdoption.claimKeyId,
                 data: Array(namespace.utf8),
                 in: legacy
             )
+        } catch {
+            return .claimUnverified
         }
-        return decision
+        return LegacyStoreAdoption.confirmClaim(
+            readBack: readLegacyClaim(from: legacy),
+            namespace: namespace
+        )
+    }
+
+    /// The claim recorded in the legacy store, or `nil` when absent or
+    /// unreadable. A failed read is deliberately not distinguished from an
+    /// absent claim on the way *in* (both mean "looks unclaimed") but is on the
+    /// way back *out*, where it means the claim is unproven.
+    private func readLegacyClaim(from legacy: String) -> String? {
+        (try? load(
+            keyType: LegacyStoreAdoption.claimKeyType,
+            keyId: LegacyStoreAdoption.claimKeyId,
+            from: legacy
+        )).flatMap { $0 }.flatMap { String(bytes: $0, encoding: .utf8) }
     }
 
     /// The legacy service to consult for `keyType`, or `nil` when read-through
-    /// is off (no legacy store, or another account claimed it).
+    /// is off (no legacy store, another account claimed it, or this account
+    /// could not prove its own claim).
     private func readThroughService(for keyType: String) -> String? {
         guard let legacy = legacyService,
               let decision = legacyAdoption,

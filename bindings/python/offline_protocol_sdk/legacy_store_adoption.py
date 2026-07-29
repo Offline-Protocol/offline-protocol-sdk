@@ -13,10 +13,11 @@ walk it. A miss in the new store consults the legacy one and promotes what it
 finds, which is naturally idempotent and resumable.
 
 The legacy store was shared by every account on the install, so at most one
-account can inherit it. The first to launch writes a claim; a second account
-seeing a foreign claim gets a fresh identity — correct, because the legacy store
-never held a separable identity for it — but must say so out loud rather than
-rotate silently.
+account can inherit it. The first to launch writes a claim *and reads it back* —
+an unverified claim is not an adoption, see :func:`confirm_claim`; a second
+account seeing a foreign claim gets a fresh identity — correct, because the
+legacy store never held a separable identity for it — but must say so out loud
+rather than rotate silently.
 
 Read-through is also what the SDK's *protocol-state* adoption sweep rides on:
 pre-split delivery state sits in this same un-namespaced store, and the sweep
@@ -45,8 +46,8 @@ class Decision:
     """Outcome of resolving one account's claim on the legacy store."""
 
     #: ``"adopt"`` (unclaimed — claim it), ``"resume"`` (already ours),
-    #: ``"conflict"`` (another account owns it), or ``"none"`` (nothing to
-    #: inherit).
+    #: ``"conflict"`` (another account owns it), ``"claim_unverified"`` (the
+    #: claim could not be recorded), or ``"none"`` (nothing to inherit).
     kind: str
     claimed_by: str | None = None
 
@@ -58,6 +59,7 @@ class Decision:
 ADOPT = Decision("adopt")
 RESUME = Decision("resume")
 NONE = Decision("none")
+CLAIM_UNVERIFIED = Decision("claim_unverified")
 
 
 def decide(existing_claim: str | None, namespace: str) -> Decision:
@@ -66,6 +68,35 @@ def decide(existing_claim: str | None, namespace: str) -> Decision:
     if existing_claim == namespace:
         return RESUME
     return Decision("conflict", claimed_by=existing_claim)
+
+
+def confirm_claim(read_back: str | None, namespace: str) -> Decision:
+    """Confirm a claim by what the legacy store reports *after* the write.
+
+    :func:`decide` returning ``ADOPT`` only means the store looked unclaimed;
+    it is the recorded claim that makes inheritance exclusive. A write whose
+    result is not read back is therefore not an adoption: if it silently
+    failed, the next account to launch also finds the store unclaimed, also
+    adopts, and the two end up sharing one MLS signing identity — and with it
+    each other's sessions and group state. That is strictly worse than the
+    conflict this claim exists to produce, so an unproven claim fails closed to
+    ``CLAIM_UNVERIFIED``.
+
+    The cost is a fresh identity for a launch that hit a transient store
+    failure. Accepted deliberately: confidentiality between two accounts on one
+    device outranks the sessions of an install whose credential store is
+    failing writes — and the same failure would break every other write this
+    session anyway.
+
+    *read_back* is what the legacy store reports for the claim entry once the
+    write returned, or ``None`` when the write raised or the read back failed.
+    """
+
+    if not read_back:
+        return CLAIM_UNVERIFIED
+    if read_back == namespace:
+        return ADOPT
+    return Decision("conflict", claimed_by=read_back)
 
 
 def is_claim_entry(key_type: str) -> bool:

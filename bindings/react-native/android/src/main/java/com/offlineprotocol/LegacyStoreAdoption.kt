@@ -17,10 +17,11 @@ package com.offlineprotocol
  * promotes what it finds, which is naturally idempotent and resumable.
  *
  * The legacy store was shared by every account on the install, so at most one
- * account can inherit it. The first to launch writes a claim; a second account
- * seeing a foreign claim gets a fresh identity — correct, because the legacy
- * store never held a separable identity for it — but must say so out loud
- * rather than rotate silently.
+ * account can inherit it. The first to launch writes a claim *and reads it
+ * back* — an unverified claim is not an adoption, see [confirmClaim]; a second
+ * account seeing a foreign claim gets a fresh identity — correct, because the
+ * legacy store never held a separable identity for it — but must say so out
+ * loud rather than rotate silently.
  *
  * Read-through is also what the SDK's *protocol-state* adoption sweep rides on:
  * pre-split delivery state sits in this same un-namespaced store, and the sweep
@@ -54,6 +55,12 @@ internal object LegacyStoreAdoption {
          */
         data class Conflict(val claimedBy: String) : Decision()
 
+        /**
+         * The claim could not be recorded, so ownership is unproven.
+         * Read-through is off — see [confirmClaim].
+         */
+        object ClaimUnverified : Decision()
+
         /** No legacy store to inherit from (fresh install, or opted out). */
         object None : Decision()
     }
@@ -62,6 +69,34 @@ internal object LegacyStoreAdoption {
         existingClaim.isNullOrEmpty() -> Decision.Adopt
         existingClaim == namespace -> Decision.Resume
         else -> Decision.Conflict(existingClaim)
+    }
+
+    /**
+     * Confirms a claim by what the legacy store reports *after* the write.
+     *
+     * [decide] returning [Decision.Adopt] only means the store looked
+     * unclaimed; it is the recorded claim that makes inheritance exclusive. A
+     * write whose result is not read back is therefore not an adoption: if it
+     * silently failed, the next account to launch also finds the store
+     * unclaimed, also adopts, and the two end up sharing one MLS signing
+     * identity — and with it each other's sessions and group state. That is
+     * strictly worse than the conflict this claim exists to produce, so an
+     * unproven claim fails closed to [Decision.ClaimUnverified].
+     *
+     * The cost is a fresh identity for a launch that hit a transient store
+     * failure. Accepted deliberately: confidentiality between two accounts on
+     * one device outranks the sessions of an install whose credential store is
+     * failing writes — and the same failure would break every other write this
+     * session anyway.
+     *
+     * @param readBack what the legacy store reports for the claim entry once
+     *   the write returned, or null when the write threw or the read back
+     *   failed.
+     */
+    fun confirmClaim(readBack: String?, namespace: String): Decision = when {
+        readBack.isNullOrEmpty() -> Decision.ClaimUnverified
+        readBack == namespace -> Decision.Adopt
+        else -> Decision.Conflict(readBack)
     }
 
     /** True when read-through to the legacy store is permitted. */

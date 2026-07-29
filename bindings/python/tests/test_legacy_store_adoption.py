@@ -36,10 +36,39 @@ def test_foreign_claim_blocks_read_through() -> None:
     assert not decision.allows_read_through
 
 
+def test_a_claim_read_back_as_ours_completes_the_adoption() -> None:
+    decision = legacy_store_adoption.confirm_claim(NAMESPACE, NAMESPACE)
+
+    assert decision.kind == "adopt"
+    assert decision.allows_read_through
+
+
+def test_an_unrecorded_claim_does_not_adopt() -> None:
+    # The write reported success (or raised, which the caller spells as None)
+    # but the store does not hold our claim. Adopting anyway is what lets a
+    # second account find the store still unclaimed, adopt it too, and end up
+    # sharing this account's MLS identity — so an unproven claim fails closed.
+    decision = legacy_store_adoption.confirm_claim(None, NAMESPACE)
+
+    assert decision.kind == "claim_unverified"
+    assert not decision.allows_read_through
+    assert legacy_store_adoption.confirm_claim("", NAMESPACE).kind == "claim_unverified"
+
+
+def test_a_claim_read_back_as_someone_elses_is_a_conflict() -> None:
+    # Another account claimed it between our read and our write.
+    decision = legacy_store_adoption.confirm_claim(OTHER, NAMESPACE)
+
+    assert decision.kind == "conflict"
+    assert decision.claimed_by == OTHER
+    assert not decision.allows_read_through
+
+
 def test_adopt_and_resume_allow_read_through() -> None:
     assert legacy_store_adoption.ADOPT.allows_read_through
     assert legacy_store_adoption.RESUME.allows_read_through
     assert not legacy_store_adoption.NONE.allows_read_through
+    assert not legacy_store_adoption.CLAIM_UNVERIFIED.allows_read_through
 
 
 def test_claim_entry_is_never_read_through() -> None:

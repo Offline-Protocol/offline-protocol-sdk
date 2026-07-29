@@ -23,10 +23,11 @@ import Foundation
 /// promotes what it finds, which is naturally idempotent and resumable.
 ///
 /// The legacy store was shared by every account on the install, so at most one
-/// account can inherit it. The first to launch writes a claim; a second account
-/// seeing a foreign claim gets a fresh identity — correct, because the legacy
-/// store never held a separable identity for it — but must say so out loud
-/// rather than rotate silently.
+/// account can inherit it. The first to launch writes a claim *and reads it
+/// back* — an unverified claim is not an adoption, see `confirmClaim`; a second
+/// account seeing a foreign claim gets a fresh identity — correct, because the
+/// legacy store never held a separable identity for it — but must say so out
+/// loud rather than rotate silently.
 ///
 /// Read-through is also what the SDK's *protocol-state* adoption sweep rides
 /// on: pre-split delivery state sits in this same un-namespaced store, and the
@@ -52,6 +53,9 @@ enum LegacyStoreAdoption {
         /// Another account owns the legacy identity. Read-through is off and
         /// this account starts fresh — surface it.
         case conflict(claimedBy: String)
+        /// The claim could not be recorded, so ownership is unproven.
+        /// Read-through is off — see `confirmClaim`.
+        case claimUnverified
     }
 
     static func decide(existingClaim: String?, namespace: String) -> Decision {
@@ -61,12 +65,39 @@ enum LegacyStoreAdoption {
         return existingClaim == namespace ? .resume : .conflict(claimedBy: existingClaim)
     }
 
+    /// Confirms a claim by what the legacy store reports *after* the write.
+    ///
+    /// `decide` returning `.adopt` only means the store looked unclaimed; it is
+    /// the recorded claim that makes inheritance exclusive. A write whose
+    /// result is not read back is therefore not an adoption: if it silently
+    /// failed, the next account to launch also finds the store unclaimed, also
+    /// adopts, and the two end up sharing one MLS signing identity — and with
+    /// it each other's sessions and group state. That is strictly worse than
+    /// the conflict this claim exists to produce, so an unproven claim fails
+    /// closed to `.claimUnverified`.
+    ///
+    /// The cost is a fresh identity for a launch that hit a transient store
+    /// failure. Accepted deliberately: confidentiality between two accounts on
+    /// one device outranks the sessions of an install whose credential store is
+    /// failing writes — and the same failure would break every other write this
+    /// session anyway.
+    ///
+    /// - Parameter readBack: what the legacy store reports for the claim entry
+    ///   once the write returned, or `nil` when the write threw or the read
+    ///   back failed.
+    static func confirmClaim(readBack: String?, namespace: String) -> Decision {
+        guard let readBack, !readBack.isEmpty else {
+            return .claimUnverified
+        }
+        return readBack == namespace ? .adopt : .conflict(claimedBy: readBack)
+    }
+
     /// True when read-through to the legacy store is permitted.
     static func allowsReadThrough(_ decision: Decision) -> Bool {
         switch decision {
         case .adopt, .resume:
             return true
-        case .conflict:
+        case .conflict, .claimUnverified:
             return false
         }
     }

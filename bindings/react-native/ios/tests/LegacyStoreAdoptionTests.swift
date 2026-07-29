@@ -40,9 +40,45 @@ final class LegacyStoreAdoptionTests: XCTestCase {
         XCTAssertFalse(LegacyStoreAdoption.allowsReadThrough(decision))
     }
 
+    /// A claim we can read back as our own is what actually makes inheritance
+    /// exclusive; the pre-write probe only says the store *looked* unclaimed.
+    func testClaimReadBackAsOursCompletesTheAdoption() {
+        XCTAssertEqual(
+            LegacyStoreAdoption.confirmClaim(readBack: namespace, namespace: namespace),
+            .adopt
+        )
+    }
+
+    /// The write reported success (or threw, which the caller spells as nil)
+    /// but the store does not hold our claim. Adopting anyway is what lets a
+    /// second account find the store still unclaimed, adopt it too, and end up
+    /// sharing this account's MLS identity — so an unproven claim fails closed.
+    func testUnrecordedClaimDoesNotAdopt() {
+        let decision = LegacyStoreAdoption.confirmClaim(
+            readBack: nil,
+            namespace: namespace
+        )
+        XCTAssertEqual(decision, .claimUnverified)
+        XCTAssertFalse(LegacyStoreAdoption.allowsReadThrough(decision))
+        XCTAssertEqual(
+            LegacyStoreAdoption.confirmClaim(readBack: "", namespace: namespace),
+            .claimUnverified
+        )
+    }
+
+    /// The read back also catches a racing claim, which the pre-write probe
+    /// cannot see.
+    func testClaimReadBackAsSomeoneElsesIsAConflict() {
+        XCTAssertEqual(
+            LegacyStoreAdoption.confirmClaim(readBack: other, namespace: namespace),
+            .conflict(claimedBy: other)
+        )
+    }
+
     func testAdoptAndResumeAllowReadThrough() {
         XCTAssertTrue(LegacyStoreAdoption.allowsReadThrough(.adopt))
         XCTAssertTrue(LegacyStoreAdoption.allowsReadThrough(.resume))
+        XCTAssertFalse(LegacyStoreAdoption.allowsReadThrough(.claimUnverified))
     }
 
     /// The claim entry is bookkeeping, not key material: promoting it into the

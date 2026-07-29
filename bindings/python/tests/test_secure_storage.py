@@ -26,9 +26,20 @@ class FakeKeyring:
     def __init__(self) -> None:
         self.entries: dict[tuple[str, str], str] = {}
         self.errors = keyring.errors
+        #: Service whose writes raise, for the "claim could not be recorded"
+        #: path. A credential store that fails one write and serves reads is
+        #: exactly the asymmetry the claim read-back exists to catch.
+        self.refuse_writes_to: str | None = None
+        #: Hook run after a successful write, for simulating a concurrent
+        #: writer landing between our probe and our read-back.
+        self.on_write = None
 
     def set_password(self, service: str, key: str, value: str) -> None:
+        if service == self.refuse_writes_to:
+            raise RuntimeError(f"refusing writes to {service}")
         self.entries[(service, key)] = value
+        if self.on_write is not None:
+            self.on_write(service, key)
 
     def get_password(self, service: str, key: str) -> str | None:
         return self.entries.get((service, key))
@@ -198,6 +209,73 @@ class TestLegacyStoreAdoption:
         assert bob.legacy_adoption.kind == "conflict"
         assert bob.legacy_adoption.claimed_by == ALICE
         assert bob.load("identity", "key_pair") is None
+
+    def test_an_unrecordable_claim_does_not_adopt(
+        self, fake_keyring: FakeKeyring
+    ) -> None:
+        # A claim write that fails must not leave read-through on. It would look
+        # like a successful adoption to this account while leaving the store
+        # unclaimed for the next one, so both would inherit the same MLS
+        # identity — and with it each other's sessions and group state.
+        fake_keyring.seed(
+            secure_storage_module._LEGACY_SERVICE, "identity", "key_pair", b"old-key"
+        )
+        fake_keyring.refuse_writes_to = secure_storage_module._LEGACY_SERVICE
+
+        alice = SecureStorage(namespace=ALICE)
+
+        assert alice.legacy_adoption.kind == "claim_unverified"
+        assert not alice.legacy_adoption.allows_read_through
+        assert alice.load("identity", "key_pair") is None
+
+    def test_only_one_account_inherits_even_if_the_first_claim_failed(
+        self, fake_keyring: FakeKeyring
+    ) -> None:
+        # The invariant is not "the first account to launch wins", it is "at
+        # most one account holds a verified claim". Alice's claim never lands,
+        # so she does not inherit; Bob's does, so he does — and exactly one of
+        # them ends up with the legacy identity.
+        fake_keyring.seed(
+            secure_storage_module._LEGACY_SERVICE, "identity", "key_pair", b"old-key"
+        )
+        fake_keyring.refuse_writes_to = secure_storage_module._LEGACY_SERVICE
+        alice = SecureStorage(namespace=ALICE)
+        fake_keyring.refuse_writes_to = None
+
+        bob = SecureStorage(namespace=BOB)
+
+        assert alice.legacy_adoption.kind == "claim_unverified"
+        assert bob.legacy_adoption.kind == "adopt"
+        assert alice.load("identity", "key_pair") is None
+        assert bob.load("identity", "key_pair") == list(b"old-key")
+
+    def test_a_claim_taken_between_our_read_and_write_is_a_conflict(
+        self, fake_keyring: FakeKeyring
+    ) -> None:
+        # The read-back also catches a racing claim, which the pre-write probe
+        # cannot see.
+        from offline_protocol_sdk import legacy_store_adoption
+
+        fake_keyring.seed(
+            secure_storage_module._LEGACY_SERVICE, "identity", "key_pair", b"old-key"
+        )
+        claim_key = (
+            f"{legacy_store_adoption.CLAIM_KEY_TYPE}:"
+            f"{legacy_store_adoption.CLAIM_KEY_ID}"
+        )
+        fake_keyring.on_write = lambda service, key: (
+            fake_keyring.entries.__setitem__(
+                (service, key), base64.b64encode(BOB.encode()).decode("ascii")
+            )
+            if key == claim_key
+            else None
+        )
+
+        alice = SecureStorage(namespace=ALICE)
+
+        assert alice.legacy_adoption.kind == "conflict"
+        assert alice.legacy_adoption.claimed_by == BOB
+        assert alice.load("identity", "key_pair") is None
 
     def test_delete_does_not_resurrect_from_the_legacy_store(
         self, fake_keyring: FakeKeyring

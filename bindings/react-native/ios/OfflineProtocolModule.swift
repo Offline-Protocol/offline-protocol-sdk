@@ -2739,9 +2739,10 @@ class OfflineProtocolModule: RCTEventEmitter {
                 secureStorage: secureStorage,
                 protocolStateStorage: protocolStateStorage
             )
-            // A legacy store claimed by a different account means this one is
-            // starting from a fresh MLS identity — never let that pass silently.
-            if case .conflict? = secureStorage.legacyAdoption {
+            // Either of these means this account is starting from a fresh MLS
+            // identity — never let that pass silently.
+            switch secureStorage.legacyAdoption {
+            case .conflict?:
                 emitDiagnostic(
                     level: "error",
                     message: "Legacy secure store belongs to another account; "
@@ -2751,6 +2752,20 @@ class OfflineProtocolModule: RCTEventEmitter {
                         + "up with an empty outbox and an empty block list — "
                         + "every previously blocked peer is unblocked"
                 )
+            case .claimUnverified?:
+                emitDiagnostic(
+                    level: "error",
+                    message: "Could not record this account's claim on the "
+                        + "legacy secure store, so it was not adopted: another "
+                        + "account could otherwise inherit the same MLS "
+                        + "identity. This account starts from a fresh identity "
+                        + "and comes up with an empty outbox and an empty block "
+                        + "list — every previously blocked peer is unblocked. "
+                        + "The credential store is failing writes; retrying on "
+                        + "a healthy store adopts normally"
+                )
+            case .adopt?, .resume?, .none:
+                break
             }
             emitDiagnostic(
                 level: "info",

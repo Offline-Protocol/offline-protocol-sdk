@@ -163,46 +163,84 @@ class MlsSecureStorage(
     }
 
     /**
-     * Resolves — and, when the legacy store is unclaimed, records — this
-     * account's right to inherit it.
+     * Resolves — and, when the legacy store is unclaimed, records and then
+     * *verifies* — this account's right to inherit it.
+     *
+     * The claim is read back rather than assumed, because a write that failed
+     * silently would leave the store looking unclaimed to the next account,
+     * which would then adopt the same identity. See
+     * [LegacyStoreAdoption.confirmClaim].
      */
     private fun resolveLegacyAdoption(): LegacyStoreAdoption.Decision {
         val legacy = legacyPreferences ?: return LegacyStoreAdoption.Decision.None
-        val existing = read(
+
+        val decision = LegacyStoreAdoption.decide(readClaim(legacy), namespace)
+        if (decision !is LegacyStoreAdoption.Decision.Adopt) {
+            if (decision is LegacyStoreAdoption.Decision.Conflict) {
+                Log.e(
+                    TAG,
+                    "Legacy secure store already belongs to another account; this " +
+                        "account starts from a fresh MLS identity and cannot " +
+                        "decrypt its old sessions."
+                )
+            }
+            return decision
+        }
+
+        val confirmed = try {
+            store(
+                legacy,
+                LegacyStoreAdoption.CLAIM_KEY_TYPE,
+                LegacyStoreAdoption.CLAIM_KEY_ID,
+                namespace.toByteArray(Charsets.UTF_8)
+            )
+            LegacyStoreAdoption.confirmClaim(readClaim(legacy), namespace)
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to claim the legacy secure store", error)
+            LegacyStoreAdoption.Decision.ClaimUnverified
+        }
+
+        when (confirmed) {
+            is LegacyStoreAdoption.Decision.Adopt ->
+                Log.i(TAG, "Adopting the pre-namespace secure store for this account")
+            is LegacyStoreAdoption.Decision.ClaimUnverified -> Log.e(
+                TAG,
+                "Could not record this account's claim on the legacy secure " +
+                    "store, so it was not adopted: another account could " +
+                    "otherwise inherit the same MLS identity. This account " +
+                    "starts from a fresh identity."
+            )
+            is LegacyStoreAdoption.Decision.Conflict -> Log.e(
+                TAG,
+                "Legacy secure store was claimed by another account concurrently; " +
+                    "this account starts from a fresh MLS identity."
+            )
+            else -> Unit
+        }
+        return confirmed
+    }
+
+    /**
+     * The claim recorded in the legacy store, or null when absent or
+     * unreadable. A failed read is deliberately not distinguished from an
+     * absent claim on the way *in* (both mean "looks unclaimed") but is on the
+     * way back *out*, where it means the claim is unproven.
+     */
+    private fun readClaim(legacy: SharedPreferences): String? = try {
+        read(
             legacy,
             LegacyStoreAdoption.CLAIM_KEY_TYPE,
             LegacyStoreAdoption.CLAIM_KEY_ID
         )?.toString(Charsets.UTF_8)
-
-        val decision = LegacyStoreAdoption.decide(existing, namespace)
-        when (decision) {
-            is LegacyStoreAdoption.Decision.Adopt -> {
-                try {
-                    store(
-                        legacy,
-                        LegacyStoreAdoption.CLAIM_KEY_TYPE,
-                        LegacyStoreAdoption.CLAIM_KEY_ID,
-                        namespace.toByteArray(Charsets.UTF_8)
-                    )
-                } catch (error: Exception) {
-                    Log.w(TAG, "Failed to claim the legacy secure store", error)
-                }
-                Log.i(TAG, "Adopting the pre-namespace secure store for this account")
-            }
-            is LegacyStoreAdoption.Decision.Conflict -> Log.e(
-                TAG,
-                "Legacy secure store already belongs to another account; this " +
-                    "account starts from a fresh MLS identity and cannot " +
-                    "decrypt its old sessions."
-            )
-            else -> Unit
-        }
-        return decision
+    } catch (error: Exception) {
+        Log.w(TAG, "Failed to read the legacy secure store claim", error)
+        null
     }
 
     /**
      * The legacy store to consult for [keyType], or null when read-through is
-     * off (no legacy store, or another account claimed it).
+     * off (no legacy store, another account claimed it, or this account could
+     * not prove its own claim).
      */
     private fun readThroughStore(keyType: String): SharedPreferences? {
         if (!LegacyStoreAdoption.allowsReadThrough(legacyAdoption)) {

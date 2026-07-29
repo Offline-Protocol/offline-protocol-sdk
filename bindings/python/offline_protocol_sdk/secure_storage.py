@@ -183,6 +183,60 @@ class SecureStorage(MlsStorageProvider):
         account's right to inherit it."""
 
         assert self._legacy_service is not None
+        decision = legacy_store_adoption.decide(self._read_claim(), namespace)
+
+        if decision.kind != "adopt":
+            if decision.kind == "conflict":
+                logger.error(
+                    "legacy secure store already belongs to another account; this "
+                    "account starts from a fresh MLS identity and cannot decrypt "
+                    "its old sessions."
+                )
+            return decision
+
+        # Read the claim back rather than assuming the write landed: a write
+        # that failed silently leaves the store looking unclaimed to the next
+        # account, which would then adopt the same MLS identity. See
+        # ``legacy_store_adoption.confirm_claim``.
+        try:
+            self._store(
+                self._legacy_service,
+                legacy_store_adoption.CLAIM_KEY_TYPE,
+                legacy_store_adoption.CLAIM_KEY_ID,
+                namespace.encode("utf-8"),
+            )
+        except Exception:
+            logger.warning("failed to claim the legacy secure store", exc_info=True)
+            confirmed = legacy_store_adoption.CLAIM_UNVERIFIED
+        else:
+            confirmed = legacy_store_adoption.confirm_claim(self._read_claim(), namespace)
+
+        if confirmed.kind == "adopt":
+            logger.info("adopting the pre-namespace secure store for this account")
+        elif confirmed.kind == "claim_unverified":
+            logger.error(
+                "could not record this account's claim on the legacy secure "
+                "store, so it was not adopted: another account could otherwise "
+                "inherit the same MLS identity. This account starts from a "
+                "fresh identity."
+            )
+        elif confirmed.kind == "conflict":
+            logger.error(
+                "legacy secure store was claimed by another account "
+                "concurrently; this account starts from a fresh MLS identity."
+            )
+        return confirmed
+
+    def _read_claim(self) -> str | None:
+        """The claim recorded in the legacy store, or None when absent or
+        unreadable.
+
+        A failed read is deliberately not distinguished from an absent claim on
+        the way *in* (both mean "looks unclaimed") but is on the way back *out*,
+        where it means the claim is unproven.
+        """
+
+        assert self._legacy_service is not None
         try:
             raw = self._read(
                 self._legacy_service,
@@ -191,37 +245,15 @@ class SecureStorage(MlsStorageProvider):
             )
         except Exception:
             logger.warning(
-                "legacy secure store could not be inspected; not adopting it",
-                exc_info=True,
+                "legacy secure store claim could not be read", exc_info=True
             )
-            self._legacy_service = None
-            return legacy_store_adoption.NONE
-
-        existing = raw.decode("utf-8", errors="replace") if raw is not None else None
-        decision = legacy_store_adoption.decide(existing, namespace)
-
-        if decision.kind == "adopt":
-            try:
-                self._store(
-                    self._legacy_service,
-                    legacy_store_adoption.CLAIM_KEY_TYPE,
-                    legacy_store_adoption.CLAIM_KEY_ID,
-                    namespace.encode("utf-8"),
-                )
-            except Exception:
-                logger.warning("failed to claim the legacy secure store", exc_info=True)
-            logger.info("adopting the pre-namespace secure store for this account")
-        elif decision.kind == "conflict":
-            logger.error(
-                "legacy secure store already belongs to another account; this "
-                "account starts from a fresh MLS identity and cannot decrypt "
-                "its old sessions."
-            )
-        return decision
+            return None
+        return raw.decode("utf-8", errors="replace") if raw is not None else None
 
     def _read_through_service(self, key_type: str) -> str | None:
         """The legacy service to consult for *key_type*, or None when
-        read-through is off (no legacy store, or another account claimed it)."""
+        read-through is off (no legacy store, another account claimed it, or
+        this account could not prove its own claim)."""
 
         if self._legacy_service is None:
             return None

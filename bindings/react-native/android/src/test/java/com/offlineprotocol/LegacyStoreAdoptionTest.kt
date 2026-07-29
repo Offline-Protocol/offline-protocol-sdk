@@ -51,11 +51,56 @@ class LegacyStoreAdoptionTest {
         assertFalse(LegacyStoreAdoption.allowsReadThrough(decision))
     }
 
+    /**
+     * A claim we can read back as our own is what actually makes inheritance
+     * exclusive; the pre-write probe only says the store *looked* unclaimed.
+     */
+    @Test
+    fun claimReadBackAsOursCompletesTheAdoption() {
+        assertEquals(
+            LegacyStoreAdoption.Decision.Adopt,
+            LegacyStoreAdoption.confirmClaim(namespace, namespace)
+        )
+    }
+
+    /**
+     * The write reported success (or threw, which the caller spells as null)
+     * but the store does not hold our claim. Adopting anyway is what lets a
+     * second account find the store still unclaimed, adopt it too, and end up
+     * sharing this account's MLS identity — so an unproven claim fails closed.
+     */
+    @Test
+    fun unrecordedClaimDoesNotAdopt() {
+        val decision = LegacyStoreAdoption.confirmClaim(null, namespace)
+
+        assertEquals(LegacyStoreAdoption.Decision.ClaimUnverified, decision)
+        assertFalse(LegacyStoreAdoption.allowsReadThrough(decision))
+        assertEquals(
+            LegacyStoreAdoption.Decision.ClaimUnverified,
+            LegacyStoreAdoption.confirmClaim("", namespace)
+        )
+    }
+
+    /**
+     * The read back also catches a racing claim, which the pre-write probe
+     * cannot see.
+     */
+    @Test
+    fun claimReadBackAsSomeoneElsesIsAConflict() {
+        assertEquals(
+            LegacyStoreAdoption.Decision.Conflict(other),
+            LegacyStoreAdoption.confirmClaim(other, namespace)
+        )
+    }
+
     @Test
     fun adoptAndResumeAllowReadThrough() {
         assertTrue(LegacyStoreAdoption.allowsReadThrough(LegacyStoreAdoption.Decision.Adopt))
         assertTrue(LegacyStoreAdoption.allowsReadThrough(LegacyStoreAdoption.Decision.Resume))
         assertFalse(LegacyStoreAdoption.allowsReadThrough(LegacyStoreAdoption.Decision.None))
+        assertFalse(
+            LegacyStoreAdoption.allowsReadThrough(LegacyStoreAdoption.Decision.ClaimUnverified)
+        )
         assertFalse(LegacyStoreAdoption.allowsReadThrough(null))
     }
 
