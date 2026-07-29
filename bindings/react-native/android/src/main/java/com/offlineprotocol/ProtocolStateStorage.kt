@@ -216,7 +216,11 @@ class AppContainerProtocolStateStorage(
             // keeps the read itself from becoming an unbounded allocation.
             val physicalBytes = maxOf(file.length(), legacyBackup.length())
             if (physicalBytes > ProtocolStateRecord.MAX_FILE_BYTES) {
-                throw discard(atomicFile, "record is $physicalBytes bytes, over the ceiling")
+                throw discard(
+                    atomicFile,
+                    typeDirectory(keyType),
+                    "record is $physicalBytes bytes, over the ceiling"
+                )
             }
 
             val raw = try {
@@ -229,14 +233,22 @@ class AppContainerProtocolStateStorage(
 
             // Re-check post-read: the stat above can race a concurrent writer.
             if (raw.size > ProtocolStateRecord.MAX_FILE_BYTES) {
-                throw discard(atomicFile, "record is ${raw.size} bytes, over the ceiling")
+                throw discard(
+                    atomicFile,
+                    typeDirectory(keyType),
+                    "record is ${raw.size} bytes, over the ceiling"
+                )
             }
 
             val header = ProtocolStateRecord.parseHeader(raw)
             if (header == null || header.keyType != keyType || header.keyId != keyId) {
                 // Malformed framing, or a name that resolves to some other
                 // record: either way this is not the entry that was asked for.
-                throw discard(atomicFile, "record framing does not name $keyType/$keyId")
+                throw discard(
+                    atomicFile,
+                    typeDirectory(keyType),
+                    "record framing does not name $keyType/$keyId"
+                )
             }
             return raw.copyOfRange(header.valueOffset, raw.size)
         }
@@ -250,9 +262,22 @@ class AppContainerProtocolStateStorage(
      * answers upstream. The SDK settles a destroyed record — the application is
      * holding the message id `sendMessage` returned for it — while absence is
      * simply nothing to restore, reported to no one.
+     *
+     * The unlink is flushed like the one in [delete], and for the same reason:
+     * the link lives in the parent directory, not in the file `AtomicFile`
+     * already fsynced. The cost of skipping it is smaller here — the record is
+     * unreadable by construction, so a resurrected one is re-reported and
+     * re-settled rather than wrongly restored — but "smaller" is not a reason
+     * for the three built-in providers to disagree, and iOS and Python both
+     * flush on this path.
      */
-    private fun discard(atomicFile: AtomicFile, reason: String): MlsStorageException {
+    private fun discard(
+        atomicFile: AtomicFile,
+        directory: File,
+        reason: String
+    ): MlsStorageException {
         atomicFile.delete()
+        syncDirectory(directory)
         return MlsStorageException.CorruptedData(
             "Dropped unreadable protocol-state record: $reason"
         )
