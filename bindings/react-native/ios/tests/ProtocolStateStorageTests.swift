@@ -287,7 +287,7 @@ final class ProtocolStateStorageTests: XCTestCase {
             )
         }
 
-        let result = storage.enumerateKeys(keyType: "outbox", limit: 4)
+        let result = try storage.enumerateKeys(keyType: "outbox", limit: 4)
 
         XCTAssertEqual(result.examined, 4, "enumeration must stop at the bound it was given")
         XCTAssertLessThanOrEqual(result.keys.count, 1)

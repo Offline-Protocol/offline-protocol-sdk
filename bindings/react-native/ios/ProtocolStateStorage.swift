@@ -309,7 +309,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     }
 
     func listKeys(keyType: String) throws -> [String] {
-        enumerateKeys(keyType: keyType, limit: ProtocolStateRecord.maxListedKeys).keys
+        try enumerateKeys(keyType: keyType, limit: ProtocolStateRecord.maxListedKeys).keys
     }
 
     /// Enumerates one category, opening at most `limit` entries.
@@ -322,7 +322,13 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     ///
     /// Key ids are deduped: a name that resolves to a record already seen (a
     /// copy planted in the container) must not make the same id appear twice.
-    func enumerateKeys(keyType: String, limit: Int) -> (keys: [String], examined: Int) {
+    ///
+    /// A directory that exists but cannot be enumerated throws, matching the
+    /// Android and Python providers. Reporting it as an empty category instead
+    /// would tell core that nothing is filed here, so the records would be
+    /// restored by nobody and settled to nobody — the silent answer, from the
+    /// one provider of three that used to give it.
+    func enumerateKeys(keyType: String, limit: Int) throws -> (keys: [String], examined: Int) {
         lock.lock()
         defer { lock.unlock() }
 
@@ -339,7 +345,9 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
         ) else {
-            return ([], 0)
+            throw MlsStorageError.LoadFailed(
+                message: "Failed to list protocol-state keys: cannot enumerate \(directory.path)"
+            )
         }
 
         var keys = Set<String>()

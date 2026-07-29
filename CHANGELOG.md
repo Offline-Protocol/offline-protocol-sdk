@@ -71,6 +71,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **The built-in Android provider's key enumeration now prefers an `AtomicFile` backup over a torn write.** On API < 30 `startWrite` renames the base entry to `.bak` and then writes the base, so a `.bak` on disk means the base is a partial write — which is why `openRead` discards it. Enumeration did the opposite, parsing the torn base, so a crash mid-`store` could drop the key from `listKeys` even though `load` recovered the record perfectly well. The entry was then listed by nobody, restored by nobody, and deleted by nobody — stranded for the life of the install, in precisely the crash the atomic write exists to survive.
 
+- **The built-in iOS provider now reports a failed directory enumeration instead of an empty category.** Android and Python already threw; iOS returned no keys, which core reads as "nothing is filed here" — so the records were restored by nobody and settled to nobody. The three built-in providers are meant to be the same implementation in three languages, and this was the one that answered silently.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed
