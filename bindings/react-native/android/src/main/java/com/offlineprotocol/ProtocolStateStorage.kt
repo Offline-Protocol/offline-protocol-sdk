@@ -1,6 +1,8 @@
 package com.offlineprotocol
 
 import android.content.Context
+import android.system.Os
+import android.system.OsConstants
 import android.util.AtomicFile
 import uniffi.offline_protocol.MlsStorageException
 import uniffi.offline_protocol.ProtocolStateStorageProvider
@@ -195,6 +197,7 @@ class AppContainerProtocolStateStorage(
                     "Failed to persist protocol state: ${error.message}"
                 )
             }
+            syncDirectory(directory)
         }
     }
 
@@ -264,6 +267,37 @@ class AppContainerProtocolStateStorage(
                     "Failed to delete protocol state: ${error.message}"
                 )
             }
+            syncDirectory(typeDirectory(keyType))
+        }
+    }
+
+    /**
+     * Flushes a directory entry so a rename or unlink in it survives a crash.
+     *
+     * `AtomicFile.finishWrite` fsyncs the record's *contents*, but the link
+     * `finishWrite` renames into place — and the one `delete` removes — lives
+     * in the parent directory and needs its own flush. Without it a power loss
+     * can lose a store the SDK was told succeeded (sharpest for records sealed
+     * under a key it just persisted) or resurrect an entry the SDK has already
+     * settled. The iOS and Python providers flush the directory for exactly
+     * this; the three are meant to be one implementation in three languages.
+     *
+     * Best effort, and deliberately catching [Throwable]: `android.system.Os`
+     * is not backed by a real syscall under a JVM unit-test harness, and a
+     * missing flush must degrade to the atomic rename rather than fail a store
+     * that otherwise succeeded.
+     */
+    private fun syncDirectory(directory: File) {
+        try {
+            val descriptor = Os.open(directory.path, OsConstants.O_RDONLY, 0)
+            try {
+                Os.fsync(descriptor)
+            } finally {
+                Os.close(descriptor)
+            }
+        } catch (_: Throwable) {
+            // Nothing actionable: the atomic rename remains the strongest
+            // guarantee available, which is what every write had before.
         }
     }
 

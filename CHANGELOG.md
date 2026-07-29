@@ -77,6 +77,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Adoption's "post-split state wins" probe now gets the same three-way read as everything else.** It went through the loader that reads `Corrupted` as absence, so a destination record the store had just examined and destroyed was treated as never having existed. When the legacy twin was still there the overwrite was a genuine recovery; when it had vanished too, the record was gone and the application was told nothing — the only destruction path in this work that did not settle. The probe now settles that case, and a destination reported as unreadable *this session* defers the record instead of adopting over it, withholding the marker so the sweep retries rather than overwriting a record a later launch can still read. The sweep's dependency on the secure store's legacy read-through — it enumerates the namespaced handle to reach records that live in the un-namespaced one — is now documented rather than silently load-bearing.
 
+- **The built-in Android provider now flushes the directory entry after a store and a delete.** `AtomicFile.finishWrite` fsyncs a record's contents, but the link it renames into place — and the one `delete` removes — lives in the parent directory and needs its own flush; without it a power loss can lose a store the SDK was told succeeded (sharpest for records sealed under a key it just persisted) or resurrect an entry the SDK has already settled. The iOS and Python providers already did this. Best effort, as on the other two.
+
 ## [0.16.6] — 2026-07-28
 
 ### Fixed
