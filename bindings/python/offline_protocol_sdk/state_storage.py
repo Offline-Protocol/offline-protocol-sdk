@@ -71,6 +71,15 @@ MAX_HEADER_BYTES = 8 + 2 * MAX_COMPONENT_BYTES
 #: sat at zero.
 MAX_LISTED_KEYS = 65_536
 
+#: Prefix of the temporary file ``store`` writes before renaming it into place.
+#: Distinct from the ``k_`` entry prefix so enumeration never mistakes a
+#: half-written record for one.
+TEMP_PREFIX = ".write-"
+
+#: Ceiling on entries one stale-temporary sweep examines, so a tampered
+#: directory cannot turn the first store of a session into an unbounded scan.
+MAX_SWEEP_ENTRIES = 4_096
+
 
 def _digest(*components: str) -> str:
     sha = hashlib.sha256()
@@ -184,6 +193,9 @@ class AppStateStorage(ProtocolStateStorageProvider):
             else base_root
         )
         self._lock = threading.RLock()
+        #: Type directories whose stale temporaries have already been swept this
+        #: process. One sweep per category per process, off the restore path.
+        self._swept: set[Path] = set()
         try:
             self._root.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -197,7 +209,8 @@ class AppStateStorage(ProtocolStateStorageProvider):
             directory = self._type_directory(key_type)
             try:
                 directory.mkdir(parents=True, exist_ok=True)
-                descriptor, temporary = tempfile.mkstemp(prefix=".write-", dir=directory)
+                self._sweep_temporaries(directory)
+                descriptor, temporary = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=directory)
                 try:
                     with os.fdopen(descriptor, "wb") as handle:
                         handle.write(framed)
@@ -310,6 +323,43 @@ class AppStateStorage(ProtocolStateStorageProvider):
             return sorted(keys), examined
 
     # -- internals -----------------------------------------------------------
+
+    def _sweep_temporaries(self, directory: Path) -> None:
+        """Remove temporaries a previous process died before renaming.
+
+        ``store`` writes to a ``mkstemp`` file and renames it into place, so a
+        crash in between orphans that file permanently — and enumeration
+        filters on the ``k_`` prefix, so nothing ever sees it again. Left alone
+        they accumulate for the life of the install, in a directory the
+        application cannot reasonably be asked to clean itself.
+
+        Safe to unlink unconditionally: ``store`` holds the instance lock for
+        the whole write, so no temporary this instance is using can be visible
+        here. Runs once per type directory per process — the caller is the
+        first store into that category, which keeps it off the restore path
+        — and is best effort, since losing the race with another process's
+        rename costs nothing.
+        """
+
+        if directory in self._swept:
+            return
+        self._swept.add(directory)
+        try:
+            with os.scandir(directory) as entries:
+                for examined, entry in enumerate(entries):
+                    if examined >= MAX_SWEEP_ENTRIES:
+                        break
+                    if not entry.name.startswith(TEMP_PREFIX):
+                        continue
+                    try:
+                        os.unlink(entry.path)
+                    except OSError:
+                        continue
+                    logger.debug("removed stale protocol-state temporary %s", entry.name)
+        except OSError:
+            # A directory we cannot scan is not a reason to fail the store that
+            # is about to create it fresh.
+            return
 
     @staticmethod
     def _read_header(path: Path) -> tuple[str, str, int] | None:

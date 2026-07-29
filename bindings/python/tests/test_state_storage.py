@@ -279,6 +279,48 @@ def test_enumeration_bound_counts_entries_examined_not_keys_returned(tmp_path) -
     assert len(keys) <= 1
 
 
+def test_stale_write_temporaries_are_swept_by_a_later_store(tmp_path) -> None:
+    # `store` renames a mkstemp file into place, so a crash in between orphans
+    # it — and enumeration filters on the `k_` prefix, so nothing ever looks at
+    # it again. Left alone they accumulate for the life of the install in a
+    # directory the application cannot reasonably be asked to clean itself.
+    storage = AppStateStorage(tmp_path / "state")
+    storage.store("outbox", "message-1", bytes([1]))
+
+    directory = tmp_path / "state" / state_storage_module._type_directory_name("outbox")
+    for index in range(3):
+        (directory / f"{state_storage_module.TEMP_PREFIX}{index}").write_bytes(b"partial")
+
+    # A fresh instance: the sweep is once per type directory per process, and
+    # the first store into that category is what performs it.
+    AppStateStorage(tmp_path / "state").store("outbox", "message-2", bytes([2]))
+
+    leftovers = [
+        entry.name
+        for entry in directory.iterdir()
+        if entry.name.startswith(state_storage_module.TEMP_PREFIX)
+    ]
+    assert leftovers == []
+    # The sweep must not touch real records, including ones it did not write.
+    assert storage.load("outbox", "message-1") == bytes([1])
+    assert sorted(storage.list_keys("outbox")) == ["message-1", "message-2"]
+
+
+def test_sweeping_temporaries_never_fails_a_store(tmp_path, monkeypatch) -> None:
+    # The sweep is opportunistic cleanup. A directory it cannot scan, or a
+    # temporary another process holds, must not fail the write it precedes.
+    storage = AppStateStorage(tmp_path / "state")
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("scandir refused")
+
+    monkeypatch.setattr(state_storage_module.os, "scandir", refuse)
+    storage.store("outbox", "message-1", bytes([1]))
+
+    monkeypatch.undo()
+    assert storage.load("outbox", "message-1") == bytes([1])
+
+
 def test_listing_dedupes_a_record_reachable_under_two_names(tmp_path) -> None:
     # A digest names exactly one record, so two names for one key id can only
     # come from a copy planted in the container. Restore must not walk the id
