@@ -61,7 +61,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **A Python `SecureStorage` built without an account namespace now says it cannot adopt the pre-namespace store.** Adoption records its claim under the namespace, so a provider constructed without one silently lands on the new service name, finds nothing, and mints a fresh MLS identity — abandoning every session, group, and TOFU pin the install had. `ProtocolManager` always supplies the namespace, but the provider is a documented constructor parameter; a caller building their own now gets a warning instead of a silent identity reset. Explicitly passing `adopt_legacy_store=False` stays quiet, since that is a decision rather than an accident.
 
-- **Malformed or unresolved recipient tokens are rejected before any queue, outbox, group mutation, clock, or transport side effect.** All outbound user-targeted APIs, including group invite/removal/role mutation, now validate the recipient at the SDK boundary, preventing app-owned unresolved identifiers such as `unresolved:token` from becoming indefinitely retried protocol state.
+- **Malformed or unresolved recipient tokens are rejected before any queue, outbox, clock, or transport side effect.** All outbound user-targeted APIs, plus `invite_to_group`, now validate the recipient at the SDK boundary, preventing app-owned unresolved identifiers such as `unresolved:token` from becoming indefinitely retried protocol state. Group *removal* and *role* mutation are deliberately exempt: admission is where a gate belongs, and one on the removal path would turn "a member with a stale-format id is on the roster" into "that member can never be removed or demoted".
 
 ## [0.16.6] — 2026-07-28
 
