@@ -5,6 +5,7 @@
 | Guide | Description |
 |-------|-------------|
 | [Quick Start](../QUICKSTART.md) | Get started in 5 minutes (React Native, iOS, Android) |
+| [Upgrading](UPGRADING.md) | **Breaking changes and required app-side work for the storage-split release** |
 | [React Native Integration](react-native-integration.md) | Full SDK integration guide with complete API reference |
 | [iOS Integration](ios-integration.md) | Native iOS (Swift) setup and usage |
 | [Android Integration](android-integration.md) | Native Android (Kotlin) setup and usage |

@@ -87,7 +87,7 @@ final class MeshController {
     private let eventHandler = MeshEventHandler()
 
     func startMesh() {
-        // ProtocolConfig has 16 required fields (+ 4 with defaults). See
+        // ProtocolConfig has 16 required fields (+ 8 with defaults). See
         // docs/configuration.md for what each one controls.
         let config = ProtocolConfig(
             appId: "my-ios-app",
@@ -104,15 +104,32 @@ final class MeshController {
             storePending: true,
             maxPendingPerPeer: 100,
             maxPendingGlobal: 1000,
-            pendingTtlMs: 604_800_000,   // 7 days
+            pendingTtlMs: 1_800_000,   // 30 min (the SDK default)
             overflowPolicy: .dropOldest
-            // requireEncryption (true), maxGroupMembers (256), groupRelayEnabled (true),
-            // and requireTransportIdentity (false) use their defaults.
+            // These 8 use their defaults: requireEncryption (true),
+            // maxGroupMembers (256), groupRelayEnabled (true),
+            // requireTransportIdentity (false), binaryWireEnabled (true),
+            // compactEnvelopeEnabled (true), richPayloadEnabled (true),
+            // cryptoRecoveryEnabled (true).
         )
 
         do {
             let mesh = try OfflineProtocol(config: config)
+
+            // Install the callback BEFORE start(): restore settlements from the
+            // previous run are parked and drained on start(), so anything
+            // emitted before the callback exists is lost.
             mesh.setEventCallback(callback: eventHandler)
+
+            // REQUIRED before you can send anything. Encryption is fail-closed
+            // by default, so with MLS uninitialized every send fails with
+            // encryptFailed. Unlike React Native there is no auto-initialization
+            // on the native path — you supply both providers yourself.
+            try mesh.initializeMls(
+                secureStorage: KeychainMlsStorage(),              // credential-backed
+                protocolStateStorage: AppContainerStateStorage()  // in the app container
+            )
+
             try mesh.start()
 
             // Send a message (priority is required; replyToMsg is optional)
@@ -135,6 +152,48 @@ final class MeshController {
     }
 }
 ```
+
+### 5. Storage: Two Providers, Two Lifecycles
+
+`initializeMls` takes two providers because key material and restartable delivery
+state have different lifetimes. `KeychainMlsStorage` and
+`AppContainerStateStorage` above are **your** classes — the SDK ships no default
+for the native path.
+
+| | `MlsStorageProvider` | `ProtocolStateStorageProvider` |
+|---|---|---|
+| Holds | MLS identity, sessions, groups, TOFU pins, install secrets, the record-sealing key | Outbox, pending messages, session/Welcome lifecycles, peer snapshots, media descriptors, block list, Lamport clock |
+| Back it with | Keychain | `Application Support`, with `isExcludedFromBackup = true` — **must** be removed when the app is deleted |
+| Value type | `[UInt8]` (`sequence<u8>`) | `Data` (`bytes`) |
+
+The Keychain can outlive an app container, which is why delivery state must not
+live in it: deleting the app would otherwise leave queued message plaintext and
+cloud-media `encryption_key`/`iv` values in the Keychain with nothing that ever
+reads or deletes them. Sensitive state-record *values* are sealed with a
+per-install AEAD key held in the secure provider, so the state provider only ever
+sees ciphertext.
+
+Two obligations bite hardest on iOS. **Writes must be durable before `store`
+returns** — the SDK treats a successful store as persisted and immediately writes
+state that depends on it, so fsync the file *and* its parent directory
+(`F_FULLFSYNC`), including on delete. And **bound your reads**: stat the entry
+first and never hand back more than 8 MiB
+(`MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES`); by the time the SDK can check a
+length it has already allocated the bytes.
+
+The React Native module's `ProtocolStateStorage.swift` and
+`StorageNamespace.swift` are working reference implementations. Read the
+[custom-provider contract](UPGRADING.md#15-the-custom-provider-contract) before
+writing your own; every obligation there exists because something breaks on a
+device without it.
+
+`initializeMls` is transactional — a failed call rolls back and leaves no partial
+state, so surface the error and retry rather than proceeding. Do not treat a
+failure as "start clean": a `blocked_users` listing failure deliberately fails
+initialization rather than coming up with every peer unblocked.
+
+See [MLS Integration](mls-integration.md#custom-storage-advanced) for the full
+provider interfaces.
 
 ## Permissions
 

@@ -82,7 +82,7 @@ config = ProtocolConfig(
     require_encryption=False,
     max_pending_per_peer=64,
     max_pending_global=4096,
-    pending_ttl_ms=120_000,
+    pending_ttl_ms=1_800_000,  # 30 min — matches the SDK default
     overflow_policy=OverflowPolicy.DROP_OLDEST,
 )
 protocol = ProtocolManager(
@@ -184,6 +184,7 @@ For details, see the [Mesh Networking Guide](docs/mesh.md).
 
 See the [docs/](docs/) directory for detailed guides:
 
+- [Upgrading](docs/UPGRADING.md) — **read first if you are moving an existing app onto the storage-split release**
 - [Architecture Deep Dive](docs/architecture.md)
 - [API Reference](docs/api-reference.md)
 - [Configuration Guide](docs/configuration.md)

@@ -285,10 +285,27 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 | `requireEncryption` | boolean | true | Fail send unless encryption is applied (fail-closed) |
 | `compactEnvelopeEnabled` | boolean | true | Emit the compact MLS envelope to recipients that advertise support (kill switch — see [Wire Format Kill Switches](#wire-format-kill-switches)) |
 | `richPayloadEnabled` | boolean | true | Seal rich extras (reply context, media metadata, forward attribution) inside the MLS ciphertext for capable recipients (kill switch — see [Wire Format Kill Switches](#wire-format-kill-switches)) |
-| `pendingQueue.maxPendingPerPeer` | number | 64 | Max queued encrypted pre-session messages per peer |
-| `pendingQueue.maxPendingGlobal` | number | 4096 | Max queued encrypted pre-session messages across all peers |
-| `pendingQueue.pendingTtlMs` | number | 120000 | TTL for queued encrypted pre-session messages |
+| `cryptoRecoveryEnabled` | boolean | true | Heal a 1:1 session that has fallen out of epoch sync instead of dropping the undecryptable message (kill switch — see [Crypto-Failure Recovery](#crypto-failure-recovery)) |
+| `pendingQueue.maxPendingPerPeer` | number | 64 | Max inbound encrypted messages held per peer awaiting session readiness |
+| `pendingQueue.maxPendingGlobal` | number | 4096 | Max inbound encrypted messages held across all peers |
+| `pendingQueue.pendingTtlMs` | number | 1800000 | TTL for held encrypted messages (30 minutes) |
 | `pendingQueue.overflowPolicy` | string | `drop_oldest` | Overflow action: `drop_oldest` or `drop_newest` |
+
+`pendingQueue` bounds the **inbound** pending-*decryption* queue — messages that
+arrived before the MLS session or group state was ready. Under the deferred-ACK
+model such a message is not delivery-ACKed on receipt, so this queue is the
+primary recovery window before the session confirms; that is why the TTL default
+is 30 minutes rather than the 2 minutes earlier releases used. The Rust
+`PendingQueueConfig` additionally carries `max_pending_bytes_per_peer` (4 MiB) and
+`max_pending_bytes_global` (32 MiB) — memory bounds that the count limits alone
+cannot provide, since a queued media chunk is far larger than a text message.
+Those two are not carried on the FFI dictionary; binding callers get the
+defaults.
+
+The **outbound** queue — messages you sent that are waiting for a session to be
+established — is a different queue with its own bounds and its own configurable
+lifetime (`pendingMessageMaxLifetimeMs`); see
+[Reliability Configuration](#reliability-configuration) below.
 
 Encryption is **required by default** (fail-closed): sends fail with a typed error
 instead of ever silently degrading to plaintext — including when MLS was never
@@ -369,6 +386,38 @@ disabled fleet interoperates with an enabled one automatically.
 }
 ```
 
+### Crypto-Failure Recovery
+
+`encryption.cryptoRecoveryEnabled` (default `true`) is a fourth runtime kill
+switch. It is not a wire format — nothing is negotiated and no peer has to
+support it — so it degrades independently of the three above.
+
+An *established* 1:1 MLS session can fall out of epoch sync with the peer (the
+two sides disagree on the MLS epoch, e.g. after a fork). The resulting decrypt
+failure used to be delivery-ACKed and dropped: silent loss behind an ACK that
+claimed delivery. With the switch on:
+
+- an epoch-mismatch failure **withholds the delivery ACK**, so the sender keeps
+  retrying instead of marking the message delivered;
+- a **rate-limited session re-key** (one per peer per 30 s, via a
+  `session_reset` key package) rebuilds the channel;
+- the sender **re-seals each resend** against the peer's current session, so the
+  message is delivered rather than merely retried.
+
+Genuine decrypt failures — corrupt or forged ciphertext, discarded ratchet
+generations — are deliberately excluded and still fail closed. Re-keying on
+those would be a re-key-storm vector.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `encryption.cryptoRecoveryEnabled` | boolean | true | Heal an epoch-desynced 1:1 session (un-ACK + rate-limited re-key + resend re-seal) |
+
+Setting it to `false` reverts to the legacy drop-and-ACK behaviour. Media chunks
+have no resend re-seal (chunks are re-encoded, not replayed) and recover through
+the `media_resend_required` path instead. See
+[MLS Integration](./mls-integration.md#crypto-failure-recovery) for the full
+mechanism.
+
 ### DORS Configuration
 
 | Parameter | Type | Default | Description |
@@ -435,8 +484,16 @@ reasoning behind each.
 **Dedup Config**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `maxTrackedMessages` | number | 1000 | Max message IDs to track |
-| `retentionTimeSecs` | number | 3600 | Retention time (1 hour) |
+| `maxTrackedMessages` | number | 1000 | Max message IDs to track (must be > 0) |
+| `retentionTimeSecs` | number | 3600 | Retention time (1 hour; must be > 0) |
+
+Both fields are now **rejected at `0`**. Neither failed safe: at
+`maxTrackedMessages: 0` the exact-match tracker evicts on every insert, so it
+holds a single id and duplicate suppression — a replay defence — was effectively
+off for a configuration the SDK used to accept in silence;
+`retentionTimeSecs: 0` expires every entry immediately for the same result. This
+refuses only the degenerate value, not an unwise one: sizing the window for your
+deployment is still your call.
 
 ### Network Configuration
 
@@ -446,14 +503,65 @@ reasoning behind each.
 
 ## Validation Rules
 
-The SDK validates configuration on creation:
+`ProtocolConfig::validate()` runs on construction — `OfflineProtocol::new` fails
+with `InvalidConfiguration` rather than starting on a configuration that cannot
+work. Nothing is partially applied.
 
-1. **appId**: Must not be empty
-2. **userId**: Must not be empty
-3. **initialTtl**: Must be > 0
-4. **Transports**: At least one must be enabled
-5. **Battery**: `minBatteryForRelay` must be 0-100
-6. **Thresholds**: `relayThreshold` must be > 0
+**Identity and routing**
+
+1. `appId` must not be empty
+2. `userId` must not be empty
+3. `initialTtl` must be > 0
+4. At least one transport must be enabled
+
+**ACK and retry**
+
+5. `ack.defaultTimeoutMs` must be > 0
+6. `ack.maxPendingAcks` must be > 0
+7. `retry.initialDelayMs` and `retry.maxDelayMs` must be > 0, and
+   `initialDelayMs` must be ≤ `maxDelayMs`
+8. `retry.backoffMultiplier` must be finite and ≥ 1.0
+9. `retry.outboxMaxLifetimeMs` and `retry.pendingMessageMaxLifetimeMs` must each
+   be in `1..=i64::MAX`
+
+**Deduplication**
+
+10. `dedup.maxTrackedMessages` must be > 0
+11. `dedup.retentionTimeSecs` must be > 0
+12. When `useBloomFilter` is set: `bloomFilterBits`, `bloomHashCount`,
+    `bloomFilterCount`, and `bloomRotationSecs` must each be > 0 (Rust-only —
+    the FFI `DedupConfig` carries no Bloom fields)
+
+**Encryption and groups**
+
+13. `requireEncryption: true` requires `enabled: true`
+14. `pendingQueue.maxPendingPerPeer` and `maxPendingGlobal` must be > 0, and
+    `maxPendingGlobal` must be ≥ `maxPendingPerPeer`
+15. `pendingQueue.pendingTtlMs` must be > 0
+16. `maxGroupMembers` must be > 0
+
+Note what is *not* validated: `minBatteryForRelay` is a `u8` and is clamped by
+its type rather than range-checked, and `relayThreshold` has no floor. Earlier
+versions of this guide claimed both were validated; they never were.
+
+### Runtime updates are validated the same way
+
+`updateAckConfig`, `updateRetryConfig`, and `updateDedupConfig` are **fallible**
+(`Result` in Rust, `[Throws=ProtocolError]` over UniFFI — Swift callers need
+`try`). Each builds the candidate configuration and runs the same
+`ProtocolConfig::validate` above, rather than re-checking a hand-rolled subset
+that would drift. On rejection the **previous configuration is kept**.
+
+Two consequences worth knowing:
+
+- A rejection can name a field you did not pass. The updaters validate the whole
+  candidate configuration, so an already-installed bad value surfaces on the next
+  unrelated update.
+- On React Native, a `reliability` block passed to the `OfflineProtocol`
+  **constructor** is applied during `start()`, where a rejection is logged and
+  swallowed — the SDK keeps its defaults. **A silently-defaulted reliability block
+  looks like it worked**; grep your logs for `Failed to apply … configuration`. A
+  direct `updateDedupConfig(...)` call rejects the promise instead.
 
 ## Platform-Specific Considerations
 
@@ -509,10 +617,15 @@ config = ProtocolConfig(
     require_encryption=True,
     max_pending_per_peer=64,
     max_pending_global=4096,
-    pending_ttl_ms=120_000,
+    pending_ttl_ms=1_800_000,  # 30 min (the SDK default)
     overflow_policy=OverflowPolicy.DROP_OLDEST,
 )
 ```
+
+`ProtocolManager` also requires a `state_root` (or `OFFLINE_PROTOCOL_STATE_ROOT`
+in the environment): Python has no portable uninstall-scoped container, so the
+SDK refuses to guess one. **Your installer must remove that directory on
+uninstall.**
 
 Build and package details are in
 [`bindings/python/README.md`](../bindings/python/README.md).

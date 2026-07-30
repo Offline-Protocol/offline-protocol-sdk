@@ -103,8 +103,18 @@ const protocol = new OfflineProtocol({
 | `requireEncryption` | `true` | Enforce encrypted delivery (send fails closed if encryption cannot be applied) |
 | `pendingQueue.maxPendingPerPeer` | `64` | Per-peer cap for encrypted messages received before session readiness |
 | `pendingQueue.maxPendingGlobal` | `4096` | Global cap for encrypted messages received before session readiness |
-| `pendingQueue.pendingTtlMs` | `120000` | TTL for encrypted messages queued before session readiness |
+| `pendingQueue.pendingTtlMs` | `1800000` | TTL (30 min) for encrypted messages held before session readiness |
 | `pendingQueue.overflowPolicy` | `drop_oldest` | Overflow policy: `drop_oldest` or `drop_newest` |
+| `compactEnvelopeEnabled` | `true` | Emit the compact MLS envelope to recipients that advertise `env_versions` |
+| `richPayloadEnabled` | `true` | Seal rich extras inside the MLS ciphertext for recipients that advertise `rich_versions` |
+| `cryptoRecoveryEnabled` | `true` | Heal an epoch-desynced 1:1 session instead of dropping the message ([below](#crypto-failure-recovery)) |
+
+The `pendingTtlMs` default is 30 minutes, not the 2 minutes earlier releases
+used: under the deferred-ACK model a message held here is not delivery-ACKed on
+receipt, so this queue is the primary recovery window before the session
+confirms. Memory stays bounded by the per-peer and global caps plus the
+`drop_oldest` policy — a longer TTL lets entries linger within those caps, it
+does not raise the ceiling.
 
 Encryption is required by default (fail-closed): outbound sends fail without transport
 transmission if encryption cannot be applied, instead of silently degrading to plaintext.
@@ -684,6 +694,51 @@ Per-peer `env_versions`/`rich_versions` capabilities persist across restarts;
 `wire_versions` is deliberately in-memory (hop-local, re-exchanged on connect).
 See [Wire Format Kill Switches](configuration.md#wire-format-kill-switches)
 for runtime disable semantics.
+
+### Crypto-Failure Recovery
+
+Distinct from the pending queue above, which covers a session that is *not yet
+ready*. This covers an **established** 1:1 session that has fallen out of epoch
+sync with the peer — the two sides disagree on the MLS epoch, e.g. after a fork.
+The decrypt fails, and previously that failure was delivery-ACKed and the
+message dropped: silent loss behind an ACK that claimed delivery.
+
+Gated by `encryption.cryptoRecoveryEnabled` (default `true`), the SDK now
+recovers in two tiers.
+
+**Tier 1 — honest failure, then heal.** An epoch-mismatch decrypt failure
+withholds the delivery ACK and un-marks the message id, so the sender keeps
+retrying rather than marking it delivered. It does *not* queue the ciphertext —
+that ciphertext is sealed to a dead epoch and could never be decrypted, however
+long it waited. Instead the receiver tears down its own stale session and
+advertises a `session_reset` key package; the peer drops its stale session,
+rebuilds from that key package, and Welcomes the receiver back. Deleting the
+local session is what makes convergence work for both user-id orderings. Re-keys
+are rate-limited to one per peer per 30 s.
+
+**Tier 2 — no loss.** The sender keeps per-outbox-entry re-seal provenance
+(memory-only; it holds plaintext and is never persisted), so each resend is
+re-sealed against the peer's *current* session while preserving the message id
+for dedup and ACK correlation. Tier 1 makes the failure honest; Tier 2 is what
+makes the message actually arrive.
+
+What is deliberately **excluded**: genuine decrypt failures — corrupt or forged
+ciphertext, discarded ratchet generations — are classified separately and still
+fail closed. Re-keying on those would let anyone force session teardowns by
+injecting garbage. The rate limit is the mitigation for the residual case: an
+attacker replaying a genuine peer's captured old-epoch ciphertext can force one
+teardown and re-establishment per window.
+
+Media has no Tier 2 — chunks are re-encoded rather than replayed, so an
+interrupted transfer recovers through the descriptor-based
+`media_resend_required` path instead.
+
+Disabling the switch reverts to the legacy drop-and-ACK behaviour.
+
+> **A missing delivery ACK is not proof of non-delivery.** Both this path and the
+> pending queue withhold ACKs while recovering, and a sender that exhausts its
+> retry budget before an ACK lands may mark a message undeliverable that the
+> recipient already holds. Do not treat ACK absence as loss.
 
 ---
 

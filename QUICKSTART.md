@@ -63,8 +63,11 @@ protocol.on('relay_promoted', () => {
 
 ## For Android Developers
 
-> Native (no React Native) integration needs the full `ProtocolConfig` and permission
-> setup. See the [Android Integration Guide](docs/android-integration.md) for the complete
+> Native (no React Native) integration needs the full `ProtocolConfig`, permission
+> setup, and a call to `initializeMls(secureStorage, protocolStateStorage)` with two
+> storage providers you supply — there is no auto-initialization on the native path,
+> and encryption is fail-closed, so sends fail until MLS is initialized. See the
+> [Android Integration Guide](docs/android-integration.md) for the complete
 > walkthrough — the snippet below is just the shape.
 
 ### 1. Build Rust Library
@@ -102,8 +105,11 @@ val messageId = protocol.sendMessage(
 
 ## For iOS Developers
 
-> Native (no React Native) integration needs the full `ProtocolConfig` and permission
-> setup. See the [iOS Integration Guide](docs/ios-integration.md) for the complete
+> Native (no React Native) integration needs the full `ProtocolConfig`, permission
+> setup, and a call to `initializeMls(secureStorage:protocolStateStorage:)` with two
+> storage providers you supply — there is no auto-initialization on the native path,
+> and encryption is fail-closed, so sends fail until MLS is initialized. See the
+> [iOS Integration Guide](docs/ios-integration.md) for the complete
 > walkthrough — the snippet below is just the shape.
 
 ### 1. Build Rust Library
@@ -138,6 +144,7 @@ let messageId = try mesh.sendMessage(
 
 ## Next Steps
 
+- **[Upgrading](docs/UPGRADING.md)** - Read this first if you are moving an existing app onto the storage-split release
 - **[React Native Example App](examples/react-native-app/README.md)** - Complete working example
 - [React Native Integration Guide](docs/react-native-integration.md) - Full SDK integration walkthrough
 - [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Step-by-step project setup

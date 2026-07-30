@@ -76,10 +76,21 @@ Retry 1:  2s     (1000 × 2^1)
 Retry 2:  4s     (1000 × 2^2)
 Retry 3:  8s     (1000 × 2^3)
 Retry 4:  16s    (1000 × 2^4)
-Retry 5+: 30s    (capped at max_delay_ms)
+Retry 5:  32s    (1000 × 2^5)
+Retry 6:  64s    (1000 × 2^6)
+Retry 7:  128s   (1000 × 2^7)
+Retry 8:  256s   (1000 × 2^8)
+Retry 9+: 300s   (capped at max_delay_ms, 5 min)
 ```
 
-The backoff exponent is capped at 20 to prevent arithmetic overflow in the intermediate calculation. In practice, `max_delay_ms` (30s) kicks in much earlier.
+The delay is `initial_delay_ms × backoff_multiplier^retry_count`, computed in
+`f64` and clamped to `max_delay_ms` before the integer cast. That makes it total
+over every configuration rather than needing an exponent ceiling: a non-finite
+intermediate collapses to `max_delay_ms`, and the float-to-int cast saturates.
+At the default `maxRetries: 10` the ladder sums to about 13.5 minutes of backoff,
+so a message that is going to fail permanently takes roughly 15 minutes to say
+so once ACK timeouts are included. Lower `maxDelayMs` and `maxRetries` if you
+need faster failure detection.
 
 ### Priority Ordering
 
@@ -330,7 +341,10 @@ The `MaxRetriesExceeded` variant was removed from the reliability crate's error 
 | ACK timeout | 5,000 ms | 10,000 ms |
 | Max ACK retries | 3 | 10 |
 
-Messages will take longer to permanently fail (up to ~100 seconds worst-case vs ~15 seconds before). Configure lower values if you need faster failure detection:
+Messages take considerably longer to permanently fail. With the current defaults
+(`maxRetries: 10`, `maxDelayMs: 300000`) the backoff ladder alone sums to about
+13.5 minutes, versus ~15 seconds under the old defaults. Configure lower values
+if you need faster failure detection:
 
 ```typescript
 reliability: {
