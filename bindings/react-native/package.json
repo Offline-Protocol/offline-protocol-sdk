@@ -21,7 +21,8 @@
     "react-native.config.js",
     "README.md",
     "LICENSE",
-    "LICENSE-COMMERCIAL.md"
+    "LICENSE-COMMERCIAL.md",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "prepare": "tsc",

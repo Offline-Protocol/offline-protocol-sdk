@@ -1,0 +1,21 @@
+# cargo-about configuration for generating THIRD-PARTY-NOTICES.md.
+# Regenerate with scripts/generate-third-party-notices.sh after dependency
+# changes; the accepted list mirrors the deny.toml license allowlist.
+accepted = [
+    "AGPL-3.0-only",
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+]
+
+# Attribution covers what we redistribute: the compiled cdylib/staticlib
+# graph. Build tools and dev-dependencies never link into shipped binaries.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+workarounds = ["ring"]
