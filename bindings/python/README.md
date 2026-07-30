@@ -2,6 +2,10 @@
 
 Python bindings for the Offline Protocol SDK: offline-first mesh networking with MLS end-to-end encryption. Supports macOS, Linux, and Windows.
 
+> **Upgrading an existing install?** Read [docs/UPGRADING.md](../../docs/UPGRADING.md)
+> first — `ProtocolManager` now requires an explicit `state_root`, and this
+> release is not safely downgradable.
+
 ## Quick Start
 
 ### 1. Build the native library

@@ -23,7 +23,7 @@ cannot be undone later.
 | 5 | [Recipient validation everywhere](#5-recipient-tokens-are-validated-at-every-outbound-boundary) | **breaking** | **breaking** | **breaking** | **breaking** |
 | 6 | [256 KiB content cap](#6-send_message-rejects-content-over-256-kib) | **breaking** | **breaking** | **breaking** | **breaking** |
 | 7 | [Pending-queue lifetime + caps](#7-the-pre-session-queue-has-a-lifetime-and-hard-caps) | new config | new config | new config | new config |
-| 8 | [RN ACK fallback 5 s → 10 s](#8-react-native-ack-timeout-fallback-is-now-10-s) | n/a | n/a | behaviour change | n/a |
+| 8 | [RN bridge fallbacks realigned](#8-react-native-bridge-fallbacks-now-match-the-sdk-defaults) | n/a | n/a | behaviour change | n/a |
 | 9 | [Synthesized relay frames](#9-react-native-synthesized-relay-frames-must-be-unattributed) | n/a | n/a | only if you wrote native relay code | n/a |
 | 10 | [Per-account storage namespaces](#10-storage-is-now-isolated-per-app_id-user_id) | your providers | your providers | behaviour change | behaviour change |
 | 11 | [Events you must handle](#11-events-you-must-now-handle) | all | all | all | all |
@@ -142,7 +142,7 @@ Locations the bridge uses:
 | iOS | Keychain, per-account service suffix | `Application Support/…/protocol-state-v1`, `isExcludedFromBackup = true` |
 | Android | `EncryptedSharedPreferences`, per-account prefs file | `noBackupFilesDir/offline-protocol/protocol-state-v1` |
 
-What *does* change for RN apps is covered in [§8](#8-react-native-ack-timeout-fallback-is-now-10-s),
+What *does* change for RN apps is covered in [§8](#8-react-native-bridge-fallbacks-now-match-the-sdk-defaults),
 [§9](#9-react-native-synthesized-relay-frames-must-be-unattributed),
 [§10](#10-storage-is-now-isolated-per-app_id-user_id), and
 [§11](#11-events-you-must-now-handle).
@@ -602,18 +602,42 @@ sit there reporting 4/64 and looking fine.
 
 ---
 
-## 8. React Native: ACK timeout fallback is now 10 s
+## 8. React Native: bridge fallbacks now match the SDK defaults
+
+Two independent fields where the RN layers substituted their own value for an
+omitted config field, and that value had drifted from the Rust default. Neither
+affects an app that passes the field explicitly.
+
+### 8.1 ACK timeout fallback: 5 s → 10 s
 
 Both RN bridges substituted `5000` when `updateAckConfig` was called without
 `defaultTimeoutMs`, silently halving the timeout against the SDK default. The
 fallback is now `10000`, matching `DEFAULT_ACK_TIMEOUT_MS`.
 
-- Apps that **pass** `defaultTimeoutMs`: unaffected.
-- Apps that **omit** it: ACK waits — and therefore retry timing — return to the
-  documented default. If you were relying on the 5 s behaviour, set it
-  explicitly.
+Apps that omit it: ACK waits — and therefore retry timing — return to the
+documented default. If you were relying on the 5 s behaviour, set it explicitly.
 
-A drift test now pins the ACK fallbacks alongside the retry ones, so the two
+### 8.2 Pending-decryption TTL fallback: 2 min → 30 min
+
+`DEFAULT_PENDING_TTL_MS` moved to 30 minutes when delivery ACKs became deferred
+(see [§7](#7-the-pre-session-queue-has-a-lifetime-and-hard-caps) for the
+*outbound* queue — this is the **inbound** pending-*decryption* queue, a
+different one). Rust and UniFFI were updated; all three RN layers kept the old
+`120000`, and because the JS wrapper materializes the field before it crosses
+the bridge, an RN app that omitted `pendingQueue.pendingTtlMs` got 2 minutes no
+matter what the SDK default said.
+
+All three now use `1800000`. Apps that omit the field hold an
+arrived-before-the-session-was-ready message for 30 minutes instead of 2,
+which is the window the deferred-ACK model needs — that queue is the primary
+recovery path before the session confirms, and a message evicted from it is not
+delivered and was never ACKed. Memory is unchanged: the count caps (64 per peer,
+4096 global) and byte caps (4 MiB / 32 MiB) still bound it, so a longer TTL lets
+entries linger *within* those caps rather than raising the ceiling.
+
+If you were relying on the 2-minute behaviour, set `pendingTtlMs` explicitly.
+
+Drift tests now pin all of these bridge literals to the Rust constants, so they
 cannot separate again.
 
 ---

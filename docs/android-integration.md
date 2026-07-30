@@ -98,8 +98,8 @@ class MainActivity : AppCompatActivity() {
         // EncryptFailed. Unlike React Native there is no auto-initialization on
         // the native path — you supply both providers yourself.
         protocol.initializeMls(
-            secureStorage = KeystoreMlsStorage(context),        // credential-backed
-            protocolStateStorage = AppContainerStateStorage(context),  // in the app container
+            secureStorage = KeystoreMlsStorage(this),        // credential-backed
+            protocolStateStorage = AppContainerStateStorage(this),  // in the app container
         )
 
         protocol.start()

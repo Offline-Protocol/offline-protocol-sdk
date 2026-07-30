@@ -184,6 +184,7 @@ For details, see the [Mesh Networking Guide](docs/mesh.md).
 
 See the [docs/](docs/) directory for detailed guides:
 
+- [Upgrading](docs/UPGRADING.md) — **read first if you are moving an existing app onto the storage-split release**
 - [Architecture Deep Dive](docs/architecture.md)
 - [API Reference](docs/api-reference.md)
 - [Configuration Guide](docs/configuration.md)

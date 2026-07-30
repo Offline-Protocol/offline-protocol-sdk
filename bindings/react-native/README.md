@@ -2,6 +2,10 @@
 
 Offline-first mesh networking SDK for React Native. Enables peer-to-peer messaging over BLE, WiFi Direct, Internet, Reticulum, and Nostr relays with intelligent transport switching.
 
+> **Upgrading an existing app?** Read [docs/UPGRADING.md](../../docs/UPGRADING.md)
+> first — this release changes storage, adds new input rejections, and is not
+> safely downgradable.
+
 ## Table of Contents
 
 - [Requirements](#requirements)
