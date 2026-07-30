@@ -2,6 +2,8 @@
 
 Offline-first mesh networking SDK for React Native. Enables peer-to-peer messaging over BLE, WiFi Direct, Internet, Reticulum, and Nostr relays with intelligent transport switching.
 
+**Dual-licensed:** use it under [AGPL-3.0-only](./LICENSE), or buy a [commercial license](./LICENSE-COMMERCIAL.md), your call. The AGPL requires you to publish your source whenever you distribute the SDK or expose it over a network (section 13); the commercial license lifts that requirement for closed-source apps. The npm manifest can only name `AGPL-3.0-only` because SPDX has no identifier for the commercial offer — see [License](#license) for the full breakdown.
+
 > **Upgrading an existing app?** Read [docs/UPGRADING.md](../../docs/UPGRADING.md)
 > first — this release changes storage, adds new input rejections, and is not
 > safely downgradable.
@@ -23,6 +25,7 @@ Offline-first mesh networking SDK for React Native. Enables peer-to-peer messagi
 - [Reliability Layer](#reliability-layer)
 - [File Transfer](#file-transfer)
 - [Troubleshooting](#troubleshooting)
+- [License](#license)
 
 ---
 
