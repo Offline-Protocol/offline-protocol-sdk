@@ -155,6 +155,35 @@ jobs:
       - name: Run pytest
         run: pytest bindings/python/tests/ -v
 
+  react-native-typecheck:
+    name: React Native Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Node version and the install/build pair below deliberately mirror the
+      # npm-publish job in release.yml. `npm run build` (tsc) had been reachable
+      # *only* from that job, which runs immediately before `npm publish` — so a
+      # type error or a tsconfig incompatibility surfaced during a release
+      # instead of on the PR that caused it. A dependabot bump to TypeScript 7
+      # (#178) passed all of CI for exactly this reason while failing to build.
+      #
+      # This job does not run scripts/prepare-npm.sh: that validates pre-built
+      # iOS .a and Android .so binaries, which don't exist outside a release run.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: bindings/react-native/package-lock.json
+
+      - name: Install dependencies
+        working-directory: bindings/react-native
+        run: npm ci
+
+      - name: Typecheck TypeScript
+        working-directory: bindings/react-native
+        run: npm run build
+
   android-unit-tests:
     name: Android Unit Tests
     runs-on: ubuntu-latest
