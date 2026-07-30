@@ -1,5 +1,7 @@
 # Commercial License
 
+Copyright © 2025-2026 Offline Protocol, Inc.
+
 The Offline Protocol SDK is **dual-licensed**. You may use it under **either** of the
 following licenses, at your option:
 

@@ -35,6 +35,15 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+  licenses:
+    name: License Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: License consistency check
+        run: ./scripts/check-license-consistency.sh
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

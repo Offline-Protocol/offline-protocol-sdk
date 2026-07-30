@@ -11,7 +11,7 @@ readme = "README.md"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE", "LICENSE-COMMERCIAL.md", "THIRD-PARTY-NOTICES.md"]
 requires-python = ">=3.10"
-authors = [{ name = "Offline Protocol Contributors" }]
+authors = [{ name = "Offline Protocol, Inc." }]
 keywords = ["offline", "messaging", "p2p", "mesh", "ble", "mls", "encryption"]
 classifiers = [
     "Development Status :: 4 - Beta",

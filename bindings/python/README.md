@@ -2,7 +2,7 @@
 
 Python bindings for the Offline Protocol SDK: offline-first mesh networking with MLS end-to-end encryption. Supports macOS, Linux, and Windows.
 
-> **Upgrading an existing install?** Read [docs/UPGRADING.md](../../docs/UPGRADING.md)
+> **Upgrading an existing install?** Read [docs/UPGRADING.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/UPGRADING.md)
 > first — `ProtocolManager` now requires an explicit `state_root`, and this
 > release is not safely downgradable.
 
@@ -231,3 +231,23 @@ pip-audit --strict
 | Linux | x86_64 | `.so` |
 | Linux | aarch64 | `.so` |
 | Windows | x86_64 | `.dll` |
+
+## License
+
+Copyright © 2025-2026 Offline Protocol, Inc.
+
+The Offline Protocol SDK is **dual-licensed**:
+
+- **AGPL-3.0-only** — see [LICENSE](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE).
+  Free for use in projects that comply with AGPL-3.0, including its network-use
+  source-disclosure requirement (section 13).
+- **Commercial License** — for proprietary applications that cannot or do not wish to
+  comply with the AGPL. See [LICENSE-COMMERCIAL.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/LICENSE-COMMERCIAL.md)
+  (contact legal@offlineprotocol.com).
+
+You may use the SDK under **either** license; you do not need both.
+
+Both license texts, along with `THIRD-PARTY-NOTICES.md`, are also installed with the
+package under `offline_protocol_sdk-<version>.dist-info/licenses/`. The links above are
+absolute because this file is the PyPI long description, and PyPI does not resolve
+repository-relative links.
