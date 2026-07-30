@@ -1,9 +1,10 @@
 # Upgrading
 
 Everything an application team has to change to move onto the **storage-split
-release** — the first release after `v0.16.6`. It is an explicitly breaking
-release: `initialize_mls` changes shape, three config updaters become fallible,
-and several previously-accepted inputs are now rejected at the boundary.
+release** — `v0.17.0`, the first release after `v0.16.6`. It is an explicitly
+breaking release: `initialize_mls` changes shape, three config updaters become
+fallible, and several previously-accepted inputs are now rejected at the
+boundary.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that

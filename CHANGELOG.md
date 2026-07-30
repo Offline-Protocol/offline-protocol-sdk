@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-07-30
+
 > **Downgrade is not a safe rollback.** The first launch on this release moves
 > pre-split delivery state out of the credential store and into the app
 > container, deleting the credential-store copy once the move is durable. An
