@@ -59,7 +59,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ProtocolConfig has 16 required fields (+ 4 with defaults). See
+        // ProtocolConfig has 16 required fields (+ 8 with defaults). See
         // docs/configuration.md for what each one controls.
         val config = ProtocolConfig(
             appId = "my-android-app",
@@ -76,16 +76,32 @@ class MainActivity : AppCompatActivity() {
             storePending = true,
             maxPendingPerPeer = 100.toULong(),
             maxPendingGlobal = 1_000.toULong(),
-            pendingTtlMs = 604_800_000.toULong(),
+            pendingTtlMs = 1_800_000.toULong(),  // 30 min (the SDK default)
             overflowPolicy = OverflowPolicy.DROP_OLDEST,
-            // requireEncryption (true), maxGroupMembers (256u), groupRelayEnabled (true),
-            // and requireTransportIdentity (false) use their defaults.
+            // These 8 use their defaults: requireEncryption (true),
+            // maxGroupMembers (256u), groupRelayEnabled (true),
+            // requireTransportIdentity (false), binaryWireEnabled (true),
+            // compactEnvelopeEnabled (true), richPayloadEnabled (true),
+            // cryptoRecoveryEnabled (true).
         )
 
         protocol = OfflineProtocol(config)
 
         // Events are delivered as JSON strings via the EventCallback interface.
+        // Install the callback BEFORE start(): restore settlements from the
+        // previous run are parked and drained on start(), so anything emitted
+        // before the callback exists is lost.
         protocol.setEventCallback(MeshEventHandler())
+
+        // REQUIRED before you can send anything. Encryption is fail-closed by
+        // default, so with MLS uninitialized every send fails with
+        // EncryptFailed. Unlike React Native there is no auto-initialization on
+        // the native path — you supply both providers yourself.
+        protocol.initializeMls(
+            secureStorage = KeystoreMlsStorage(context),        // credential-backed
+            protocolStateStorage = AppContainerStateStorage(context),  // in the app container
+        )
+
         protocol.start()
 
         // Send a message (priority is required; replyToMsg is optional)
@@ -115,6 +131,42 @@ class MeshEventHandler : EventCallback {
     }
 }
 ```
+
+### 5. Storage: Two Providers, Two Lifecycles
+
+`initializeMls` takes two providers because key material and restartable
+delivery state have different lifetimes. `KeystoreMlsStorage` and
+`AppContainerStateStorage` above are **your** classes — the SDK ships no default
+for the native path.
+
+| | `MlsStorageProvider` | `ProtocolStateStorageProvider` |
+|---|---|---|
+| Holds | MLS identity, sessions, groups, TOFU pins, install secrets, the record-sealing key | Outbox, pending messages, session/Welcome lifecycles, peer snapshots, media descriptors, block list, Lamport clock |
+| Back it with | `EncryptedSharedPreferences` (Keystore-backed) | `noBackupFilesDir` — **must** be removed when the app is uninstalled |
+| Value type | `List<UByte>` (`sequence<u8>`) | `ByteArray` (`bytes`) |
+
+A credential store can outlive an app container, which is why delivery state must
+not live in one: uninstalling would otherwise leave queued message plaintext and
+cloud-media `encryption_key`/`iv` values in the Keystore with nothing that ever
+reads or deletes them. Sensitive state-record *values* are sealed with a
+per-install AEAD key held in the secure provider, so the state provider only ever
+sees ciphertext.
+
+The React Native module's `ProtocolStateStorage.kt` and `StorageNamespace.kt` are
+working reference implementations — atomic durable writes, digest-based
+filenames, a process-wide lock, per-account namespacing, and stale-temporary
+sweeping. Read the
+[custom-provider contract](UPGRADING.md#15-the-custom-provider-contract)
+before writing your own; every obligation there exists because something breaks
+on a device without it.
+
+`initializeMls` is transactional — a failed call rolls back and leaves no partial
+state, so surface the error and retry rather than proceeding. Do not treat a
+failure as "start clean": a `blocked_users` listing failure deliberately fails
+initialization rather than coming up with every peer unblocked.
+
+See [MLS Integration](mls-integration.md#custom-storage-advanced) for the full
+provider interfaces.
 
 ## Permissions
 

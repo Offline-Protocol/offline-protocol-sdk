@@ -175,10 +175,20 @@ await protocol.start(); // MLS auto-initialized when encryption.enabled is true
 // Key packages are exchanged automatically when peers are discovered.
 ```
 
-Both wire-format kill switches — top-level `binaryWireEnabled` and
-`encryption.compactEnvelopeEnabled` (default `true`) — disable the compact
-binary codec / compact MLS envelope at runtime; see
-[Wire Format Kill Switches](../../docs/configuration.md#wire-format-kill-switches).
+Four runtime kill switches (all default `true`) let you disable a negotiated
+format or the recovery path without an SDK release:
+
+| Flag | Disables |
+|------|----------|
+| `binaryWireEnabled` (top level) | Compact binary mesh framing, back to the JSON floor |
+| `encryption.compactEnvelopeEnabled` | Compact MLS envelope, back to the JSON floor |
+| `encryption.richPayloadEnabled` | Sealing rich extras — they drop rather than going cleartext |
+| `encryption.cryptoRecoveryEnabled` | Epoch-desync healing, back to legacy drop-and-ACK |
+
+Each degrades independently, and inbound parsing of every format stays on
+regardless, so a disabled fleet still interoperates with an enabled one. See
+[Wire Format Kill Switches](../../docs/configuration.md#wire-format-kill-switches)
+and [Crypto-Failure Recovery](../../docs/configuration.md#crypto-failure-recovery).
 
 See the [MLS Integration Guide](../../docs/mls-integration.md) for advanced usage.
 
@@ -505,6 +515,34 @@ interface DorsConfig {
 ```
 
 
+### EncryptionConfig
+
+```typescript
+interface EncryptionConfig {
+  enabled?: boolean;                 // default: true
+  autoKeyExchange?: boolean;         // default: true
+  storePending?: boolean;            // default: true
+  requireEncryption?: boolean;       // default: true (fail-closed)
+  compactEnvelopeEnabled?: boolean;  // default: true (kill switch)
+  richPayloadEnabled?: boolean;      // default: true (kill switch)
+  cryptoRecoveryEnabled?: boolean;   // default: true (kill switch)
+  pendingQueue?: PendingQueueConfig;
+}
+
+interface PendingQueueConfig {
+  maxPendingPerPeer?: number;  // default: 64
+  maxPendingGlobal?: number;   // default: 4096
+  pendingTtlMs?: number;       // default: 1800000 (30 min)
+  overflowPolicy?: 'drop_oldest' | 'drop_newest';  // default: drop_oldest
+}
+```
+
+`pendingQueue` bounds the **inbound** pending-decryption queue — messages that
+arrived before the MLS session was ready. The **outbound** pre-session queue is a
+different queue: it is bounded at a fixed 64 messages / 2 MiB per peer and
+4096 / 16 MiB globally (not configurable), with a configurable lifetime via
+`reliability.retry.pendingMessageMaxLifetimeMs`.
+
 ### NetworkConfig
 
 ```typescript
@@ -530,11 +568,19 @@ interface ReliabilityConfig {
     pendingMessageMaxLifetimeMs?: number; // default: 604800000
   };
   dedup?: {
-    maxTrackedMessages?: number; // default: 1000
-    retentionTimeSecs?: number;  // default: 3600
+    maxTrackedMessages?: number; // default: 1000, must be > 0
+    retentionTimeSecs?: number;  // default: 3600, must be > 0
   };
 }
 ```
+
+Both dedup fields are **rejected at `0`** — at `maxTrackedMessages: 0` duplicate
+suppression is effectively off, which is a replay-defence gap the SDK used to
+accept in silence. A `reliability` block passed to the **constructor** is applied
+during `start()`, where a rejection is logged and swallowed (the SDK keeps its
+defaults), so grep for `Failed to apply … configuration` rather than assuming it
+took. A direct `updateDedupConfig(...)` / `updateAckConfig(...)` /
+`updateRetryConfig(...)` call rejects the promise instead.
 
 ### PathConfig
 
@@ -608,7 +654,8 @@ enum MessagePriority {
 
 `recipient` is always the target's canonical user id — the value they
 supplied as `ProtocolConfig.userId`, which is exactly what
-`neighbor_discovered` reports as `peer_id` (see [Identity](#identity)).
+`neighbor_discovered` reports as `peer_id` (see the identity contract under
+[neighbor_discovered](#neighbor_discovered)).
 
 The message ID returned by `sendConnectionRequest` is the correlation key
 for the request's outcome events:

@@ -131,6 +131,14 @@ pub struct EncryptionConfig {
     /// advertise support (`rich_versions`). Kill switch — inbound parsing
     /// is always on; rich extras are never sent cleartext. (default: true)
     pub rich_payload_enabled: bool,
+
+    /// Heal a 1:1 session that has fallen out of epoch sync with the peer
+    /// rather than dropping the undecryptable message: the delivery ACK is
+    /// withheld and a rate-limited session re-key rebuilds the channel.
+    /// Genuine decrypt failures (corrupt/forged ciphertext, discarded
+    /// ratchet generations) are unaffected and still fail closed.
+    /// (default: true)
+    pub crypto_recovery_enabled: bool,
 }
 ```
 
@@ -144,16 +152,26 @@ interface EncryptionConfig {
   pendingQueue?: {
     maxPendingPerPeer?: number; // Default: 64
     maxPendingGlobal?: number;  // Default: 4096
-    pendingTtlMs?: number;      // Default: 120000
+    pendingTtlMs?: number;      // Default: 1800000 (30 min)
     overflowPolicy?: 'drop_oldest' | 'drop_newest'; // Default: drop_oldest
   };
   compactEnvelopeEnabled?: boolean; // Default: true
   richPayloadEnabled?: boolean;     // Default: true
+  cryptoRecoveryEnabled?: boolean;  // Default: true
 }
 ```
 
+`pendingQueue` bounds the **inbound** pending-decryption queue (messages that
+arrived before the session was ready). The Rust struct additionally carries
+`max_pending_bytes_per_peer` (4 MB) and `max_pending_bytes_global` (32 MB), which
+are not on the FFI dictionary — binding callers get the defaults. The *outbound*
+pre-session queue is separate and has its own bounds; see
+[Configuration](configuration.md#reliability-configuration).
+
 See [Wire Format Kill Switches](configuration.md#wire-format-kill-switches) for
-what the last two flags gate and how they degrade.
+what `compactEnvelopeEnabled` and `richPayloadEnabled` gate, and
+[Crypto-Failure Recovery](configuration.md#crypto-failure-recovery) for
+`cryptoRecoveryEnabled`.
 
 ### DorsConfig
 

@@ -82,7 +82,7 @@ config = ProtocolConfig(
     require_encryption=False,
     max_pending_per_peer=64,
     max_pending_global=4096,
-    pending_ttl_ms=120_000,
+    pending_ttl_ms=1_800_000,  # 30 min — matches the SDK default
     overflow_policy=OverflowPolicy.DROP_OLDEST,
 )
 protocol = ProtocolManager(

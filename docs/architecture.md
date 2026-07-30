@@ -8,7 +8,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 2. **Write Once**: Core logic shared across all platforms
 3. **Zero-Copy**: Minimize allocations and copying
 4. **Modular**: Each crate has a single responsibility
-5. **Testable**: ~900 tests covering all critical paths
+5. **Testable**: ~1,700 tests covering all critical paths
 
 ## Crate Organization
 
@@ -66,7 +66,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Key Components**:
 - `AckManager` - Timeout tracking (default 10s)
-- `RetryQueue` - Exponential backoff (1s → 2s → 4s, max 30s; 10 retries)
+- `RetryQueue` - Exponential backoff (1s → 2s → 4s …, capped at 5 min; 10 retries)
 - `Deduplicator` - Message ID tracking (1,000 IDs, 1-hour retention)
 
 **Data Structures**:
@@ -84,8 +84,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Key Components**:
 - `MlsManager` - Session, group, key-package, encryption, and decryption lifecycle
-- `MlsStorage` - Storage-agnostic interface for platform secure storage
-- `ProtocolStateStorage` - App-container storage for restartable outbox, pending-message, and delivery state
+- `MlsStorage` - Storage-agnostic interface for platform **secure** storage (credential store)
 - `GroupId`, `GroupInfo`, `EncryptedMessage`, and `WelcomeMessage`
 
 **Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
@@ -121,7 +120,16 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 - `ProtocolConfig` - Unified configuration
 - `Event` - All event types
 - `OfflineProtocol` - Main entry point
+- `ProtocolStateStorage` - App-container storage for restartable delivery state (outbox, pending messages, session/Welcome lifecycles, peer snapshots, media descriptors, block list, Lamport clock)
 - `FileTransferManager` - File chunking/reassembly
+
+**Storage domains**: key material and restartable protocol state are two
+different contracts with two different lifecycles. `MlsStorage` (in the MLS
+crate) is credential-backed and may outlive an app container;
+`ProtocolStateStorage` must live *in* the container and be removed on app
+deletion. Sensitive protocol-state record values are sealed with a per-install
+AEAD key held in secure storage before they reach the state provider. See
+[MLS Integration](mls-integration.md#custom-storage-advanced).
 
 **Thread Safety**:
 - `Arc<Mutex<SharedState>>` for shared mutable state
@@ -187,12 +195,19 @@ Distributes messages across top K relays (default 3):
 
 ```
 Retry 0: Wait 1s
-Retry 1: Wait 2s  (1s * 2.0)
-Retry 2: Wait 4s  (2s * 2.0)
-Retry 3: Wait 8s  (4s * 2.0)
-Retry 4: Wait 16s (8s * 2.0)
-Retry 5-10: Wait 30s (maximum-delay clamp)
+Retry 1: Wait 2s   (1s * 2.0)
+Retry 2: Wait 4s   (2s * 2.0)
+Retry 3: Wait 8s   (4s * 2.0)
+Retry 4: Wait 16s  (8s * 2.0)
+Retry 5: Wait 32s  (16s * 2.0)
+Retry 6: Wait 64s  (32s * 2.0)
+Retry 7: Wait 128s (64s * 2.0)
+Retry 8: Wait 256s (128s * 2.0)
+Retry 9: Wait 300s (maximum-delay clamp, 5 min)
 ```
+
+See [Message Delivery](message-delivery.md#exponential-backoff) for the
+clamping semantics and how to tune the ladder.
 
 ### Deduplication
 
@@ -270,17 +285,25 @@ The SDK uses [UniFFI](https://mozilla.github.io/uniffi-rs/) to generate type-saf
 
 ## Testing Strategy
 
-### Test Coverage (~900 tests)
+### Test Coverage (~1,700 tests)
 
 Tests are distributed across all crates and cover:
 - Core types and message construction
 - Transport abstraction and metrics
 - DORS scoring, hysteresis, escalation
 - Reliability (ACK, retry, deduplication)
-- MLS encryption lifecycle
+- MLS encryption lifecycle, crypto-desync recovery
+- Storage split: restore walks, delete budgets, legacy adoption, record sealing
 - Service discovery and request/response
 - Protocol integration and event handling
 - UniFFI bindings
+
+Several are **drift guards** rather than behavioural tests — they read another
+file and assert it still agrees with the Rust source (React Native event types
+against the `Event` enum, the built-in storage providers' transfer ceilings
+against the Rust constant, the RN bridges' config fallbacks against the
+reliability defaults). Those are the tests that fail when documentation-adjacent
+code goes stale.
 
 Run all tests with `cargo test --workspace`.
 
