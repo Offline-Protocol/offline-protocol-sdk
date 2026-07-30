@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+# AGPL-3.0-only requires the license text to accompany the program, and a
+# published crate ships on its own — cargo copies this into the .crate archive.
+license-file = "../../LICENSE"
 repository.workspace = true
 rust-version.workspace = true
 description = "Reliability layer with ACK, retry, and deduplication for the Offline Protocol SDK"

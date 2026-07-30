@@ -43,7 +43,7 @@ Used by:
 - [offline-protocol-mls 0.2.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 - [offline-protocol-reliability 0.2.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 - [offline-protocol-router 0.2.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-services 0.2.0](https://crates.io/crates/offline-protocol-services)
+- [offline-protocol-services 0.2.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 - [offline-protocol-transport 0.2.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 - [offline-protocol-uniffi 0.2.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 

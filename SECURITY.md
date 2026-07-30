@@ -2,10 +2,21 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.13.x  | :white_check_mark: |
-| < 0.13  | :x:                |
+Security fixes land on the most recent minor release line only — there are no
+backports to earlier lines. If you are on an older line, upgrading is the fix.
+
+| Version                          | Supported          |
+| -------------------------------- | ------------------ |
+| Current line (`0.17.x`)          | :white_check_mark: |
+| Any earlier line (`≤ 0.16.x`)    | :x:                |
+
+Report against the latest published release
+([releases](https://github.com/Offline-Protocol/offline-protocol-sdk/releases),
+`npm view @offline-protocol/mesh-sdk version`); a fix ships in the next release
+on the current line. These are release versions — the git tag and the
+`@offline-protocol/mesh-sdk` npm package, which share a number. The workspace
+`Cargo.toml` version is an internal, deliberately decoupled `0.x` and is not
+what this table refers to.
 
 ## Reporting a Vulnerability
 
@@ -45,6 +56,64 @@ The following are in scope for security reports:
 - Social engineering
 - Issues in development dependencies only (not shipped)
 - Theoretical attacks with no practical exploit path
+
+## Safe Harbor
+
+We want security researchers to look at this code, so we will not use the law as
+a deterrent against people who do it in good faith.
+
+If you conduct security research and disclose it in accordance with this policy,
+Offline Protocol, Inc. considers that research to be:
+
+- **Authorized** under the Computer Fraud and Abuse Act and equivalent
+  anti-hacking statutes in other jurisdictions. We will not initiate or support
+  civil or criminal action against you, and we will not report you to law
+  enforcement, for accidental, good-faith violations of this policy.
+- **Authorized** under the anti-circumvention provisions of the DMCA (17 U.S.C.
+  §1201) and equivalent laws. We waive any claim against you for circumventing
+  technical measures in our software in the course of your research, and we will
+  not send DMCA takedown notices aimed at suppressing your findings.
+- **Exempt** from any provision of our terms of service or acceptable-use terms
+  that would otherwise prohibit security testing, waived on a limited basis for
+  the research this policy covers.
+- **Lawful and welcome.** If a third party brings action against you and you
+  complied with this policy, we will make it known that your research was
+  authorized.
+
+Reverse engineering, decompiling, and disassembling the SDK and its shipped
+binaries for the purpose of finding vulnerabilities is expressly permitted,
+whatever license you received the SDK under.
+
+### What we ask in return
+
+Safe harbor applies while you:
+
+- Test only against software, devices, and deployments **you own or have
+  explicit permission to test**. Do not attack other people's peers, meshes, or
+  self-hosted relays.
+- Avoid privacy violations, data destruction, and service degradation. Access,
+  modify, or retain only the data strictly needed to demonstrate the issue, stop
+  as soon as the vulnerability is confirmed, and tell us if you encountered
+  someone else's data.
+- Keep testing against infrastructure we operate (our hosted relay endpoints)
+  limited to your own accounts and traffic. No load, volumetric, or
+  denial-of-service testing against shared infrastructure — describe the attack
+  instead and we will assess it.
+- Give us reasonable time to remediate before disclosing publicly. **90 days
+  from our acknowledgment** is the default; tell us if you intend to publish
+  sooner and we will work out a timeline rather than argue about one.
+- Do not extort. A report conditioned on payment is not a good-faith
+  disclosure. We credit researchers in release notes; we do not currently run a
+  paid bounty program.
+
+Two limits worth stating plainly. This safe harbor is ours to give and covers
+only claims by Offline Protocol, Inc. — it cannot bind third parties, so an
+application built on this SDK, an independently operated relay, or a platform
+vendor may take its own view. And it is not a license to break the law: you are
+still expected to comply with all applicable statutes.
+
+If you are unsure whether a specific test is covered, email us **before** you
+run it and ask. We would rather answer that question than litigate it.
 
 ## Security Design
 

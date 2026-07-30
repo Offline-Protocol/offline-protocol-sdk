@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+# Criterion harness for the workspace, not a distributable library: it carries no
+# per-crate license copy because it is never packaged or published.
+publish = false
 
 [lints]
 workspace = true
