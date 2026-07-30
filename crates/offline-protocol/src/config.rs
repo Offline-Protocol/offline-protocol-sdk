@@ -1037,31 +1037,49 @@ mod tests {
         let rn_root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
 
-        // Each entry is (path, the fallback literal that file must contain).
+        // Each entry is (path, the fallback that file must contain). The
+        // pattern names the field it guards, not just the literal, so deleting
+        // the fallback cannot be masked by the same number appearing on some
+        // other line. Matched against the source with whitespace squeezed, so a
+        // line wrap between the field and its `?:`/`??` doesn't hide it.
         let expected = [
             (
                 rn_root.join("src/index.ts"),
-                format!("?? {DEFAULT_PENDING_TTL_MS}"),
+                format!("pendingTtlMs ?? {DEFAULT_PENDING_TTL_MS}"),
             ),
             (
                 rn_root.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"),
-                format!("?: {}L", format_underscored(DEFAULT_PENDING_TTL_MS)),
+                format!(
+                    "\"pending_ttl_ms\") ?: {}L",
+                    format_underscored(DEFAULT_PENDING_TTL_MS)
+                ),
             ),
             (
                 rn_root.join("ios/EncryptionConfigReader.swift"),
-                format!("?? {}", format_underscored(DEFAULT_PENDING_TTL_MS)),
+                format!(
+                    "\"pending_ttl_ms\") ?? {}",
+                    format_underscored(DEFAULT_PENDING_TTL_MS)
+                ),
             ),
         ];
 
-        for (path, fallback) in &expected {
-            // The guard only applies in the repo checkout; skip when the
-            // bindings tree isn't present (e.g. a vendored crate).
-            let Ok(source) = std::fs::read_to_string(path) else {
-                eprintln!("bindings tree not present, skipping RN pending-TTL drift check");
-                return;
-            };
+        // The guard only applies in the repo checkout; skip when the bindings
+        // tree isn't present (e.g. a vendored crate). Read every file up front
+        // so a moved or renamed bridge skips the whole guard rather than
+        // silently dropping the checks that come after it.
+        let Some(sources) = expected
+            .iter()
+            .map(|(path, _)| std::fs::read_to_string(path).ok())
+            .collect::<Option<Vec<_>>>()
+        else {
+            eprintln!("bindings tree not present, skipping RN pending-TTL drift check");
+            return;
+        };
+
+        for ((path, fallback), source) in expected.iter().zip(&sources) {
+            let squeezed = source.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(
-                source.contains(fallback.as_str()),
+                squeezed.contains(fallback.as_str()),
                 "RN pending-queue TTL fallback drifted from DEFAULT_PENDING_TTL_MS: \
                  expected `{fallback}` in {}",
                 path.display()
