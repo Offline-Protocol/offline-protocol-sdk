@@ -55,7 +55,7 @@ tracing = "0.1"
 criterion = "0.8"
 
 # MLS (Message Layer Security)
-openmls = "0.7"
+openmls = "0.8"
 openmls_rust_crypto = "0.4"
 openmls_basic_credential = "0.4"
 openmls_traits = "0.4"
