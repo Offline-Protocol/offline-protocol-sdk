@@ -1,26 +1,54 @@
 version: 2
+
+# Every ecosystem below carries a 7-day cooldown: a release must have been
+# public for a week before Dependabot proposes it. Without this we were being
+# offered releases 2-3 days old (taiki-e/install-action v2.85.3 was superseded
+# by v2.85.4 the day after its PR opened), which is exactly the window in which
+# a bad release gets yanked or hot-fixed.
+#
+# Cooldown applies to *version* updates only — Dependabot still raises security
+# updates immediately, which is the behavior we want.
 updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: pip
     directory: /bindings/python
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: npm
     directory: /bindings/react-native
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: gradle
     directory: /bindings/react-native/android
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      # ci.yml pins `dtolnay/rust-toolchain@1.87.0` for the MSRV job. That ref is
+      # not a stale action version — it encodes the workspace's
+      # `rust-version = "1.87"`, and bumping it silently stops testing MSRV
+      # rather than upgrading anything. Dependabot read it as a version pin and
+      # proposed 1.100.0, a Rust release that does not exist (#184).
+      # Our four other uses of this action are `@stable`, which Dependabot does
+      # not version-bump, so ignoring the action outright costs us nothing.
+      - dependency-name: dtolnay/rust-toolchain
