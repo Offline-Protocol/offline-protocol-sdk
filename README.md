@@ -212,6 +212,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines and [QUICKSTAR
 
 ## License
 
+Copyright © 2025-2026 Offline Protocol, Inc.
+
 The Offline Protocol SDK is **dual-licensed**:
 
 - **GNU Affero General Public License v3.0** (AGPL-3.0-only) — see [LICENSE](LICENSE).

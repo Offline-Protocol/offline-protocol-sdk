@@ -1396,9 +1396,11 @@ If you see the linking error message:
 
 ## License
 
+Copyright © 2025-2026 Offline Protocol, Inc.
+
 The Offline Protocol SDK is **dual-licensed**:
 
-- **AGPL-3.0-only** — see [LICENSE](../../LICENSE). Free for use in projects that comply
+- **AGPL-3.0-only** — see [LICENSE](./LICENSE). Free for use in projects that comply
   with AGPL-3.0, including its network-use source-disclosure requirement (section 13).
 - **Commercial License** — for proprietary apps that cannot or do not wish to comply with
   the AGPL. See [LICENSE-COMMERCIAL.md](./LICENSE-COMMERCIAL.md) (contact legal@offlineprotocol.com).
