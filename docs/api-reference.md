@@ -163,7 +163,7 @@ interface EncryptionConfig {
 
 `pendingQueue` bounds the **inbound** pending-decryption queue (messages that
 arrived before the session was ready). The Rust struct additionally carries
-`max_pending_bytes_per_peer` (4 MB) and `max_pending_bytes_global` (32 MB), which
+`max_pending_bytes_per_peer` (4 MiB) and `max_pending_bytes_global` (32 MiB), which
 are not on the FFI dictionary — binding callers get the defaults. The *outbound*
 pre-session queue is separate and has its own bounds; see
 [Configuration](configuration.md#reliability-configuration).

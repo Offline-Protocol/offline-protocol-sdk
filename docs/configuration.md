@@ -296,8 +296,8 @@ arrived before the MLS session or group state was ready. Under the deferred-ACK
 model such a message is not delivery-ACKed on receipt, so this queue is the
 primary recovery window before the session confirms; that is why the TTL default
 is 30 minutes rather than the 2 minutes earlier releases used. The Rust
-`PendingQueueConfig` additionally carries `max_pending_bytes_per_peer` (4 MB) and
-`max_pending_bytes_global` (32 MB) — memory bounds that the count limits alone
+`PendingQueueConfig` additionally carries `max_pending_bytes_per_peer` (4 MiB) and
+`max_pending_bytes_global` (32 MiB) — memory bounds that the count limits alone
 cannot provide, since a queued media chunk is far larger than a text message.
 Those two are not carried on the FFI dictionary; binding callers get the
 defaults.

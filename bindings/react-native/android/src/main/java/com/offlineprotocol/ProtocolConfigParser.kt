@@ -81,7 +81,7 @@ internal object ProtocolConfigParser {
         val pendingTtlMs = pendingQueueJson?.optLongCompat(
             "pendingTtlMs",
             "pending_ttl_ms"
-        ) ?: json.optLongCompat("pendingTtlMs", "pending_ttl_ms") ?: 120_000L
+        ) ?: json.optLongCompat("pendingTtlMs", "pending_ttl_ms") ?: 1_800_000L
         val overflowPolicyRaw = pendingQueueJson?.optStringCompat(
             "overflowPolicy",
             "overflow_policy"

@@ -27,7 +27,9 @@ final class EncryptionConfigReaderTests: XCTestCase {
         XCTAssertTrue(values.cryptoRecoveryEnabled)
         XCTAssertEqual(values.maxPendingPerPeer, 64)
         XCTAssertEqual(values.maxPendingGlobal, 4096)
-        XCTAssertEqual(values.pendingTtlMs, 120_000)
+        // Mirrors DEFAULT_PENDING_TTL_MS (30 min). Pinned on the Rust side too
+        // by `rn_bridge_pending_ttl_fallbacks_match_rust_default`.
+        XCTAssertEqual(values.pendingTtlMs, 1_800_000)
         XCTAssertEqual(values.overflowPolicyRaw, "drop_oldest")
     }
 

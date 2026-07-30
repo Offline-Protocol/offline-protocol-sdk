@@ -1020,4 +1020,65 @@ mod tests {
             .build();
         assert!(result.is_err());
     }
+
+    /// The RN bridges never reach [`DEFAULT_PENDING_TTL_MS`]: each layer
+    /// substitutes its own fallback when the app omits `pendingTtlMs`, and the
+    /// JS layer always materializes the field before it crosses the bridge. So
+    /// the Rust default is only the RN default for as long as these three
+    /// literals agree with it — they silently drifted to the pre-deferred-ACK
+    /// 2-minute window once already, which is the window this constant was
+    /// raised to replace.
+    ///
+    /// The sibling guard for the ACK/retry fallbacks lives in
+    /// `offline-protocol-reliability`; this one has to live here because that
+    /// crate cannot depend on this one.
+    #[test]
+    fn rn_bridge_pending_ttl_fallbacks_match_rust_default() {
+        let rn_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+
+        // Each entry is (path, the fallback literal that file must contain).
+        let expected = [
+            (
+                rn_root.join("src/index.ts"),
+                format!("?? {DEFAULT_PENDING_TTL_MS}"),
+            ),
+            (
+                rn_root.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"),
+                format!("?: {}L", format_underscored(DEFAULT_PENDING_TTL_MS)),
+            ),
+            (
+                rn_root.join("ios/EncryptionConfigReader.swift"),
+                format!("?? {}", format_underscored(DEFAULT_PENDING_TTL_MS)),
+            ),
+        ];
+
+        for (path, fallback) in &expected {
+            // The guard only applies in the repo checkout; skip when the
+            // bindings tree isn't present (e.g. a vendored crate).
+            let Ok(source) = std::fs::read_to_string(path) else {
+                eprintln!("bindings tree not present, skipping RN pending-TTL drift check");
+                return;
+            };
+            assert!(
+                source.contains(fallback.as_str()),
+                "RN pending-queue TTL fallback drifted from DEFAULT_PENDING_TTL_MS: \
+                 expected `{fallback}` in {}",
+                path.display()
+            );
+        }
+    }
+
+    /// Renders `1800000` as `1_800_000`, the form Kotlin and Swift use.
+    fn format_underscored(value: u64) -> String {
+        let digits = value.to_string();
+        let mut out = String::new();
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                out.push('_');
+            }
+            out.push(c);
+        }
+        out
+    }
 }

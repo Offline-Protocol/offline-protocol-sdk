@@ -367,7 +367,7 @@ export interface PendingQueueConfig {
   maxPendingPerPeer?: number;
   /** Global pending message cap (default: 4096) */
   maxPendingGlobal?: number;
-  /** Pending message TTL in milliseconds (default: 120000) */
+  /** Pending message TTL in milliseconds (default: 1800000 — 30 min) */
   pendingTtlMs?: number;
   /** Overflow behavior when limits are hit (default: 'drop_oldest') */
   overflowPolicy?: OverflowPolicy;
