@@ -77,9 +77,14 @@ final class RecipientInFlightTracker {
     /// into a later recipient-keyed `DeliveryError` (which would false-fail a
     /// delivered message — for a welcome, parking a lifecycle the peer
     /// actually received). Removes the exact `messageId` when the relay
-    /// echoed ours; otherwise removes the oldest entry for the recipient —
-    /// sends per recipient are FIFO on one socket and the relay answers in
-    /// order, so oldest-first is the sound correlation.
+    /// echoed ours — relay send outcomes are unordered (push fallbacks run
+    /// detached from its read loop; "correlate by id, never by response
+    /// order" per its API doc), so the echo is the only sound correlation.
+    /// When nothing matches (an older relay, or a raw-channel frame — both
+    /// echo a relay-minted id) removes the oldest entry as a best-effort
+    /// guess; a wrong guess is bounded by the entry TTL and by the
+    /// recipient-keyed `DeliveryError` sweep, whose offline verdict holds
+    /// regardless of which entry it finds.
     func resolveOnRelayAccepted(recipient: String, messageId: String?, nowMs: Int64) {
         guard !recipient.isEmpty else { return }
         lock.lock()

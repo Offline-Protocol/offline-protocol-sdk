@@ -541,6 +541,34 @@ class TestInternetManagerPollAndSend:
             await asyncio.gather(*filler, return_exceptions=True)
 
 
+class TestInternetManagerSendFrame:
+    @pytest.mark.asyncio
+    async def test_send_message_frame_shape(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """Pins the relay SendMessage frame contract, message_id included —
+        the id is what lets a message_id-aware relay dedup push
+        notifications across retries of one logical message."""
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr._connected = True
+        ws = MagicMock()
+        ws.send = AsyncMock()
+        mgr._ws = ws
+
+        await mgr._send_message("msg-1", "peer-1", b"hello")
+
+        frame = json.loads(ws.send.call_args.args[0])
+        assert frame == {
+            "type": "SendMessage",
+            "recipient": "peer-1",
+            "content": "hello",
+            "message_id": "msg-1",
+        }
+        mock_protocol.internet_confirm_sent.assert_called_once_with(
+            message_id="msg-1"
+        )
+
+
 class TestInternetManagerSendMessageTOCTOU:
     @pytest.mark.asyncio
     async def test_send_fails_gracefully_when_ws_becomes_none(
