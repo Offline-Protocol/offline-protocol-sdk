@@ -95,11 +95,63 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// lifecycle notifications that drive it are delivered on main.
     private let foregroundReconnectPolicy = ForegroundReconnectPolicy()
 
+    /// Background assertion held while the deferred
+    /// `wifiDirectStatusChanged(false)` hop completes. Main-confined: it is
+    /// armed from the background notification and ended from either the
+    /// expiration handler or a hop back to main, both of which run there — so
+    /// "end exactly once" needs no synchronization.
+    private var backgroundWifiTaskId: UIBackgroundTaskIdentifier = .invalid
+
+    /// Main-only. Ends the assertion `id` unless a later background transition
+    /// already superseded it. Leaving one unbalanced past its budget is itself
+    /// a termination cause and ending the same identifier twice is a hard
+    /// error, so ownership is checked rather than assumed: a completion whose
+    /// assertion was superseded matches nothing and does nothing, which is
+    /// what keeps a stale hop from ending the current transition's assertion.
+    private func endBackgroundWifiTask(_ id: UIBackgroundTaskIdentifier) {
+        guard id != .invalid, backgroundWifiTaskId == id else { return }
+        UIApplication.shared.endBackgroundTask(id)
+        backgroundWifiTaskId = .invalid
+    }
+
     @objc private func applicationDidEnterBackground() {
         Self.testLastWifiStatusChangeForTesting = false
         foregroundReconnectPolicy.didEnterBackground(nowMs: MonotonicClock.nowMs())
         guard let proto = protocolInstance else { return }
-        try? proto.wifiDirectStatusChanged(isConnected: false)
+
+        // Off-main deliberately. `wifiDirectStatusChanged` takes the global
+        // protocol mutex on the Rust side — the same lock the process tick,
+        // MLS work and group fan-out hold — so calling it synchronously here
+        // parks the main thread for as long as that lock is contended, inside
+        // the scene-update watchdog's ~10s wall-clock window. That is a
+        // 0x8BADF00D kill, and it fires under exactly the load that makes the
+        // lock slow. `processQueue` is serial, so this `false` and the `true`
+        // from `applicationWillEnterForeground` cannot reorder.
+        //
+        // The background assertion keeps the hop as prompt as the synchronous
+        // call it replaces: the SDK stays alive in the background on BLE, and
+        // until this `false` lands DORS still scores a Wi-Fi Direct link iOS
+        // has already torn down. `self` is captured strongly on purpose —
+        // these closures are short-lived, they are not retained by `self`, and
+        // a weak capture that lost its referent would leave the assertion
+        // unbalanced.
+        // Supersede an assertion still outstanding from an earlier transition;
+        // its own completion will then match nothing and no-op.
+        endBackgroundWifiTask(backgroundWifiTaskId)
+        let armed = UIApplication.shared.beginBackgroundTask(
+            withName: "OfflineProtocol.wifiDirectStatusChanged"
+        ) {
+            // Ending an assertion cancels its expiration handler, so this can
+            // only fire while the one it belongs to is still the current one.
+            self.endBackgroundWifiTask(self.backgroundWifiTaskId)
+        }
+        // Safe to assign after the call: the handler is delivered on main and
+        // we have not yet returned to the runloop, so it cannot run first.
+        backgroundWifiTaskId = armed
+        processQueue.async {
+            try? proto.wifiDirectStatusChanged(isConnected: false)
+            DispatchQueue.main.async { self.endBackgroundWifiTask(armed) }
+        }
     }
 
     @objc private func applicationWillEnterForeground() {
@@ -121,7 +173,14 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
 
         guard let proto = protocolInstance else { return }
-        try? proto.wifiDirectStatusChanged(isConnected: true)
+        // Same hop as the background side, for the same reason (the global
+        // protocol mutex must not be taken on main during an OS-metered
+        // transition) — and onto the same serial queue, which is what keeps
+        // the false/true pair from reordering. No background assertion here:
+        // the app is becoming active, not losing its runtime.
+        processQueue.async {
+            try? proto.wifiDirectStatusChanged(isConnected: true)
+        }
     }
 
     /// Set by notification handlers for unit tests. Reset to nil before each test that uses it.
