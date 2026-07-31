@@ -1672,10 +1672,19 @@ class InternetManager(
         
         // Wrap in relay server protocol format
         // reply_to_msg is now provided directly from the Rust SDK via InternetMessage
+        //
+        // message_id is the core's outbox id, stable across retries of the
+        // same logical message. The relay echoes it in MessageReceived /
+        // MessageSent / DeliveryError and its push payload, and uses it to
+        // suppress duplicate push notifications when an un-ACKed message is
+        // retried against a still-offline recipient (a deduped retry comes
+        // back as DeliveryError → recipient_unreachable → park, the designed
+        // offline path). Older relays ignore the extra field.
         val relayMessage = org.json.JSONObject().apply {
             put("type", "SendMessage")
             put("recipient", recipientId)
             put("content", content)
+            put("message_id", messageId)
             if (replyToMsg != null && replyToMsg.isNotEmpty()) {
                 put("reply_to_msg", replyToMsg)
             }

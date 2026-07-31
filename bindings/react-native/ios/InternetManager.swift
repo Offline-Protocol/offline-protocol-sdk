@@ -1861,10 +1861,19 @@ public class InternetManager: NSObject, TransportManager {
         // Wrap in relay server protocol format
         // reply_to_msg is provided directly from the Rust SDK via
         // InternetMessage — the only source, matching the Kotlin bridge.
+        //
+        // message_id is the core's outbox id, stable across retries of the
+        // same logical message. The relay echoes it in MessageReceived /
+        // MessageSent / DeliveryError and its push payload, and uses it to
+        // suppress duplicate push notifications when an un-ACKed message is
+        // retried against a still-offline recipient (a deduped retry comes
+        // back as DeliveryError → recipient_unreachable → park, the designed
+        // offline path). Older relays ignore the extra field.
         var relayMessage: [String: Any] = [
             "type": "SendMessage",
             "recipient": recipientId,
-            "content": content
+            "content": content,
+            "message_id": messageId
         ]
         if let replyToMsg = replyToMsg, !replyToMsg.isEmpty {
             relayMessage["reply_to_msg"] = replyToMsg
