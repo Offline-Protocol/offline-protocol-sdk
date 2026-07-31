@@ -4,6 +4,12 @@ All notable changes to the Offline Protocol SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This changelog covers everything after the **v0.7.1** release.
 
+## [Unreleased]
+
+### Fixed
+
+- **iOS: a forced presence check no longer leaves its React Native promise unresolved when the transport is torn down.** `checkInternetPresence(force: true)` parks the query until the relay socket is authenticated and rate-admits it, and the transport's `stop()` is supposed to resolve every parked entry `false` — dangling a JS promise until the deadline helps nobody, and on an explicit stop no reconnect is coming. That drain ran inside a block hopped onto the transport's internal queue and captured the transport weakly, so it executed only if the transport was still alive when the block ran. On the two paths where the drain is the entire point, it was not: `stop()` is reached from `deinit`, and from `destroy()`, which releases the transport immediately afterwards — in both cases the weak reference is gone by the time the block runs and every parked promise is silently dropped, hanging the JS caller forever with no error and no timeout. The queue holding those promise resolvers is now captured strongly and drained unconditionally, which keeps the guarantee without resurrecting a deinitializing object; the rest of the block, which only clears state that dies with the transport anyway, is unchanged. Worth knowing that this was reachable without `destroy()` at all: a transport that was never started sits in `.unavailable`, which the park policy does not fail fast on, so checks park on it and its only teardown is `deinit`. The Android bridge was never affected — it runs the same cleanup inline under a blocking main-thread hop — and this restores parity with it.
+
 ## [0.18.0] — 2026-07-31
 
 ### Changed

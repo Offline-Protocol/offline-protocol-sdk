@@ -575,25 +575,51 @@ public class InternetManager: NSObject, TransportManager {
         // clear/reset never runs for this path.
         inFlightTracker.clear()
         controlOpTranslator.reset()
-        messageQueue.async { [weak self] in
-            self?.pendingControlFrames.removeAll()
-            // Outstanding writes are abandoned with this socket; reset the
-            // watchdog so the next connection starts fresh (late cancelled
-            // completions disarm to empty, a no-op).
-            self?.writeStallWatchdog.reset()
-            // An armed pause-drain dies with the session (a disconnect
-            // reset deliberately keeps it — the drain guarantee survives
-            // background reconnects while paused).
-            self?.drainOnSettle = false
+        // The forced-check queue is captured STRONGLY and drained
+        // unconditionally; everything else stays weak. `stop()` is reached
+        // from `deinit`, and from `destroy()`, which releases this manager
+        // immediately after — on both paths `self` can be gone by the time
+        // this block runs, and a `[weak self]` drain silently no-ops exactly
+        // where it matters most: the queue holds RN promise resolvers, so a
+        // skipped drain hangs those JS callers forever (a forced check parks
+        // on a never-started manager too — the initial state is
+        // `.unavailable`, which `parkOrExpire` does not fail fast on). The
+        // queue is a separate object, so capturing it keeps the guarantee
+        // without resurrecting a deinitializing `self`.
+        //
+        // The rest is self-owned state that dies with `self`: clearing an
+        // array that deallocated with its owner, or resetting a watchdog no
+        // future connection can read, is a no-op by definition.
+        //
+        // Kotlin's `stopUnsafe` runs this cleanup inline under a blocking
+        // `runOnMainSync` and gets the guarantee for free. Swift hops to
+        // `messageQueue` instead because that is the confinement queue for
+        // the state below, and a `messageQueue.sync` from main could deadlock
+        // against the reverse hop (`connect()` → `runOnMainSync`). Keep the
+        // two bridges' *effects* in sync, not their shape.
+        messageQueue.async { [weak self, forcedChecks = self.forcedChecks] in
+            if let self = self {
+                self.pendingControlFrames.removeAll()
+                // Outstanding writes are abandoned with this socket; reset the
+                // watchdog so the next connection starts fresh (late cancelled
+                // completions disarm to empty, a no-op).
+                self.writeStallWatchdog.reset()
+                // An armed pause-drain dies with the session (a disconnect
+                // reset deliberately keeps it — the drain guarantee survives
+                // background reconnects while paused).
+                self.drainOnSettle = false
+                // Cancel the pending retry tick (mirrors the Kotlin bridge's
+                // removeCallbacks in stopUnsafe — keep in sync). One that
+                // outlives this block is harmless: it captures `self` weakly
+                // and no-ops once the manager is gone.
+                self.forcedCheckRetryWorkItem?.cancel()
+                self.forcedCheckRetryWorkItem = nil
+            }
             // Parked forced presence checks resolve false immediately: an
             // explicit stop() ends the session, and dangling their RN
             // promises until the deadline helps nobody. (A mere disconnect
             // keeps them — the deadline gives the reconnect its chance.)
-            // Cancel the pending retry tick too (mirrors the Kotlin
-            // bridge's removeCallbacks in stopUnsafe — keep in sync).
-            self?.forcedCheckRetryWorkItem?.cancel()
-            self?.forcedCheckRetryWorkItem = nil
-            self?.forcedChecks.drainAll()
+            forcedChecks.drainAll()
         }
         // The watch set survives *reconnects* on purpose (pending traffic is
         // still pending), but an explicit stop() ends the session: without
