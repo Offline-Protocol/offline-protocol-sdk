@@ -175,6 +175,47 @@ The outbox lifetime bounds the entry itself, with one caveat worth knowing: each
 
 **Contract**: `MessageUndeliverable` is the "recipient is offline" signal and may fire repeatedly for the same message while the peer stays offline. Terminal settlement happens only at delivery (`MessageDelivered`) or outbox-lifetime expiry (`MessageFailed`). Apps that previously keyed "recipient offline" UX off the ~15-minute terminal `message_failed` should key it off `message_undeliverable` instead.
 
+## Group sends
+
+A group send returns a `Vec<MessageId>` — **one id per recipient**, not one id
+per send. By default each of those ids is a real `SendMessage` frame carrying
+the same MLS group ciphertext, addressed to one member, and therefore gets
+everything described on this page independently: its own outbox entry, ACK,
+retry ladder, relay write-ack, offline push carrying the ciphertext, and
+park-on-unreachable with presence-driven flush. A member who is backgrounded,
+offline, or on a socket that has quietly died is recovered the same way a direct
+message's recipient is.
+
+This is what `group.relayBroadcastEnabled: false` (the default) buys. The
+alternative is the relay's O(1) broadcast — one frame the relay fans out to the
+group — which saves sender uplink but has **no per-recipient delivery contract
+at any layer**: no presence check, no push fallback, no persistence, and the
+"sent" answer comes back before delivery is known. Missing a group message is
+also undetectable, because MLS application messages do not advance the group
+epoch, so a receiver never learns that one existed. See
+[Group Configuration](configuration.md#group-configuration) for when opting back
+in is the right trade.
+
+**Cost of the default.** Sends are O(N) frames. This does *not* risk tripping
+the relay's rate limiter at any group size: the platform bridge meters every
+relay-bound frame through a client-side token bucket (28 capacity, 9/s refill)
+deliberately tighter than the relay's own (30 burst, 10/s), and defers a frame
+it cannot fund to a later poll tick rather than dropping it — so the fan-out
+self-paces below the server's budget regardless of member count.
+
+What large groups cost instead is **drain latency**, and past roughly 118
+members, self-inflicted duplicate sends. The core enqueues all N frames at once
+and the bridge writes them at about 9/s after an initial burst of ~28, so frame
+N reaches the wire at roughly `(N - 28) / 9` seconds. The ACK timer starts when
+a frame is enqueued locally, not when it reaches the wire, so beyond that size
+the tail of a single fan-out exceeds the 10s ACK timeout and is retransmitted
+before it was ever written. Those duplicates are absorbed by receiver and push
+dedup via the stable outbox id, so they cost bandwidth rather than correctness.
+Presence checks, typing indicators, and read receipts draw on the same bucket
+and lower the threshold. Groups near that size should enable the broadcast and
+accept the delivery gap until the relay can report per-recipient delivery back
+to the sender.
+
 ## ACK Cleanup
 
 When an ACK is received for a message:
@@ -240,8 +281,16 @@ ceiling to leave room for MLS ciphertext expansion, base64, and the JSON wire
 envelope, so anything accepted here can actually be delivered. **Large payloads
 belong on `sendMedia`**, which chunks them and is not subject to this limit.
 
-Group sends are deliberately exempt from all of the above: a group send has no
-durable pre-session queue behind it, so it stays bounded by the transport alone.
+**Group sends are exempt from the pre-session queue bounds and from the content
+cap** — and only from those. A group send encrypts to group state that already
+exists, so there is nothing to wait on and no durable pre-session queue behind
+it, and neither `sendGroupMessage` nor `sendGroupMessageWith` runs the 256 KiB
+check (they reject reserved internal prefixes, `FileChunk`, and oversized rich
+extras instead). Everything else on this page applies: over the Internet
+transport a group send is, by default, one ordinary `SendMessage` frame per
+member, so each member's copy gets its own outbox entry, ACK, retry ladder, and
+park-on-unreachable handling exactly like a direct message. See
+[Group sends](#group-sends) for what that means per member.
 
 Expiry work is scheduled from the earliest queued deadline rather than scanning
 the queue on every `process()` tick.
