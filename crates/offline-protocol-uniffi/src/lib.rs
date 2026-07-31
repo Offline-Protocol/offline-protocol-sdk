@@ -1972,6 +1972,11 @@ pub struct ProtocolConfig {
     pub overflow_policy: OverflowPolicy,
     pub max_group_members: u32,
     pub group_relay_enabled: bool,
+    /// Whether a relay-synced group may send one O(1) relay broadcast instead
+    /// of per-member fan-out (default off). See the UDL dictionary and
+    /// `GroupConfig::relay_broadcast_enabled` for why the reliable path is
+    /// the default.
+    pub group_relay_broadcast_enabled: bool,
     pub require_transport_identity: bool,
     /// Kill switch for the compact binary wire codec (default on). See the UDL
     /// dictionary and `TransportConfig::binary_wire_enabled` for semantics.
@@ -2033,6 +2038,7 @@ impl From<ProtocolConfig> for CoreConfig {
         };
         core_config.group.max_group_members = config.max_group_members as usize;
         core_config.group.relay_enabled = config.group_relay_enabled;
+        core_config.group.relay_broadcast_enabled = config.group_relay_broadcast_enabled;
         core_config.security.require_transport_identity = config.require_transport_identity;
         core_config
     }
@@ -5820,6 +5826,7 @@ mod tests {
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
+            group_relay_broadcast_enabled: false,
             require_transport_identity: false,
         }
     }
@@ -5849,6 +5856,7 @@ mod tests {
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
+            group_relay_broadcast_enabled: false,
             require_transport_identity: false,
         }
     }
@@ -6198,6 +6206,7 @@ mod tests {
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
+            group_relay_broadcast_enabled: false,
             require_transport_identity: false,
         }
     }

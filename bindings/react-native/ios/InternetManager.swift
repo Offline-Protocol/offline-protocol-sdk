@@ -1485,6 +1485,15 @@ public class InternetManager: NSObject, TransportManager {
             let replyToMsg = json["reply_to_msg"] as? String
             var payload: [String: Any] = ["group_id": groupId, "sender": sender, "content": content, "timestamp": timestamp, "message_id": messageId]
             if let r = replyToMsg, !r.isEmpty { payload["reply_to_msg"] = r }
+            // Forward attribution, when the relay carries it through. Core's
+            // GroupMessageReceivedPayload has always parsed this field
+            // (`#[serde(default)]`), but no relay populated it — so a
+            // forwarded group message rendered its attribution over mesh and
+            // lost it over relay. Sender side is the translator's
+            // forward_info passthrough; this is the receiving half.
+            if let forwardInfo = json["forward_info"] as? [String: Any], !forwardInfo.isEmpty {
+                payload["forward_info"] = forwardInfo
+            }
             injectGroupInternalMessage(actorId: sender.isEmpty ? nil : sender, prefix: "__GROUP_MSG__", payload: payload)
             
         case "GroupMemberAdded":

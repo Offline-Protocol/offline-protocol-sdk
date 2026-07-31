@@ -173,6 +173,21 @@ class RelayControlOpTranslator(private val selfId: String) {
                         put("content", payload.optString("ciphertext"))
                         payload.optString("reply_to").takeIf { it.isNotEmpty() }
                             ?.let { put("reply_to_msg", it) }
+                        // Forward attribution rides the frame so relay-path
+                        // receivers can render "forwarded from X" like
+                        // mesh-path receivers already do. Dropping it here is
+                        // why unsealed forward_info survived over mesh but
+                        // vanished over relay. Sealed rich payloads carry
+                        // their own copy inside the MLS body and are
+                        // unaffected either way. Old relays ignore the
+                        // unknown field.
+                        //
+                        // `epoch` is deliberately NOT forwarded: OpenMLS reads
+                        // the epoch from the ciphertext header, so the payload
+                        // copy is informational and never consulted on receive.
+                        payload.optJSONObject("forward_info")
+                            ?.takeIf { it.length() > 0 }
+                            ?.let { put("forward_info", it) }
                     }))
                 }
 

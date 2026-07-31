@@ -121,6 +121,33 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         XCTAssertEqual(bcast[0]["group_id"] as? String, "g1")
         XCTAssertEqual(bcast[0]["content"] as? String, "AAECAw==")
         XCTAssertEqual(bcast[0]["reply_to_msg"] as? String, "m-9")
+        // `epoch` is deliberately not forwarded — OpenMLS reads the epoch from
+        // the ciphertext header, so the payload copy is informational only.
+        XCTAssertNil(bcast[0]["epoch"])
+    }
+
+    func testBroadcastForwardsForwardInfo() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+        let bcast = frames(translator.translate(
+            controlOp: "group_relay_broadcast",
+            controlPayload: #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":4,"forward_info":{"original_sender":"dave","forwarded_at":123}}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(bcast.count, 1)
+        let forwardInfo = bcast[0]["forward_info"] as? [String: Any]
+        XCTAssertNotNil(forwardInfo, "forward_info must ride the relay frame, not be dropped")
+        XCTAssertEqual(forwardInfo?["original_sender"] as? String, "dave")
+    }
+
+    func testBroadcastOmitsForwardInfoWhenAbsent() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+        let bcast = frames(translator.translate(
+            controlOp: "group_relay_broadcast",
+            controlPayload: #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":4}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(bcast.count, 1)
+        XCTAssertNil(bcast[0]["forward_info"])
     }
 
     func testLeaveIsATapSentOncePerGroupForSelfOnly() {

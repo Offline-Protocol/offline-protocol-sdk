@@ -499,6 +499,82 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
+    /// Sends a self-addressed relay *hint* frame — `__GRP_RELAY_REG__` or
+    /// `__GRP_RELAY_BCAST__` — pinned to the Internet transport, without the
+    /// ACK ladder.
+    ///
+    /// A hint frame is not traffic. The platform bridge recognizes it via
+    /// [`Self::internet_control_op`] and **replaces** it with a relay-native
+    /// frame (`CreateGroup` + member deltas, or `SendGroupMessage`), so the
+    /// frame itself never reaches a peer and no delivery ACK can ever come
+    /// back for it. Two properties follow, and both are load-bearing:
+    ///
+    /// 1. **`requires_ack = false`.** On the ordinary ladder an un-ACKable
+    ///    frame is retransmitted `DEFAULT_MAX_RETRIES` times over ~800s, each
+    ///    resend producing another full relay fan-out (under a fresh
+    ///    relay-minted id, so receiver dedup misses it), and terminates in a
+    ///    `MessageFailed` for an id the app was never told about plus a
+    ///    `record_delivery_failure` that degrades DORS' score for the very
+    ///    transport the frame requires. Opting out of the ladder is what makes
+    ///    these frames honest one-shots; retry policy for them lives at the
+    ///    application layer instead (`RelayRegisterPending` for registration,
+    ///    the caller's per-member fallback for broadcast).
+    /// 2. **Pinned to [`TransportType::Internet`].** These frames are
+    ///    self-addressed, and DORS demotes Internet below every mesh transport
+    ///    (`INTERNET_FALLBACK_DEMOTION`), so ordinary routing hands them to
+    ///    BLE/Wi-Fi Direct first. BLE fails closed (self is never a connected
+    ///    peer), but Wi-Fi Direct and Reticulum enqueue unconditionally and
+    ///    return `Ok` — swallowing the frame while reporting success, which on
+    ///    the broadcast path means the group message is delivered to nobody.
+    ///
+    /// Errors propagate to the caller rather than routing through
+    /// [`Self::handle_send_failure`]: a hint frame has no outbox entry to
+    /// defer into, and its callers already have a better recovery than a
+    /// retry (fall back to per-member fan-out; leave the group unregistered
+    /// for the next sync tick). The failure is also deliberately *not*
+    /// recorded against Internet's DORS metrics — "the relay bridge isn't up"
+    /// is not evidence about the transport's delivery quality.
+    ///
+    /// No `TransportChanged` event is emitted, matching
+    /// [`Self::send_delivery_ack`] — the other fire-and-forget control frame
+    /// sent over a forced transport. A hint frame is not user traffic, and
+    /// announcing a switch for one would report a transport change the app's
+    /// messages did not take.
+    pub(crate) fn send_relay_hint_message(
+        &mut self,
+        content: String,
+        priority: MessagePriority,
+    ) -> Result<MessageId> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let self_id = self.config.user_id.clone();
+        let mut message = self.create_message(&self_id, content, Some(priority), None)?;
+        // Set before signing for clarity; the canonical payload covers only
+        // sender/id/recipient/content, so ordering is not security-relevant.
+        message.requires_ack = false;
+        self.sign_control_message(&mut message)?;
+        let message_id = message.id.clone();
+
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        // Mark seen so a bridge that passes the frame through verbatim (an
+        // adapter without a translator) cannot have the relay echo it back
+        // into our own receive path.
+        self.deduplicator.mark_seen(message_id.clone());
+
+        self.transport_manager
+            .send_via_transport(&message, TransportType::Internet)?;
+
+        Ok(message_id)
+    }
+
     /// Sends one MLS-encrypted session-confirm marker to `peer_id`.
     ///
     /// Used by the Welcome-adopt path: after we adopt the peer's `session:` group

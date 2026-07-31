@@ -2879,9 +2879,21 @@ impl OfflineProtocol {
         let self_id = self.config.user_id.clone();
 
         // --- Attempt relay broadcast first ---
-        // If Internet is the primary transport and the group is registered,
-        // a single relay broadcast is O(1) instead of O(N) individual sends.
-        if self.group_mesh.relay_synced.contains(group_id) {
+        // If the group is registered and the app opted in, a single relay
+        // broadcast is O(1) instead of O(N) individual sends.
+        //
+        // Opt-in (`relay_broadcast_enabled`, default off) because the
+        // broadcast trades away the whole per-member delivery ladder for that
+        // uplink saving — see `GroupConfig::relay_broadcast_enabled`.
+        //
+        // `is_internet_available()` is re-checked here and not inferred from
+        // `relay_synced`: sync state is cleared by the `process()` tick, so
+        // between Internet dropping and the next tick a stale `relay_synced`
+        // would otherwise route the broadcast into the mesh.
+        if self.config.group.relay_broadcast_enabled
+            && self.group_mesh.relay_synced.contains(group_id)
+            && self.is_internet_available()
+        {
             if let Ok(mid) = self.try_relay_broadcast(
                 group_id,
                 &ciphertext_b64,
@@ -3561,8 +3573,12 @@ impl OfflineProtocol {
         // was queued locally, and a prefix-unaware relay echoes it back instead
         // of registering anything. Sync is confirmed only by the relay's
         // `__GROUP_CREATED__` acknowledgment.
-        let self_id = self.config.user_id.clone();
-        match self.send_internal_message(&self_id, content, MessagePriority::Medium) {
+        //
+        // Un-ACKed and Internet-pinned (see `send_relay_hint_message`): the
+        // retry policy for registration is the `relay_register_pending`
+        // tracker armed just below, not the message ACK ladder — which could
+        // never settle this frame and would re-send it ~10 times.
+        match self.send_relay_hint_message(content, MessagePriority::Medium) {
             Ok(_) => {
                 // Arm the ack correlation: only a `__GROUP_CREATED__` that
                 // answers an outstanding registration may set `relay_synced`.
@@ -3640,11 +3656,20 @@ impl OfflineProtocol {
     /// The bridge translator (not the relay — see
     /// [`RelayGroupBroadcastPayload`]) turns it into a relay-native
     /// `SendGroupMessage`; the relay fans out to registered members, whose
-    /// bridges inject the delivery as `__GROUP_MSG__` frames. Callers must
-    /// only take this path for a `relay_synced` group.
+    /// bridges inject the delivery as `__GROUP_MSG__` frames.
+    ///
+    /// Callers must only take this path when all three of
+    /// `GroupConfig::relay_broadcast_enabled` (opt-in — the broadcast has no
+    /// per-recipient delivery contract), `relay_synced` (the relay
+    /// acknowledged the group; otherwise a prefix-unaware relay swallows the
+    /// frame), and `is_internet_available()` hold.
     ///
     /// Returns the broadcast `MessageId` on success, or an error if the
-    /// relay is unreachable.
+    /// relay is unreachable — in which case the caller falls back to
+    /// per-member fan-out. The frame goes out via
+    /// [`Self::send_relay_hint_message`], so it is a pinned, un-ACKed
+    /// one-shot: a failure surfaces here immediately instead of being
+    /// deferred into a retry ladder that could never settle.
     fn try_relay_broadcast(
         &mut self,
         group_id: &str,
@@ -3667,8 +3692,7 @@ impl OfflineProtocol {
                 .map_err(|e| Error::Serialization(format!("Serialize relay broadcast: {}", e)))?
         );
 
-        let self_id = self.config.user_id.clone();
-        let mid = self.send_internal_message(&self_id, content, MessagePriority::Medium)?;
+        let mid = self.send_relay_hint_message(content, MessagePriority::Medium)?;
         debug!(group_id = %group_id, "Sent group message via relay broadcast");
         Ok(mid)
     }

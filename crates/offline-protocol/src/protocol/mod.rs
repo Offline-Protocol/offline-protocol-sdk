@@ -2489,6 +2489,22 @@ impl OfflineProtocol {
         self.outbox.clear();
     }
 
+    /// Returns `true` when `message_id` is anywhere in the reliability
+    /// machinery — awaiting an ACK, held in the outbox, or queued for retry
+    /// (test-only).
+    ///
+    /// Exists for the fire-and-forget frames (relay hints, delivery ACKs),
+    /// whose correctness is defined by leaving *no* trace here: an un-ACKable
+    /// frame that registers a pending ACK is retransmitted until the retry cap
+    /// and then reported failed.
+    #[cfg(test)]
+    pub(crate) fn is_tracked_for_delivery(&self, message_id: &MessageId) -> bool {
+        self.ack_manager.is_waiting_for_ack(message_id)
+            || self.outbox.contains_key(message_id)
+            || self.media_outbox.contains_key(message_id)
+            || self.retry_queue.contains(&message_id.as_str())
+    }
+
     /// Returns a reference to the MLS manager Arc (test-only).
     #[cfg(test)]
     pub(crate) fn mls_manager_for_testing(&self) -> &Arc<RwLock<offline_protocol_mls::MlsManager>> {

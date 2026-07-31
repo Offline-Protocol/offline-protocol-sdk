@@ -133,6 +133,18 @@ final class RelayControlOpTranslator {
             if let replyTo = payload["reply_to"] as? String, !replyTo.isEmpty {
                 frame["reply_to_msg"] = replyTo
             }
+            // Forward attribution rides the frame so relay-path receivers can
+            // render "forwarded from X" like mesh-path receivers already do.
+            // Dropping it here is why unsealed forward_info survived over mesh
+            // but vanished over relay. Sealed rich payloads carry their own
+            // copy inside the MLS body and are unaffected either way.
+            // Old relays ignore the unknown field.
+            if let forwardInfo = payload["forward_info"] as? [String: Any], !forwardInfo.isEmpty {
+                frame["forward_info"] = forwardInfo
+            }
+            // The `epoch` field is deliberately NOT forwarded: OpenMLS reads
+            // the epoch from the ciphertext header, so the payload copy is
+            // informational only and the receive path never consults it.
             return .replace([frame], nil)
 
         case "group_mls_leave":
