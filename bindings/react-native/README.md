@@ -161,6 +161,27 @@ Because the sweep deletes the credential-store copy, **downgrading is not a
 rollback** — an older build reads the old location and finds none of it. Roll
 forward, not back.
 
+#### Erasing an account on logout
+
+`destroy()` releases the in-memory instance and nothing else: the outbox,
+pending queue, block list, and MLS identity stay on disk, so signing back in
+re-drives undelivered messages, and on iOS — where the Keychain outlives the app
+container — the account survives an uninstall and is adopted again after a
+reinstall. To erase it:
+
+```typescript
+await protocol.destroy();
+await protocol.wipePersistedState(appId, userId);
+```
+
+Wipe after destroy, never under a live instance (the native side rejects that),
+and pass the same `appId`/`userId` the protocol was created with — `destroy()`
+clears the config the namespace is derived from, which is why the identity is an
+argument. It is irreversible, it rotates the account's MLS and Nostr identities,
+and it leaves other accounts on the device untouched. Full semantics, including
+what happens to a pre-namespace store shared with another account:
+[UPGRADING §10](../../docs/UPGRADING.md#logging-out-and-switching-accounts).
+
 ### End-to-End Encryption
 
 The SDK provides automatic end-to-end encryption using MLS (RFC 9420):
