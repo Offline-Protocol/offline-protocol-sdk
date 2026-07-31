@@ -542,8 +542,12 @@ anything accepted can actually be delivered.
 **Large payloads belong on `send_media` / `sendMedia`**, which chunks and is not
 subject to this limit.
 
-**Group sends are exempt** — a group send has no durable pre-session queue, so
-it stays bounded by the transport alone. That is unchanged behaviour.
+**Group sends are exempt from this cap** — a group send encrypts to group state
+that already exists, so it has no durable pre-session queue behind it and the
+boundary check does not run. That is unchanged behaviour. (It is exempt from the
+*cap*, not from delivery tracking: as of the per-member fan-out default, each
+recipient's copy of a group message carries its own outbox entry, ACK, and retry
+ladder. See [Group sends](message-delivery.md#group-sends).)
 
 **What to do:** if your app can produce large text bodies (pasted logs, embedded
 data URIs, JSON blobs in message content), add a length check at your composer

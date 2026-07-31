@@ -1,6 +1,6 @@
 # Offline Protocol SDK Integration Guide (React Native)
 
-This guide covers integrating the Offline Protocol SDK into React Native applications: installation, configuration, transports (BLE, Wi‑Fi Direct, Internet), Dynamic Offline Relay Switch (DORS), **group management (relay-based) via SDK group methods**, and a **complete API reference** for every function.
+This guide covers integrating the Offline Protocol SDK into React Native applications: installation, configuration, transports (BLE, Wi‑Fi Direct, Internet), Dynamic Offline Relay Switch (DORS), **MLS-encrypted group messaging via SDK group methods**, and a **complete API reference** for every function.
 
 ---
 
@@ -146,7 +146,11 @@ See `docs/dors-configuration.md` and `docs/configuration.md` for full parameters
 
 ## 7. Group Messaging (MLS-Encrypted Mesh Groups)
 
-Group features (create groups, send messages, manage members) are provided directly by the SDK's **mesh group methods**. The SDK handles MLS end-to-end encryption and mesh fan-out automatically — there is **no relay server** to run or connect to. Each method runs against your `OfflineProtocol` instance and delivers over whatever transports DORS has selected.
+Group features (create groups, send messages, manage members) are provided directly by the SDK's **mesh group methods**. Membership and message encryption are MLS, end to end, and handled entirely by the SDK — **there is no group server that can read your messages**, and no separate service for your app to run. Each method runs against your `OfflineProtocol` instance and delivers over whatever transports DORS has selected.
+
+The relay does play two roles over the Internet transport, neither of which can see plaintext. Groups are **registered** with it so invite links resolve (`groupRelayEnabled`, on by default). And a group send is, by default, **one ordinary message frame per member** — the same MLS ciphertext addressed individually — so every member's copy gets the full direct-message delivery ladder: outbox, ACK, retry, offline push, and park-on-unreachable with presence-driven flush. The relay's O(1) broadcast alternative is off by default because it has no per-recipient delivery contract; see [Group sends](message-delivery.md#group-sends) and [Group Configuration](configuration.md#group-configuration).
+
+> **Config gap:** the `group` config section is not readable from JS today — the bridges do not parse it, so `maxGroupMembers`, `groupRelayEnabled`, and `groupRelayBroadcastEnabled` take their Rust defaults and cannot be overridden from React Native. The defaults are what an RN app wants; this is a known gap.
 
 ### 7.1 Prerequisites
 
@@ -427,7 +431,7 @@ Parse the raw event and check the server frame's `type` before consuming extensi
 
 ### 11.13 Mesh Group Messaging (MLS-Encrypted)
 
-High-level group methods that handle MLS encryption and mesh fan-out automatically.
+High-level group methods that handle MLS encryption and per-member fan-out automatically. `meshSendGroupMessage` resolves to **one message id per recipient** — each is a separately tracked frame with its own outbox entry, ACK, and retry ladder ([Group sends](message-delivery.md#group-sends)).
 
 | Method | Signature | Description |
 |--------|-----------|-------------|

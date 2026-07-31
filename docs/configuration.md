@@ -477,9 +477,12 @@ surface as errors or as `message_failed` events:
 | Single protocol-state record | 4 MiB | refused on write, dropped on read |
 
 Group sends have no durable pre-session queue and are exempt from the queue
-bounds and the content cap; they remain bounded by the transport alone. See
-[Message Delivery](message-delivery.md#reliability-parameters) for the
-reasoning behind each.
+bounds and the content cap. They are **not** otherwise unbounded: by default a
+group send over the Internet transport is one ordinary message frame per member,
+so each member's copy carries its own outbox entry, ACK, and retry ladder. See
+[Message Delivery](message-delivery.md#reliability-parameters) for the reasoning
+behind each bound, and [Group sends](message-delivery.md#group-sends) for the
+per-member delivery path.
 
 **Dedup Config**:
 | Parameter | Type | Default | Description |
@@ -494,6 +497,42 @@ off for a configuration the SDK used to accept in silence;
 `retentionTimeSecs: 0` expires every entry immediately for the same result. This
 refuses only the degenerate value, not an unwise one: sizing the window for your
 deployment is still your call.
+
+### Group Configuration
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `maxGroupMembers` | number | 256 | Maximum members in a single group (must be > 0) |
+| `relayEnabled` | boolean | `true` | Register groups with the relay server |
+| `relayBroadcastEnabled` | boolean | `false` | Allow a relay-synced group to send via one O(1) relay broadcast instead of per-member fan-out |
+
+**These two flags are not the same switch, and only one of them is off.**
+
+`relayEnabled` gates *registration*. The relay's group registry is what invite
+links resolve against, so turning it off breaks invite links. Leave it on.
+
+`relayBroadcastEnabled` gates the *send path*, and defaults to **off** because
+the broadcast is an uplink optimization with no delivery contract. The relay
+fans a broadcast out fire-and-forget — no per-recipient presence check, no push
+fallback, no persistence — and answers "sent" before delivery is known, so a
+member who is backgrounded, offline, or on a socket that has quietly died misses
+the message permanently and *undetectably*: MLS application messages do not
+advance the group epoch, so the receiver never learns one existed.
+
+With it off, a group send is one ordinary message frame per member and inherits
+the full direct-message ladder — outbox, ACK, retry, relay write-ack, offline
+push carrying the ciphertext, and park-on-unreachable with presence-driven
+flush. The cost is O(N) frames, which does not risk the relay's rate limiter at
+any group size (the bridge's own token bucket is tighter and defers rather than
+drops), but does mean drain latency and, past roughly 118 members, duplicate
+sends from the ACK timer starting at local enqueue. **Groups near that size are
+the case for turning the broadcast back on** and accepting the delivery gap. See
+[Group sends](message-delivery.md#group-sends) for the full analysis.
+
+> **React Native:** the entire `group` config section is currently unreachable
+> from JS — the bridges do not read it, so these three fields take their Rust
+> defaults and cannot be overridden. The defaults are what an RN app wants
+> today; this is a known gap, tracked alongside `requireTransportIdentity`.
 
 ### Network Configuration
 

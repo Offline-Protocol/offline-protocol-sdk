@@ -78,8 +78,11 @@ class MainActivity : AppCompatActivity() {
             maxPendingGlobal = 1_000.toULong(),
             pendingTtlMs = 1_800_000.toULong(),  // 30 min (the SDK default)
             overflowPolicy = OverflowPolicy.DROP_OLDEST,
-            // These 8 use their defaults: requireEncryption (true),
+            // These 9 use their defaults: requireEncryption (true),
             // maxGroupMembers (256u), groupRelayEnabled (true),
+            // groupRelayBroadcastEnabled (false — group sends fan out per
+            // member so each copy gets the full delivery ladder; see
+            // docs/configuration.md#group-configuration),
             // requireTransportIdentity (false), binaryWireEnabled (true),
             // compactEnvelopeEnabled (true), richPayloadEnabled (true),
             // cryptoRecoveryEnabled (true).

@@ -385,6 +385,11 @@ inviter); otherwise the text still sends but the extras drop, surfaced via the
 `GroupRichExtrasDropped` event — the SDK then probes the unknown members'
 capability once so a later retry can succeed.
 
+Both group send methods return **one `MessageId` per recipient**, not one per
+send. By default each is a real frame with its own outbox entry, ACK, and retry
+ladder, so an app can track them individually — see
+[Group sends](message-delivery.md#group-sends).
+
 ```rust
 pub fn group_rich_readiness(&self, group_id: &str) -> Result<GroupRichReadiness>
 

@@ -264,7 +264,9 @@ let group = try mesh.createGroup(groupName: "Project Team")
 // Invite members (admin only — handles key exchange + Welcome automatically)
 try mesh.inviteToGroup(groupId: group.groupId, inviteeUserId: "alice")
 
-// Send encrypted group message (MLS encryption + mesh fan-out)
+// Send encrypted group message. Returns one id per recipient: the same MLS
+// ciphertext is fanned out per member, so each copy carries its own outbox
+// entry, ACK, and retry ladder.
 let messageIds = try mesh.sendGroupMessage(
     groupId: group.groupId,
     content: "Hello team!",
