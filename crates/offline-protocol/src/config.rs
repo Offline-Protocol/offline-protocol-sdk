@@ -340,12 +340,27 @@ pub struct GroupConfig {
     /// more than the uplink saving until the relay can report per-recipient
     /// delivery back to the sender.
     ///
-    /// Cost of the default: sends are O(N) frames. The relay's per-connection
-    /// rate limiter (30 burst / 10 per second, disconnect after 10
-    /// *consecutive* violations) makes this comfortable to roughly 30
-    /// members, self-healing to about 40 via the ACK-timeout retry, and
-    /// risky beyond that. Groups larger than that should keep the broadcast
-    /// on and accept the delivery gap, or pace their sends.
+    /// Cost of the default: sends are O(N) frames. This does **not** risk
+    /// tripping the relay's rate limiter at any group size. The platform
+    /// bridge meters every relay-bound frame through a client-side token
+    /// bucket (`RelayRateLimiter`: 28 capacity, 9/s refill) deliberately
+    /// tighter than the relay's (30 burst, 10/s), and a frame that cannot
+    /// take a token is *deferred to a later poll tick*, never dropped — so
+    /// client spend stays at `28 + 9t` against a server budget of `30 + 10t`
+    /// and the fan-out self-paces below it regardless of member count. Core
+    /// enqueues all N frames at once; the bridge drains that queue.
+    ///
+    /// What large groups actually cost is drain latency. Frame N reaches the
+    /// wire at roughly `(N - 28) / 9` seconds. Since the ACK timer starts at
+    /// local *enqueue* (`handle_send_success`) and not at wire-confirm —
+    /// `on_transport_send_confirmed` advances only the welcome lifecycle —
+    /// past roughly 118 members the tail of a single fan-out exceeds the 10s
+    /// ACK timeout and is retransmitted by the ladder before it was ever
+    /// written. That is wasted duplicate frames, absorbed by receiver and
+    /// push dedup via the stable outbox id, not lost messages. Presence
+    /// checks, typing, and receipts draw on the same bucket and lower the
+    /// threshold. Groups near that size should keep the broadcast on and
+    /// accept the delivery gap.
     pub relay_broadcast_enabled: bool,
 }
 
