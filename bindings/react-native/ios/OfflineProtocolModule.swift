@@ -174,6 +174,28 @@ class OfflineProtocolModule: RCTEventEmitter {
         let binaryWireEnabled = raw["binaryWireEnabled"] as? Bool
             ?? raw["binary_wire_enabled"] as? Bool ?? true
 
+        // Group section (nested home under `group`, then top level, both
+        // cases — same shape rules as `encryption`; mirrors
+        // ProtocolConfigParser.kt, keep in sync). These were UniFFI-only
+        // until the broadcast default flipped on: with no JS-reachable
+        // opt-out, an RN app could not force per-member fan-out.
+        let groupRaw = raw["group"] as? [String: Any]
+        let maxGroupMembers = groupRaw?["maxGroupMembers"] as? Int
+            ?? groupRaw?["max_group_members"] as? Int
+            ?? raw["maxGroupMembers"] as? Int
+            ?? raw["max_group_members"] as? Int
+            ?? 256
+        let groupRelayEnabled = groupRaw?["relayEnabled"] as? Bool
+            ?? groupRaw?["relay_enabled"] as? Bool
+            ?? raw["groupRelayEnabled"] as? Bool
+            ?? raw["group_relay_enabled"] as? Bool
+            ?? true
+        let groupRelayBroadcastEnabled = groupRaw?["relayBroadcastEnabled"] as? Bool
+            ?? groupRaw?["relay_broadcast_enabled"] as? Bool
+            ?? raw["groupRelayBroadcastEnabled"] as? Bool
+            ?? raw["group_relay_broadcast_enabled"] as? Bool
+            ?? true
+
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
             userId: raw["userId"] as? String ?? raw["user_id"] as? String ?? "",
@@ -192,6 +214,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             maxPendingGlobal: encryption.maxPendingGlobal,
             pendingTtlMs: encryption.pendingTtlMs,
             overflowPolicy: overflowPolicy,
+            maxGroupMembers: UInt32(maxGroupMembers),
+            groupRelayEnabled: groupRelayEnabled,
+            groupRelayBroadcastEnabled: groupRelayBroadcastEnabled,
             binaryWireEnabled: binaryWireEnabled,
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
             richPayloadEnabled: encryption.richPayloadEnabled,

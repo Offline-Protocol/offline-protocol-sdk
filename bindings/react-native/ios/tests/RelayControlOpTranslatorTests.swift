@@ -126,6 +126,34 @@ final class RelayControlOpTranslatorTests: XCTestCase {
         XCTAssertNil(bcast[0]["epoch"])
     }
 
+    func testBroadcastStampsLogicalMessageId() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+        let bcast = frames(translator.translate(
+            controlOp: "group_relay_broadcast",
+            controlPayload: #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":4,"message_id":"11111111-2222-3333-4444-555555555555"}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(bcast.count, 1)
+        // The logical id is what the v2 relay echoes to members, keys its
+        // push dedup by, and names in the settled delivery report the core
+        // correlates on — dropping it here would break all three.
+        XCTAssertEqual(
+            bcast[0]["message_id"] as? String,
+            "11111111-2222-3333-4444-555555555555"
+        )
+    }
+
+    func testBroadcastOmitsMessageIdWhenAbsent() {
+        let translator = RelayControlOpTranslator(selfId: "alice")
+        let bcast = frames(translator.translate(
+            controlOp: "group_relay_broadcast",
+            controlPayload: #"{"group_id":"g1","ciphertext":"AAECAw==","epoch":4}"#,
+            recipientId: "alice"
+        ))
+        XCTAssertEqual(bcast.count, 1)
+        XCTAssertNil(bcast[0]["message_id"])
+    }
+
     func testBroadcastForwardsForwardInfo() {
         let translator = RelayControlOpTranslator(selfId: "alice")
         let bcast = frames(translator.translate(

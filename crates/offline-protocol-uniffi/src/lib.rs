@@ -1973,9 +1973,9 @@ pub struct ProtocolConfig {
     pub max_group_members: u32,
     pub group_relay_enabled: bool,
     /// Whether a relay-synced group may send one O(1) relay broadcast instead
-    /// of per-member fan-out (default off). See the UDL dictionary and
-    /// `GroupConfig::relay_broadcast_enabled` for why the reliable path is
-    /// the default.
+    /// of per-member fan-out (default on, additionally gated on the relay's
+    /// `group_delivery_v2` capability). See the UDL dictionary and
+    /// `GroupConfig::relay_broadcast_enabled` for why the default is safe.
     pub group_relay_broadcast_enabled: bool,
     pub require_transport_identity: bool,
     /// Kill switch for the compact binary wire codec (default on). See the UDL
@@ -3596,6 +3596,41 @@ impl OfflineProtocol {
     pub fn internet_presence_watchlist(&self) -> Vec<String> {
         let protocol = recover_mutex(&self.inner, "inner");
         protocol.presence_watch_peers()
+    }
+
+    /// Internet: capability tokens from the relay's `Authenticated` answer
+    /// (e.g. `group_delivery_v2`).
+    ///
+    /// The bridge MUST call this before `internet_status_changed(true)` on
+    /// each (re)connect — the false→true flush has to see the capabilities,
+    /// or the first sends after a reconnect take the capability-less path.
+    /// Wholesale replace; the SDK clears the set itself when the Internet
+    /// transport drops, so a relay that predates the advertisement simply
+    /// leaves it empty.
+    pub fn internet_relay_capabilities(
+        &self,
+        capabilities: Vec<String>,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol.set_relay_capabilities(capabilities);
+        Ok(())
+    }
+
+    /// Internet: a relay `GroupMessageSent` settled delivery report,
+    /// forwarded verbatim as the raw server frame JSON.
+    ///
+    /// Correlated by its `message_id` to an in-flight group broadcast: the
+    /// tracker settles, members the relay did not reach get a per-member
+    /// re-send through the ordinary delivery ladder, and the app sees
+    /// `group_message_delivery_report`. A dedicated entry point (not
+    /// message-plane injection) so it cannot be forged through the
+    /// notification ciphertext injector. Reports that correlate with
+    /// nothing are ignored; malformed JSON is an error.
+    pub fn internet_group_report_received(&self, report_json: String) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .handle_relay_group_delivery_report(&report_json)
+            .map_err(ProtocolError::from)
     }
 
     // ========================================================================
@@ -5826,7 +5861,7 @@ mod tests {
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
-            group_relay_broadcast_enabled: false,
+            group_relay_broadcast_enabled: true,
             require_transport_identity: false,
         }
     }
@@ -5856,7 +5891,7 @@ mod tests {
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
-            group_relay_broadcast_enabled: false,
+            group_relay_broadcast_enabled: true,
             require_transport_identity: false,
         }
     }
@@ -6206,7 +6241,7 @@ mod tests {
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
-            group_relay_broadcast_enabled: false,
+            group_relay_broadcast_enabled: true,
             require_transport_identity: false,
         }
     }

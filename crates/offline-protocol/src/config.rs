@@ -324,43 +324,53 @@ pub struct GroupConfig {
     /// Whether a relay-synced group may send via a single O(1) relay
     /// broadcast instead of per-member fan-out.
     ///
-    /// **Default `false`.** The broadcast is an uplink optimization with no
-    /// delivery contract: today's relay fans out fire-and-forget (no
-    /// per-recipient presence check, no push fallback, no persistence) and
-    /// answers `GroupMessageSent` before delivery is known, so a member who
-    /// is backgrounded, offline, or on a dead socket misses the message
-    /// permanently and undetectably — MLS application messages don't advance
-    /// the epoch, so the receiver never learns one existed.
+    /// **Default `true`, and additionally gated on the relay's advertised
+    /// capabilities.** The flag alone does not select the broadcast: the
+    /// path is taken only when the connected relay also advertised the
+    /// `group_delivery_v2` capability in its `Authenticated` answer. Against
+    /// such a relay the broadcast keeps a delivery contract — the relay
+    /// answers every broadcast with a *settled* per-recipient delivery
+    /// report (`GroupMessageSent` v2) naming who took the message over a
+    /// socket and who took a device push, and the SDK re-sends a per-member
+    /// copy through the ordinary outbox/ACK/park ladder to every MLS roster
+    /// member the report does not account for. A lost report re-sends the
+    /// broadcast under the same logical message id (receiver and push dedup
+    /// absorb the duplicate fan-out) a bounded number of times, then
+    /// downgrades the message to full per-member fan-out. Against an older
+    /// relay the capability gate fails and every send takes per-member
+    /// fan-out — the fire-and-forget broadcast of the v1 relay (no presence
+    /// check, no push fallback, no persistence, "sent" answered before
+    /// delivery was known) is never taken, regardless of this flag.
     ///
+    /// Set `false` to force per-member fan-out even against a v2 relay.
     /// Per-member fan-out (`__GRP_MLS_MSG__` as ordinary `SendMessage`
-    /// frames) instead inherits the full DM ladder: outbox + ACK + retry,
-    /// relay write-ack + successor retry + offline push carrying the
+    /// frames) inherits the full DM ladder end to end — outbox + ACK +
+    /// retry, relay write-ack + successor retry + offline push carrying the
     /// ciphertext, park-on-unreachable with presence-driven flush, and
-    /// receiver-side deferred-ACK-after-decrypt. That reliability is worth
-    /// more than the uplink saving until the relay can report per-recipient
-    /// delivery back to the sender.
+    /// receiver-side deferred-ACK-after-decrypt — at the cost of O(N)
+    /// uplink frames per send.
     ///
-    /// Cost of the default: sends are O(N) frames. This does **not** risk
-    /// tripping the relay's rate limiter at any group size. The platform
-    /// bridge meters every relay-bound frame through a client-side token
-    /// bucket (`RelayRateLimiter`: 28 capacity, 9/s refill) deliberately
-    /// tighter than the relay's (30 burst, 10/s), and a frame that cannot
-    /// take a token is *deferred to a later poll tick*, never dropped — so
-    /// client spend stays at `28 + 9t` against a server budget of `30 + 10t`
-    /// and the fan-out self-paces below it regardless of member count. Core
-    /// enqueues all N frames at once; the bridge drains that queue.
+    /// O(N) fan-out does **not** risk tripping the relay's rate limiter at
+    /// any group size. The platform bridge meters every relay-bound frame
+    /// through a client-side token bucket (`RelayRateLimiter`: 28 capacity,
+    /// 9/s refill) deliberately tighter than the relay's (30 burst, 10/s),
+    /// and a frame that cannot take a token is *deferred to a later poll
+    /// tick*, never dropped — so client spend stays at `28 + 9t` against a
+    /// server budget of `30 + 10t` and the fan-out self-paces below it
+    /// regardless of member count. Core enqueues all N frames at once; the
+    /// bridge drains that queue.
     ///
-    /// What large groups actually cost is drain latency. Frame N reaches the
-    /// wire at roughly `(N - 28) / 9` seconds. Since the ACK timer starts at
-    /// local *enqueue* (`handle_send_success`) and not at wire-confirm —
-    /// `on_transport_send_confirmed` advances only the welcome lifecycle —
-    /// past roughly 118 members the tail of a single fan-out exceeds the 10s
-    /// ACK timeout and is retransmitted by the ladder before it was ever
-    /// written. That is wasted duplicate frames, absorbed by receiver and
-    /// push dedup via the stable outbox id, not lost messages. Presence
-    /// checks, typing, and receipts draw on the same bucket and lower the
-    /// threshold. Groups near that size should keep the broadcast on and
-    /// accept the delivery gap.
+    /// What large groups actually cost on the per-member path is drain
+    /// latency. Frame N reaches the wire at roughly `(N - 28) / 9` seconds.
+    /// Since the ACK timer starts at local *enqueue* (`handle_send_success`)
+    /// and not at wire-confirm — `on_transport_send_confirmed` advances only
+    /// the welcome lifecycle — past roughly 118 members the tail of a single
+    /// fan-out exceeds the 10s ACK timeout and is retransmitted by the
+    /// ladder before it was ever written. That is wasted duplicate frames,
+    /// absorbed by receiver and push dedup via the stable outbox id, not
+    /// lost messages. Presence checks, typing, and receipts draw on the same
+    /// bucket and lower the threshold. This is the strongest reason to leave
+    /// the broadcast enabled for large groups.
     pub relay_broadcast_enabled: bool,
 }
 
@@ -369,7 +379,7 @@ impl Default for GroupConfig {
         Self {
             max_group_members: 256,
             relay_enabled: true,
-            relay_broadcast_enabled: false,
+            relay_broadcast_enabled: true,
         }
     }
 }
@@ -777,8 +787,10 @@ impl ProtocolConfigBuilder {
 
     /// Sets whether relay-synced groups may send via a single relay broadcast
     /// instead of per-member fan-out. See
-    /// [`GroupConfig::relay_broadcast_enabled`] — off by default because the
-    /// broadcast has no per-recipient delivery contract.
+    /// [`GroupConfig::relay_broadcast_enabled`] — on by default, but only
+    /// ever taken against a relay that advertised the `group_delivery_v2`
+    /// capability, whose settled delivery report gives the broadcast a
+    /// per-recipient delivery contract.
     pub fn group_relay_broadcast_enabled(mut self, enabled: bool) -> Self {
         self.config.group.relay_broadcast_enabled = enabled;
         self
@@ -1026,25 +1038,26 @@ mod tests {
     fn test_group_config_default() {
         let group = GroupConfig::default();
         assert_eq!(group.max_group_members, 256);
-        // Registration on, broadcast off: invite links resolve against the
-        // relay group registry, so registration must stay on — but the
-        // broadcast trades the per-member delivery ladder for an uplink
-        // saving and is opt-in until the relay can report per-recipient
-        // delivery back to the sender.
+        // Registration and broadcast both default on. Registration must stay
+        // on because invite links resolve against the relay group registry.
+        // The broadcast default is safe because the flag alone never selects
+        // the path: it is additionally gated on the relay advertising the
+        // `group_delivery_v2` capability, whose settled delivery report is
+        // what gives the broadcast a per-recipient delivery contract.
         assert!(group.relay_enabled);
-        assert!(!group.relay_broadcast_enabled);
+        assert!(group.relay_broadcast_enabled);
     }
 
     #[test]
-    fn test_group_relay_broadcast_builder_opt_in() {
+    fn test_group_relay_broadcast_builder_opt_out() {
         let config = ProtocolConfig::builder("test-app", "user123")
-            .group_relay_broadcast_enabled(true)
+            .group_relay_broadcast_enabled(false)
             .build()
             .unwrap();
-        assert!(config.group.relay_broadcast_enabled);
+        assert!(!config.group.relay_broadcast_enabled);
         assert!(
             config.group.relay_enabled,
-            "opting into the broadcast must not disturb registration"
+            "opting out of the broadcast must not disturb registration"
         );
     }
 

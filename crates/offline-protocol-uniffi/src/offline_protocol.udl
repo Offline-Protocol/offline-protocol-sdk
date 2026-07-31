@@ -516,17 +516,19 @@ dictionary ProtocolConfig {
     u32 max_group_members = 256;
     boolean group_relay_enabled = true;
     // Whether a relay-synced group may send one O(1) relay broadcast instead
-    // of per-member fan-out. Default OFF: the broadcast has no per-recipient
-    // delivery contract (the relay fans out fire-and-forget, with no presence
-    // check, push fallback, or persistence), so a backgrounded or offline
-    // member misses the message permanently and undetectably. Per-member
-    // fan-out inherits the full DM ladder — retry, offline push carrying the
+    // of per-member fan-out. Default ON, but the flag alone never selects the
+    // broadcast: the path additionally requires the connected relay to have
+    // advertised the group_delivery_v2 capability (injected by the bridge via
+    // internet_relay_capabilities). Such a relay answers every broadcast with
+    // a settled per-recipient delivery report, and the SDK re-sends a
+    // per-member copy to every MLS roster member the report does not account
+    // for — so the broadcast keeps a delivery contract. Against an older
+    // relay the gate fails closed and sends take per-member fan-out, which
+    // inherits the full DM ladder — retry, offline push carrying the
     // ciphertext, park/flush, deferred ACK — at the cost of O(N) frames.
-    // O(N) does not risk the relay's rate limiter at any size: the bridge
-    // meters frames through a bucket tighter than the server's and defers
-    // rather than drops, so the fan-out self-paces. Large groups cost drain
-    // latency instead — see GroupConfig::relay_broadcast_enabled.
-    boolean group_relay_broadcast_enabled = false;
+    // Set false to force per-member fan-out even against a v2 relay.
+    // See GroupConfig::relay_broadcast_enabled for the full rationale.
+    boolean group_relay_broadcast_enabled = true;
     boolean require_transport_identity = false;
     // Kill switch for the compact binary wire codec (default on). Negotiated
     // per-peer, so a mixed fleet stays on JSON automatically; decoding of
@@ -992,6 +994,27 @@ interface OfflineProtocol {
     // queries (CheckPresence) — every peer with an undelivered or
     // session-unproven MLS welcome.
     sequence<string> internet_presence_watchlist();
+
+    // Internet: capability tokens from the relay's Authenticated answer
+    // (e.g. "group_delivery_v2"). MUST be called BEFORE
+    // internet_status_changed(true) on each (re)connect — the false→true
+    // flush has to see the capabilities, or the first sends after reconnect
+    // take the capability-less path. Wholesale replace; the SDK clears the
+    // set itself when the Internet transport drops. Relays that predate the
+    // advertisement: pass an empty list (or skip the call — the set is
+    // already empty after a drop).
+    [Throws=ProtocolError]
+    void internet_relay_capabilities(sequence<string> capabilities);
+
+    // Internet: a relay GroupMessageSent settled delivery report, forwarded
+    // as the raw server frame JSON. Correlated by its message_id to an
+    // in-flight group broadcast; members the relay did not reach get a
+    // per-member re-send and the app sees group_message_delivery_report.
+    // A dedicated entry point (not message-plane injection) so it cannot be
+    // forged through the notification ciphertext injector. Reports that
+    // correlate with nothing are ignored; malformed JSON throws.
+    [Throws=ProtocolError]
+    void internet_group_report_received(string report_json);
 
     // WiFi Direct transport operations
     [Throws=ProtocolError]

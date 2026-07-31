@@ -1008,11 +1008,15 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_inte
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed(
 ): Short
@@ -1412,12 +1416,16 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_c
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_group_report_received(`ptr`: Long,`reportJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence(`ptr`: Long,`peerId`: RustBuffer.ByValue,`online`: Byte,`lastSeenMs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_relay_capabilities(`ptr`: Long,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1932,6 +1940,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 48075.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received() != 31734.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1939,6 +1950,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 10876.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities() != 4047.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204.toShort()) {
@@ -3278,11 +3292,15 @@ public interface OfflineProtocolInterface {
     
     fun `internetGetNextMessage`(): InternetMessage?
     
+    fun `internetGroupReportReceived`(`reportJson`: kotlin.String)
+    
     fun `internetMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
     
     fun `internetPeerPresence`(`peerId`: kotlin.String, `online`: kotlin.Boolean, `lastSeenMs`: kotlin.Long?)
     
     fun `internetPresenceWatchlist`(): List<kotlin.String>
+    
+    fun `internetRelayCapabilities`(`capabilities`: List<kotlin.String>)
     
     fun `internetSendFailed`(`messageId`: kotlin.String)
     
@@ -4349,6 +4367,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `internetGroupReportReceived`(`reportJson`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_group_report_received(
+        it,
+        FfiConverterString.lower(`reportJson`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(ProtocolException::class)override fun `internetMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
         = 
     callWithHandle {
@@ -4384,6 +4415,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     )
     }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `internetRelayCapabilities`(`capabilities`: List<kotlin.String>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_relay_capabilities(
+        it,
+        FfiConverterSequenceString.lower(`capabilities`),_status)
+}
+    }
+    
     
 
     override fun `internetSendFailed`(`messageId`: kotlin.String)
@@ -7179,7 +7223,7 @@ data class ProtocolConfig (
     , 
     var `groupRelayEnabled`: kotlin.Boolean = true 
     , 
-    var `groupRelayBroadcastEnabled`: kotlin.Boolean = false 
+    var `groupRelayBroadcastEnabled`: kotlin.Boolean = true 
     , 
     var `requireTransportIdentity`: kotlin.Boolean = false 
     , 

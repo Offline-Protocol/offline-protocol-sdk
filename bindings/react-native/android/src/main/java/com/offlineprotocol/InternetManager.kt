@@ -727,7 +727,12 @@ class InternetManager(
         }
     }
     
-    private fun handleAuthenticated(ws: WebSocket, userId: String, username: String) {
+    private fun handleAuthenticated(
+        ws: WebSocket,
+        userId: String,
+        username: String,
+        capabilities: List<String>
+    ) {
         // The whole reaction is ONE main-posted block gated on the socket
         // still being current and the transport not stopping: reacting on
         // the reader thread would race stopUnsafe() — the core would be told
@@ -747,6 +752,17 @@ class InternetManager(
             cancelAuthTimeout()
 
             updateState(TransportState.RUNNING)
+
+            // Capabilities MUST reach the SDK before the status flip: the
+            // false→true transition flushes queued sends, and the group
+            // broadcast gate reads the capability set. An older relay omits
+            // the field; the empty list is still injected so a stale set
+            // from a previous relay can never leak across connections.
+            try {
+                protocol.internetRelayCapabilities(capabilities)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error injecting relay capabilities", e)
+            }
 
             // Notify protocol - this will trigger outbox flush for pending messages
             try {
@@ -1081,7 +1097,12 @@ class InternetManager(
                 // Handle authentication success
                 val userId = json.safeOptString("user_id", deviceId)
                 val username = json.safeOptString("username", deviceId)
-                handleAuthenticated(ws, userId, username)
+                // Capability tokens this relay deployment supports (e.g.
+                // "group_delivery_v2"). Older relays omit the field → empty.
+                val capabilities = json.optJSONArray("capabilities")?.let { arr ->
+                    (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotEmpty() } }
+                } ?: emptyList()
+                handleAuthenticated(ws, userId, username, capabilities)
             }
             
             "AuthError" -> {
@@ -1443,6 +1464,29 @@ class InternetManager(
                 )
                 serverMessageEmitter?.invoke(rawText)
                 emitDiagnostic("debug", "Relay server message forwarded", mapOf(
+                    "type" to messageType
+                ))
+            }
+
+            "GroupMessageSent" -> {
+                // The relay's settled per-recipient delivery report for a
+                // group broadcast. Forwarded verbatim into the SDK's
+                // dedicated report entry point — it correlates by
+                // message_id, settles the broadcast tracker, and re-sends
+                // per-member copies to members the relay did not reach.
+                // Deliberately NOT message-plane injection, so the report
+                // path cannot be forged through the notification ciphertext
+                // injector. Also passed through as internet_server_message
+                // like before, for app observers.
+                try {
+                    protocol.internetGroupReportReceived(rawText)
+                } catch (e: Exception) {
+                    emitDiagnostic("warning", "Group delivery report rejected", mapOf(
+                        "error" to (e.message ?: e.javaClass.simpleName)
+                    ))
+                }
+                serverMessageEmitter?.invoke(rawText)
+                emitDiagnostic("debug", "Group delivery report forwarded", mapOf(
                     "type" to messageType
                 ))
             }

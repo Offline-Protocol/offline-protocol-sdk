@@ -954,6 +954,38 @@ pub enum Event {
         succeeded_members: Vec<String>,
     },
 
+    /// The relay's settled per-recipient delivery report for a group
+    /// message sent via relay broadcast, after the SDK acted on it.
+    ///
+    /// Fires once per broadcast whose report arrived, seconds after
+    /// `group_message_sent` (the relay reports only when its whole fan-out
+    /// has settled — correlate by `message_id`, never by order). Members in
+    /// `delivered` took the message over a live relay socket; members in
+    /// `pushed` took a device push carrying the ciphertext. Every other
+    /// MLS roster member — the ones the relay reported missed *and* the
+    /// ones it did not know about at all — has already been re-sent a
+    /// per-member copy through the ordinary outbox/ACK/park delivery
+    /// ladder (`missed_reissued`), so no app action is required; the event
+    /// is delivery observability, not a failure signal. Not emitted when
+    /// the report itself is lost — the SDK then re-broadcasts (bounded)
+    /// and finally downgrades the whole message to per-member fan-out,
+    /// which reports per-member like any mesh send.
+    GroupMessageDeliveryReport {
+        /// MLS group identifier.
+        group_id: String,
+        /// The logical group message id, as returned by the send and echoed
+        /// by the relay.
+        message_id: String,
+        /// Members whose relay socket write was confirmed (a relay-side
+        /// write-ack, not an end-to-end delivery ACK).
+        delivered: Vec<String>,
+        /// Members offline at the relay who took a device push.
+        pushed: Vec<String>,
+        /// Members re-sent a per-member copy because the relay reached them
+        /// neither way (or never knew them).
+        missed_reissued: Vec<String>,
+    },
+
     /// Rich media metadata was dropped from an outbound group message
     /// because the group is not fully rich-capable (not every member
     /// advertised sealed rich payload support, or the local kill switch
@@ -1874,6 +1906,23 @@ impl Event {
         }
     }
 
+    /// Creates a GroupMessageDeliveryReport event.
+    pub fn group_message_delivery_report(
+        group_id: String,
+        message_id: String,
+        delivered: Vec<String>,
+        pushed: Vec<String>,
+        missed_reissued: Vec<String>,
+    ) -> Self {
+        Self::GroupMessageDeliveryReport {
+            group_id,
+            message_id,
+            delivered,
+            pushed,
+            missed_reissued,
+        }
+    }
+
     /// Creates a GroupRichExtrasDropped event.
     pub fn group_rich_extras_dropped(group_id: String, unknown_members: Vec<String>) -> Self {
         Self::GroupRichExtrasDropped {
@@ -2118,6 +2167,7 @@ impl Event {
             Self::GroupRelaySyncChanged { .. } => "protocol.group.relay_sync_changed",
             Self::GroupMessageSent { .. } => "protocol.group.message_sent",
             Self::GroupMessagePartialFailure { .. } => "protocol.group.message_partial_failure",
+            Self::GroupMessageDeliveryReport { .. } => "protocol.group.delivery_report",
             Self::GroupRichExtrasDropped { .. } => "protocol.group.rich_extras_dropped",
             Self::GroupEpochForkDetected { .. } => "protocol.group.epoch_fork_detected",
             Self::GroupEpochForkResolved { .. } => "protocol.group.epoch_fork_resolved",
@@ -2735,6 +2785,20 @@ impl fmt::Debug for Event {
                 .field("group_id", group_id)
                 .field("failed_count", &failed_members.len())
                 .field("succeeded_count", &succeeded_members.len())
+                .finish(),
+            Self::GroupMessageDeliveryReport {
+                group_id,
+                message_id,
+                delivered,
+                pushed,
+                missed_reissued,
+            } => f
+                .debug_struct("GroupMessageDeliveryReport")
+                .field("group_id", group_id)
+                .field("message_id", message_id)
+                .field("delivered_count", &delivered.len())
+                .field("pushed_count", &pushed.len())
+                .field("missed_reissued_count", &missed_reissued.len())
                 .finish(),
             Self::GroupRichExtrasDropped {
                 group_id,

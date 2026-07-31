@@ -941,14 +941,20 @@ public class InternetManager: NSObject, TransportManager {
     /// Authenticated from a socket that was already replaced or torn down —
     /// it must not mark the transport running or start timers for a
     /// connection that no longer exists.
-    private func handleAuthenticated(userId: String, username: String, task: URLSessionWebSocketTask) {
+    private func handleAuthenticated(
+        userId: String,
+        username: String,
+        capabilities: [String],
+        task: URLSessionWebSocketTask
+    ) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, !self.isStale(task) else { return }
-            self.handleAuthenticatedOnMain(userId: userId, username: username)
+            self.handleAuthenticatedOnMain(
+                userId: userId, username: username, capabilities: capabilities)
         }
     }
 
-    private func handleAuthenticatedOnMain(userId: String, username: String) {
+    private func handleAuthenticatedOnMain(userId: String, username: String, capabilities: [String]) {
         isAuthenticated = true
         emitConnectionStatus()
         cancelAuthTimeout()
@@ -958,6 +964,13 @@ public class InternetManager: NSObject, TransportManager {
         currentReconnectDelay = RECONNECT_INITIAL_DELAY
 
         updateState(.running)
+
+        // Capabilities MUST reach the SDK before the status flip: the
+        // false→true transition flushes queued sends, and the group
+        // broadcast gate reads the capability set. An older relay omits the
+        // field; the empty list is still injected so a stale set from a
+        // previous relay can never leak across connections.
+        try? protocolInstance.internetRelayCapabilities(capabilities: capabilities)
 
         // Notify protocol - this will trigger outbox flush for pending messages
         try? protocolInstance.internetStatusChanged(isConnected: true)
@@ -1240,7 +1253,11 @@ public class InternetManager: NSObject, TransportManager {
             // Handle authentication success
             let userId = json["user_id"] as? String ?? deviceId
             let username = json["username"] as? String ?? deviceId
-            handleAuthenticated(userId: userId, username: username, task: task)
+            // Capability tokens this relay deployment supports (e.g.
+            // "group_delivery_v2"). Older relays omit the field → empty.
+            let capabilities = json["capabilities"] as? [String] ?? []
+            handleAuthenticated(
+                userId: userId, username: username, capabilities: capabilities, task: task)
             
         case "AuthError":
             // Handle authentication error
@@ -1567,6 +1584,27 @@ public class InternetManager: NSObject, TransportManager {
             )
             emitServerMessage(rawText)
             emitDiagnostic("debug", "Relay server message forwarded", context: [
+                "type": messageType
+            ])
+
+        case "GroupMessageSent":
+            // The relay's settled per-recipient delivery report for a group
+            // broadcast. Forwarded verbatim into the SDK's dedicated report
+            // entry point — it correlates by message_id, settles the
+            // broadcast tracker, and re-sends per-member copies to members
+            // the relay did not reach. Deliberately NOT message-plane
+            // injection, so the report path cannot be forged through the
+            // notification ciphertext injector. Also passed through as
+            // internet_server_message like before, for app observers.
+            do {
+                try protocolInstance.internetGroupReportReceived(reportJson: rawText)
+            } catch {
+                emitDiagnostic("warning", "Group delivery report rejected", context: [
+                    "error": String(describing: error)
+                ])
+            }
+            emitServerMessage(rawText)
+            emitDiagnostic("debug", "Group delivery report forwarded", context: [
                 "type": messageType
             ])
 

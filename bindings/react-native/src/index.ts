@@ -132,6 +132,11 @@ interface NativeConfig {
       overflowPolicy: 'drop_oldest' | 'drop_newest';
     };
   };
+  group?: {
+    maxGroupMembers?: number;
+    relayEnabled?: boolean;
+    relayBroadcastEnabled?: boolean;
+  };
   dors?: {
     preferOnline: boolean;
     switchHysteresis: number;
@@ -389,6 +394,21 @@ export class OfflineProtocol {
       });
       if (fileTransferConfig) {
         nativeConfig.fileTransfer = fileTransferConfig;
+      }
+    }
+
+    // Group section: the nested `group` object is the documented home (what
+    // the native bridges read first). Only forwarded when the app set
+    // something — the native parsers default every field, and the broadcast
+    // default (on, capability-gated) lives in the core config.
+    if (this.config.group) {
+      const groupConfig = sanitize({
+        maxGroupMembers: this.config.group.maxGroupMembers,
+        relayEnabled: this.config.group.relayEnabled,
+        relayBroadcastEnabled: this.config.group.relayBroadcastEnabled,
+      });
+      if (groupConfig) {
+        nativeConfig.group = groupConfig;
       }
     }
 

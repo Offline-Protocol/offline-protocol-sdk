@@ -483,6 +483,7 @@ fn test_group_mls_internal_prefixes_defined() {
 fn test_group_mls_payload_serialization_roundtrip() {
     // Message payload with reply_to and epoch
     let msg_payload = GroupMlsMessagePayload {
+        message_id: None,
         group_id: "group:abc".to_string(),
         ciphertext: "dGVzdA==".to_string(),
         epoch: 42,
@@ -498,6 +499,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
 
     // Message payload without reply_to (should not include field in JSON)
     let msg_no_reply = GroupMlsMessagePayload {
+        message_id: None,
         group_id: "group:abc".to_string(),
         ciphertext: "dGVzdA==".to_string(),
         epoch: 1,
@@ -597,6 +599,7 @@ fn test_group_mls_full_lifecycle_create_invite_send_decrypt() {
     };
 
     let msg_payload = GroupMlsMessagePayload {
+        message_id: None,
         group_id: group_id.clone(),
         ciphertext: base64_encode(&encrypted.ciphertext),
         epoch: encrypted.epoch,
@@ -648,6 +651,7 @@ fn test_group_mls_message_with_spoofed_sender_not_surfaced() {
     };
 
     let msg_payload = GroupMlsMessagePayload {
+        message_id: None,
         group_id: group_id.clone(),
         ciphertext: base64_encode(&encrypted.ciphertext),
         epoch: encrypted.epoch,
@@ -845,6 +849,7 @@ fn test_group_mls_message_after_leaving() {
 
     // Simulate receiving an encrypted group message for the left group
     let msg_payload = GroupMlsMessagePayload {
+        message_id: None,
         group_id: group_id.clone(),
         ciphertext: base64_encode(b"encrypted-content"),
         epoch: 1,
@@ -879,6 +884,7 @@ fn test_group_mls_oversized_payload_rejected() {
     // Create an oversized base64 payload
     let oversized = "A".repeat(MAX_BASE64_PAYLOAD_SIZE + 1);
     let msg_payload = GroupMlsMessagePayload {
+        message_id: None,
         group_id: "group:test".to_string(),
         ciphertext: oversized,
         epoch: 1,
@@ -923,6 +929,7 @@ fn test_group_mls_duplicate_message_rejected() {
         alice_mls.encrypt_for_group(&gid, b"Hello dedup!").unwrap()
     };
     let msg_payload = GroupMlsMessagePayload {
+        message_id: None,
         group_id: group_id.clone(),
         ciphertext: base64_encode(&encrypted.ciphertext),
         epoch: encrypted.epoch,
@@ -1289,6 +1296,7 @@ fn test_group_mls_dedup_inserted_before_decrypt_attempt() {
 
     // Build a group message with bad ciphertext (will fail decryption)
     let msg_payload = GroupMlsMessagePayload {
+        message_id: None,
         group_id: group_id.clone(),
         ciphertext: base64_encode(b"definitely-not-valid-mls-ciphertext"),
         epoch: 1,
@@ -2586,6 +2594,7 @@ fn test_group_mls_dedup_independent_per_message_id() {
 
     for encrypted in [&enc1, &enc2] {
         let msg_payload = GroupMlsMessagePayload {
+            message_id: None,
             group_id: group_id.clone(),
             ciphertext: base64_encode(&encrypted.ciphertext),
             epoch: encrypted.epoch,
@@ -3134,13 +3143,24 @@ fn test_relay_sync_disabled_config() {
     assert!(!protocol.group_mesh.internet_was_available);
 }
 
-/// Config with the O(1) relay broadcast opted in. The default is off (the
-/// broadcast has no per-recipient delivery contract), so every test that
-/// exercises the broadcast path must ask for it explicitly.
+/// Config with the O(1) relay broadcast enabled explicitly. The flag now
+/// defaults on, so this is documentation more than configuration — but the
+/// broadcast path additionally requires the relay's `group_delivery_v2`
+/// capability (see [`grant_group_delivery_v2`]) and `relay_synced`.
 fn broadcast_enabled_config() -> crate::ProtocolConfig {
     let mut config = create_test_config();
     config.group.relay_broadcast_enabled = true;
     config
+}
+
+/// Grants the connected-relay `group_delivery_v2` capability, as the
+/// platform bridge does from the relay's `Authenticated` answer before
+/// reporting the transport up. Without it the broadcast gate fails closed
+/// and every group send takes per-member fan-out.
+fn grant_group_delivery_v2(protocol: &mut OfflineProtocol) {
+    protocol.set_relay_capabilities(vec![
+        crate::group_mesh::RELAY_CAP_GROUP_DELIVERY_V2.to_string()
+    ]);
 }
 
 #[test]
@@ -3172,8 +3192,9 @@ fn test_relay_broadcast_used_when_synced() {
         ],
     );
 
-    // Mark group as relay-synced
+    // Mark group as relay-synced and the relay as v2-capable
     protocol.group_mesh.relay_synced.insert(group_id.clone());
+    grant_group_delivery_v2(&mut protocol);
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_clone = events.clone();
@@ -3192,6 +3213,16 @@ fn test_relay_broadcast_used_when_synced() {
         "Relay broadcast should return exactly 1 message ID"
     );
 
+    // The broadcast arms the delivery-report tracker under the returned
+    // logical id.
+    assert!(
+        protocol
+            .group_mesh
+            .relay_broadcast_pending
+            .contains_key(&msg_ids[0].as_str()),
+        "Broadcast must be tracked awaiting its delivery report"
+    );
+
     // GroupMessageSent event should reflect all members
     let events = events.lock().unwrap();
     let sent_event = events.iter().find(|e| {
@@ -3204,18 +3235,21 @@ fn test_relay_broadcast_used_when_synced() {
     );
 }
 
-/// The broadcast is opt-in: with the default config a relay-synced group
-/// still fans out per member, so every copy rides the DM ladder (retry,
-/// offline push with ciphertext, park/flush, deferred ACK).
+/// The broadcast is capability-gated: with the default config (flag on) a
+/// relay-synced group still fans out per member unless the connected relay
+/// advertised `group_delivery_v2` — so against a v1 relay every copy rides
+/// the DM ladder (retry, offline push with ciphertext, park/flush,
+/// deferred ACK) and the contract-less fire-and-forget broadcast is never
+/// taken.
 #[test]
-fn test_relay_broadcast_disabled_by_default_uses_per_member_fanout() {
+fn test_relay_broadcast_without_capability_uses_per_member_fanout() {
     use offline_protocol_transport::mock::MockTransport;
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
     let config = create_test_config();
     assert!(
-        !config.group.relay_broadcast_enabled,
-        "Relay broadcast must default to off"
+        config.group.relay_broadcast_enabled,
+        "Relay broadcast defaults on (the capability gate is what keeps it safe)"
     );
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls_for_test(storage).unwrap();
@@ -3239,8 +3273,8 @@ fn test_relay_broadcast_disabled_by_default_uses_per_member_fanout() {
             "dave".to_string(),
         ],
     );
-    // Relay-synced — under the old unconditional gate this alone took the
-    // broadcast path.
+    // Relay-synced, but no capability granted — under the flag-and-sync-only
+    // gate this alone would have taken the broadcast path.
     protocol.group_mesh.relay_synced.insert(group_id.clone());
 
     let msg_ids = protocol
@@ -3297,6 +3331,7 @@ fn test_relay_broadcast_frame_is_unacked_and_not_retried() {
         ],
     );
     protocol.group_mesh.relay_synced.insert(group_id.clone());
+    grant_group_delivery_v2(&mut protocol);
 
     let msg_ids = protocol
         .send_group_message(&group_id, "hello relay", None, None)
@@ -3322,6 +3357,24 @@ fn test_relay_broadcast_frame_is_unacked_and_not_retried() {
     assert!(
         !broadcast_frame.requires_ack,
         "Broadcast frame must be sent with requires_ack = false"
+    );
+    assert!(
+        !protocol.is_tracked_for_delivery(&broadcast_frame.id),
+        "The hint frame's own id must stay off the ACK ladder too"
+    );
+
+    // The payload carries the logical id the send returned — that is what
+    // the bridge stamps onto the relay frame and the relay echoes in its
+    // delivery report.
+    let payload_json = broadcast_frame
+        .content
+        .strip_prefix(internal_prefixes::GROUP_RELAY_BROADCAST)
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(payload_json).unwrap();
+    assert_eq!(
+        payload["message_id"].as_str(),
+        Some(broadcast_id.as_str().as_str()),
+        "Broadcast payload must carry the logical message id"
     );
 }
 
@@ -3414,6 +3467,7 @@ fn test_relay_hint_frames_pin_to_internet_not_mesh() {
         ],
     );
     protocol.group_mesh.relay_synced.insert(group_id.clone());
+    grant_group_delivery_v2(&mut protocol);
 
     protocol
         .send_group_message(&group_id, "hello relay", None, None)
@@ -3476,8 +3530,9 @@ fn test_relay_broadcast_falls_back_when_internet_unavailable() {
             "carol".to_string(),
         ],
     );
-    // Stale sync state from a previous connection.
+    // Stale sync state and capabilities from a previous connection.
     protocol.group_mesh.relay_synced.insert(group_id.clone());
+    grant_group_delivery_v2(&mut protocol);
 
     let msg_ids = protocol
         .send_group_message(&group_id, "hello fallback", None, None)
@@ -3499,6 +3554,697 @@ fn test_relay_broadcast_falls_back_when_internet_unavailable() {
     assert_eq!(
         broadcasts, 0,
         "Broadcast frame must never be swallowed by the mesh transport"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Broadcast delivery report (GroupMessageSent v2) — settle, backstop, retry
+// ---------------------------------------------------------------------------
+
+/// Arms a broadcast tracker directly, for report/timeout tests that don't
+/// need a real MLS group: the group exists only in the member cache, so the
+/// handler's MLS roster refresh fails and falls back to the cache — letting
+/// the roster be shaped freely.
+fn arm_fake_broadcast(
+    protocol: &mut OfflineProtocol,
+    group_id: &str,
+    logical_id: &str,
+    members: &[&str],
+) {
+    protocol.group_mesh.members.insert(
+        group_id.to_string(),
+        members.iter().map(|m| m.to_string()).collect(),
+    );
+    protocol
+        .group_mesh
+        .relay_synced
+        .insert(group_id.to_string());
+    protocol.group_mesh.relay_broadcast_pending.insert(
+        logical_id.to_string(),
+        RelayBroadcastPending {
+            group_id: group_id.to_string(),
+            ciphertext_b64: base64_encode(b"broadcast-ct"),
+            epoch: 3,
+            reply_to: None,
+            forward_info: None,
+            priority: offline_protocol_core::MessagePriority::Medium,
+            armed_at: chrono::Utc::now(),
+            attempts: 1,
+        },
+    );
+}
+
+/// Collects the `__GRP_MLS_MSG__` frames a mock transport saw, as
+/// (recipient, payload json) pairs.
+fn grp_mls_frames(
+    handle: &offline_protocol_transport::mock::MockTransport,
+) -> Vec<(String, serde_json::Value)> {
+    handle
+        .sent_messages()
+        .into_iter()
+        .filter_map(|m| {
+            m.content
+                .strip_prefix(internal_prefixes::GROUP_MLS_MSG)
+                .map(|p| {
+                    (
+                        m.recipient.as_str().to_string(),
+                        serde_json::from_str::<serde_json::Value>(p).unwrap(),
+                    )
+                })
+        })
+        .collect()
+}
+
+/// A report accounting for every roster member settles the tracker without
+/// re-sending anything, and surfaces the relay's lists to the app.
+#[test]
+fn test_broadcast_report_all_reached_settles_without_reissue() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+    grant_group_delivery_v2(&mut protocol);
+
+    let logical = "0b0b0b0b-1111-2222-3333-444444444444";
+    arm_fake_broadcast(
+        &mut protocol,
+        "grp-report",
+        logical,
+        &["user123", "bob", "carol", "dave"],
+    );
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    protocol.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let report = serde_json::json!({
+        "type": "GroupMessageSent",
+        "group_id": "grp-report",
+        "message_id": logical,
+        "timestamp": "2026-07-31T00:00:00Z",
+        "delivered": ["bob"],
+        "pushed": ["carol", "dave"],
+        "missed": [],
+    })
+    .to_string();
+    protocol
+        .handle_relay_group_delivery_report(&report)
+        .unwrap();
+
+    assert!(
+        !protocol
+            .group_mesh
+            .relay_broadcast_pending
+            .contains_key(logical),
+        "Report must settle the tracker"
+    );
+    assert!(
+        grp_mls_frames(&internet_handle).is_empty(),
+        "No per-member copies should be re-sent when everyone was reached"
+    );
+    let events = events.lock().unwrap();
+    let report_event = events
+        .iter()
+        .find_map(|e| match e {
+            Event::GroupMessageDeliveryReport {
+                group_id,
+                message_id,
+                delivered,
+                pushed,
+                missed_reissued,
+            } => Some((
+                group_id.clone(),
+                message_id.clone(),
+                delivered.clone(),
+                pushed.clone(),
+                missed_reissued.clone(),
+            )),
+            _ => None,
+        })
+        .expect("Expected GroupMessageDeliveryReport event");
+    assert_eq!(report_event.0, "grp-report");
+    assert_eq!(report_event.1, logical);
+    assert_eq!(report_event.2, vec!["bob".to_string()]);
+    assert_eq!(
+        report_event.3,
+        vec!["carol".to_string(), "dave".to_string()]
+    );
+    assert!(report_event.4.is_empty());
+}
+
+/// Members the relay names as missed AND members it does not name at all
+/// (its registered roster can lag the MLS roster) get a per-member copy
+/// carrying the logical id, tracked on the ordinary delivery ladder.
+#[test]
+fn test_broadcast_report_reissues_missed_and_unnamed_members() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+    grant_group_delivery_v2(&mut protocol);
+
+    let logical = "0c0c0c0c-1111-2222-3333-444444444444";
+    // dave is in the MLS roster but the relay never mentions him — a
+    // mesh-created group where only the creator registered.
+    arm_fake_broadcast(
+        &mut protocol,
+        "grp-missed",
+        logical,
+        &["user123", "bob", "carol", "dave"],
+    );
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    protocol.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let report = serde_json::json!({
+        "type": "GroupMessageSent",
+        "group_id": "grp-missed",
+        "message_id": logical,
+        "timestamp": "2026-07-31T00:00:00Z",
+        "delivered": ["bob"],
+        "pushed": [],
+        "missed": [{"username": "carol", "reason": "offline_no_push"}],
+    })
+    .to_string();
+    protocol
+        .handle_relay_group_delivery_report(&report)
+        .unwrap();
+
+    let frames = grp_mls_frames(&internet_handle);
+    let mut recipients: Vec<&str> = frames.iter().map(|(r, _)| r.as_str()).collect();
+    recipients.sort_unstable();
+    assert_eq!(
+        recipients,
+        vec!["carol", "dave"],
+        "Missed and unnamed members must both get a per-member copy"
+    );
+    for (_, payload) in &frames {
+        assert_eq!(
+            payload["message_id"].as_str(),
+            Some(logical),
+            "Re-issued copies must carry the logical id for cross-path dedup"
+        );
+        assert_eq!(
+            payload["ciphertext"].as_str(),
+            Some(base64_encode(b"broadcast-ct").as_str())
+        );
+    }
+    // The copies ride the ordinary delivery ladder.
+    let tracked = internet_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| m.content.starts_with(internal_prefixes::GROUP_MLS_MSG))
+        .all(|m| protocol.is_tracked_for_delivery(&m.id));
+    assert!(tracked, "Re-issued copies must be ACK-tracked");
+
+    let events = events.lock().unwrap();
+    let reissued = events
+        .iter()
+        .find_map(|e| match e {
+            Event::GroupMessageDeliveryReport {
+                missed_reissued, ..
+            } => Some(missed_reissued.clone()),
+            _ => None,
+        })
+        .expect("Expected GroupMessageDeliveryReport event");
+    let mut reissued_sorted = reissued;
+    reissued_sorted.sort_unstable();
+    assert_eq!(
+        reissued_sorted,
+        vec!["carol".to_string(), "dave".to_string()]
+    );
+}
+
+/// Reports that correlate with nothing (settled already, or forged) are
+/// ignored; a report naming the wrong group leaves the tracker armed so the
+/// timeout path recovers.
+#[test]
+fn test_broadcast_report_unknown_or_mismatched_is_ignored() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+    grant_group_delivery_v2(&mut protocol);
+
+    let logical = "0d0d0d0d-1111-2222-3333-444444444444";
+    arm_fake_broadcast(&mut protocol, "grp-guard", logical, &["user123", "bob"]);
+
+    // Unknown id: no-op.
+    let unknown = serde_json::json!({
+        "group_id": "grp-guard",
+        "message_id": "ffffffff-1111-2222-3333-444444444444",
+        "delivered": [], "pushed": [], "missed": [],
+    })
+    .to_string();
+    protocol
+        .handle_relay_group_delivery_report(&unknown)
+        .unwrap();
+    assert!(protocol
+        .group_mesh
+        .relay_broadcast_pending
+        .contains_key(logical));
+
+    // Right id, wrong group: ignored, tracker stays armed.
+    let mismatched = serde_json::json!({
+        "group_id": "some-other-group",
+        "message_id": logical,
+        "delivered": ["bob"], "pushed": [], "missed": [],
+    })
+    .to_string();
+    protocol
+        .handle_relay_group_delivery_report(&mismatched)
+        .unwrap();
+    assert!(
+        protocol
+            .group_mesh
+            .relay_broadcast_pending
+            .contains_key(logical),
+        "A mismatched report must not settle the tracker"
+    );
+    assert!(grp_mls_frames(&internet_handle).is_empty());
+}
+
+/// A lost report re-sends the broadcast under the same logical id while the
+/// attempt budget and gate hold, then downgrades the whole message to
+/// per-member fan-out.
+#[test]
+fn test_lost_report_rebroadcasts_bounded_then_downgrades_per_member() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+    grant_group_delivery_v2(&mut protocol);
+
+    let logical = "0e0e0e0e-1111-2222-3333-444444444444";
+    arm_fake_broadcast(
+        &mut protocol,
+        "grp-timeout",
+        logical,
+        &["user123", "bob", "carol"],
+    );
+
+    let rewind = |protocol: &mut OfflineProtocol| {
+        protocol
+            .group_mesh
+            .relay_broadcast_pending
+            .get_mut(logical)
+            .unwrap()
+            .armed_at = chrono::Utc::now() - chrono::Duration::seconds(61);
+    };
+    let broadcast_frames = |handle: &MockTransport| {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| {
+                m.content
+                    .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)
+            })
+            .count()
+    };
+
+    // Not yet due: nothing happens.
+    protocol.process_relay_broadcast_report_timeouts();
+    assert_eq!(broadcast_frames(&internet_handle), 0);
+
+    // Attempt 2: re-broadcast, same logical id in the payload.
+    rewind(&mut protocol);
+    protocol.process_relay_broadcast_report_timeouts();
+    assert_eq!(broadcast_frames(&internet_handle), 1);
+    let entry = protocol
+        .group_mesh
+        .relay_broadcast_pending
+        .get(logical)
+        .expect("still armed after re-send");
+    assert_eq!(entry.attempts, 2);
+    let resent = internet_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| {
+            m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)
+        })
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(
+        resent
+            .content
+            .strip_prefix(internal_prefixes::GROUP_RELAY_BROADCAST)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        payload["message_id"].as_str(),
+        Some(logical),
+        "Re-sent broadcast must reuse the logical id — that is what keeps \
+         receiver and push dedup coherent across attempts"
+    );
+
+    // Attempt 3: last budgeted re-send.
+    rewind(&mut protocol);
+    protocol.process_relay_broadcast_report_timeouts();
+    assert_eq!(broadcast_frames(&internet_handle), 2);
+    assert_eq!(
+        protocol
+            .group_mesh
+            .relay_broadcast_pending
+            .get(logical)
+            .unwrap()
+            .attempts,
+        3
+    );
+
+    // Budget exhausted: downgrade to per-member fan-out, tracker gone.
+    rewind(&mut protocol);
+    protocol.process_relay_broadcast_report_timeouts();
+    assert!(
+        !protocol
+            .group_mesh
+            .relay_broadcast_pending
+            .contains_key(logical),
+        "Exhausted broadcast must be settled by the downgrade"
+    );
+    assert_eq!(
+        broadcast_frames(&internet_handle),
+        2,
+        "No further broadcast attempts past the budget"
+    );
+    let frames = grp_mls_frames(&internet_handle);
+    let mut recipients: Vec<&str> = frames.iter().map(|(r, _)| r.as_str()).collect();
+    recipients.sort_unstable();
+    assert_eq!(
+        recipients,
+        vec!["bob", "carol"],
+        "Downgrade must fan out to the whole roster (minus self)"
+    );
+    for (_, payload) in &frames {
+        assert_eq!(payload["message_id"].as_str(), Some(logical));
+    }
+}
+
+/// Internet dropping strands any in-flight report, so pending broadcasts
+/// are downgraded immediately (the copies park/flush on the ordinary
+/// ladder) and the dead connection's capabilities are forgotten.
+#[test]
+fn test_internet_drop_downgrades_pending_broadcasts_and_clears_capabilities() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let wifi = MockTransport::new(TransportType::WiFiDirect);
+    wifi.start().unwrap();
+    let wifi_handle = wifi.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(wifi));
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+    grant_group_delivery_v2(&mut protocol);
+
+    let logical = "0f0f0f0f-1111-2222-3333-444444444444";
+    arm_fake_broadcast(&mut protocol, "grp-drop", logical, &["user123", "bob"]);
+    protocol.group_mesh.internet_was_available = true;
+
+    protocol
+        .transport_manager_mut()
+        .remove_transport(TransportType::Internet);
+    protocol.check_relay_group_sync();
+
+    assert!(
+        protocol.group_mesh.relay_capabilities.is_empty(),
+        "Capabilities describe the dead connection and must be cleared"
+    );
+    assert!(
+        protocol.group_mesh.relay_broadcast_pending.is_empty(),
+        "Stranded broadcasts must be downgraded immediately"
+    );
+    let frames = grp_mls_frames(&wifi_handle);
+    assert_eq!(frames.len(), 1, "Per-member copy should go out over mesh");
+    assert_eq!(frames[0].0, "bob");
+    assert_eq!(frames[0].1["message_id"].as_str(), Some(logical));
+}
+
+/// Opting out of the broadcast forces per-member fan-out even against a
+/// fully v2-capable, synced relay.
+#[test]
+fn test_relay_broadcast_opt_out_forces_per_member_fanout() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut config = create_test_config();
+    config.group.relay_broadcast_enabled = false;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let info = protocol.create_group("Opt Out Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![
+            "user123".to_string(),
+            "bob".to_string(),
+            "carol".to_string(),
+        ],
+    );
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+    grant_group_delivery_v2(&mut protocol);
+
+    let msg_ids = protocol
+        .send_group_message(&group_id, "hello opt-out", None, None)
+        .unwrap();
+    assert_eq!(msg_ids.len(), 2, "Expected per-member fan-out");
+    assert!(!internet_handle.sent_messages().iter().any(|m| m
+        .content
+        .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)));
+}
+
+/// The capability list is wire-supplied and must be bounded.
+#[test]
+fn test_relay_capabilities_are_bounded() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let mut caps: Vec<String> = (0..200).map(|i| format!("cap-{}", i)).collect();
+    caps.push("x".repeat(4096));
+    protocol.set_relay_capabilities(caps);
+    assert!(protocol.group_mesh.relay_capabilities.len() <= 64);
+    assert!(!protocol
+        .group_mesh
+        .relay_capabilities
+        .iter()
+        .any(|c| c.len() > 128));
+
+    // Wholesale replace, not merge.
+    protocol.set_relay_capabilities(vec!["group_delivery_v2".to_string()]);
+    assert_eq!(protocol.group_mesh.relay_capabilities.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Receiver-side logical id — emit identity, cross-path dedup, poison safety
+// ---------------------------------------------------------------------------
+
+/// A `__GRP_MLS_MSG__` frame carrying a logical id emits that id (every
+/// member sees the same app-facing id regardless of arrival path), and both
+/// a second mesh copy under a fresh envelope and the relay path's copy of
+/// the same logical message are absorbed as duplicates.
+#[test]
+fn test_grp_mls_msg_logical_id_emit_and_cross_path_dedup() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Logical Id Group");
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let logical = "abcdabcd-1111-2222-3333-444444444444";
+    let encrypted = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        mls.encrypt_for_group(&gid, b"hello logical").unwrap()
+    };
+    let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
+    let payload = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": ciphertext_b64,
+        "epoch": encrypted.epoch,
+        "message_id": logical,
+    })
+    .to_string();
+
+    let msg1 = make_message(
+        "alice",
+        "bob",
+        &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload),
+    );
+    let res = bob.handle_group_mls_msg(&msg1, "alice", &payload);
+    assert!(matches!(res, InternalMessageResult::Consumed));
+    {
+        let events = events.lock().unwrap();
+        let received: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::GroupMessageReceived {
+                    message_id,
+                    content,
+                    ..
+                } => Some((message_id.clone(), content.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            received[0].0, logical,
+            "Emitted id must be the logical id, not the envelope id"
+        );
+        assert_eq!(received[0].1, "hello logical");
+    }
+
+    // Second mesh copy: fresh envelope, same logical id — absorbed without
+    // an MLS decrypt (the ciphertext's ratchet generation is already spent,
+    // so decrypting would misclassify as Retriable and buffer noise).
+    let msg2 = make_message(
+        "alice",
+        "bob",
+        &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload),
+    );
+    let res2 = bob.handle_group_mls_msg(&msg2, "alice", &payload);
+    assert!(
+        matches!(res2, InternalMessageResult::Consumed),
+        "Cross-path duplicate must be consumed (and re-ACKed by the receive loop)"
+    );
+
+    // Relay path copy of the same logical message: also a duplicate.
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &ciphertext_b64,
+        "2026-07-31T00:00:00Z",
+        logical,
+        None,
+        None,
+    );
+
+    let events = events.lock().unwrap();
+    let received_count = events
+        .iter()
+        .filter(|e| matches!(e, Event::GroupMessageReceived { .. }))
+        .count();
+    assert_eq!(
+        received_count, 1,
+        "The logical message must be delivered exactly once across paths"
+    );
+}
+
+/// The logical id is unauthenticated wire input: a frame that fails MLS
+/// decryption must not mark it as seen, or a non-member could suppress a
+/// genuine message by poisoning its id.
+#[test]
+fn test_grp_mls_msg_failed_decrypt_does_not_poison_logical_id() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Poison Group");
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let logical = "deadbeef-1111-2222-3333-444444444444";
+    // Attacker frame: garbage ciphertext claiming the logical id.
+    let poison_payload = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": base64_encode(b"not real mls ciphertext"),
+        "epoch": 9,
+        "message_id": logical,
+    })
+    .to_string();
+    let poison_msg = make_message(
+        "mallory",
+        "bob",
+        &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, poison_payload),
+    );
+    bob.handle_group_mls_msg(&poison_msg, "mallory", &poison_payload);
+    assert!(
+        !bob.group_mesh.message_dedup.contains_key(logical),
+        "A failed decrypt must not mark the logical id as seen"
+    );
+
+    // The genuine copy still delivers under the logical id.
+    let encrypted = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        mls.encrypt_for_group(&gid, b"the real message").unwrap()
+    };
+    let genuine_payload = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": base64_encode(&encrypted.ciphertext),
+        "epoch": encrypted.epoch,
+        "message_id": logical,
+    })
+    .to_string();
+    let genuine_msg = make_message(
+        "alice",
+        "bob",
+        &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, genuine_payload),
+    );
+    let res = bob.handle_group_mls_msg(&genuine_msg, "alice", &genuine_payload);
+    assert!(matches!(res, InternalMessageResult::Consumed));
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::GroupMessageReceived { message_id, content, .. }
+                if message_id == logical && content == "the real message"
+        )),
+        "Genuine copy must deliver despite the poison attempt"
     );
 }
 
@@ -8417,6 +9163,7 @@ fn test_pending_group_message_buffer_cap() {
         protocol.buffer_pending_group_message(
             "cap-group",
             PendingGroupMessage {
+                logical_id: None,
                 sender: "alice".to_string(),
                 message_id: format!("m{}", i),
                 ciphertext_b64: base64_encode(b"x"),
@@ -8443,6 +9190,7 @@ fn test_pending_group_message_expired_entries_cleaned_up() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
     let expired = PendingGroupMessage {
+        logical_id: None,
         sender: "alice".to_string(),
         message_id: "expired-1".to_string(),
         ciphertext_b64: base64_encode(b"x"),
@@ -8453,6 +9201,7 @@ fn test_pending_group_message_expired_entries_cleaned_up() {
         received_via: None,
     };
     let recent = PendingGroupMessage {
+        logical_id: None,
         sender: "bob".to_string(),
         message_id: "recent-1".to_string(),
         ciphertext_b64: base64_encode(b"x"),
@@ -8489,6 +9238,7 @@ fn test_drain_pending_group_messages_drops_expired() {
     let (mut protocol, events) = setup_with_events();
 
     let expired = PendingGroupMessage {
+        logical_id: None,
         sender: "alice".to_string(),
         message_id: "expired-drain-1".to_string(),
         ciphertext_b64: base64_encode(b"x"),
@@ -8609,6 +9359,7 @@ fn test_pending_group_message_spread_flood_bounded_by_group_cap() {
         protocol.buffer_pending_group_message(
             &format!("group-{}", i),
             PendingGroupMessage {
+                logical_id: None,
                 sender: "alice".to_string(),
                 message_id: format!("m{}", i),
                 ciphertext_b64: base64_encode(b"x"),
@@ -8661,6 +9412,7 @@ fn test_evicted_pending_group_message_releases_dedup_entry() {
         protocol.buffer_pending_group_message(
             "evict-group",
             PendingGroupMessage {
+                logical_id: None,
                 sender: "alice".to_string(),
                 message_id: format!("evict{}", i),
                 ciphertext_b64: base64_encode(b"x"),
@@ -8702,6 +9454,7 @@ fn test_drain_expired_pending_group_message_releases_dedup_entry() {
         .entry("dedup-ttl-group".to_string())
         .or_default()
         .push_back(PendingGroupMessage {
+            logical_id: None,
             sender: "alice".to_string(),
             message_id: "expired-dedup-1".to_string(),
             ciphertext_b64: base64_encode(b"x"),
@@ -8820,6 +9573,7 @@ fn test_group_cap_eviction_evicts_single_group_wholesale() {
             protocol.buffer_pending_group_message(
                 &format!("wg-group-{}", g),
                 PendingGroupMessage {
+                    logical_id: None,
                     sender: "alice".to_string(),
                     message_id: mid,
                     ciphertext_b64: base64_encode(b"x"),
@@ -8844,6 +9598,7 @@ fn test_group_cap_eviction_evicts_single_group_wholesale() {
     protocol.buffer_pending_group_message(
         "wg-group-fresh",
         PendingGroupMessage {
+            logical_id: None,
             sender: "alice".to_string(),
             message_id: "wg-fresh".to_string(),
             ciphertext_b64: base64_encode(b"x"),
@@ -8980,6 +9735,7 @@ fn test_pending_group_message_global_byte_cap() {
         protocol.buffer_pending_group_message(
             &format!("big-group-{}", i),
             PendingGroupMessage {
+                logical_id: None,
                 sender: "alice".to_string(),
                 message_id: format!("big{}", i),
                 ciphertext_b64: big.clone(),
@@ -9107,6 +9863,7 @@ fn test_global_eviction_prefers_largest_buffer_over_older_honest_entry() {
     protocol.buffer_pending_group_message(
         "honest-group",
         PendingGroupMessage {
+            logical_id: None,
             sender: "alice".to_string(),
             message_id: "honest-1".to_string(),
             ciphertext_b64: base64_encode(b"x"),
@@ -9127,6 +9884,7 @@ fn test_global_eviction_prefers_largest_buffer_over_older_honest_entry() {
             protocol.buffer_pending_group_message(
                 &format!("attacker-group-{}", g),
                 PendingGroupMessage {
+                    logical_id: None,
                     sender: "mallory".to_string(),
                     message_id: format!("atk-{}-{}", g, i),
                     ciphertext_b64: base64_encode(b"x"),
@@ -9205,6 +9963,7 @@ fn test_leave_group_clears_pending_buffers() {
     protocol.buffer_pending_group_message(
         &group_id,
         PendingGroupMessage {
+            logical_id: None,
             sender: "alice".to_string(),
             message_id: "stale-msg".to_string(),
             ciphertext_b64: base64_encode(b"x"),
@@ -9393,6 +10152,7 @@ fn test_evicted_pending_group_message_releases_transport_dedup() {
         protocol.buffer_pending_group_message(
             "transport-evict-group",
             PendingGroupMessage {
+                logical_id: None,
                 sender: "alice".to_string(),
                 message_id: mid.as_str().to_string(),
                 ciphertext_b64: base64_encode(b"x"),
@@ -9434,6 +10194,7 @@ fn test_drain_expired_pending_entries_release_transport_dedup() {
         .entry("transport-ttl-group".to_string())
         .or_default()
         .push_back(PendingGroupMessage {
+            logical_id: None,
             sender: "alice".to_string(),
             message_id: msg_mid.as_str().to_string(),
             ciphertext_b64: base64_encode(b"x"),
@@ -9497,6 +10258,7 @@ fn test_cleanup_sweep_releases_transport_dedup_for_expired_entries() {
         .entry("sweep-transport-group".to_string())
         .or_default()
         .push_back(PendingGroupMessage {
+            logical_id: None,
             sender: "alice".to_string(),
             message_id: msg_mid.as_str().to_string(),
             ciphertext_b64: base64_encode(b"x"),
@@ -9866,6 +10628,7 @@ fn group_sealed_parse_failure_surfaces_raw_text() {
         alice_mls.encrypt_for_group(&gid, raw.as_bytes()).unwrap()
     };
     let msg_payload = GroupMlsMessagePayload {
+        message_id: None,
         group_id: group_id.clone(),
         ciphertext: base64_encode(&encrypted.ciphertext),
         epoch: encrypted.epoch,
@@ -10035,6 +10798,7 @@ fn group_buffered_drain_restores_sealed_media() {
     bob.buffer_pending_group_message(
         &group_id,
         PendingGroupMessage {
+            logical_id: None,
             sender: "alice".to_string(),
             message_id: "buffered-rich-1".to_string(),
             ciphertext_b64: base64_encode(&encrypted.ciphertext),

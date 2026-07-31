@@ -92,6 +92,23 @@ internal object ProtocolConfigParser {
             else -> OverflowPolicy.DROP_OLDEST
         }
 
+        // Group section (nested home under `group`, then top level, both
+        // cases — same shape rules as `encryption`). These were UniFFI-only
+        // until the broadcast default flipped on: with no JS-reachable
+        // opt-out, an RN app could not force per-member fan-out.
+        val groupJson = json.optJSONObject("group")
+        val maxGroupMembers = groupJson?.optLongCompat("maxGroupMembers", "max_group_members")
+            ?: json.optLongCompat("maxGroupMembers", "max_group_members")
+            ?: 256L
+        val groupRelayEnabled = groupJson?.optBooleanCompat("relayEnabled", "relay_enabled")
+            ?: json.optBooleanCompat("groupRelayEnabled", "group_relay_enabled")
+            ?: true
+        val groupRelayBroadcastEnabled = groupJson?.optBooleanCompat(
+            "relayBroadcastEnabled",
+            "relay_broadcast_enabled"
+        ) ?: json.optBooleanCompat("groupRelayBroadcastEnabled", "group_relay_broadcast_enabled")
+            ?: true
+
         val config = ProtocolConfig(
             appId = json.safeOptString("appId", json.safeOptString("app_id")),
             userId = json.safeOptString("userId", json.safeOptString("user_id")),
@@ -110,6 +127,9 @@ internal object ProtocolConfigParser {
             maxPendingGlobal = maxPendingGlobal.toULong(),
             pendingTtlMs = pendingTtlMs.toULong(),
             overflowPolicy = overflowPolicy,
+            maxGroupMembers = maxGroupMembers.toUInt(),
+            groupRelayEnabled = groupRelayEnabled,
+            groupRelayBroadcastEnabled = groupRelayBroadcastEnabled,
             binaryWireEnabled = binaryWireEnabled,
             compactEnvelopeEnabled = compactEnvelopeEnabled,
             richPayloadEnabled = richPayloadEnabled,
