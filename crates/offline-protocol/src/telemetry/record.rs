@@ -152,6 +152,7 @@ mod tests {
         "protocol.group.relay_sync_changed",
         "protocol.group.message_sent",
         "protocol.group.message_partial_failure",
+        "protocol.group.delivery_report",
         "protocol.group.rich_extras_dropped",
         "protocol.group.epoch_fork_detected",
         "protocol.group.epoch_fork_resolved",
@@ -328,6 +329,7 @@ mod tests {
             | Event::GroupRelaySyncChanged { .. }
             | Event::GroupMessageSent { .. }
             | Event::GroupMessagePartialFailure { .. }
+            | Event::GroupMessageDeliveryReport { .. }
             | Event::GroupRichExtrasDropped { .. }
             | Event::GroupEpochForkDetected { .. }
             | Event::GroupEpochForkResolved { .. }
@@ -631,6 +633,13 @@ mod tests {
                 group_id: String::new(),
                 failed_members: Vec::new(),
                 succeeded_members: Vec::new(),
+            },
+            Event::GroupMessageDeliveryReport {
+                group_id: String::new(),
+                message_id: String::new(),
+                delivered: Vec::new(),
+                pushed: Vec::new(),
+                missed_reissued: Vec::new(),
             },
             Event::GroupRichExtrasDropped {
                 group_id: String::new(),

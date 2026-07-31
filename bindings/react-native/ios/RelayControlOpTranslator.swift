@@ -130,6 +130,15 @@ final class RelayControlOpTranslator {
                 "group_id": groupId,
                 "content": (payload["ciphertext"] as? String) ?? ""
             ]
+            // The core's logical message id for this group message, stable
+            // across broadcast re-sends. A v2 relay echoes it to every member
+            // (receiver dedup), keys its push dedup by it, and names it in
+            // the settled GroupMessageSent delivery report the core
+            // correlates on. Mirrors the DM translator's message_id stamp;
+            // old relays ignore the unknown field.
+            if let messageId = payload["message_id"] as? String, !messageId.isEmpty {
+                frame["message_id"] = messageId
+            }
             if let replyTo = payload["reply_to"] as? String, !replyTo.isEmpty {
                 frame["reply_to_msg"] = replyTo
             }

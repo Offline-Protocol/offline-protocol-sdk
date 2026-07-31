@@ -177,33 +177,68 @@ The outbox lifetime bounds the entry itself, with one caveat worth knowing: each
 
 ## Group sends
 
-A group send returns a `Vec<MessageId>` — **one id per recipient**, not one id
-per send. By default each of those ids is a real `SendMessage` frame carrying
-the same MLS group ciphertext, addressed to one member, and therefore gets
-everything described on this page independently: its own outbox entry, ACK,
-retry ladder, relay write-ack, offline push carrying the ciphertext, and
-park-on-unreachable with presence-driven flush. A member who is backgrounded,
-offline, or on a socket that has quietly died is recovered the same way a direct
-message's recipient is.
+A group send takes one of two paths, and which one is not a config flag alone —
+it is negotiated with the relay.
 
-This is what `group.relayBroadcastEnabled: false` (the default) buys. The
-alternative is the relay's O(1) broadcast — one frame the relay fans out to the
-group — which saves sender uplink but has **no per-recipient delivery contract
-at any layer**: no presence check, no push fallback, no persistence, and the
-"sent" answer comes back before delivery is known. Missing a group message is
-also undetectable, because MLS application messages do not advance the group
-epoch, so a receiver never learns that one existed. See
-[Group Configuration](configuration.md#group-configuration) for when opting back
-in is the right trade.
+**Relay broadcast with a delivery report (the default against a v2 relay).**
+When the group is relay-registered, `group.relayBroadcastEnabled` is on (the
+default), and the connected relay advertised the `group_delivery_v2` capability
+in its `Authenticated` answer, the send is **one** frame the relay fans out,
+and the send returns a single logical message id. The relay then answers with
+a *settled* per-recipient delivery report (its `GroupMessageSent` v2) naming
+which members took the message over a live socket and which took a device push
+carrying the ciphertext. The SDK consumes that report: every MLS roster member
+the report does **not** account for — the ones the relay names as missed *and*
+the ones it does not know about at all (its registered roster can lag the MLS
+roster) — is automatically re-sent a per-member copy that gets everything
+described on this page: outbox entry, ACK, retry ladder, relay write-ack,
+offline push, park-on-unreachable. The report is surfaced to the app as the
+`group_message_delivery_report` event (observability only — the backstop
+re-send has already happened by the time it fires).
 
-**Cost of the default.** Sends are O(N) frames. This does *not* risk tripping
-the relay's rate limiter at any group size: the platform bridge meters every
-relay-bound frame through a client-side token bucket (28 capacity, 9/s refill)
-deliberately tighter than the relay's own (30 burst, 10/s), and defers a frame
-it cannot fund to a later poll tick rather than dropping it — so the fan-out
-self-paces below the server's budget regardless of member count.
+The report itself is on a contract too: it can legitimately arrive tens of
+seconds after the send (the relay reports only when its whole fan-out settles,
+bounded by a 45 s wall-clock budget), so the SDK waits 60 s per attempt. A
+lost report re-sends the broadcast under the **same logical id** — receivers
+and the relay's push dedup key on it, so a duplicate fan-out costs bandwidth,
+never duplicate messages — at most twice, then the whole message downgrades to
+per-member fan-out, which needs no report to be correct. The same downgrade
+fires immediately if the Internet transport drops while a report is pending.
 
-What large groups cost instead is **drain latency**, and past roughly 118
+**The one gap on this path: the report tracker is in memory only.** Unlike an
+outbox entry, a broadcast awaiting its report does not survive process death.
+If the app is killed inside the report window (up to 60 s per attempt) the
+backstop is lost with it — members the relay could not reach get no per-member
+re-send, and nothing retries on restart, even though the send already reported
+`group_message_sent`. The exposure is narrow: it needs a member the relay
+missed *and* a process death in that window, and the relay's own push fan-out
+still covers members who are merely offline with a valid push token. It is
+also strictly smaller than the pre-report broadcast's, which had no backstop at
+all. But it is a real difference from per-member fan-out, where the outbox
+persists for 7 days — so an app that must not lose a group message to a
+mid-flight kill should set `relayBroadcastEnabled: false` and pay the O(N)
+uplink. Persisting the tracker is planned; it is not in this release.
+
+**Per-member fan-out (the fallback, and the opt-out).** Against a relay that
+did not advertise `group_delivery_v2` — or with `relayBroadcastEnabled: false`
+— a group send returns a `Vec<MessageId>` with **one id per recipient**: each
+is a real `SendMessage` frame carrying the same MLS group ciphertext,
+addressed to one member, with the full DM delivery ladder independently. The
+contract-less fire-and-forget broadcast of the v1 relay (no presence check, no
+push fallback, no persistence, "sent" answered before delivery was known) is
+**never** taken regardless of configuration; missing a group message on that
+path was undetectable, because MLS application messages do not advance the
+group epoch. See [Group Configuration](configuration.md#group-configuration).
+
+**Cost of per-member fan-out.** Sends are O(N) frames. This does *not* risk
+tripping the relay's rate limiter at any group size: the platform bridge
+meters every relay-bound frame through a client-side token bucket (28
+capacity, 9/s refill) deliberately tighter than the relay's own (30 burst,
+10/s), and defers a frame it cannot fund to a later poll tick rather than
+dropping it — so the fan-out self-paces below the server's budget regardless
+of member count.
+
+What large groups cost on that path is **drain latency**, and past roughly 118
 members, self-inflicted duplicate sends. The core enqueues all N frames at once
 and the bridge writes them at about 9/s after an initial burst of ~28, so frame
 N reaches the wire at roughly `(N - 28) / 9` seconds. The ACK timer starts when
@@ -212,9 +247,8 @@ the tail of a single fan-out exceeds the 10s ACK timeout and is retransmitted
 before it was ever written. Those duplicates are absorbed by receiver and push
 dedup via the stable outbox id, so they cost bandwidth rather than correctness.
 Presence checks, typing indicators, and read receipts draw on the same bucket
-and lower the threshold. Groups near that size should enable the broadcast and
-accept the delivery gap until the relay can report per-recipient delivery back
-to the sender.
+and lower the threshold. This is the strongest reason large groups should leave
+the broadcast enabled.
 
 ## ACK Cleanup
 

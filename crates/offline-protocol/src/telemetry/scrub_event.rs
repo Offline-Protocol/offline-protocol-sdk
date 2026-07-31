@@ -519,6 +519,18 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             hash_each(failed_members, scrubber);
             hash_each(succeeded_members, scrubber);
         }
+        Event::GroupMessageDeliveryReport {
+            group_id,
+            message_id: _,
+            delivered,
+            pushed,
+            missed_reissued,
+        } => {
+            hash_string(group_id, scrubber);
+            hash_each(delivered, scrubber);
+            hash_each(pushed, scrubber);
+            hash_each(missed_reissued, scrubber);
+        }
         Event::GroupRichExtrasDropped {
             group_id,
             unknown_members,
@@ -721,6 +733,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::GroupRelaySyncChanged { .. }
         | Event::GroupMessageSent { .. }
         | Event::GroupMessagePartialFailure { .. }
+        | Event::GroupMessageDeliveryReport { .. }
         | Event::GroupRichExtrasDropped { .. }
         | Event::GroupEpochForkDetected { .. }
         | Event::GroupEpochForkResolved { .. }

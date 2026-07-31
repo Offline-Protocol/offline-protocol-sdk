@@ -2042,6 +2042,7 @@ impl OfflineProtocol {
         self.process_retry_queue()?;
         self.process_welcome_retry_queue()?;
         self.process_relay_register_retries();
+        self.process_relay_broadcast_report_timeouts();
         self.process_timed_out_acks()?;
 
         // Throttle session reconciliation to avoid expensive storage I/O

@@ -910,11 +910,15 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func internetGetNextMessage()  -> InternetMessage?
     
+    func internetGroupReportReceived(reportJson: String) throws 
+    
     func internetMessageReceived(senderId: String, data: [UInt8]) throws 
     
     func internetPeerPresence(peerId: String, online: Bool, lastSeenMs: Int64?) 
     
     func internetPresenceWatchlist()  -> [String]
+    
+    func internetRelayCapabilities(capabilities: [String]) throws 
     
     func internetSendFailed(messageId: String) 
     
@@ -1657,6 +1661,14 @@ open func internetGetNextMessage() -> InternetMessage?  {
 })
 }
     
+open func internetGroupReportReceived(reportJson: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_group_report_received(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(reportJson),$0
+    )
+}
+}
+    
 open func internetMessageReceived(senderId: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(
             self.uniffiCloneHandle(),
@@ -1682,6 +1694,14 @@ open func internetPresenceWatchlist() -> [String]  {
             self.uniffiCloneHandle(),$0
     )
 })
+}
+    
+open func internetRelayCapabilities(capabilities: [String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_relay_capabilities(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(capabilities),$0
+    )
+}
 }
     
 open func internetSendFailed(messageId: String)  {try! rustCall() {
@@ -4443,7 +4463,7 @@ public struct ProtocolConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -9702,6 +9722,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 48075) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received() != 31734) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9709,6 +9732,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 10876) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities() != 4047) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204) {

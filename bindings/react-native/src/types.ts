@@ -399,6 +399,28 @@ export interface ProtocolConfig {
    * Defaults to encryption enabled with auto key exchange.
    */
   encryption?: EncryptionConfig;
+  /** Group messaging configuration (optional). */
+  group?: {
+    /** Maximum members allowed in a single group (default: 256). */
+    maxGroupMembers?: number;
+    /**
+     * Whether groups register with the relay server (default: true).
+     * Registration is what invite links resolve against — leave it on
+     * unless the app never uses relay group features.
+     */
+    relayEnabled?: boolean;
+    /**
+     * Whether a relay-synced group may send one O(1) relay broadcast
+     * instead of per-member fan-out (default: true). The flag alone never
+     * selects the broadcast: the path additionally requires the connected
+     * relay to advertise the `group_delivery_v2` capability, whose settled
+     * per-recipient delivery report is what gives the broadcast a delivery
+     * contract (members the relay did not reach are re-sent per-member
+     * automatically — see the `group_message_delivery_report` event). Set
+     * false to force per-member fan-out even against a capable relay.
+     */
+    relayBroadcastEnabled?: boolean;
+  };
   /** DORS configuration (optional) */
   dors?: {
     /** Prefer online mode (default: false) */
@@ -1297,6 +1319,34 @@ export interface GroupMessagePartialFailureEvent extends BaseEvent {
 }
 
 /**
+ * The relay's settled per-recipient delivery report for a group message
+ * sent via relay broadcast, after the SDK acted on it.
+ *
+ * Fires once per broadcast whose report arrived, seconds after
+ * `group_message_sent` (the relay reports only when its whole fan-out has
+ * settled — correlate by `message_id`, never by order). Members in
+ * `delivered` took the message over a live relay socket; members in
+ * `pushed` took a device push carrying the ciphertext. Every other MLS
+ * roster member has already been re-sent a per-member copy through the
+ * ordinary delivery ladder (`missed_reissued`) — no app action is
+ * required; this is delivery observability, not a failure signal. Not
+ * emitted when the report itself is lost: the SDK then re-broadcasts
+ * (bounded) and finally downgrades the message to per-member fan-out.
+ */
+export interface GroupMessageDeliveryReportEvent extends BaseEvent {
+  type: 'group_message_delivery_report';
+  group_id: string;
+  /** The logical group message id, as returned by the send. */
+  message_id: string;
+  /** Members whose relay socket write was confirmed (relay-side write-ack). */
+  delivered: string[];
+  /** Members offline at the relay who took a device push. */
+  pushed: string[];
+  /** Members re-sent a per-member copy because the relay reached them neither way. */
+  missed_reissued: string[];
+}
+
+/**
  * Rich media metadata was dropped from an outbound group message because
  * the group is not fully rich-capable (not every member advertised sealed
  * rich payload support, or the local kill switch disabled it). The text
@@ -1789,6 +1839,7 @@ export type ProtocolEvent =
   | GroupRelaySyncChangedEvent
   | GroupMessageSentEvent
   | GroupMessagePartialFailureEvent
+  | GroupMessageDeliveryReportEvent
   | GroupRichExtrasDroppedEvent
   | GroupEpochForkDetectedEvent
   | GroupEpochForkResolvedEvent

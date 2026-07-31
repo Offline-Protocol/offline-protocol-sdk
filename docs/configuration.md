@@ -504,35 +504,52 @@ deployment is still your call.
 |-----------|------|---------|-------------|
 | `maxGroupMembers` | number | 256 | Maximum members in a single group (must be > 0) |
 | `relayEnabled` | boolean | `true` | Register groups with the relay server |
-| `relayBroadcastEnabled` | boolean | `false` | Allow a relay-synced group to send via one O(1) relay broadcast instead of per-member fan-out |
+| `relayBroadcastEnabled` | boolean | `true` | Allow a relay-synced group to send via one O(1) relay broadcast instead of per-member fan-out — taken only against a relay that advertised the `group_delivery_v2` capability |
 
-**These two flags are not the same switch, and only one of them is off.**
+**These two flags are not the same switch.**
 
 `relayEnabled` gates *registration*. The relay's group registry is what invite
 links resolve against, so turning it off breaks invite links. Leave it on.
 
-`relayBroadcastEnabled` gates the *send path*, and defaults to **off** because
-the broadcast is an uplink optimization with no delivery contract. The relay
-fans a broadcast out fire-and-forget — no per-recipient presence check, no push
-fallback, no persistence — and answers "sent" before delivery is known, so a
-member who is backgrounded, offline, or on a socket that has quietly died misses
-the message permanently and *undetectably*: MLS application messages do not
-advance the group epoch, so the receiver never learns one existed.
+`relayBroadcastEnabled` gates the *send path*, and the flag alone never selects
+it: the broadcast is additionally gated on the connected relay having advertised
+the `group_delivery_v2` capability in its `Authenticated` answer. Such a relay
+answers every broadcast with a *settled* per-recipient delivery report, and the
+SDK re-sends a per-member copy — through the ordinary outbox/ACK/park ladder —
+to every MLS roster member the report does not account for, surfacing the
+result as the `group_message_delivery_report` event. That report-plus-backstop
+is what gives the broadcast a delivery contract and is why the default is now
+**on**. Against an older relay the capability gate fails closed and every send
+takes per-member fan-out; the v1 relay's fire-and-forget broadcast (no
+presence check, no push fallback, no persistence, "sent" answered before
+delivery was known — a miss was *undetectable*, since MLS application messages
+do not advance the group epoch) is never taken regardless of this flag.
 
-With it off, a group send is one ordinary message frame per member and inherits
-the full direct-message ladder — outbox, ACK, retry, relay write-ack, offline
-push carrying the ciphertext, and park-on-unreachable with presence-driven
-flush. The cost is O(N) frames, which does not risk the relay's rate limiter at
-any group size (the bridge's own token bucket is tighter and defers rather than
-drops), but does mean drain latency and, past roughly 118 members, duplicate
-sends from the ACK timer starting at local enqueue. **Groups near that size are
-the case for turning the broadcast back on** and accepting the delivery gap. See
+Set it to `false` to force per-member fan-out even against a capable relay: one
+ordinary message frame per member, each inheriting the full direct-message
+ladder — outbox, ACK, retry, relay write-ack, offline push carrying the
+ciphertext, and park-on-unreachable with presence-driven flush. The cost is
+O(N) frames, which does not risk the relay's rate limiter at any group size
+(the bridge's own token bucket is tighter and defers rather than drops), but
+does mean drain latency and, past roughly 118 members, duplicate sends from the
+ACK timer starting at local enqueue — the strongest reason large groups should
+leave the broadcast on. See
 [Group sends](message-delivery.md#group-sends) for the full analysis.
 
-> **React Native:** the entire `group` config section is currently unreachable
-> from JS — the bridges do not read it, so these three fields take their Rust
-> defaults and cannot be overridden. The defaults are what an RN app wants
-> today; this is a known gap, tracked alongside `requireTransportIdentity`.
+**React Native:** the `group` section is plumbed through both bridges. Its
+documented home is the nested object (top-level flat keys are also accepted,
+camelCase or snake_case, nested winning over flat — the same shape rules as
+`encryption`):
+
+```typescript
+const config = {
+  group: {
+    maxGroupMembers: 256,        // default
+    relayEnabled: true,          // default — invite links depend on it
+    relayBroadcastEnabled: true, // default — capability-gated; false forces per-member fan-out
+  },
+};
+```
 
 ### Network Configuration
 

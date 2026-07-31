@@ -171,6 +171,16 @@ class RelayControlOpTranslator(private val selfId: String) {
                         put("type", "SendGroupMessage")
                         put("group_id", groupId)
                         put("content", payload.optString("ciphertext"))
+                        // The core's logical message id for this group
+                        // message, stable across broadcast re-sends. A v2
+                        // relay echoes it to every member (receiver dedup),
+                        // keys its push dedup by it, and names it in the
+                        // settled GroupMessageSent delivery report the core
+                        // correlates on. Mirrors the DM translator's
+                        // message_id stamp; old relays ignore the unknown
+                        // field.
+                        payload.optString("message_id").takeIf { it.isNotEmpty() }
+                            ?.let { put("message_id", it) }
                         payload.optString("reply_to").takeIf { it.isNotEmpty() }
                             ?.let { put("reply_to_msg", it) }
                         // Forward attribution rides the frame so relay-path

@@ -288,6 +288,39 @@ class RelayControlOpTranslatorTest {
     }
 
     @Test
+    fun broadcastStampsLogicalMessageId() {
+        val translator = RelayControlOpTranslator("alice")
+        val bcast = frames(
+            translator.translate(
+                "group_relay_broadcast",
+                """{"group_id":"g1","ciphertext":"AAECAw==","epoch":4,""" +
+                    """"message_id":"11111111-2222-3333-4444-555555555555"}""",
+                "alice"
+            )
+        ).single()
+        // The logical id is what the v2 relay echoes to members, keys its
+        // push dedup by, and names in the settled delivery report the core
+        // correlates on — dropping it here would break all three.
+        assertEquals(
+            "11111111-2222-3333-4444-555555555555",
+            bcast.getString("message_id")
+        )
+    }
+
+    @Test
+    fun broadcastOmitsMessageIdWhenAbsent() {
+        val translator = RelayControlOpTranslator("alice")
+        val bcast = frames(
+            translator.translate(
+                "group_relay_broadcast",
+                """{"group_id":"g1","ciphertext":"AAECAw==","epoch":4}""",
+                "alice"
+            )
+        ).single()
+        assertFalse(bcast.has("message_id"))
+    }
+
+    @Test
     fun broadcastForwardsForwardInfo() {
         val translator = RelayControlOpTranslator("alice")
         val bcast = frames(

@@ -184,4 +184,54 @@ class ProtocolConfigParserTest {
         assertTrue(config.autoKeyExchange)
         assertTrue(config.storePending)
     }
+
+    @Test
+    fun groupSectionDefaultsWhenOmitted() {
+        val config = parse("""{"appId":"app","userId":"alice"}""")
+        assertEquals(256, config.maxGroupMembers.toInt())
+        assertTrue(config.groupRelayEnabled)
+        // Broadcast defaults on; the core's capability gate is what keeps it
+        // off against a v1 relay.
+        assertTrue(config.groupRelayBroadcastEnabled)
+    }
+
+    @Test
+    fun groupSectionReadsItsNestedHome() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","group":{"maxGroupMembers":32,"relayEnabled":false,"relayBroadcastEnabled":false}}"""
+        )
+        assertEquals(32, config.maxGroupMembers.toInt())
+        assertFalse(config.groupRelayEnabled)
+        assertFalse(config.groupRelayBroadcastEnabled)
+    }
+
+    @Test
+    fun groupSectionReadsNestedSnakeCase() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","group":{"max_group_members":48,"relay_enabled":false,"relay_broadcast_enabled":false}}"""
+        )
+        assertEquals(48, config.maxGroupMembers.toInt())
+        assertFalse(config.groupRelayEnabled)
+        assertFalse(config.groupRelayBroadcastEnabled)
+    }
+
+    @Test
+    fun groupFlagsReadTheFlatShape() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","maxGroupMembers":64,"groupRelayEnabled":false,"groupRelayBroadcastEnabled":false}"""
+        )
+        assertEquals(64, config.maxGroupMembers.toInt())
+        assertFalse(config.groupRelayEnabled)
+        assertFalse(config.groupRelayBroadcastEnabled)
+    }
+
+    @Test
+    fun nestedGroupSectionWinsOverFlat() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","groupRelayBroadcastEnabled":true,"group":{"relayBroadcastEnabled":false}}"""
+        )
+        assertFalse(config.groupRelayBroadcastEnabled)
+        assertTrue(config.groupRelayEnabled)
+        assertEquals(256, config.maxGroupMembers.toInt())
+    }
 }
