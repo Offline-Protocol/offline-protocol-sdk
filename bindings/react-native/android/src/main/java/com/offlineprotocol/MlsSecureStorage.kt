@@ -68,6 +68,141 @@ class MlsSecureStorage(
         private const val INDEX_PREFIX = "index:"
         // Global lock to ensure index consistency across instances/threads
         private val LOCK = Any()
+
+        /**
+         * Erases every secure-store entry this SDK holds for one account.
+         *
+         * Deliberately static: it must run when no instance exists — after
+         * `destroy`, on logout — and constructing one would be actively wrong,
+         * because the constructor *claims* the legacy store as a side effect. A
+         * wipe that built a provider first could therefore claim a store on
+         * behalf of an account that is being erased.
+         *
+         * The legacy store goes first. Read-through and the claim both live
+         * there, so wiping the namespaced store first and then failing would
+         * leave an install that re-promotes, on its next launch, exactly the
+         * material it was asked to destroy. In the other order a partial wipe
+         * leaves only the namespaced store, which the next wipe removes and
+         * which nothing re-populates.
+         *
+         * Whether the legacy store may be destroyed at all is
+         * [LegacyStoreAdoption.shouldWipeLegacy]'s decision: it was shared by
+         * every account on a pre-split install, so another account's claim makes
+         * it off-limits.
+         *
+         * Both phases are attempted even if the first fails, and the first error
+         * is rethrown afterwards — a failure on the legacy store must not strand
+         * the namespaced one, which is where everything written since the
+         * storage split lives. Idempotent: a caller that gets an error should
+         * call again.
+         *
+         * The androidx [MasterKey] is never touched: it is shared with every
+         * other account's store, and with any other library in the process that
+         * uses the default master key alias.
+         *
+         * @param wipeLegacyStore off only for tests that must not touch the
+         *   shared pre-namespace store.
+         */
+        @JvmStatic
+        fun wipeAccount(
+            context: Context,
+            accountNamespace: String,
+            wipeLegacyStore: Boolean = true
+        ) {
+            val namespace = StorageNamespace.requireAccount(accountNamespace)
+            synchronized(LOCK) {
+                var firstError: Exception? = null
+                if (wipeLegacyStore) {
+                    try {
+                        wipeLegacy(context, namespace)
+                    } catch (error: Exception) {
+                        firstError = error
+                    }
+                }
+                try {
+                    deletePreferences(context, "$PREFS_FILE_PREFIX$namespace")
+                } catch (error: Exception) {
+                    if (firstError == null) {
+                        firstError = error
+                    }
+                }
+                firstError?.let {
+                    throw MlsStorageException.DeleteFailed(
+                        "Failed to wipe secure storage: ${it.message}"
+                    )
+                }
+            }
+        }
+
+        private fun wipeLegacy(context: Context, namespace: String) {
+            if (!legacyPreferencesFile(context).exists()) {
+                return
+            }
+            val claim = readLegacyClaim(context)
+            if (!LegacyStoreAdoption.shouldWipeLegacy(claim, namespace)) {
+                Log.i(
+                    TAG,
+                    "Leaving the pre-namespace secure store in place: it is not " +
+                        "this account's to erase"
+                )
+                return
+            }
+            deletePreferences(context, LEGACY_PREFS_FILE_NAME)
+        }
+
+        /**
+         * Reads the legacy store's claim, keeping "not recorded" and "could not
+         * be read" apart — see [LegacyStoreAdoption.LegacyClaim].
+         *
+         * A store that will not open is reported as unreadable rather than
+         * unclaimed, so the wipe fails closed. The failure is not always
+         * permanent: a rotated master key makes it so, but a locked keystore
+         * makes it transient, and the two are indistinguishable here. Treating
+         * either as "unclaimed" would let a transient failure destroy another
+         * account's identity and block list.
+         */
+        private fun readLegacyClaim(context: Context): LegacyStoreAdoption.LegacyClaim = try {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            val legacy = EncryptedSharedPreferences.create(
+                context,
+                LEGACY_PREFS_FILE_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+            val encoded = legacy.getString(
+                "${LegacyStoreAdoption.CLAIM_KEY_TYPE}:${LegacyStoreAdoption.CLAIM_KEY_ID}",
+                null
+            )
+            LegacyStoreAdoption.LegacyClaim.of(
+                encoded?.let { String(Base64.decode(it, Base64.NO_WRAP), Charsets.UTF_8) }
+            )
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not read the legacy secure store claim; not wiping it", error)
+            LegacyStoreAdoption.LegacyClaim.Unreadable
+        }
+
+        private fun legacyPreferencesFile(context: Context): File =
+            File(context.dataDir, "shared_prefs/$LEGACY_PREFS_FILE_NAME.xml")
+
+        private fun deletePreferences(context: Context, name: String) {
+            // Clears the instance `ContextImpl` caches under this name as well
+            // as the file. Unlinking the file alone would leave a cached
+            // `SharedPreferences` that recreates it on its next commit.
+            // API 24, which is this module's minSdk.
+            context.deleteSharedPreferences(name)
+
+            // Verify rather than trust the return value, which is false both
+            // when the file was absent and when the delete failed.
+            val remaining = File(context.dataDir, "shared_prefs/$name.xml")
+            if (remaining.exists() && !remaining.delete()) {
+                throw MlsStorageException.DeleteFailed(
+                    "Secure store $name is still present after wipe"
+                )
+            }
+        }
     }
 
     /**
@@ -98,6 +233,11 @@ class MlsSecureStorage(
      * operation would mean holding it across a legacy-store read on every miss,
      * which is the common path during an upgrade. If a second caller is ever
      * given this provider, that trade has to be revisited.
+     *
+     * [wipeAccount] is not that second caller. It touches the same store but
+     * only ever for an account with no live instance — the bridge refuses to
+     * wipe the one it is running — so it cannot interleave with a promotion on
+     * the same preferences file.
      */
     override fun load(keyType: String, keyId: String): List<UByte>? {
         // No lock needed for simple reads of the namespaced store; the

@@ -421,4 +421,97 @@ class ProtocolStateStorageTest {
         )
         assertEquals(listOf("message-1", "message-2"), enumeration.keys)
     }
+
+    // -- account wipe --------------------------------------------------------
+
+    /**
+     * Logout must leave nothing behind: not the records, not the type
+     * directories, and not the account directory itself. The schema directory
+     * above it is shared with every other account, so it has to survive.
+     */
+    @Test
+    fun wipeRemovesTheWholeAccountDirectory() {
+        val account = namespace("wipe-whole")
+        val storage = AppContainerProtocolStateStorage(context, account)
+        storage.store("outbox", "message-1", byteArrayOf(1, 2, 3))
+        storage.store("pending/messages", "peer-1", byteArrayOf(4))
+        storage.store("blocked_users", "peer-2", byteArrayOf(5))
+
+        val root = AppContainerProtocolStateStorage.accountRoot(context, account)
+        assertTrue(root.exists())
+
+        AppContainerProtocolStateStorage.wipeAccount(context, account)
+
+        assertFalse(
+            "the account directory itself must go, not just the records in it",
+            root.exists()
+        )
+        assertTrue(
+            "the schema directory is shared with every other account",
+            root.parentFile!!.exists()
+        )
+    }
+
+    /**
+     * A wipe names one account. Another account signed in on the same device
+     * keeps its outbox, its block list, and everything else.
+     */
+    @Test
+    fun wipeLeavesOtherAccountsAlone() {
+        val alice = namespace("wipe-alice")
+        val bob = namespace("wipe-bob")
+        val aliceStorage = AppContainerProtocolStateStorage(context, alice)
+        val bobStorage = AppContainerProtocolStateStorage(context, bob)
+        aliceStorage.store("outbox", "message-1", byteArrayOf(1))
+        bobStorage.store("outbox", "message-2", byteArrayOf(2))
+
+        AppContainerProtocolStateStorage.wipeAccount(context, alice)
+
+        assertFalse(
+            AppContainerProtocolStateStorage.accountRoot(context, alice).exists()
+        )
+        assertEquals(listOf(2), loadedBytes(bobStorage, "outbox", "message-2"))
+        assertEquals(listOf("message-2"), bobStorage.listKeys("outbox"))
+    }
+
+    /**
+     * The wipe is documented as retryable, and a logout for an account that
+     * never wrote anything is not a failure.
+     */
+    @Test
+    fun wipeIsIdempotentAndToleratesAMissingAccount() {
+        val account = namespace("wipe-idempotent")
+        AppContainerProtocolStateStorage(context, account)
+            .store("outbox", "message-1", byteArrayOf(1))
+
+        AppContainerProtocolStateStorage.wipeAccount(context, account)
+        AppContainerProtocolStateStorage.wipeAccount(context, account)
+        AppContainerProtocolStateStorage.wipeAccount(context, namespace("never-existed"))
+    }
+
+    /**
+     * A per-record wipe would have to enumerate, and enumeration skips `.new`
+     * orphans — so they would outlive the account forever. Removing the
+     * directory is what makes the wipe complete.
+     */
+    @Test
+    fun wipeRemovesOrphanedTemporariesToo() {
+        val account = namespace("wipe-orphans")
+        val storage = AppContainerProtocolStateStorage(context, account)
+        storage.store("outbox", "message-1", byteArrayOf(1, 2, 3))
+
+        val root = AppContainerProtocolStateStorage.accountRoot(context, account)
+        val directory = File(root, ProtocolStateRecord.typeDirectoryName("outbox"))
+        val orphan = File(
+            directory,
+            "${ProtocolStateRecord.entryName("outbox", "interrupted")}.new"
+        )
+        orphan.writeBytes(byteArrayOf(9, 9, 9))
+        assertTrue(orphan.exists())
+
+        AppContainerProtocolStateStorage.wipeAccount(context, account)
+
+        assertFalse(orphan.exists())
+        assertFalse(root.exists())
+    }
 }
