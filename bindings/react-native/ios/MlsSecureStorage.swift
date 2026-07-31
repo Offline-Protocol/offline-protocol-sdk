@@ -20,14 +20,46 @@ final class MlsSecureStorage: MlsStorageProvider {
     private let service: String
     private let legacyService: String?
     private let accessGroup: String?
-    private let lock = NSLock()
 
-    /// Serialises legacy-store adoption across *every* instance in the process.
+    /// Serialises every Keychain primitive in the process.
     ///
-    /// Deliberately not the per-instance `lock` above: two accounts adopting
-    /// concurrently are two `MlsSecureStorage` objects, so an instance lock
-    /// cannot order them by construction. See `resolveLegacyAdoption`.
+    /// Deliberately `static`, matching `AppContainerProtocolStateStorage`.
+    /// Two instances over one service are not hypothetical — the React Native
+    /// bridge constructs a fresh provider on every `initializeMls` — and
+    /// `wipeAccount` deletes a whole service without holding an instance at
+    /// all, so a per-instance lock could not order it against a live writer.
+    ///
+    /// Lock order is always `adoptionLock` → `lock`; nothing acquires them the
+    /// other way round.
+    private static let lock = NSLock()
+
+    /// Serialises legacy-store adoption — and legacy-store *destruction* —
+    /// across every instance in the process.
+    ///
+    /// Deliberately not `lock` above: adoption is a read-modify-write over the
+    /// claim, so it has to exclude other accounts for its whole duration rather
+    /// than per primitive. See `resolveLegacyAdoption`.
     private static let adoptionLock = NSLock()
+
+    /// Bundle component every service name is derived from.
+    private static var bundleComponent: String {
+        Bundle.main.bundleIdentifier ?? "com.offlineprotocol"
+    }
+
+    /// The namespaced service for one account.
+    ///
+    /// Shared by `init` and `wipeAccount` so the two can never disagree about
+    /// which service an account's material lives in — a wipe that computed a
+    /// service name of its own would silently erase nothing.
+    private static func namespacedService(prefix: String?, namespace: String) -> String {
+        "\(prefix ?? bundleComponent + ".mls.v2").\(namespace)"
+    }
+
+    /// The pre-namespace service. It predates namespacing *and* the ".v2"
+    /// prefix, so it is only ever the default, un-suffixed name.
+    private static var legacyServiceName: String {
+        bundleComponent + ".mls"
+    }
 
     /// Outcome of the one-time legacy-store adoption, for the caller to
     /// surface. `.conflict` in particular must not pass silently: this account
@@ -49,13 +81,9 @@ final class MlsSecureStorage: MlsStorageProvider {
         adoptLegacyStore: Bool = true
     ) throws {
         let namespace = try StorageNamespace.requireAccount(accountNamespace)
-        let bundleComponent = Bundle.main.bundleIdentifier ?? "com.offlineprotocol"
-        let servicePrefix = service ?? bundleComponent + ".mls.v2"
-        self.service = "\(servicePrefix).\(namespace)"
-        // The legacy store predates namespacing and predates the ".v2" prefix,
-        // so it is only ever the default, un-suffixed service.
+        self.service = Self.namespacedService(prefix: service, namespace: namespace)
         self.legacyService = (service == nil && adoptLegacyStore)
-            ? bundleComponent + ".mls"
+            ? Self.legacyServiceName
             : nil
         self.accessGroup = accessGroup
 
@@ -66,7 +94,13 @@ final class MlsSecureStorage: MlsStorageProvider {
 
     /// Stores data securely in the Keychain.
     func store(keyType: String, keyId: String, data: [UInt8]) throws {
-        try store(keyType: keyType, keyId: keyId, data: data, in: service)
+        try Self.store(
+            keyType: keyType,
+            keyId: keyId,
+            data: data,
+            in: service,
+            accessGroup: accessGroup
+        )
     }
 
     /// Loads data from the Keychain.
@@ -89,19 +123,40 @@ final class MlsSecureStorage: MlsStorageProvider {
     /// operation would mean holding it across a Keychain read on every miss,
     /// which is the common path during an upgrade. If a second caller is ever
     /// given this provider, that trade has to be revisited.
+    ///
+    /// `wipeAccount` is not that second caller. It touches the same primitives
+    /// but only ever for an account with no live instance — the bridge refuses
+    /// to wipe the one it is running — so it cannot interleave with a promotion
+    /// on the same service.
     func load(keyType: String, keyId: String) throws -> [UInt8]? {
-        if let data = try load(keyType: keyType, keyId: keyId, from: service) {
+        if let data = try Self.load(
+            keyType: keyType,
+            keyId: keyId,
+            from: service,
+            accessGroup: accessGroup
+        ) {
             return data
         }
         guard let legacy = readThroughService(for: keyType) else {
             return nil
         }
-        guard let inherited = try load(keyType: keyType, keyId: keyId, from: legacy) else {
+        guard let inherited = try Self.load(
+            keyType: keyType,
+            keyId: keyId,
+            from: legacy,
+            accessGroup: accessGroup
+        ) else {
             return nil
         }
         // Best-effort promotion: a failed copy still returns the value, it just
         // costs another read-through next launch.
-        try? store(keyType: keyType, keyId: keyId, data: inherited, in: service)
+        try? Self.store(
+            keyType: keyType,
+            keyId: keyId,
+            data: inherited,
+            in: service,
+            accessGroup: accessGroup
+        )
         return inherited
     }
 
@@ -111,23 +166,139 @@ final class MlsSecureStorage: MlsStorageProvider {
     /// place would let read-through resurrect key material the caller believes
     /// is gone.
     func delete(keyType: String, keyId: String) throws {
-        try delete(keyType: keyType, keyId: keyId, from: service)
+        try Self.delete(
+            keyType: keyType,
+            keyId: keyId,
+            from: service,
+            accessGroup: accessGroup
+        )
         if let legacy = readThroughService(for: keyType) {
-            try? delete(keyType: keyType, keyId: keyId, from: legacy)
+            try? Self.delete(
+                keyType: keyType,
+                keyId: keyId,
+                from: legacy,
+                accessGroup: accessGroup
+            )
         }
     }
 
     /// Lists all key IDs for a given key type, unioned across the adopted
     /// legacy store so a not-yet-promoted entry is still discoverable.
     func listKeys(keyType: String) throws -> [String] {
-        var keys = try listKeys(keyType: keyType, in: service)
+        var keys = try Self.listKeys(
+            keyType: keyType,
+            in: service,
+            accessGroup: accessGroup
+        )
         if let legacy = readThroughService(for: keyType) {
-            let inherited = (try? listKeys(keyType: keyType, in: legacy)) ?? []
+            let inherited = (try? Self.listKeys(
+                keyType: keyType,
+                in: legacy,
+                accessGroup: accessGroup
+            )) ?? []
             for key in inherited where !keys.contains(key) {
                 keys.append(key)
             }
         }
         return keys
+    }
+
+    // MARK: - Account wipe
+
+    /// Erases every Keychain item this SDK holds for one account.
+    ///
+    /// Deliberately `static`: it must run when no instance exists — after
+    /// `destroy`, on logout — and constructing one would be actively wrong,
+    /// because `init` *claims* the legacy store as a side effect. A wipe that
+    /// built a provider first could therefore claim a store on behalf of an
+    /// account that is being erased.
+    ///
+    /// The legacy store goes first. Read-through and the claim both live there,
+    /// so wiping the namespaced store first and then failing would leave an
+    /// install that re-promotes, on its next launch, exactly the material it was
+    /// asked to destroy. In the other order a partial wipe leaves only the
+    /// namespaced store, which the next wipe removes and which nothing
+    /// re-populates.
+    ///
+    /// Whether the legacy store may be destroyed at all is
+    /// `LegacyStoreAdoption.shouldWipeLegacy`'s decision: it was shared by every
+    /// account on a pre-split install, so another account's claim makes it
+    /// off-limits.
+    ///
+    /// Both phases are attempted even if the first fails, and the first error is
+    /// rethrown afterwards — a Keychain failure on the legacy store must not
+    /// strand the namespaced one, which is where everything written since the
+    /// storage split lives. Idempotent: a caller that gets an error should call
+    /// again.
+    ///
+    /// - Parameters:
+    ///   - accountNamespace: Namespace from `StorageNamespace.account`.
+    ///   - service: Keychain service prefix, matching `init`. A custom prefix
+    ///     opts out of legacy handling entirely, exactly as it does there.
+    ///   - accessGroup: Optional keychain access group, matching `init`.
+    ///   - wipeLegacyStore: Off only for tests that must not touch the shared
+    ///     pre-namespace store.
+    static func wipeAccount(
+        accountNamespace: String,
+        service: String? = nil,
+        accessGroup: String? = nil,
+        wipeLegacyStore: Bool = true
+    ) throws {
+        let namespace = try StorageNamespace.requireAccount(accountNamespace)
+        let namespaced = namespacedService(prefix: service, namespace: namespace)
+        let legacy = (service == nil && wipeLegacyStore) ? legacyServiceName : nil
+
+        adoptionLock.lock()
+        defer { adoptionLock.unlock() }
+
+        var firstError: Error?
+
+        if let legacy {
+            let claim = readClaim(from: legacy, accessGroup: accessGroup)
+            if LegacyStoreAdoption.shouldWipeLegacy(claim, namespace: namespace) {
+                do {
+                    try deleteAll(in: legacy, accessGroup: accessGroup)
+                } catch {
+                    firstError = firstError ?? error
+                }
+            }
+        }
+
+        do {
+            try deleteAll(in: namespaced, accessGroup: accessGroup)
+        } catch {
+            firstError = firstError ?? error
+        }
+
+        if let firstError {
+            throw firstError
+        }
+    }
+
+    /// Deletes every generic-password item filed under one service.
+    ///
+    /// A service-wide query rather than a walk over `listKeys`: the MLS key-type
+    /// set is open — OpenMLS contributes its own labels — so an enumeration
+    /// keyed on the types this SDK knows about would leave the rest behind, and
+    /// what it left behind would include signing-identity material.
+    private static func deleteAll(in service: String, accessGroup: String?) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service
+        ]
+        if let accessGroup {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw MlsStorageError.DeleteFailed(
+                message: "Keychain wipe failed for \(service) with status: \(status)"
+            )
+        }
     }
 
     // MARK: - Legacy adoption
@@ -175,11 +346,12 @@ final class MlsSecureStorage: MlsStorageProvider {
         }
 
         do {
-            try store(
+            try Self.store(
                 keyType: LegacyStoreAdoption.claimKeyType,
                 keyId: LegacyStoreAdoption.claimKeyId,
                 data: Array(namespace.utf8),
-                in: legacy
+                in: legacy,
+                accessGroup: accessGroup
             )
         } catch {
             return .claimUnverified
@@ -195,11 +367,38 @@ final class MlsSecureStorage: MlsStorageProvider {
     /// absent claim on the way *in* (both mean "looks unclaimed") but is on the
     /// way back *out*, where it means the claim is unproven.
     private func readLegacyClaim(from legacy: String) -> String? {
-        (try? load(
-            keyType: LegacyStoreAdoption.claimKeyType,
-            keyId: LegacyStoreAdoption.claimKeyId,
-            from: legacy
-        )).flatMap { $0 }.flatMap { String(bytes: $0, encoding: .utf8) }
+        switch Self.readClaim(from: legacy, accessGroup: accessGroup) {
+        case .owned(let owner):
+            return owner
+        case .absent, .unreadable:
+            return nil
+        }
+    }
+
+    /// Reads the legacy store's claim, keeping "not recorded" and "could not be
+    /// read" apart.
+    ///
+    /// `readLegacyClaim` above collapses them, which is right for adoption and
+    /// wrong for `wipeAccount` — see `LegacyStoreAdoption.LegacyClaim`. A value
+    /// that is present but not UTF-8 reads as absent, matching adoption: the
+    /// SDK never wrote it, so no account's ownership rests on it.
+    private static func readClaim(
+        from legacy: String,
+        accessGroup: String?
+    ) -> LegacyStoreAdoption.LegacyClaim {
+        do {
+            guard let raw = try load(
+                keyType: LegacyStoreAdoption.claimKeyType,
+                keyId: LegacyStoreAdoption.claimKeyId,
+                from: legacy,
+                accessGroup: accessGroup
+            ) else {
+                return .absent
+            }
+            return LegacyStoreAdoption.LegacyClaim.of(String(bytes: raw, encoding: .utf8))
+        } catch {
+            return .unreadable
+        }
     }
 
     /// The legacy service to consult for `keyType`, or `nil` when read-through
@@ -218,11 +417,12 @@ final class MlsSecureStorage: MlsStorageProvider {
 
     // MARK: - Keychain primitives
 
-    private func store(
+    private static func store(
         keyType: String,
         keyId: String,
         data: [UInt8],
-        in service: String
+        in service: String,
+        accessGroup: String?
     ) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -230,11 +430,11 @@ final class MlsSecureStorage: MlsStorageProvider {
         let key = makeKey(keyType: keyType, keyId: keyId)
 
         // Delete any existing item first
-        let deleteQuery = baseQuery(for: key, in: service)
+        let deleteQuery = baseQuery(for: key, in: service, accessGroup: accessGroup)
         SecItemDelete(deleteQuery as CFDictionary)
 
         // Add new item
-        var addQuery = baseQuery(for: key, in: service)
+        var addQuery = baseQuery(for: key, in: service, accessGroup: accessGroup)
         addQuery[kSecValueData as String] = Data(data)
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
@@ -244,17 +444,18 @@ final class MlsSecureStorage: MlsStorageProvider {
         }
     }
 
-    private func load(
+    private static func load(
         keyType: String,
         keyId: String,
-        from service: String
+        from service: String,
+        accessGroup: String?
     ) throws -> [UInt8]? {
         lock.lock()
         defer { lock.unlock() }
 
         let key = makeKey(keyType: keyType, keyId: keyId)
 
-        var query = baseQuery(for: key, in: service)
+        var query = baseQuery(for: key, in: service, accessGroup: accessGroup)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -274,13 +475,18 @@ final class MlsSecureStorage: MlsStorageProvider {
         }
     }
 
-    private func delete(keyType: String, keyId: String, from service: String) throws {
+    private static func delete(
+        keyType: String,
+        keyId: String,
+        from service: String,
+        accessGroup: String?
+    ) throws {
         lock.lock()
         defer { lock.unlock() }
 
         let key = makeKey(keyType: keyType, keyId: keyId)
 
-        let query = baseQuery(for: key, in: service)
+        let query = baseQuery(for: key, in: service, accessGroup: accessGroup)
         let status = SecItemDelete(query as CFDictionary)
 
         guard status == errSecSuccess || status == errSecItemNotFound else {
@@ -288,7 +494,11 @@ final class MlsSecureStorage: MlsStorageProvider {
         }
     }
 
-    private func listKeys(keyType: String, in service: String) throws -> [String] {
+    private static func listKeys(
+        keyType: String,
+        in service: String,
+        accessGroup: String?
+    ) throws -> [String] {
         lock.lock()
         defer { lock.unlock() }
 
@@ -329,11 +539,15 @@ final class MlsSecureStorage: MlsStorageProvider {
 
     // MARK: - Private Helpers
 
-    private func makeKey(keyType: String, keyId: String) -> String {
+    private static func makeKey(keyType: String, keyId: String) -> String {
         return "\(keyType):\(keyId)"
     }
 
-    private func baseQuery(for key: String, in service: String) -> [String: Any] {
+    private static func baseQuery(
+        for key: String,
+        in service: String,
+        accessGroup: String?
+    ) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
