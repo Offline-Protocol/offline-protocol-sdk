@@ -127,7 +127,11 @@ internal object ProtocolConfigParser {
             maxPendingGlobal = maxPendingGlobal.toULong(),
             pendingTtlMs = pendingTtlMs.toULong(),
             overflowPolicy = overflowPolicy,
-            maxGroupMembers = maxGroupMembers.toUInt(),
+            // Coerced, not bare `toUInt()` — the value is app-supplied JS, and
+            // a negative would wrap to ~4 billion (silently unlimited). Clamped
+            // low it reaches the core's own validation, which rejects 0.
+            // Mirrors the iOS parser's `UInt32(clamping:)`.
+            maxGroupMembers = maxGroupMembers.coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
             groupRelayEnabled = groupRelayEnabled,
             groupRelayBroadcastEnabled = groupRelayBroadcastEnabled,
             binaryWireEnabled = binaryWireEnabled,

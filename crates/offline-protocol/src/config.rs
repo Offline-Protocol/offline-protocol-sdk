@@ -342,7 +342,18 @@ pub struct GroupConfig {
     /// check, no push fallback, no persistence, "sent" answered before
     /// delivery was known) is never taken, regardless of this flag.
     ///
-    /// Set `false` to force per-member fan-out even against a v2 relay.
+    /// The one gap on the broadcast path: the tracker awaiting the report
+    /// lives in memory only, so a process death inside the report window
+    /// (up to `RELAY_BROADCAST_REPORT_TIMEOUT_SECS` per attempt) loses the
+    /// backstop with it — members the relay could not reach get no
+    /// per-member re-send, and nothing retries on restart. It needs both a
+    /// missed member and a kill in that window, and is strictly smaller than
+    /// the pre-report broadcast's exposure, but it is a real difference from
+    /// per-member fan-out, whose outbox entries persist for 7 days.
+    ///
+    /// Set `false` to force per-member fan-out even against a v2 relay —
+    /// the right choice for an app that must not lose a group message to a
+    /// mid-flight process kill.
     /// Per-member fan-out (`__GRP_MLS_MSG__` as ordinary `SendMessage`
     /// frames) inherits the full DM ladder end to end — outbox + ACK +
     /// retry, relay write-ack + successor retry + offline push carrying the

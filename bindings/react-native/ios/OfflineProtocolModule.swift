@@ -214,7 +214,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             maxPendingGlobal: encryption.maxPendingGlobal,
             pendingTtlMs: encryption.pendingTtlMs,
             overflowPolicy: overflowPolicy,
-            maxGroupMembers: UInt32(maxGroupMembers),
+            // `clamping:` and not `UInt32(_:)` — the value is app-supplied JS,
+            // and a negative or oversized number traps the initializer.
+            maxGroupMembers: UInt32(clamping: maxGroupMembers),
             groupRelayEnabled: groupRelayEnabled,
             groupRelayBroadcastEnabled: groupRelayBroadcastEnabled,
             binaryWireEnabled: binaryWireEnabled,

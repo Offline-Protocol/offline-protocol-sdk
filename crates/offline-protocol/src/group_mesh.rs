@@ -57,6 +57,14 @@ pub(super) const RELAY_BROADCAST_REPORT_TIMEOUT_SECS: i64 = 60;
 /// are safe: the relay echoes the client-supplied `message_id`, so receiver
 /// dedup and the relay's push dedup both hold across attempts.
 pub(super) const RELAY_BROADCAST_MAX_ATTEMPTS: u32 = 3;
+/// Upper bound on broadcasts awaiting a delivery report at once. Each entry
+/// holds a full ciphertext copy and lives for up to
+/// `RELAY_BROADCAST_REPORT_TIMEOUT_SECS * RELAY_BROADCAST_MAX_ATTEMPTS`, so
+/// against a relay that accepts broadcasts but never reports, an app sending
+/// steadily would otherwise grow the tracker without limit. At the cap the
+/// oldest entry is downgraded to per-member fan-out, which needs no report
+/// to be correct — the bound costs uplink, never delivery.
+pub(super) const MAX_RELAY_BROADCAST_PENDING: usize = 64;
 /// Relay capability token gating the whole v2 group-delivery contract:
 /// client `message_id` accept/echo, group push fallback, the settled
 /// `GroupMessageSent` delivery report, and `forward_info` passthrough. The
@@ -623,11 +631,13 @@ pub(crate) struct PendingGroupMessage {
     pub(crate) message_id: String,
     /// Logical group message id carried in the frame's payload, when the
     /// frame re-issued a relay broadcast (`GroupMlsMessagePayload::message_id`).
-    /// On delivery the drain emits this id (so every member sees the same
-    /// app-facing id) and suppresses the emit entirely if the logical id was
-    /// already delivered via the relay path — the deferred delivery ACK is
-    /// still sent either way, keyed on `message_id`. `None` on the ordinary
-    /// fan-out and relay paths.
+    /// On delivery the drain emits this id, so every member sees the same
+    /// app-facing id whichever path reached them; the deferred delivery ACK
+    /// is keyed on `message_id` regardless, since that is the envelope the
+    /// sender's ack_manager awaits. A rival copy of the same logical message
+    /// cannot double-deliver: whichever copy decrypts first spends the
+    /// ratchet generation, and the drain drops any later copy of an id it
+    /// already delivered. `None` on the ordinary fan-out and relay paths.
     pub(crate) logical_id: Option<String>,
     /// Base64-encoded MLS application ciphertext.
     pub(crate) ciphertext_b64: String,
@@ -1871,7 +1881,25 @@ impl OfflineProtocol {
     /// earlier in the same pass may now decrypt. Terminates: a pass loops
     /// only after consuming a `NonApplication` entry, which is never
     /// re-buffered, so each looping pass shrinks the buffer.
+    ///
+    /// Double delivery is impossible by construction rather than by
+    /// bookkeeping: MLS consumes a ratchet generation on decrypt, so a copy
+    /// of a ciphertext that was already decrypted elsewhere fails here
+    /// (`Decryption` → `Retriable`) and never reaches the emit. Reaching the
+    /// `Plaintext` branch *proves* this logical message has not been
+    /// delivered before. `delivered_here` exists only to stop a second
+    /// buffered copy from burning that pointless decrypt within one drain —
+    /// see the declaration.
     pub(crate) fn drain_pending_group_messages(&mut self, group_id: &str) {
+        // Ids (envelope and logical) this drain has already delivered. Both
+        // the mesh re-issue of a relay broadcast and the relay's own copy of
+        // it can sit buffered at once while group state lags, and they carry
+        // the same ciphertext. Once one is delivered, the other must be
+        // dropped without a decrypt attempt: its generation is spent, so MLS
+        // would classify it `Retriable` and re-buffer it as noise until its
+        // TTL — whose expiry would then call `release_replay_protection` on
+        // an id that WAS delivered, re-opening a replay window for it.
+        let mut delivered_here: HashSet<String> = HashSet::new();
         loop {
             let pending = match self.group_mesh.pending_group_messages.get_mut(group_id) {
                 Some(buf) if !buf.is_empty() => std::mem::take(buf),
@@ -1881,6 +1909,31 @@ impl OfflineProtocol {
             let mut state_advanced = false;
             let mut still_pending = VecDeque::new();
             for entry in pending {
+                // A second buffered copy of something this drain just
+                // delivered. Checked before the TTL branch so it can never
+                // release replay protection for a delivered id.
+                if delivered_here.contains(&entry.message_id)
+                    || entry
+                        .logical_id
+                        .as_deref()
+                        .is_some_and(|l| delivered_here.contains(l))
+                {
+                    debug!(
+                        group_id = %group_id,
+                        msg_id = %entry.message_id,
+                        "Buffered copy of a message this drain already delivered, dropping"
+                    );
+                    // The frame *is* delivered (as a duplicate), so ACK it or
+                    // the sender keeps retransmitting a message we hold.
+                    // `received_via` is `None` on the relay path, where the
+                    // sender is not ACK-gated — a correct no-op there.
+                    self.ack_drained_group_message(
+                        &entry.sender,
+                        &entry.message_id,
+                        entry.received_via,
+                    );
+                    continue;
+                }
                 if entry.buffered_at.elapsed()
                     > StdDuration::from_secs(PENDING_GROUP_MESSAGE_TTL_SECS)
                 {
@@ -1924,30 +1977,19 @@ impl OfflineProtocol {
                         let ack_sender = entry.sender.clone();
                         let ack_message_id = entry.message_id.clone();
                         // A re-issued broadcast copy carries the logical id the
-                        // whole group knows this message by: emit that id, mark
-                        // it delivered so the relay path's copy dedups against
-                        // this one — and if the logical id was already delivered
-                        // via another path while this copy sat buffered, skip
-                        // the emit entirely (the ACK still goes out: the
-                        // sender's frame IS delivered, as a duplicate).
+                        // whole group knows this message by: emit that id and
+                        // mark it delivered, so the relay path's copy of the
+                        // same logical message dedups against this one.
+                        //
+                        // No "already delivered elsewhere?" check is needed
+                        // here, and none would be correct: the successful
+                        // decrypt above already proves this ciphertext's
+                        // ratchet generation was unspent, i.e. that no other
+                        // copy was delivered before it. A copy that *was*
+                        // beaten to it fails decrypt and lands in `Retriable`,
+                        // never here.
                         let emit_id = match entry.logical_id {
                             Some(logical) => {
-                                let already_delivered =
-                                    self.group_mesh.message_dedup.contains_key(&logical)
-                                        && !self.is_group_message_pending(group_id, &logical);
-                                if already_delivered {
-                                    debug!(
-                                        group_id = %group_id,
-                                        msg_id = %logical,
-                                        "Buffered group message already delivered via another path, suppressing duplicate emit"
-                                    );
-                                    self.ack_drained_group_message(
-                                        &ack_sender,
-                                        &ack_message_id,
-                                        received_via,
-                                    );
-                                    continue;
-                                }
                                 self.group_mesh
                                     .message_dedup
                                     .insert(logical.clone(), Instant::now());
@@ -1955,6 +1997,8 @@ impl OfflineProtocol {
                             }
                             None => entry.message_id,
                         };
+                        delivered_here.insert(ack_message_id.clone());
+                        delivered_here.insert(emit_id.clone());
                         let (content, media_metadata, content_type, forward_info_event) =
                             Self::restore_group_rich(text, entry.forward_info, &entry.sender);
                         let timestamp = entry
@@ -3899,6 +3943,27 @@ impl OfflineProtocol {
             message_id: logical_id.as_str(),
         };
         self.send_relay_broadcast_frame(&payload)?;
+        // Keep the tracker bounded (see `MAX_RELAY_BROADCAST_PENDING`).
+        // Terminates: every iteration removes exactly one entry.
+        while self.group_mesh.relay_broadcast_pending.len() >= MAX_RELAY_BROADCAST_PENDING {
+            let Some(oldest) = self
+                .group_mesh
+                .relay_broadcast_pending
+                .iter()
+                .min_by_key(|(_, pending)| pending.armed_at)
+                .map(|(id, _)| id.clone())
+            else {
+                break;
+            };
+            let Some(stale) = self.group_mesh.relay_broadcast_pending.remove(&oldest) else {
+                break;
+            };
+            warn!(
+                msg_id = %oldest,
+                "Relay broadcast tracker full, downgrading oldest to per-member fan-out"
+            );
+            self.downgrade_broadcast_to_per_member(&oldest, stale);
+        }
         self.group_mesh.relay_broadcast_pending.insert(
             logical_id.as_str(),
             RelayBroadcastPending {
@@ -4114,7 +4179,11 @@ impl OfflineProtocol {
                 count = unreached.len(),
                 "Re-sending group message per-member to members the relay did not reach"
             );
-            let (_ids, succeeded, _failed) = self.fanout_group_frames_per_member(
+            // Never `?` here: the tracker entry is already removed, so
+            // propagating would strand the whole contract — no re-issue, no
+            // event, and no timeout left to recover it. Report what happened
+            // instead and let the app see an empty `missed_reissued`.
+            match self.fanout_group_frames_per_member(
                 &entry.group_id,
                 &unreached,
                 Some(&report.message_id),
@@ -4123,8 +4192,17 @@ impl OfflineProtocol {
                 entry.reply_to.as_deref(),
                 entry.forward_info.clone(),
                 entry.priority,
-            )?;
-            reissued = succeeded;
+            ) {
+                Ok((_ids, succeeded, _failed)) => reissued = succeeded,
+                Err(e) => {
+                    error!(
+                        group_id = %entry.group_id,
+                        msg_id = %report.message_id,
+                        error = %e,
+                        "Failed to re-issue per-member copies for unreached members"
+                    );
+                }
+            }
         }
 
         self.emit_event(Event::group_message_delivery_report(

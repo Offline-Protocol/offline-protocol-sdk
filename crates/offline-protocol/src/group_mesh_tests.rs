@@ -3615,6 +3615,83 @@ fn grp_mls_frames(
         .collect()
 }
 
+/// The tracker holds a full ciphertext per entry and is fed by app sends, so
+/// a relay that accepts broadcasts but never reports must not grow it without
+/// limit. At the cap the oldest entry is *downgraded* to per-member fan-out —
+/// which needs no report to be correct — never silently dropped.
+#[test]
+fn test_relay_broadcast_tracker_is_bounded_by_downgrading_oldest() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let info = protocol.create_group("Bounded Tracker").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec!["user123".to_string(), "bob".to_string()],
+    );
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+    grant_group_delivery_v2(&mut protocol);
+
+    // Fill the tracker to the cap with broadcasts awaiting reports that never
+    // came, then make one unambiguously the oldest.
+    for i in 0..MAX_RELAY_BROADCAST_PENDING {
+        arm_fake_broadcast(
+            &mut protocol,
+            "other-group",
+            &format!("logical-{i}"),
+            &["carol"],
+        );
+    }
+    let oldest = "logical-0";
+    protocol
+        .group_mesh
+        .relay_broadcast_pending
+        .get_mut(oldest)
+        .unwrap()
+        .armed_at = chrono::Utc::now() - chrono::Duration::seconds(600);
+
+    protocol
+        .send_group_message(&group_id, "over the cap", None, None)
+        .unwrap();
+
+    assert_eq!(
+        protocol.group_mesh.relay_broadcast_pending.len(),
+        MAX_RELAY_BROADCAST_PENDING,
+        "the tracker stays at its cap"
+    );
+    assert!(
+        !protocol
+            .group_mesh
+            .relay_broadcast_pending
+            .contains_key(oldest),
+        "the oldest entry is the one evicted"
+    );
+    // Evicted means downgraded, not dropped: its ciphertext went out
+    // per-member, carrying its logical id so receivers still dedup it.
+    let reissued: Vec<_> = grp_mls_frames(&internet_handle)
+        .into_iter()
+        .filter(|(_, p)| p.get("message_id").and_then(|v| v.as_str()) == Some(oldest))
+        .collect();
+    assert_eq!(
+        reissued.len(),
+        1,
+        "the evicted broadcast is downgraded to per-member fan-out, not dropped"
+    );
+    assert_eq!(reissued[0].0, "carol");
+}
+
 /// A report accounting for every roster member settles the tracker without
 /// re-sending anything, and surfaces the relay's lists to the app.
 #[test]
@@ -8869,6 +8946,96 @@ fn test_group_dup_after_delivery_reacks_and_not_redelivered() {
         "a delivered message must not be redelivered on resend"
     );
     assert_eq!(ack_count(&ble, &msg_id), 1);
+}
+
+/// Both copies of one logical group message — the mesh re-issue of a relay
+/// broadcast and the relay's own fan-out copy — can sit buffered at once while
+/// group state lags, since they carry the same ciphertext under different
+/// envelopes. The drain must deliver it exactly once, under the logical id.
+///
+/// The trap this pins: the relay path marks its id in the dedup table at
+/// *arrival*, before any decrypt. An "was this already delivered elsewhere?"
+/// check that reads that mark as a delivery — and cannot see the sibling in the
+/// batch it is itself draining — suppresses the only copy that can still
+/// decrypt. The message is then lost permanently and silently: ACKed to the
+/// sender, never surfaced, with the second copy left to re-buffer as noise.
+#[test]
+fn test_both_buffered_copies_of_one_logical_message_deliver_exactly_once() {
+    let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
+    let ble = attach_ble_mock(&mut bob);
+
+    // One ciphertext carried by both paths — what a re-issued broadcast copy
+    // and the relay's own copy actually share.
+    let encrypted = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        mls.encrypt_for_group(&gid, b"one logical message").unwrap()
+    };
+    let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
+    let logical = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb";
+    let msg_json = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": ciphertext_b64,
+        "epoch": encrypted.epoch,
+        "message_id": logical,
+    })
+    .to_string();
+
+    // The mesh re-issued copy: buffered under its envelope id, carrying the
+    // logical id in its payload.
+    let wire = make_message("alice", "bob", "unused-envelope");
+    let envelope_id = wire.id.as_str().to_string();
+    let r = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    assert!(matches!(r, InternalMessageResult::Deferred));
+
+    // Then the relay's own copy of the same logical message.
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &ciphertext_b64,
+        "2026-07-31T00:00:00Z",
+        logical,
+        None,
+        None,
+    );
+    assert_eq!(
+        bob.group_mesh
+            .pending_group_messages
+            .get(&group_id)
+            .map(|b| b.len()),
+        Some(2),
+        "both copies buffer while group state lags"
+    );
+
+    // Group state catches up.
+    bob.handle_group_mls_welcome("welcome-both-copies", "alice", &welcome_json);
+
+    let received = group_messages_received(&events);
+    assert_eq!(
+        received.len(),
+        1,
+        "exactly one delivery — a sibling buffered copy must not suppress it"
+    );
+    assert_eq!(received[0].0, "one logical message");
+    assert_eq!(
+        received[0].1, logical,
+        "delivered under the logical id every member shares"
+    );
+    assert_eq!(
+        ack_count(&ble, &envelope_id),
+        1,
+        "the mesh sender's frame is ACKed on drain"
+    );
+    assert!(
+        !bob.group_mesh
+            .pending_group_messages
+            .contains_key(&group_id),
+        "the spent second copy is dropped, not re-buffered as noise"
+    );
+    assert!(
+        bob.group_mesh.message_dedup.contains_key(logical),
+        "replay protection for a delivered id must survive the drain"
+    );
 }
 
 #[test]
