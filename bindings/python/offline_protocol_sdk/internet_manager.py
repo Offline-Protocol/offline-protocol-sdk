@@ -726,10 +726,18 @@ class InternetManager(TransportManager):
                     content = data.decode("utf-8")
                 except UnicodeDecodeError:
                     content = base64.b64encode(data).decode("ascii")
+                # message_id is the core's outbox id, stable across retries
+                # of the same logical message. The relay echoes it in
+                # MessageReceived / MessageSent / DeliveryError and its push
+                # payload, and uses it to suppress duplicate push
+                # notifications when an un-ACKed message is retried against
+                # a still-offline recipient. Older relays ignore the extra
+                # field. Mirrors the Kotlin and Swift bridges.
                 payload = json.dumps({
                     "type": "SendMessage",
                     "recipient": recipient,
                     "content": content,
+                    "message_id": message_id,
                 })
                 await ws.send(payload)
                 self._bytes_sent += len(payload)
