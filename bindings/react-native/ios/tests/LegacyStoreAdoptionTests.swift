@@ -81,6 +81,58 @@ final class LegacyStoreAdoptionTests: XCTestCase {
         XCTAssertFalse(LegacyStoreAdoption.allowsReadThrough(.claimUnverified))
     }
 
+    // MARK: - Wipe policy
+
+    /// The leftover a logout is asked to erase. Every account that has completed
+    /// a post-split launch records a claim, so an unclaimed store is what the
+    /// *previous* install left behind — and on a platform whose credential store
+    /// outlives the app container, what a reinstall would otherwise re-adopt.
+    func testUnclaimedLegacyStoreMayBeWiped() {
+        XCTAssertTrue(LegacyStoreAdoption.shouldWipeLegacy(.absent, namespace: namespace))
+        XCTAssertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(.of(nil), namespace: namespace)
+        )
+        // Empty reads as absent here exactly as it does in `decide`.
+        XCTAssertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(.of(""), namespace: namespace)
+        )
+    }
+
+    /// The ordinary logout: this account inherited the legacy store, so erasing
+    /// it is erasing its own material.
+    func testOurOwnClaimMayBeWiped() {
+        XCTAssertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(.of(namespace), namespace: namespace)
+        )
+        XCTAssertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                .owned(by: namespace),
+                namespace: namespace
+            )
+        )
+    }
+
+    /// The legacy store was shared by every account on a pre-split install, so
+    /// another account's claim makes it theirs. Wiping it would destroy an MLS
+    /// identity, sessions, and a block list that have nothing to do with this
+    /// logout.
+    func testForeignClaimIsNotWiped() {
+        XCTAssertFalse(
+            LegacyStoreAdoption.shouldWipeLegacy(.of(other), namespace: namespace)
+        )
+    }
+
+    /// Unreadable is not "unclaimed". The two are indistinguishable at the
+    /// store, and the mistakes are not symmetric: refusing costs a leftover the
+    /// next wipe removes, while proceeding can destroy another account. So it
+    /// fails closed — which is the whole reason `LegacyClaim` keeps a third case
+    /// that `decide` does not.
+    func testUnreadableClaimIsNotWiped() {
+        XCTAssertFalse(
+            LegacyStoreAdoption.shouldWipeLegacy(.unreadable, namespace: namespace)
+        )
+    }
+
     /// The claim entry is bookkeeping, not key material: promoting it into the
     /// new store would make a later account read its own namespace back as an
     /// inherited value.

@@ -59,6 +59,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         const val NAME = "OfflineProtocolModule"
         const val EVENT_NAME = "OfflineProtocol_Event"
         const val TELEMETRY_EVENT_NAME = "OfflineProtocol_Telemetry"
+
+        /** How long `destroy` waits for an in-flight process tick to finish. */
+        private const val PROCESS_SHUTDOWN_TIMEOUT_MS = 2_000L
     }
     
     private object Constants {
@@ -1456,6 +1459,65 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("ERROR_DESTROY", "Failed to destroy protocol: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Erases every byte of persisted SDK state for one account.
+     *
+     * Takes the identity explicitly rather than reading [currentConfig], because
+     * the call this exists for happens *after* [destroy], which clears it. That
+     * also lets an application wipe the account it just signed out of while a
+     * different one is already running.
+     *
+     * Refuses to wipe the account this instance is currently running: the
+     * protocol persists as it works — outbox entries on the send path, pending
+     * snapshots, sealed state records — so a wipe underneath a live instance
+     * races those writes and leaves a partially repopulated container. Call
+     * `destroy()` first.
+     */
+    @ReactMethod
+    fun wipePersistedState(appId: String, userId: String, promise: Promise) {
+        try {
+            val namespace = StorageNamespace.account(appId, userId)
+            val live = currentConfig
+            if (live != null && StorageNamespace.account(live.appId, live.userId) == namespace) {
+                promise.reject(
+                    "ERROR_WIPE_STATE",
+                    "Refusing to wipe storage for the account this instance is " +
+                        "running. Call destroy() first."
+                )
+                return
+            }
+
+            // Secure storage first: it holds the key every sealed protocol-state
+            // record is written under, so an interrupted wipe leaves the
+            // remainder as ciphertext nobody can open rather than readable
+            // state.
+            var firstError: Exception? = null
+            try {
+                MlsSecureStorage.wipeAccount(reactApplicationContext, namespace)
+            } catch (error: Exception) {
+                firstError = error
+            }
+            try {
+                AppContainerProtocolStateStorage.wipeAccount(
+                    reactApplicationContext,
+                    namespace
+                )
+            } catch (error: Exception) {
+                if (firstError == null) {
+                    firstError = error
+                }
+            }
+            firstError?.let { throw it }
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject(
+                "ERROR_WIPE_STATE",
+                "Failed to wipe persisted state: ${e.message}",
+                e
+            )
         }
     }
 
@@ -3783,8 +3845,23 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * Stop background process scheduler
      */
     private fun stopProcessScheduler() {
-        processScheduler?.shutdown()
+        val scheduler = processScheduler
         processScheduler = null
+        scheduler?.shutdown()
+        // `shutdown()` only refuses *new* work; a tick already running keeps
+        // going, and `processProtocol` persists (outbox entries, retry
+        // lifecycles). `destroy` must not return while one is still writing, or
+        // a wipe that follows it races a straggler and leaves a repopulated
+        // container. Bounded so a wedged tick cannot hang the bridge — the tick
+        // itself is short, and the timeout is far longer than one takes.
+        try {
+            scheduler?.awaitTermination(
+                PROCESS_SHUTDOWN_TIMEOUT_MS,
+                TimeUnit.MILLISECONDS
+            )
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     /**

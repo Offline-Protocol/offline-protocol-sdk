@@ -92,6 +92,57 @@ enum LegacyStoreAdoption {
         return readBack == namespace ? .adopt : .conflict(claimedBy: readBack)
     }
 
+    /// What the legacy store reports about its claim, for a caller deciding
+    /// whether it may *destroy* that store.
+    ///
+    /// Adoption collapses "absent" and "unreadable" into one answer on the way
+    /// in — both mean "looks unclaimed", and the worst case is a fresh identity.
+    /// A wipe cannot collapse them: the worst case there is deleting the MLS
+    /// identity, sessions, and block list of a *different* account that has not
+    /// yet had its first post-split launch. So the two are kept apart here.
+    enum LegacyClaim: Equatable {
+        /// No claim recorded. The store has not been inherited by anyone.
+        case absent
+        /// The recorded claim, verbatim.
+        case owned(by: String)
+        /// The claim could not be read, so ownership is unknown.
+        case unreadable
+
+        /// Classifies a claim value that was read successfully. An empty value
+        /// is absence, matching how `decide` reads it.
+        static func of(_ value: String?) -> LegacyClaim {
+            guard let value, !value.isEmpty else {
+                return .absent
+            }
+            return .owned(by: value)
+        }
+    }
+
+    /// Whether `namespace` may delete the legacy store outright.
+    ///
+    /// Wiping is permitted when this account already owns the claim, and when
+    /// the store is unclaimed. Unclaimed is the case that matters in practice:
+    /// on the built-in path every account that has completed a post-split
+    /// launch has recorded a claim, so an unclaimed store is what the *previous*
+    /// install left behind — precisely the leftover a logout is asked to erase,
+    /// and (on platforms whose credential store outlives the app container) the
+    /// state that would otherwise be re-adopted after a reinstall.
+    ///
+    /// An unreadable claim fails closed. It is indistinguishable from a foreign
+    /// claim, and the two outcomes are not symmetric: refusing costs a leftover
+    /// store that the next successful wipe removes, while proceeding can
+    /// silently destroy another account's identity and block list.
+    static func shouldWipeLegacy(_ claim: LegacyClaim, namespace: String) -> Bool {
+        switch claim {
+        case .absent:
+            return true
+        case .owned(let owner):
+            return owner == namespace
+        case .unreadable:
+            return false
+        }
+    }
+
     /// True when read-through to the legacy store is permitted.
     static func allowsReadThrough(_ decision: Decision) -> Bool {
         switch decision {

@@ -2873,6 +2873,44 @@ export class OfflineProtocol {
     this.initialRuntimeConfigApplied = false;
   }
 
+  /**
+   * Erases every byte of persisted SDK state for one account: the namespaced
+   * secure store (MLS identity, sessions, TOFU pins, the Nostr signing secret,
+   * the protocol-state record key), the account's protocol-state directory
+   * (outbox, pending queues, block list, media descriptors), and — when this
+   * account owns it, or nobody does — the pre-namespace store an upgraded
+   * install inherited from.
+   *
+   * Call this on logout and on username switch, **after** `destroy()`. The
+   * protocol persists as it works, so wiping underneath a live instance races
+   * those writes; the native side rejects the call if the account named here is
+   * the one the current instance is running.
+   *
+   * Without it, an account's undelivered messages are restored and re-driven on
+   * the next launch for the lifetime of the outbox, and on iOS — where the
+   * Keychain outlives the app container — its identity and delivery state
+   * survive an uninstall and are adopted again after a reinstall.
+   *
+   * The identity is passed explicitly because `destroy()` clears the config the
+   * namespace would otherwise be derived from. Pass the same `appId` and
+   * `userId` the protocol was created with; any other pair names a different
+   * account and wipes nothing.
+   *
+   * Irreversible, and it rotates the account's MLS and Nostr identities: peers
+   * holding a session with it will see a desync on next contact and re-establish
+   * from a fresh key package. Safe to call twice — a failed wipe should simply
+   * be retried.
+   *
+   * Applications that supply their own storage providers must erase their own
+   * containers: this only knows about the built-in ones.
+   *
+   * @param appId - The `appId` the protocol was created with
+   * @param userId - The `userId` the protocol was created with
+   */
+  async wipePersistedState(appId: string, userId: string): Promise<void> {
+    await OfflineProtocolNativeModule.wipePersistedState(appId, userId);
+  }
+
   // ─── Presence, Typing, Read Receipts ────────────────────────
 
   /**

@@ -203,6 +203,24 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         accountNamespace: String,
         fileManager: FileManager = .default
     ) throws {
+        try self.init(
+            root: Self.accountRoot(
+                accountNamespace: accountNamespace,
+                fileManager: fileManager
+            ),
+            fileManager: fileManager
+        )
+    }
+
+    /// Directory holding one account's records.
+    ///
+    /// Shared by `init` and `wipeAccount` so the two can never disagree about
+    /// where an account's state lives — a wipe that derived a path of its own
+    /// would silently erase nothing.
+    private static func accountRoot(
+        accountNamespace: String,
+        fileManager: FileManager
+    ) throws -> URL {
         guard let applicationSupport = fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -213,14 +231,58 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         }
 
         let bundleComponent = Bundle.main.bundleIdentifier ?? "com.offlineprotocol"
-        let root = applicationSupport
+        return applicationSupport
             .appendingPathComponent(bundleComponent, isDirectory: true)
-            .appendingPathComponent(Self.schemaDirectory, isDirectory: true)
+            .appendingPathComponent(schemaDirectory, isDirectory: true)
             .appendingPathComponent(
                 try StorageNamespace.requireAccount(accountNamespace),
                 isDirectory: true
             )
-        try self.init(root: root, fileManager: fileManager)
+    }
+
+    /// Erases every protocol-state record this SDK holds for one account.
+    ///
+    /// Deliberately `static`, and deliberately *not* a walk over the categories
+    /// in `ADOPTABLE_STATE_KEY_TYPES`: removing the account's directory outright
+    /// is both complete — it takes stale temporaries, `.bak` twins, and any
+    /// category a future release adds — and one unlink instead of thousands of
+    /// individually flushed ones.
+    ///
+    /// Only this account's subtree goes. The schema directory above it is shared
+    /// with every other account on the install.
+    static func wipeAccount(
+        accountNamespace: String,
+        fileManager: FileManager = .default
+    ) throws {
+        try wipe(
+            root: accountRoot(
+                accountNamespace: accountNamespace,
+                fileManager: fileManager
+            ),
+            fileManager: fileManager
+        )
+    }
+
+    /// `wipeAccount` against an explicit root, so tests can exercise it without
+    /// touching the real container.
+    static func wipe(root: URL, fileManager: FileManager = .default) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard fileManager.fileExists(atPath: root.path) else {
+            return
+        }
+        do {
+            try fileManager.removeItem(at: root)
+        } catch {
+            throw MlsStorageError.DeleteFailed(
+                message: "Failed to wipe protocol state: \(error)"
+            )
+        }
+        // The unlink lives in the parent, so it needs its own flush — the same
+        // reason `delete` flushes the type directory. Without it a crash can
+        // resurrect the whole account subtree the caller was told was gone.
+        flushDirectory(at: root.deletingLastPathComponent())
     }
 
     init(
@@ -271,7 +333,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
             )
         }
         flushFile(at: url)
-        flushDirectory(at: directory)
+        Self.flushDirectory(at: directory)
     }
 
     /// Removes temporaries a previous process died before renaming.
@@ -389,7 +451,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
         }
         // The unlink lives in the parent directory, so it needs its own flush
         // or a crash can resurrect an entry the SDK has already settled.
-        flushDirectory(at: typeDirectory(keyType))
+        Self.flushDirectory(at: typeDirectory(keyType))
     }
 
     func listKeys(keyType: String) throws -> [String] {
@@ -474,7 +536,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     private func discard(_ url: URL, reason: String) -> MlsStorageError {
         let directory = url.deletingLastPathComponent()
         try? fileManager.removeItem(at: url)
-        flushDirectory(at: directory)
+        Self.flushDirectory(at: directory)
         return MlsStorageError.CorruptedData(
             message: "Dropped unreadable protocol-state record: \(reason)"
         )
@@ -507,7 +569,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
 
     /// Flushes a directory entry so a rename or unlink in it survives a crash.
     /// A directory cannot be opened for writing, so this reads.
-    private func flushDirectory(at url: URL) {
+    private static func flushDirectory(at url: URL) {
         let descriptor = open(url.path, O_RDONLY)
         guard descriptor >= 0 else { return }
         defer { close(descriptor) }

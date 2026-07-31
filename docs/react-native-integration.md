@@ -407,6 +407,7 @@ Parse the raw event and check the server frame's `type` before consuming extensi
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | **initializeMlsWithSecureStorage** | `initializeMlsWithSecureStorage(): Promise<void>` | Initialises MLS key material in iOS Keychain / Android EncryptedSharedPreferences and message-plane state in the app container. Called automatically by `start()` when encryption enabled. |
+| **wipePersistedState** | `wipePersistedState(appId, userId): Promise<void>` | Erases all persisted state for one account — namespaced secure store, protocol-state directory, and the pre-namespace store when this account owns it or nobody does. Call on logout/username switch, **after** `destroy()`; rejects if the account named is the one currently running. Irreversible, and rotates the MLS and Nostr identities. See [UPGRADING §10](./UPGRADING.md#logging-out-and-switching-accounts). |
 | **isMlsInitialized** | `isMlsInitialized(): Promise<boolean>` | Whether MLS is ready. |
 | **mlsGenerateKeyPackage** | `mlsGenerateKeyPackage(): Promise<MlsKeyPackage>` | Generates a new key package. |
 | **mlsGetOrCreateKeyPackage** | `mlsGetOrCreateKeyPackage(): Promise<MlsKeyPackage>` | Gets or creates key package. |

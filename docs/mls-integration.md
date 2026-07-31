@@ -394,6 +394,15 @@ block list**. If you have shipped a custom provider and are upgrading across
 this release, have it read through to wherever your previous version wrote, or
 migrate that data yourself before calling `initializeMls`.
 
+**A custom provider is also not covered by the logout wipe.** React Native's
+`wipePersistedState(appId, userId)` erases the *built-in* stores for one account
+— it has no handle on a container it did not create. If you supply your own
+providers, erase them yourself when the user signs out; otherwise that account's
+outbox is restored and re-driven on the next sign-in, and its MLS identity
+survives indefinitely. See
+[UPGRADING §10](./UPGRADING.md#logging-out-and-switching-accounts) for what the
+built-in wipe covers and in what order, which is the behaviour to mirror.
+
 **Protocol-state values are `ByteArray` / `Data` / `bytes`**, not the
 element-wise sequence `MlsStorageProvider` uses. That interface carries key
 material a few hundred bytes at a time; these records reach megabytes, where a

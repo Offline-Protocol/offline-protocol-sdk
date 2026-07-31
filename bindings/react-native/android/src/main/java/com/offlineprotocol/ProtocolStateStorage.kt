@@ -164,10 +164,7 @@ class AppContainerProtocolStateStorage(
     context: Context,
     accountNamespace: String
 ) : ProtocolStateStorageProvider {
-    private val root = File(
-        File(context.noBackupFilesDir, SCHEMA_DIRECTORY),
-        StorageNamespace.requireAccount(accountNamespace)
-    ).also {
+    private val root = accountRoot(context, accountNamespace).also {
         // Check `isDirectory` rather than `mkdirs()`'s return value: it reports
         // false when a concurrent creator won the race, which is success, not
         // failure.
@@ -391,36 +388,6 @@ class AppContainerProtocolStateStorage(
             File("${file.path}.new").exists()
     }
 
-    /**
-     * Flushes a directory entry so a rename or unlink in it survives a crash.
-     *
-     * `AtomicFile.finishWrite` fsyncs the record's *contents*, but the link
-     * `finishWrite` renames into place — and the one `delete` removes — lives
-     * in the parent directory and needs its own flush. Without it a power loss
-     * can lose a store the SDK was told succeeded (sharpest for records sealed
-     * under a key it just persisted) or resurrect an entry the SDK has already
-     * settled. The iOS and Python providers flush the directory for exactly
-     * this; the three are meant to be one implementation in three languages.
-     *
-     * Best effort, and deliberately catching [Throwable]: `android.system.Os`
-     * is not backed by a real syscall under a JVM unit-test harness, and a
-     * missing flush must degrade to the atomic rename rather than fail a store
-     * that otherwise succeeded.
-     */
-    private fun syncDirectory(directory: File) {
-        try {
-            val descriptor = Os.open(directory.path, OsConstants.O_RDONLY, 0)
-            try {
-                Os.fsync(descriptor)
-            } finally {
-                Os.close(descriptor)
-            }
-        } catch (_: Throwable) {
-            // Nothing actionable: the atomic rename remains the strongest
-            // guarantee available, which is what every write had before.
-        }
-    }
-
     override fun listKeys(keyType: String): List<String> =
         enumerateKeys(keyType, ProtocolStateRecord.MAX_LISTED_KEYS).keys
 
@@ -527,5 +494,89 @@ class AppContainerProtocolStateStorage(
     companion object {
         private const val SCHEMA_DIRECTORY = "offline-protocol/protocol-state-v1"
         private val LOCK = Any()
+
+        /**
+         * Directory holding one account's records.
+         *
+         * Shared by the constructor and [wipeAccount] so the two can never
+         * disagree about where an account's state lives — a wipe that derived a
+         * path of its own would silently erase nothing.
+         */
+        internal fun accountRoot(context: Context, accountNamespace: String): File =
+            File(
+                File(context.noBackupFilesDir, SCHEMA_DIRECTORY),
+                StorageNamespace.requireAccount(accountNamespace)
+            )
+
+        /**
+         * Erases every protocol-state record this SDK holds for one account.
+         *
+         * Deliberately static, and deliberately *not* a walk over the categories
+         * in `ADOPTABLE_STATE_KEY_TYPES`: removing the account's directory
+         * outright is both complete — it takes stale temporaries, `.bak` twins,
+         * and any category a future release adds — and one recursive unlink
+         * instead of thousands of individually flushed ones.
+         *
+         * Only this account's subtree goes. The schema directory above it is
+         * shared with every other account on the install.
+         */
+        @JvmStatic
+        fun wipeAccount(context: Context, accountNamespace: String) {
+            wipe(accountRoot(context, accountNamespace))
+        }
+
+        /**
+         * [wipeAccount] against an explicit root, so tests can exercise it
+         * without a real `noBackupFilesDir`.
+         */
+        internal fun wipe(root: File) {
+            synchronized(LOCK) {
+                if (!root.exists()) {
+                    return
+                }
+                if (!root.deleteRecursively()) {
+                    throw MlsStorageException.DeleteFailed(
+                        "Failed to wipe protocol state at ${root.absolutePath}"
+                    )
+                }
+                // The unlink lives in the parent, so it needs its own flush —
+                // the same reason `delete` flushes the type directory. Without
+                // it a crash can resurrect the whole account subtree the caller
+                // was told was gone.
+                root.parentFile?.let { syncDirectory(it) }
+            }
+        }
+
+        /**
+         * Flushes a directory entry so a rename or unlink in it survives a
+         * crash.
+         *
+         * `AtomicFile.finishWrite` fsyncs the record's *contents*, but the link
+         * `finishWrite` renames into place — and the one `delete` removes —
+         * lives in the parent directory and needs its own flush. Without it a
+         * power loss can lose a store the SDK was told succeeded (sharpest for
+         * records sealed under a key it just persisted) or resurrect an entry
+         * the SDK has already settled. The iOS and Python providers flush the
+         * directory for exactly this; the three are meant to be one
+         * implementation in three languages.
+         *
+         * Best effort, and deliberately catching [Throwable]: `android.system.Os`
+         * is not backed by a real syscall under a JVM unit-test harness, and a
+         * missing flush must degrade to the atomic rename rather than fail a
+         * store that otherwise succeeded.
+         */
+        private fun syncDirectory(directory: File) {
+            try {
+                val descriptor = Os.open(directory.path, OsConstants.O_RDONLY, 0)
+                try {
+                    Os.fsync(descriptor)
+                } finally {
+                    Os.close(descriptor)
+                }
+            } catch (_: Throwable) {
+                // Nothing actionable: the atomic rename remains the strongest
+                // guarantee available, which is what every write had before.
+            }
+        }
     }
 }

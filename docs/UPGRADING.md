@@ -729,6 +729,77 @@ the remainder for the next launch), non-destructive (a key already present in
 protocol-state storage wins), and marked complete only when it finished without
 a storage error.
 
+### Logging out and switching accounts
+
+Namespacing keeps accounts apart; it does not erase one when a user signs out.
+Destroying the protocol instance releases memory and nothing else — the outbox,
+the pending queue, the block list, and the whole MLS identity stay on disk under
+that account's namespace. Two consequences are worth planning for:
+
+- On the next sign-in as the same user, the restored outbox is **re-driven**.
+  Undelivered messages are retried on every launch and reconnect until they
+  expire (`outbox_max_lifetime_ms`, seven days by default) or exhaust their
+  retries.
+- On iOS the Keychain **outlives the app container**, so an uninstall does not
+  take the secure store with it. A reinstall followed by a sign-in as the same
+  user adopts that material again — identity, sessions, and, through the
+  pre-split store, delivery state.
+
+React Native applications can now erase all of it:
+
+```ts
+await protocol.destroy();
+await protocol.wipePersistedState(appId, userId);
+```
+
+**Order matters, and the identity is passed explicitly.** The protocol persists
+as it works — outbox entries on the send path, pending snapshots, sealed state
+records — so a wipe underneath a live instance races those writes; the native
+side rejects the call if the account named is the one the current instance is
+running. The identity is an argument because `destroy()` clears the config the
+namespace would otherwise be derived from. Pass the same `appId`/`userId` the
+protocol was created with; any other pair names a different account and wipes
+nothing.
+
+What it erases, for that account only:
+
+| Store | iOS | Android |
+|---|---|---|
+| Namespaced secure store | Keychain service `<bundle>.mls.v2.<namespace>` | `mls_secure_storage_v2_<namespace>` |
+| Namespaced protocol state | `Application Support/<bundle>/protocol-state-v1/<namespace>/` | `noBackupFilesDir/offline-protocol/protocol-state-v1/<namespace>/` |
+| Pre-namespace secure store | Keychain service `<bundle>.mls` | `mls_secure_storage` |
+
+The pre-namespace store is only erased when this account owns the claim or the
+store is unclaimed. Another account's claim makes it off-limits, and a claim
+that cannot be *read* also stops the wipe — unreadable and foreign are
+indistinguishable, and only one of those two mistakes is recoverable. The
+androidx master key is never touched: it is shared with every other account's
+store.
+
+Three things to know before wiring it in:
+
+- **It rotates the account's MLS *and* Nostr identities.** Peers holding a
+  session will see a desync on next contact and re-establish from a fresh key
+  package. Peers holding a TOFU pin for the old identity will treat the new one
+  as a new peer.
+- **It is irreversible and it is not a "clear my messages" button.** There is no
+  partial mode; the outbox, block list, and every group membership go together.
+- **Retry on failure.** The wipe is idempotent, attempts every store even if one
+  fails, and reports the first error. Secure storage goes first, so an
+  interrupted wipe leaves protocol-state records as ciphertext whose key is
+  already gone rather than as readable state.
+
+Applications that supply **their own** storage providers must erase their own
+containers — the SDK only knows how to wipe the built-in ones.
+
+There is no equivalent API in the Python bindings. The state directory could be
+removed trivially, but the secure store cannot be enumerated: `keyring` has no
+listing operation, the SDK's per-`key_type` index has no index *of* key types,
+and the MLS key-type set is open (OpenMLS contributes its own labels). A partial
+wipe that left signing-identity material behind would be worse than none, so
+Python callers should scope `SecureStorage` to a namespace they can drop
+wholesale at the backend instead.
+
 ---
 
 ## 11. Events you must now handle

@@ -99,6 +99,58 @@ internal object LegacyStoreAdoption {
         else -> Decision.Conflict(readBack)
     }
 
+    /**
+     * What the legacy store reports about its claim, for a caller deciding
+     * whether it may *destroy* that store.
+     *
+     * Adoption collapses "absent" and "unreadable" into one answer on the way
+     * in — both mean "looks unclaimed", and the worst case is a fresh identity.
+     * A wipe cannot collapse them: the worst case there is deleting the MLS
+     * identity, sessions, and block list of a *different* account that has not
+     * yet had its first post-split launch. So the two are kept apart here.
+     */
+    sealed class LegacyClaim {
+        /** No claim recorded. The store has not been inherited by anyone. */
+        object Absent : LegacyClaim()
+
+        /** The recorded claim, verbatim. */
+        data class Owned(val namespace: String) : LegacyClaim()
+
+        /** The claim could not be read, so ownership is unknown. */
+        object Unreadable : LegacyClaim()
+
+        companion object {
+            /**
+             * Classifies a claim value that was read successfully. An empty
+             * value is absence, matching how [decide] reads it.
+             */
+            fun of(value: String?): LegacyClaim =
+                if (value.isNullOrEmpty()) Absent else Owned(value)
+        }
+    }
+
+    /**
+     * Whether [namespace] may delete the legacy store outright.
+     *
+     * Wiping is permitted when this account already owns the claim, and when
+     * the store is unclaimed. Unclaimed is the case that matters in practice:
+     * on the built-in path every account that has completed a post-split launch
+     * has recorded a claim, so an unclaimed store is what the *previous* install
+     * left behind — precisely the leftover a logout is asked to erase, and (on
+     * platforms whose credential store outlives the app container) the state
+     * that would otherwise be re-adopted after a reinstall.
+     *
+     * An unreadable claim fails closed. It is indistinguishable from a foreign
+     * claim, and the two outcomes are not symmetric: refusing costs a leftover
+     * store that the next successful wipe removes, while proceeding can silently
+     * destroy another account's identity and block list.
+     */
+    fun shouldWipeLegacy(claim: LegacyClaim, namespace: String): Boolean = when (claim) {
+        is LegacyClaim.Absent -> true
+        is LegacyClaim.Owned -> claim.namespace == namespace
+        is LegacyClaim.Unreadable -> false
+    }
+
     /** True when read-through to the legacy store is permitted. */
     fun allowsReadThrough(decision: Decision?): Boolean =
         decision is Decision.Adopt || decision is Decision.Resume

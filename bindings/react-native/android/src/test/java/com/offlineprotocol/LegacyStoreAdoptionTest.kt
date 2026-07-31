@@ -104,6 +104,84 @@ class LegacyStoreAdoptionTest {
         assertFalse(LegacyStoreAdoption.allowsReadThrough(null))
     }
 
+    // -- wipe policy ---------------------------------------------------------
+
+    /**
+     * The leftover a logout is asked to erase. Every account that has completed
+     * a post-split launch records a claim, so an unclaimed store is what the
+     * *previous* install left behind — and on a platform whose credential store
+     * outlives the app container, what a reinstall would otherwise re-adopt.
+     */
+    @Test
+    fun unclaimedLegacyStoreMayBeWiped() {
+        assertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                LegacyStoreAdoption.LegacyClaim.Absent,
+                namespace
+            )
+        )
+        assertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                LegacyStoreAdoption.LegacyClaim.of(null),
+                namespace
+            )
+        )
+        // Empty reads as absent here exactly as it does in `decide`.
+        assertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                LegacyStoreAdoption.LegacyClaim.of(""),
+                namespace
+            )
+        )
+    }
+
+    /**
+     * The ordinary logout: this account inherited the legacy store, so erasing
+     * it is erasing its own material.
+     */
+    @Test
+    fun ourOwnClaimMayBeWiped() {
+        assertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                LegacyStoreAdoption.LegacyClaim.of(namespace),
+                namespace
+            )
+        )
+    }
+
+    /**
+     * The legacy store was shared by every account on a pre-split install, so
+     * another account's claim makes it theirs. Wiping it would destroy an MLS
+     * identity, sessions, and a block list that have nothing to do with this
+     * logout.
+     */
+    @Test
+    fun foreignClaimIsNotWiped() {
+        assertFalse(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                LegacyStoreAdoption.LegacyClaim.of(other),
+                namespace
+            )
+        )
+    }
+
+    /**
+     * Unreadable is not "unclaimed". The two are indistinguishable at the store,
+     * and the mistakes are not symmetric: refusing costs a leftover the next
+     * wipe removes, while proceeding can destroy another account. So it fails
+     * closed — which is the whole reason [LegacyStoreAdoption.LegacyClaim] keeps
+     * a third case that `decide` does not.
+     */
+    @Test
+    fun unreadableClaimIsNotWiped() {
+        assertFalse(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                LegacyStoreAdoption.LegacyClaim.Unreadable,
+                namespace
+            )
+        )
+    }
+
     /**
      * The claim entry is bookkeeping, not key material: promoting it into the
      * new store would make a later account read its own namespace back as an

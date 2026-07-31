@@ -348,4 +348,90 @@ final class ProtocolStateStorageTests: XCTestCase {
         )
         XCTAssertEqual(try restarted.load(keyType: "outbox", keyId: "message-1"), Data([1, 2, 3]))
     }
+
+    // MARK: - Account wipe
+
+    /// Logout must leave nothing behind: not the records, not the type
+    /// directories, and not the account directory itself. The schema directory
+    /// above it is shared with every other account, so it has to survive.
+    func testWipeRemovesTheWholeAccountDirectory() throws {
+        let parent = temporaryRoot("accounts")
+        defer { try? FileManager.default.removeItem(at: parent.deletingLastPathComponent()) }
+        let root = parent.appendingPathComponent("alice", isDirectory: true)
+
+        let storage = try AppContainerProtocolStateStorage(root: root)
+        try storage.store(keyType: "outbox", keyId: "message-1", data: Data([1, 2, 3]))
+        try storage.store(keyType: "pending/messages", keyId: "peer-1", data: Data([4]))
+        try storage.store(keyType: "blocked_users", keyId: "peer-2", data: Data([5]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+
+        try AppContainerProtocolStateStorage.wipe(root: root)
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: root.path),
+            "the account directory itself must go, not just the records in it"
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: parent.path),
+            "the schema directory is shared with every other account"
+        )
+    }
+
+    /// A wipe names one account. Another account signed in on the same device
+    /// keeps its outbox, its block list, and everything else.
+    func testWipeLeavesOtherAccountsAlone() throws {
+        let parent = temporaryRoot("accounts")
+        defer { try? FileManager.default.removeItem(at: parent.deletingLastPathComponent()) }
+        let aliceRoot = parent.appendingPathComponent("alice", isDirectory: true)
+        let bobRoot = parent.appendingPathComponent("bob", isDirectory: true)
+
+        let alice = try AppContainerProtocolStateStorage(root: aliceRoot)
+        let bob = try AppContainerProtocolStateStorage(root: bobRoot)
+        try alice.store(keyType: "outbox", keyId: "message-1", data: Data([1]))
+        try bob.store(keyType: "outbox", keyId: "message-2", data: Data([2]))
+
+        try AppContainerProtocolStateStorage.wipe(root: aliceRoot)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: aliceRoot.path))
+        XCTAssertEqual(try bob.load(keyType: "outbox", keyId: "message-2"), Data([2]))
+        XCTAssertEqual(try bob.listKeys(keyType: "outbox"), ["message-2"])
+    }
+
+    /// The wipe is documented as retryable, and a logout for an account that
+    /// never wrote anything is not a failure.
+    func testWipeIsIdempotentAndToleratesAMissingRoot() throws {
+        let parent = temporaryRoot("accounts")
+        defer { try? FileManager.default.removeItem(at: parent.deletingLastPathComponent()) }
+        let root = parent.appendingPathComponent("alice", isDirectory: true)
+
+        let storage = try AppContainerProtocolStateStorage(root: root)
+        try storage.store(keyType: "outbox", keyId: "message-1", data: Data([1]))
+
+        try AppContainerProtocolStateStorage.wipe(root: root)
+        try AppContainerProtocolStateStorage.wipe(root: root)
+        try AppContainerProtocolStateStorage.wipe(
+            root: parent.appendingPathComponent("never-existed", isDirectory: true)
+        )
+    }
+
+    /// A per-record wipe would have to enumerate, and enumeration filters on the
+    /// `k_` prefix — so orphaned temporaries would outlive the account forever.
+    /// Removing the directory is what makes the wipe complete.
+    func testWipeRemovesStaleTemporariesToo() throws {
+        let parent = temporaryRoot("accounts")
+        defer { try? FileManager.default.removeItem(at: parent.deletingLastPathComponent()) }
+        let root = parent.appendingPathComponent("alice", isDirectory: true)
+
+        let storage = try AppContainerProtocolStateStorage(root: root)
+        try storage.store(keyType: "outbox", keyId: "message-1", data: Data([1, 2, 3]))
+        let orphan = root
+            .appendingPathComponent(ProtocolStateRecord.typeDirectoryName("outbox"), isDirectory: true)
+            .appendingPathComponent(".dat.nosync-interrupted")
+        try Data([9, 9, 9]).write(to: orphan)
+
+        try AppContainerProtocolStateStorage.wipe(root: root)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
 }
