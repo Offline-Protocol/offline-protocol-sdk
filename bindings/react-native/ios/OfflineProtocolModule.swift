@@ -30,6 +30,10 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var hasListeners = false
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
     private var processTimer: DispatchSourceTimer?
+    /// The deferred `bleStatusChanged(true)` backup call, held so `destroy` can
+    /// cancel it. An uncancelled one re-enters the protocol up to a second after
+    /// the module was torn down.
+    private var bleStatusBackupWorkItem: DispatchWorkItem?
     private var currentConfig: ProtocolConfig?
     private var internetServerUrl: String?
     private var internetAutoReconnect: Bool = true
@@ -727,13 +731,19 @@ class OfflineProtocolModule: RCTEventEmitter {
                         print("[OfflineProtocolModule] Immediate bleStatusChanged failed: \(error.localizedDescription)")
                     }
                     
-                    // Backup call in case timing is off
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    // Backup call in case timing is off. Held in a work item so
+                    // `destroy` can cancel it: uncancelled, it re-enters the
+                    // protocol up to a second after teardown, which a wipe
+                    // following `destroy` would race.
+                    bleStatusBackupWorkItem?.cancel()
+                    let backup = DispatchWorkItem { [weak self] in
                         print("[OfflineProtocolModule] Backup bleStatusChanged(true) call")
                         self?.emitDiagnostic(level: "info", message: "Backup call to protocol.bleStatusChanged(true)")
                         try? self?.protocolInstance?.bleStatusChanged(isAvailable: true)
                         self?.emitDiagnostic(level: "info", message: "Backup bleStatusChanged(true) completed")
                     }
+                    bleStatusBackupWorkItem = backup
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: backup)
                 } catch {
                     print("[OfflineProtocolModule] ❌ FAILED to start BLE Manager: \(error.localizedDescription)")
                     emitDiagnostic(level: "error", message: "Failed to start BLE manager", context: [
@@ -1375,6 +1385,9 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func destroy(_ resolver: @escaping RCTPromiseResolveBlock,
                        rejecter: @escaping RCTPromiseRejectBlock) {
         stopProcessTimer()
+        bleStatusBackupWorkItem?.cancel()
+        bleStatusBackupWorkItem = nil
+        drainProcessQueue()
         bleManager?.stop()
         bleManager = nil
         internetManager?.stop()
@@ -1393,7 +1406,61 @@ class OfflineProtocolModule: RCTEventEmitter {
         currentConfig = nil
         resolver(nil)
     }
-    
+
+    /// Erases every byte of persisted SDK state for one account.
+    ///
+    /// Takes the identity explicitly rather than reading `currentConfig`,
+    /// because the call this exists for happens *after* `destroy`, which clears
+    /// it. That also lets an application wipe the account it just signed out of
+    /// while a different one is already running.
+    ///
+    /// Refuses to wipe the account this instance is currently running: the
+    /// protocol persists as it works — outbox entries on the send path, pending
+    /// snapshots, sealed state records — so a wipe underneath a live instance
+    /// races those writes and leaves a partially repopulated container. Call
+    /// `destroy()` first.
+    @objc func wipePersistedState(_ appId: String,
+                                  userId: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        let namespace = StorageNamespace.account(appId: appId, userId: userId)
+        if let config = currentConfig,
+           StorageNamespace.account(appId: config.appId, userId: config.userId) == namespace {
+            rejecter(
+                "ERROR_WIPE_STATE",
+                "Refusing to wipe storage for the account this instance is running. "
+                    + "Call destroy() first.",
+                nil
+            )
+            return
+        }
+
+        // Secure storage first: it holds the key every sealed protocol-state
+        // record is written under, so an interrupted wipe leaves the remainder
+        // as ciphertext nobody can open rather than readable state.
+        var firstError: Error?
+        do {
+            try MlsSecureStorage.wipeAccount(accountNamespace: namespace)
+        } catch {
+            firstError = error
+        }
+        do {
+            try AppContainerProtocolStateStorage.wipeAccount(accountNamespace: namespace)
+        } catch {
+            firstError = firstError ?? error
+        }
+
+        if let firstError {
+            rejecter(
+                "ERROR_WIPE_STATE",
+                "Failed to wipe persisted state: \(firstError.localizedDescription)",
+                firstError
+            )
+            return
+        }
+        resolver(nil)
+    }
+
     // MARK: - Transport Management
     
     @objc func enableTransport(_ type: String,
@@ -3859,7 +3926,26 @@ class OfflineProtocolModule: RCTEventEmitter {
         processTimer?.cancel()
         processTimer = nil
     }
-    
+
+    /// Waits for a process tick that is already running to finish.
+    ///
+    /// `DispatchSourceTimer.cancel()` only stops *future* firings; a handler
+    /// mid-flight keeps going, and it holds a strong reference to the protocol
+    /// instance, so it can still persist (outbox entries, retry lifecycles)
+    /// after `destroy` has returned. A wipe that follows `destroy` would then
+    /// race a straggler and leave a repopulated container.
+    ///
+    /// `processQueue` is serial, so a block enqueued here cannot run until the
+    /// in-flight handler has returned. Bounded, so a wedged tick cannot hang the
+    /// bridge — the tick itself is short, and the timeout is far longer than one
+    /// takes. Safe from any other queue: `destroy` runs on the bridge queue,
+    /// never on `processQueue`.
+    private func drainProcessQueue() {
+        let drained = DispatchSemaphore(value: 0)
+        processQueue.async { drained.signal() }
+        _ = drained.wait(timeout: .now() + 2.0)
+    }
+
     private func processProtocol() {
         guard let instance = protocolInstance else { return }
         do {

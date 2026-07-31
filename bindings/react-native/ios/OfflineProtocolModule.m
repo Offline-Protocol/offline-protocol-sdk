@@ -18,6 +18,11 @@ RCT_EXTERN_METHOD(create:(NSString *)configJson
 RCT_EXTERN_METHOD(destroy:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(wipePersistedState:(NSString *)appId
+                  userId:(NSString *)userId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(start:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
