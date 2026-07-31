@@ -3134,12 +3134,21 @@ fn test_relay_sync_disabled_config() {
     assert!(!protocol.group_mesh.internet_was_available);
 }
 
+/// Config with the O(1) relay broadcast opted in. The default is off (the
+/// broadcast has no per-recipient delivery contract), so every test that
+/// exercises the broadcast path must ask for it explicitly.
+fn broadcast_enabled_config() -> crate::ProtocolConfig {
+    let mut config = create_test_config();
+    config.group.relay_broadcast_enabled = true;
+    config
+}
+
 #[test]
 fn test_relay_broadcast_used_when_synced() {
     use offline_protocol_transport::mock::MockTransport;
 
     let storage = Arc::new(crate::mls::InMemoryStorage::default());
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
     protocol.initialize_mls_for_test(storage).unwrap();
 
     // Add Internet transport
@@ -3192,6 +3201,304 @@ fn test_relay_broadcast_used_when_synced() {
     assert!(
         sent_event.is_some(),
         "Expected GroupMessageSent with member_count=3 (bob, carol, dave)"
+    );
+}
+
+/// The broadcast is opt-in: with the default config a relay-synced group
+/// still fans out per member, so every copy rides the DM ladder (retry,
+/// offline push with ciphertext, park/flush, deferred ACK).
+#[test]
+fn test_relay_broadcast_disabled_by_default_uses_per_member_fanout() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let config = create_test_config();
+    assert!(
+        !config.group.relay_broadcast_enabled,
+        "Relay broadcast must default to off"
+    );
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let info = protocol.create_group("Default Off Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![
+            "user123".to_string(),
+            "bob".to_string(),
+            "carol".to_string(),
+            "dave".to_string(),
+        ],
+    );
+    // Relay-synced — under the old unconditional gate this alone took the
+    // broadcast path.
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+
+    let msg_ids = protocol
+        .send_group_message(&group_id, "hello fanout", None, None)
+        .unwrap();
+
+    assert_eq!(
+        msg_ids.len(),
+        3,
+        "Expected one message ID per member (bob, carol, dave), not a single broadcast ID"
+    );
+
+    let broadcasts = internet_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| {
+            m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)
+        })
+        .count();
+    assert_eq!(broadcasts, 0, "No broadcast frame should be emitted");
+}
+
+/// The broadcast frame can never be ACKed — the bridge replaces it with a
+/// relay-native `SendGroupMessage`, so nothing addressed to its id ever comes
+/// back. It must therefore stay off the ACK ladder entirely: no pending ACK
+/// (whose 10s timeout drove ~10 duplicate relay fan-outs), no outbox entry,
+/// no retry-queue entry, and so no terminal `MessageFailed` for an id the app
+/// was never told about.
+#[test]
+fn test_relay_broadcast_frame_is_unacked_and_not_retried() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let info = protocol.create_group("Unacked Broadcast Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![
+            "user123".to_string(),
+            "bob".to_string(),
+            "carol".to_string(),
+        ],
+    );
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+
+    let msg_ids = protocol
+        .send_group_message(&group_id, "hello relay", None, None)
+        .unwrap();
+    assert_eq!(msg_ids.len(), 1, "Expected the single broadcast ID");
+    let broadcast_id = msg_ids[0].clone();
+
+    assert!(
+        !protocol.is_tracked_for_delivery(&broadcast_id),
+        "Broadcast frame must leave no pending ACK, outbox entry, or retry entry — \
+         it can never be ACKed, so any of those means it gets retransmitted to the \
+         retry cap and then reported failed"
+    );
+
+    let broadcast_frame = internet_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| {
+            m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)
+        })
+        .expect("Broadcast frame should have been sent over Internet");
+    assert!(
+        !broadcast_frame.requires_ack,
+        "Broadcast frame must be sent with requires_ack = false"
+    );
+}
+
+/// Registration hints share the broadcast's shape and the same fix: their
+/// retry policy is the `relay_register_pending` tracker, not the ACK ladder.
+#[test]
+fn test_relay_registration_frame_is_unacked_and_not_retried() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    // create_group triggers registration.
+    let info = protocol.create_group("Registration Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    let register_frame = internet_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| {
+            m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)
+        })
+        .expect("Registration frame should have been sent over Internet");
+    assert!(
+        !register_frame.requires_ack,
+        "Registration frame must be sent with requires_ack = false"
+    );
+    assert!(
+        !protocol.is_tracked_for_delivery(&register_frame.id),
+        "Registration frame must leave no pending ACK, outbox entry, or retry entry"
+    );
+    // The application-level tracker owns the retry instead.
+    assert!(
+        protocol
+            .group_mesh
+            .relay_register_pending
+            .contains_key(&group_id),
+        "Registration retry must be armed on the relay_register_pending tracker"
+    );
+}
+
+/// Self-addressed relay hints must go out over Internet specifically. DORS
+/// demotes Internet below every mesh transport, and mesh transports other
+/// than BLE enqueue a self-addressed frame unconditionally and report
+/// success — swallowing the hint while `try_relay_broadcast` reports `Ok`,
+/// which skips the per-member fan-out and delivers the group message to
+/// nobody.
+#[test]
+fn test_relay_hint_frames_pin_to_internet_not_mesh() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    // Wi-Fi Direct is present and DORS-preferred over Internet.
+    let wifi = MockTransport::new(TransportType::WiFiDirect);
+    wifi.start().unwrap();
+    let wifi_handle = wifi.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(wifi));
+
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let internet_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let info = protocol.create_group("Pinning Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![
+            "user123".to_string(),
+            "bob".to_string(),
+            "carol".to_string(),
+        ],
+    );
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+
+    protocol
+        .send_group_message(&group_id, "hello relay", None, None)
+        .unwrap();
+
+    let is_hint = |content: &str| {
+        content.starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)
+            || content.starts_with(internal_prefixes::GROUP_RELAY_REGISTER)
+    };
+
+    let mesh_hints = wifi_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| is_hint(&m.content))
+        .count();
+    assert_eq!(
+        mesh_hints, 0,
+        "Relay hint frames must never be handed to a mesh transport"
+    );
+
+    let internet_hints = internet_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| is_hint(&m.content))
+        .count();
+    assert!(
+        internet_hints >= 2,
+        "Both the registration and broadcast hints should go out over Internet, got {}",
+        internet_hints
+    );
+}
+
+/// A stale `relay_synced` (Internet dropped, `process()` hasn't cleared it
+/// yet) must not route the broadcast into the mesh — the send falls back to
+/// per-member fan-out instead.
+#[test]
+fn test_relay_broadcast_falls_back_when_internet_unavailable() {
+    use offline_protocol_transport::mock::MockTransport;
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(broadcast_enabled_config()).unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
+
+    // Mesh only — no Internet transport registered at all.
+    let wifi = MockTransport::new(TransportType::WiFiDirect);
+    wifi.start().unwrap();
+    let wifi_handle = wifi.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(wifi));
+    protocol.start().unwrap();
+
+    let info = protocol.create_group("Stale Sync Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![
+            "user123".to_string(),
+            "bob".to_string(),
+            "carol".to_string(),
+        ],
+    );
+    // Stale sync state from a previous connection.
+    protocol.group_mesh.relay_synced.insert(group_id.clone());
+
+    let msg_ids = protocol
+        .send_group_message(&group_id, "hello fallback", None, None)
+        .unwrap();
+
+    assert_eq!(
+        msg_ids.len(),
+        2,
+        "Expected per-member fan-out (bob, carol) when Internet is unavailable"
+    );
+    let broadcasts = wifi_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| {
+            m.content
+                .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)
+        })
+        .count();
+    assert_eq!(
+        broadcasts, 0,
+        "Broadcast frame must never be swallowed by the mesh transport"
     );
 }
 

@@ -315,7 +315,38 @@ pub struct GroupConfig {
     /// for optimized fan-out when Internet transport is available.
     /// When `false`, groups always use per-member fan-out regardless of
     /// transport.
+    ///
+    /// This gates *registration* only — the relay group registry is what
+    /// invite links resolve against, so it stays on independently of
+    /// [`Self::relay_broadcast_enabled`].
     pub relay_enabled: bool,
+
+    /// Whether a relay-synced group may send via a single O(1) relay
+    /// broadcast instead of per-member fan-out.
+    ///
+    /// **Default `false`.** The broadcast is an uplink optimization with no
+    /// delivery contract: today's relay fans out fire-and-forget (no
+    /// per-recipient presence check, no push fallback, no persistence) and
+    /// answers `GroupMessageSent` before delivery is known, so a member who
+    /// is backgrounded, offline, or on a dead socket misses the message
+    /// permanently and undetectably — MLS application messages don't advance
+    /// the epoch, so the receiver never learns one existed.
+    ///
+    /// Per-member fan-out (`__GRP_MLS_MSG__` as ordinary `SendMessage`
+    /// frames) instead inherits the full DM ladder: outbox + ACK + retry,
+    /// relay write-ack + successor retry + offline push carrying the
+    /// ciphertext, park-on-unreachable with presence-driven flush, and
+    /// receiver-side deferred-ACK-after-decrypt. That reliability is worth
+    /// more than the uplink saving until the relay can report per-recipient
+    /// delivery back to the sender.
+    ///
+    /// Cost of the default: sends are O(N) frames. The relay's per-connection
+    /// rate limiter (30 burst / 10 per second, disconnect after 10
+    /// *consecutive* violations) makes this comfortable to roughly 30
+    /// members, self-healing to about 40 via the ACK-timeout retry, and
+    /// risky beyond that. Groups larger than that should keep the broadcast
+    /// on and accept the delivery gap, or pace their sends.
+    pub relay_broadcast_enabled: bool,
 }
 
 impl Default for GroupConfig {
@@ -323,6 +354,7 @@ impl Default for GroupConfig {
         Self {
             max_group_members: 256,
             relay_enabled: true,
+            relay_broadcast_enabled: false,
         }
     }
 }
@@ -728,6 +760,15 @@ impl ProtocolConfigBuilder {
         self
     }
 
+    /// Sets whether relay-synced groups may send via a single relay broadcast
+    /// instead of per-member fan-out. See
+    /// [`GroupConfig::relay_broadcast_enabled`] — off by default because the
+    /// broadcast has no per-recipient delivery contract.
+    pub fn group_relay_broadcast_enabled(mut self, enabled: bool) -> Self {
+        self.config.group.relay_broadcast_enabled = enabled;
+        self
+    }
+
     /// Configures security settings.
     pub fn security(mut self, config: SecurityConfig) -> Self {
         self.config.security = config;
@@ -970,6 +1011,26 @@ mod tests {
     fn test_group_config_default() {
         let group = GroupConfig::default();
         assert_eq!(group.max_group_members, 256);
+        // Registration on, broadcast off: invite links resolve against the
+        // relay group registry, so registration must stay on — but the
+        // broadcast trades the per-member delivery ladder for an uplink
+        // saving and is opt-in until the relay can report per-recipient
+        // delivery back to the sender.
+        assert!(group.relay_enabled);
+        assert!(!group.relay_broadcast_enabled);
+    }
+
+    #[test]
+    fn test_group_relay_broadcast_builder_opt_in() {
+        let config = ProtocolConfig::builder("test-app", "user123")
+            .group_relay_broadcast_enabled(true)
+            .build()
+            .unwrap();
+        assert!(config.group.relay_broadcast_enabled);
+        assert!(
+            config.group.relay_enabled,
+            "opting into the broadcast must not disturb registration"
+        );
     }
 
     #[test]

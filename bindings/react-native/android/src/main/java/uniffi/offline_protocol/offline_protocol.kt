@@ -7179,6 +7179,8 @@ data class ProtocolConfig (
     , 
     var `groupRelayEnabled`: kotlin.Boolean = true 
     , 
+    var `groupRelayBroadcastEnabled`: kotlin.Boolean = false 
+    , 
     var `requireTransportIdentity`: kotlin.Boolean = false 
     , 
     var `binaryWireEnabled`: kotlin.Boolean = true 
@@ -7226,6 +7228,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -7249,6 +7252,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterTypeOverflowPolicy.allocationSize(value.`overflowPolicy`) +
             FfiConverterUInt.allocationSize(value.`maxGroupMembers`) +
             FfiConverterBoolean.allocationSize(value.`groupRelayEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`groupRelayBroadcastEnabled`) +
             FfiConverterBoolean.allocationSize(value.`requireTransportIdentity`) +
             FfiConverterBoolean.allocationSize(value.`binaryWireEnabled`) +
             FfiConverterBoolean.allocationSize(value.`compactEnvelopeEnabled`) +
@@ -7276,6 +7280,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterTypeOverflowPolicy.write(value.`overflowPolicy`, buf)
             FfiConverterUInt.write(value.`maxGroupMembers`, buf)
             FfiConverterBoolean.write(value.`groupRelayEnabled`, buf)
+            FfiConverterBoolean.write(value.`groupRelayBroadcastEnabled`, buf)
             FfiConverterBoolean.write(value.`requireTransportIdentity`, buf)
             FfiConverterBoolean.write(value.`binaryWireEnabled`, buf)
             FfiConverterBoolean.write(value.`compactEnvelopeEnabled`, buf)

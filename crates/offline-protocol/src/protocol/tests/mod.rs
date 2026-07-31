@@ -26544,6 +26544,10 @@ fn test_group_registration_enqueue_does_not_mark_relay_synced() {
 fn test_group_send_takes_broadcast_path_only_when_relay_synced() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
+    // `relay_synced` is necessary but not sufficient — the broadcast is also
+    // opt-in (default off, see `GroupConfig::relay_broadcast_enabled`). This
+    // test pins the sync half of the gate, so it opts in explicitly.
+    config.group.relay_broadcast_enabled = true;
 
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = OfflineProtocol::new(config).unwrap();

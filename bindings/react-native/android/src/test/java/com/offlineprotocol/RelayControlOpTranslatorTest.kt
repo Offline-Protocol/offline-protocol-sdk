@@ -3,6 +3,7 @@ package com.offlineprotocol
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -281,6 +282,38 @@ class RelayControlOpTranslatorTest {
         assertEquals("g1", bcast.getString("group_id"))
         assertEquals("AAECAw==", bcast.getString("content"))
         assertEquals("m-9", bcast.getString("reply_to_msg"))
+        // `epoch` is deliberately not forwarded — OpenMLS reads the epoch from
+        // the ciphertext header, so the payload copy is informational only.
+        assertFalse(bcast.has("epoch"))
+    }
+
+    @Test
+    fun broadcastForwardsForwardInfo() {
+        val translator = RelayControlOpTranslator("alice")
+        val bcast = frames(
+            translator.translate(
+                "group_relay_broadcast",
+                """{"group_id":"g1","ciphertext":"AAECAw==","epoch":4,""" +
+                    """"forward_info":{"original_sender":"dave","forwarded_at":123}}""",
+                "alice"
+            )
+        ).single()
+        val forwardInfo = bcast.optJSONObject("forward_info")
+        assertNotNull("forward_info must ride the relay frame, not be dropped", forwardInfo)
+        assertEquals("dave", forwardInfo!!.getString("original_sender"))
+    }
+
+    @Test
+    fun broadcastOmitsForwardInfoWhenAbsent() {
+        val translator = RelayControlOpTranslator("alice")
+        val bcast = frames(
+            translator.translate(
+                "group_relay_broadcast",
+                """{"group_id":"g1","ciphertext":"AAECAw==","epoch":4}""",
+                "alice"
+            )
+        ).single()
+        assertFalse(bcast.has("forward_info"))
     }
 
     @Test

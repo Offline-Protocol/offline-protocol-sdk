@@ -1342,6 +1342,16 @@ class InternetManager(
                     put("timestamp", timestamp)
                     put("message_id", messageId)
                     if (replyToMsg != null && replyToMsg.isNotEmpty()) put("reply_to_msg", replyToMsg)
+                    // Forward attribution, when the relay carries it through.
+                    // Core's GroupMessageReceivedPayload has always parsed
+                    // this field (`#[serde(default)]`), but no relay populated
+                    // it — so a forwarded group message rendered its
+                    // attribution over mesh and lost it over relay. Sender
+                    // side is the translator's forward_info passthrough; this
+                    // is the receiving half.
+                    json.optJSONObject("forward_info")
+                        ?.takeIf { it.length() > 0 }
+                        ?.let { put("forward_info", it) }
                 }
                 injectGroupInternalMessage(sender.ifEmpty { null }, "__GROUP_MSG__", payloadJson)
             }

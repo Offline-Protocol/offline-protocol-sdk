@@ -515,6 +515,15 @@ dictionary ProtocolConfig {
     OverflowPolicy overflow_policy;
     u32 max_group_members = 256;
     boolean group_relay_enabled = true;
+    // Whether a relay-synced group may send one O(1) relay broadcast instead
+    // of per-member fan-out. Default OFF: the broadcast has no per-recipient
+    // delivery contract (the relay fans out fire-and-forget, with no presence
+    // check, push fallback, or persistence), so a backgrounded or offline
+    // member misses the message permanently and undetectably. Per-member
+    // fan-out inherits the full DM ladder — retry, offline push carrying the
+    // ciphertext, park/flush, deferred ACK — at the cost of O(N) frames,
+    // which the relay's rate limiter makes comfortable to ~30 members.
+    boolean group_relay_broadcast_enabled = false;
     boolean require_transport_identity = false;
     // Kill switch for the compact binary wire codec (default on). Negotiated
     // per-peer, so a mixed fleet stays on JSON automatically; decoding of
