@@ -635,9 +635,14 @@ public class InternetManager: NSObject, TransportManager {
             // `false` and a later start's authenticated `true` can never
             // reorder. `wasActive` was read on main, in the state this stop
             // actually tore down. The one visible shift: destroy() may now
-            // run `protocol.stop()` before this lands — harmless, the
-            // `false` path only records status and emits the transport
-            // event, it takes no flush path.
+            // run `protocol.stop()` before this lands — harmless *for this
+            // direction only*, because `false` merely records the status and
+            // emits the transport event; the flush is on the `false`→`true`
+            // edge, so this path takes no lock_inner and writes no state a
+            // following wipePersistedState() could race. That asymmetry is
+            // why the `true` in handleAuthenticatedOnMain — which does flush
+            // — is gated on the authentication still being current, while
+            // this one stays unconditional.
             if wasActive {
                 try? proto.internetStatusChanged(isConnected: false)
             }
@@ -1033,10 +1038,29 @@ public class InternetManager: NSObject, TransportManager {
         // disconnection go out promptly, not on the next timer tick.
         let pausedNow = isPaused
         messageQueue.async { [weak self, proto = self.protocolInstance] in
+            // The `true` is asymmetric to the `false` blocks on purpose: those
+            // are unconditional (a status the Rust side still needs even after
+            // this manager dies), this one is valid only while the
+            // authentication that enqueued it is still current. Making it
+            // async opened a window the synchronous call did not have —
+            // `destroy()` drains the module's processQueue but nothing
+            // barriers this queue, so `protocol.stop()` can land first and a
+            // blind `true` would then run `flush_outbox_all()` under the lock
+            // on a stopped protocol, re-persisting outbox state that a
+            // `wipePersistedState()` after logout races. Every teardown flips
+            // this flag on main *before* enqueueing its own `false`
+            // (disconnect/stop, the close funnel, a fresh socket's open), so
+            // the guard can never skip a `true` that is still wanted: a later
+            // re-auth enqueues a fresh block carrying its own connection's
+            // capabilities. The tail work is safe to skip with it — a poll
+            // re-checks the same flags, an armed `drainOnSettle` is meant to
+            // survive to the next auth, and parked forced checks stay parked
+            // (serviced by that auth, or drained by stop()).
+            guard let self = self, self.isAuthenticated else { return }
             try? proto.internetRelayCapabilities(capabilities: capabilities)
             try? proto.internetStatusChanged(isConnected: true)
             if !pausedNow {
-                self?.pollAndSendMessages()
+                self.pollAndSendMessages()
             } else {
                 // Paused, but an armed pause-drain (drainOnSettle) may have
                 // survived the disconnect reset on purpose. The completions
@@ -1049,13 +1073,13 @@ public class InternetManager: NSObject, TransportManager {
                 // makes this a no-op unless armed and idle — so a clean
                 // pause is unaffected, and drainOnSettle stays
                 // messageQueue-confined (never read from main).
-                self?.settleDrainIfRequested()
+                self.settleDrainIfRequested()
             }
             // Forced presence checks parked during the reconnect window can
             // go now — even while paused: they are explicit app actions with
             // a bounded deadline, not a recurring timer the pause gate
             // exists for.
-            self?.serviceForcedChecks()
+            self.serviceForcedChecks()
         }
 
         // Timers are main-owned, so they start here — but only after the
