@@ -575,17 +575,19 @@ public class InternetManager: NSObject, TransportManager {
         // clear/reset never runs for this path.
         inFlightTracker.clear()
         controlOpTranslator.reset()
-        // The forced-check queue is captured STRONGLY and drained
-        // unconditionally; everything else stays weak. `stop()` is reached
-        // from `deinit`, and from `destroy()`, which releases this manager
-        // immediately after — on both paths `self` can be gone by the time
-        // this block runs, and a `[weak self]` drain silently no-ops exactly
-        // where it matters most: the queue holds RN promise resolvers, so a
-        // skipped drain hangs those JS callers forever (a forced check parks
-        // on a never-started manager too — the initial state is
-        // `.unavailable`, which `parkOrExpire` does not fail fast on). The
-        // queue is a separate object, so capturing it keeps the guarantee
-        // without resurrecting a deinitializing `self`.
+        // The forced-check queue and the protocol handle are captured
+        // STRONGLY and used unconditionally; everything else stays weak.
+        // `stop()` is reached from `deinit`, and from `destroy()`, which
+        // releases this manager immediately after — on both paths `self` can
+        // be gone by the time this block runs, and a `[weak self]` guard
+        // silently no-ops exactly where it matters most: the queue holds RN
+        // promise resolvers, so a skipped drain hangs those JS callers
+        // forever (a forced check parks on a never-started manager too — the
+        // initial state is `.unavailable`, which `parkOrExpire` does not
+        // fail fast on), and a skipped status notification leaves DORS
+        // scoring a transport whose socket is gone. Both are separate
+        // objects, so capturing them keeps the guarantees without
+        // resurrecting a deinitializing `self`.
         //
         // The rest is self-owned state that dies with `self`: clearing an
         // array that deallocated with its owner, or resetting a watchdog no
@@ -597,7 +599,7 @@ public class InternetManager: NSObject, TransportManager {
         // the state below, and a `messageQueue.sync` from main could deadlock
         // against the reverse hop (`connect()` → `runOnMainSync`). Keep the
         // two bridges' *effects* in sync, not their shape.
-        messageQueue.async { [weak self, forcedChecks = self.forcedChecks] in
+        messageQueue.async { [weak self, forcedChecks = self.forcedChecks, proto = self.protocolInstance] in
             if let self = self {
                 self.pendingControlFrames.removeAll()
                 // Outstanding writes are abandoned with this socket; reset the
@@ -620,17 +622,31 @@ public class InternetManager: NSObject, TransportManager {
             // promises until the deadline helps nobody. (A mere disconnect
             // keeps them — the deadline gives the reconnect its chance.)
             forcedChecks.drainAll()
+            // The status notification rides this hop too (it used to run
+            // synchronously on the caller's main hop): internetStatusChanged
+            // takes the global protocol mutex — the lock the process tick,
+            // MLS work and group fan-out hold — and stop() runs its body on
+            // main, so taking it there parks the main thread for as long as
+            // the lock is contended, inside the scene-update watchdog's
+            // window (0x8BADF00D; same defect class as the lifecycle hops in
+            // OfflineProtocolModule). messageQueue is the single serial lane
+            // for every status-plane call from this manager, enqueued from
+            // main in the order main observed the transitions, so this
+            // `false` and a later start's authenticated `true` can never
+            // reorder. `wasActive` was read on main, in the state this stop
+            // actually tore down. The one visible shift: destroy() may now
+            // run `protocol.stop()` before this lands — harmless, the
+            // `false` path only records status and emits the transport
+            // event, it takes no flush path.
+            if wasActive {
+                try? proto.internetStatusChanged(isConnected: false)
+            }
         }
         // The watch set survives *reconnects* on purpose (pending traffic is
         // still pending), but an explicit stop() ends the session: without
         // this, a stop/start cycle spends up to the idle TTL of CheckPresence
         // tokens on the previous session's peers.
         presenceWatch.clear()
-
-        if wasActive {
-            // Notify protocol
-            try? protocolInstance.internetStatusChanged(isConnected: false)
-        }
 
         // URLSession retains its delegate (self) until invalidated; without
         // this, deinit is unreachable and every start() after stop() leaks a
@@ -991,50 +1007,66 @@ public class InternetManager: NSObject, TransportManager {
 
         updateState(.running)
 
-        // Capabilities MUST reach the SDK before the status flip: the
-        // false→true transition flushes queued sends, and the group
-        // broadcast gate reads the capability set. An older relay omits the
-        // field; the empty list is still injected so a stale set from a
-        // previous relay can never leak across connections.
-        try? protocolInstance.internetRelayCapabilities(capabilities: capabilities)
+        // The two FFI calls hop to messageQueue instead of running here:
+        // internetStatusChanged(true) executes the false→true outbox flush
+        // under the global protocol mutex — the lock the process tick, MLS
+        // work and group fan-out hold — and this handler runs on main. Taken
+        // synchronously it parks the main thread inside the scene-update
+        // watchdog's window on every reconnect, worst on the foreground
+        // forceReconnect, which fires under exactly the load (queued outbox,
+        // resumed ticks) that makes the flush slow: a 0x8BADF00D kill, the
+        // same defect class as the lifecycle hops in OfflineProtocolModule.
+        // messageQueue is the single serial lane for every status-plane call
+        // from this manager, enqueued from main in the order main observed
+        // the transitions — so a close's `false` and this `true` can never
+        // reorder, in either direction. `proto` is captured strongly (the
+        // component, never `self`): a teardown racing this hop must not
+        // swallow the status change while the Rust instance lives on.
+        //
+        // In-block order is load-bearing twice over. Capabilities MUST reach
+        // the SDK before the status flip: the flush reads the group
+        // broadcast gate's capability set (an older relay omits the field;
+        // the empty list is still injected so a stale set from a previous
+        // relay can never leak across connections). And the immediate poll
+        // MUST follow the flip on the same queue: the flush is what fills
+        // the internet send queue that poll drains — messages queued during
+        // disconnection go out promptly, not on the next timer tick.
+        let pausedNow = isPaused
+        messageQueue.async { [weak self, proto = self.protocolInstance] in
+            try? proto.internetRelayCapabilities(capabilities: capabilities)
+            try? proto.internetStatusChanged(isConnected: true)
+            if !pausedNow {
+                self?.pollAndSendMessages()
+            } else {
+                // Paused, but an armed pause-drain (drainOnSettle) may have
+                // survived the disconnect reset on purpose. The completions
+                // that would have re-fired it died with the old socket
+                // (stale guard), and polling stays stopped while paused — so
+                // nothing else will. Now that a live socket exists, fire the
+                // settle hook: pendingControlFrames was cleared on
+                // disconnect, so if still armed it re-runs drainForPause and
+                // flushes whatever the Rust outbox holds. The guard inside
+                // makes this a no-op unless armed and idle — so a clean
+                // pause is unaffected, and drainOnSettle stays
+                // messageQueue-confined (never read from main).
+                self?.settleDrainIfRequested()
+            }
+            // Forced presence checks parked during the reconnect window can
+            // go now — even while paused: they are explicit app actions with
+            // a bounded deadline, not a recurring timer the pause gate
+            // exists for.
+            self?.serviceForcedChecks()
+        }
 
-        // Notify protocol - this will trigger outbox flush for pending messages
-        try? protocolInstance.internetStatusChanged(isConnected: true)
-
-        // Start polling, pinging, and the presence watch — unless the app
-        // paused the transport; a background reconnect must stay quiet and
+        // Timers are main-owned, so they start here — but only after the
+        // block above is enqueued, so a first tick's poll lands behind the
+        // still-queued status flip on the serial queue, never ahead of it.
+        // Skipped while paused: a background reconnect must stay quiet and
         // resume() restarts the timers.
         if !isPaused {
             startMessagePolling()
             startPingTimer()
             startPresenceWatch()
-
-            // Immediately poll for messages to flush outbox after reconnection
-            // This ensures messages queued during disconnection are sent promptly
-            messageQueue.async { [weak self] in
-                self?.pollAndSendMessages()
-            }
-        } else {
-            // Paused, but an armed pause-drain (drainOnSettle) may have
-            // survived the disconnect reset on purpose. The completions that
-            // would have re-fired it died with the old socket (stale guard),
-            // and polling stays stopped while paused — so nothing else will.
-            // Now that a live socket exists, hop to messageQueue and fire the
-            // settle hook: pendingControlFrames was cleared on disconnect, so
-            // if still armed it re-runs drainForPause and flushes whatever the
-            // Rust outbox holds. The guard inside makes this a no-op unless
-            // armed and idle — so a clean pause is unaffected, and drainOnSettle
-            // stays messageQueue-confined (never read from main).
-            messageQueue.async { [weak self] in
-                self?.settleDrainIfRequested()
-            }
-        }
-
-        // Forced presence checks parked during the reconnect window can go
-        // now — even while paused: they are explicit app actions with a
-        // bounded deadline, not a recurring timer the pause gate exists for.
-        messageQueue.async { [weak self] in
-            self?.serviceForcedChecks()
         }
 
         emitDiagnostic("info", "Authenticated with relay server", context: [
@@ -1084,24 +1116,35 @@ public class InternetManager: NSObject, TransportManager {
         // internet 0→1 transition).
         controlOpTranslator.reset()
         // Deferred frames belong to the dead connection; their commits are
-        // generation-dead after the reset above.
-        messageQueue.async { [weak self] in
+        // generation-dead after the reset above. The status notification
+        // rides the same hop: this funnel runs on main, and iOS kills the
+        // socket on backgrounding — so the synchronous FFI call here took
+        // the global protocol mutex on main inside the very transition the
+        // scene-update watchdog measures (0x8BADF00D under exactly the load
+        // that makes the lock slow; same defect class as the lifecycle hops
+        // in OfflineProtocolModule). messageQueue is the single serial lane
+        // for every status-plane call from this manager, enqueued from main
+        // in observation order, so this `false` and a later re-auth's `true`
+        // can never reorder. `proto` is captured strongly (the component,
+        // never `self`): DORS must stop selecting Internet even if the
+        // manager is torn down before the block runs.
+        messageQueue.async { [weak self, proto = self.protocolInstance] in
             self?.pendingControlFrames.removeAll()
             // Outstanding writes are abandoned with this socket; reset the
             // watchdog so the next connection starts fresh (late cancelled
             // completions disarm to empty, a no-op).
             self?.writeStallWatchdog.reset()
-        }
-
-        // Always notify protocol of disconnection so DORS excludes Internet from
-        // available transports and can switch to BLE (or WiFi Direct). Without this,
-        // the core would keep Internet in the available set and keep selecting it.
-        do {
-            try protocolInstance.internetStatusChanged(isConnected: false)
-        } catch {
-            emitDiagnostic("error", "Failed to notify protocol of disconnection", context: [
-                "error": error.localizedDescription
-            ])
+            // Always notify protocol of disconnection so DORS excludes
+            // Internet from available transports and can switch to BLE (or
+            // WiFi Direct). Without this, the core would keep Internet in
+            // the available set and keep selecting it.
+            do {
+                try proto.internetStatusChanged(isConnected: false)
+            } catch {
+                self?.emitDiagnostic("error", "Failed to notify protocol of disconnection", context: [
+                    "error": error.localizedDescription
+                ])
+            }
         }
         
         emitDiagnostic("warning", "WebSocket disconnected", context: [

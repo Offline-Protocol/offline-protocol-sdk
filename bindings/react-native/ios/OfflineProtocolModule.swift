@@ -794,6 +794,16 @@ class OfflineProtocolModule: RCTEventEmitter {
                     // `destroy` can cancel it: uncancelled, it re-enters the
                     // protocol up to a second after teardown, which a wipe
                     // following `destroy` would race.
+                    //
+                    // Scheduled on processQueue, not main: bleStatusChanged
+                    // takes the global protocol mutex, and this fires one
+                    // second after start() — squarely inside the launch
+                    // window where restore and the first flush make that
+                    // lock slow (the 0x8BADF00D class the lifecycle hops
+                    // fixed). processQueue also closes the cancel race for
+                    // good: destroy's drainProcessQueue() barrier waits out
+                    // a backup that already started running, which a
+                    // main-queue backup could dodge.
                     bleStatusBackupWorkItem?.cancel()
                     let backup = DispatchWorkItem { [weak self] in
                         print("[OfflineProtocolModule] Backup bleStatusChanged(true) call")
@@ -802,7 +812,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                         self?.emitDiagnostic(level: "info", message: "Backup bleStatusChanged(true) completed")
                     }
                     bleStatusBackupWorkItem = backup
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: backup)
+                    processQueue.asyncAfter(deadline: .now() + 1.0, execute: backup)
                 } catch {
                     print("[OfflineProtocolModule] ❌ FAILED to start BLE Manager: \(error.localizedDescription)")
                     emitDiagnostic(level: "error", message: "Failed to start BLE manager", context: [
