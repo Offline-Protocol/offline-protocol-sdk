@@ -134,3 +134,58 @@ Consider creating a validation script that:
 3. Compares them and reports mismatches
 
 This would help catch bridge sync issues during development.
+
+## Invariant: `deinit` must never name `self` in a capture list
+
+Forming a **new** weak reference to an object whose deallocation has already
+begun is a hard runtime abort, not a benign nil. `objc_initWeak` routes to
+`storeWeak<DoCrashIfDeallocating>`, which calls
+`_objc_fatal("Cannot form weak reference to instance …")` and kills the
+process with **SIGABRT**. "Goes nil" only describes a weak reference that was
+registered *before* its target died.
+
+Because a capture list is evaluated when the closure is **created**, this
+aborts whether or not the closure body ever runs:
+
+```swift
+deinit { stop() }                       // ← stop() reaches the hop below
+
+private func stopOnMain() {
+    messageQueue.async { [weak self] in  // ← 💥 SIGABRT when reached from deinit
+        ...
+    }
+}
+```
+
+This shipped in 0.18.1 and 0.18.2 and killed the app on every `destroy()`:
+`OfflineProtocolModule.destroy()` does `manager?.stop()` then `manager = nil`,
+so `stop()` runs a second time from `deinit`.
+
+### Rules when writing manager teardown
+
+1. **`deinit` must not call the public `stop()`** if `stop()` can reach an
+   escaping closure with a capture list naming `self`. Give `stop()` a private
+   `fromDeinit:` variant and skip that hop, as `InternetManager` and
+   `NostrManager` do.
+2. **A strong `self` capture is not the fix either.** It resurrects a
+   deinitializing object, and it defers dealloc until the block runs — which
+   moves `deinit` onto that queue, where a `runOnMainSync` becomes a
+   `main.sync` that can deadlock.
+3. **Bind what the closure needs to locals *before* the closure**
+   (`let proto = self.protocolInstance`). Reading a stored property during
+   `deinit` is fine — the storage is still valid. Only the weak reference is
+   fatal.
+4. **Non-escaping closures are safe** (`DispatchQueue.main.sync`,
+   `queue.sync`, `performOnMain`). They use `self` directly without forming
+   any managed reference.
+5. **Do not rely on an early-return state guard for safety.** `BleManager`,
+   `ReticulumManager` and `WifiDirectManager` survive today only because their
+   `guard state == .running || state == .starting else { return }`
+   short-circuits the second `stop()`. That is incidental, not a design —
+   `InternetManager.stopOnMain` deliberately omits that guard so it always
+   releases its `URLSession`, which is exactly why it was the one that aborted.
+
+CI cannot catch this: it is a runtime abort, and these files are excluded from
+the SwiftPM harness. The device check is to trigger teardown and confirm no
+`objc[…]: Cannot form weak reference …` line follows the manager's "stopped"
+log.

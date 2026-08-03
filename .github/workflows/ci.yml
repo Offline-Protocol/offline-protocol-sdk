@@ -233,3 +233,27 @@ jobs:
       # on its own outside an app workspace.
       - name: iOS unit tests
         run: swift test --package-path bindings/react-native/ios
+
+      # The two largest bridge files are on Package.swift's `exclude:` list
+      # (they need CoreBluetooth / React / the generated UniFFI module, none
+      # of which the SwiftPM harness can supply), so `swift test` above
+      # compiles neither and every change to them has historically shipped
+      # with zero compile coverage. They CAN be type-checked directly against
+      # the iphoneos SDK plus the checked-in Generated/ modulemap, which at
+      # least catches API drift and syntax breakage before a release.
+      # `-typecheck` emits no binary; warnings do not fail the build.
+      - name: iOS bridge typecheck (files excluded from the SwiftPM harness)
+        working-directory: bindings/react-native/ios
+        run: |
+          xcrun --sdk iphoneos swiftc -typecheck \
+            -target arm64-apple-ios15.1 \
+            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap \
+            -Xcc -IGenerated \
+            InternetManager.swift NostrManager.swift TransportManager.swift \
+            Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
+            RelayControlOpTranslator.swift RelayGroupSnapshotBridge.swift \
+            RelayRateLimiter.swift LegacyRelayMessage.swift MonotonicClock.swift \
+            PresenceWatchPolicy.swift RecipientInFlightTracker.swift \
+            SocketGenerationTracker.swift SupersededLatchPolicy.swift \
+            RelayTimestamps.swift WriteStallWatchdog.swift
