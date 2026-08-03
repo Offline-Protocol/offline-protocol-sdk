@@ -408,11 +408,19 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     deinit {
-        stop()
+        // Deliberately NOT `stop()`. `stop()` runs the same teardown but lets
+        // `stopOnMain` enqueue the hop that captures `[weak self]`, and
+        // forming a weak reference to an object already inside `dealloc` is a
+        // hard runtime abort (`_objc_fatal` → SIGABRT), not a benign nil.
+        // `runOnMainSync`'s closure is non-escaping, so it uses `self`
+        // directly without forming any managed reference — safe here.
+        runOnMainSync {
+            stopOnMain(fromDeinit: true)
+        }
     }
-    
+
     // MARK: - Configuration
-    
+
     /// Configure the relay server URL
     public func configure(serverUrl: String, autoReconnect: Bool = true, maxReconnectAttempts: Int = 0) throws {
         guard let url = URL(string: serverUrl) else {
@@ -537,11 +545,16 @@ public class InternetManager: NSObject, TransportManager {
 
     public func stop() {
         runOnMainSync {
-            stopOnMain()
+            stopOnMain(fromDeinit: false)
         }
     }
 
-    private func stopOnMain() {
+    /// - Parameter fromDeinit: `true` only from `deinit`. Suppresses the one
+    ///   hop that names `self` in a capture list; see the split inside. Every
+    ///   other effect — including the forced-check drain and the
+    ///   `internetStatusChanged(false)` notification — is identical on both
+    ///   paths.
+    private func stopOnMain(fromDeinit: Bool) {
         // Even a transport that already stopped itself (e.g. after
         // max-reconnect-attempts set .stopped) still holds a URLSession that
         // retains its delegate (self) plus per-connection state; stop() must
@@ -575,23 +588,29 @@ public class InternetManager: NSObject, TransportManager {
         // clear/reset never runs for this path.
         inFlightTracker.clear()
         controlOpTranslator.reset()
-        // The forced-check queue and the protocol handle are captured
-        // STRONGLY and used unconditionally; everything else stays weak.
-        // `stop()` is reached from `deinit`, and from `destroy()`, which
-        // releases this manager immediately after — on both paths `self` can
-        // be gone by the time this block runs, and a `[weak self]` guard
-        // silently no-ops exactly where it matters most: the queue holds RN
-        // promise resolvers, so a skipped drain hangs those JS callers
-        // forever (a forced check parks on a never-started manager too — the
-        // initial state is `.unavailable`, which `parkOrExpire` does not
-        // fail fast on), and a skipped status notification leaves DORS
-        // scoring a transport whose socket is gone. Both are separate
-        // objects, so capturing them keeps the guarantees without
-        // resurrecting a deinitializing `self`.
+        // SPLIT DELIBERATELY IN TWO — do not merge these hops back together.
         //
-        // The rest is self-owned state that dies with `self`: clearing an
-        // array that deallocated with its owner, or resetting a watchdog no
-        // future connection can read, is a no-op by definition.
+        // Forming a **new** weak reference to an object whose deallocation
+        // has already begun is a hard runtime abort, not a silent no-op:
+        // `objc_initWeak` routes to `storeWeak<DoCrashIfDeallocating>`, which
+        // calls `_objc_fatal("Cannot form weak reference to instance …")` and
+        // kills the process with SIGABRT. ("Goes nil" only describes a weak
+        // reference registered *before* its target died.) The capture list is
+        // evaluated when the closure is created, so a `[weak self]` here
+        // aborts on the `deinit` path whether or not the body ever runs —
+        // which is exactly what shipped in 0.18.1/0.18.2 and killed the app
+        // on every `destroy()` (`internetManager?.stop()` then
+        // `internetManager = nil` runs `stop()` a second time from `deinit`,
+        // and unlike the sibling managers `stopOnMain` has no early-return
+        // guard to short-circuit it — see the note at the top of this method,
+        // the missing guard is deliberate).
+        //
+        // So: `self`-owned state is cleaned on the explicit-stop path only,
+        // where the weak capture is legal because `self` is alive by
+        // definition. Nothing is lost on the `deinit` path — every field
+        // below dies with `self` moments later, so clearing an array that
+        // deallocated with its owner or resetting a watchdog no future
+        // connection can read is a no-op by definition.
         //
         // Kotlin's `stopUnsafe` runs this cleanup inline under a blocking
         // `runOnMainSync` and gets the guarantee for free. Swift hops to
@@ -599,8 +618,9 @@ public class InternetManager: NSObject, TransportManager {
         // the state below, and a `messageQueue.sync` from main could deadlock
         // against the reverse hop (`connect()` → `runOnMainSync`). Keep the
         // two bridges' *effects* in sync, not their shape.
-        messageQueue.async { [weak self, forcedChecks = self.forcedChecks, proto = self.protocolInstance] in
-            if let self = self {
+        if !fromDeinit {
+            messageQueue.async { [weak self] in
+                guard let self = self else { return }
                 self.pendingControlFrames.removeAll()
                 // Outstanding writes are abandoned with this socket; reset the
                 // watchdog so the next connection starts fresh (late cancelled
@@ -617,10 +637,33 @@ public class InternetManager: NSObject, TransportManager {
                 self.forcedCheckRetryWorkItem?.cancel()
                 self.forcedCheckRetryWorkItem = nil
             }
+        }
+        // The unconditional half. Both guarantees below must hold on the
+        // `deinit` path too, so this hop captures only locals bound *before*
+        // the closure — never `self`, weakly or strongly. Binding them here
+        // rather than in the capture list is what keeps `self` out of it:
+        // reading a stored property during `deinit` is fine (the storage is
+        // still valid); it is only the weak reference that is fatal. A strong
+        // `self` capture would be wrong for a second reason — it would defer
+        // dealloc until this block ran, moving `deinit` onto `messageQueue`,
+        // where its `runOnMainSync` becomes a `main.sync` that can deadlock.
+        //
+        // Enqueued after the block above on the same serial queue, so the
+        // self-owned cleanup still lands first — the ordering the single
+        // merged block used to give for free.
+        let forcedChecks = self.forcedChecks
+        let proto = self.protocolInstance
+        messageQueue.async {
             // Parked forced presence checks resolve false immediately: an
             // explicit stop() ends the session, and dangling their RN
             // promises until the deadline helps nobody. (A mere disconnect
             // keeps them — the deadline gives the reconnect its chance.)
+            // This is the guarantee 0.18.1 added the strong capture for: the
+            // queue holds RN promise resolvers, so a skipped drain hangs
+            // those JS callers forever. A forced check parks on a
+            // never-started manager too — the initial state is
+            // `.unavailable`, which `parkOrExpire` does not fail fast on —
+            // and such a transport's only teardown is `deinit`.
             forcedChecks.drainAll()
             // The status notification rides this hop too (it used to run
             // synchronously on the caller's main hop): internetStatusChanged

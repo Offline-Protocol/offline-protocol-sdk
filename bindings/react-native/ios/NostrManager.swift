@@ -142,7 +142,14 @@ public class NostrManager: NSObject, TransportManager {
     }
 
     deinit {
-        stop()
+        // NOT the public `stop()`: its `disconnectAll` hop captures
+        // `[weak self]`, and forming a weak reference to an object already
+        // inside `dealloc` is a hard runtime abort (`_objc_fatal` → SIGABRT),
+        // not a benign nil. Latent rather than fatal today only because the
+        // guard below short-circuits the second `stop()` that `destroy()`
+        // triggers — but a manager released while still `.running` (module
+        // teardown without `destroy()`) walks straight into it.
+        stop(fromDeinit: true)
     }
 
     // MARK: - Configuration
@@ -210,6 +217,12 @@ public class NostrManager: NSObject, TransportManager {
     }
 
     public func stop() {
+        stop(fromDeinit: false)
+    }
+
+    /// - Parameter fromDeinit: `true` only from `deinit`, which selects the
+    ///   `disconnectAll` variant that names no `self` in a capture list.
+    private func stop(fromDeinit: Bool) {
         guard state == .running || state == .starting else {
             return
         }
@@ -229,7 +242,7 @@ public class NostrManager: NSObject, TransportManager {
         stopPingTimer()
 
         // Close all relay connections
-        disconnectAll()
+        disconnectAll(fromDeinit: fromDeinit)
 
         // Notify protocol
         try? protocolInstance.nostrStatusChanged(isConnected: false)
@@ -304,15 +317,35 @@ public class NostrManager: NSObject, TransportManager {
         }
     }
 
-    private func disconnectAll() {
-        connectionQueue.async { [weak self] in
-            guard let self = self else { return }
-            for (_, task) in self.relayConnections {
-                task.cancel(with: .goingAway, reason: nil)
+    private func disconnectAll(fromDeinit: Bool) {
+        if fromDeinit {
+            // `deinit` cannot form a weak reference to `self` (hard abort) and
+            // must not form a strong one either (resurrection, and it would
+            // defer dealloc onto this queue). `connectionQueue.sync` takes a
+            // NON-escaping closure, so it uses `self` directly without
+            // creating any managed reference — the one shape that is safe
+            // here. Running the cleanup synchronously also keeps the state
+            // confined to `connectionQueue` exactly as the async path does,
+            // and cancelling the sockets still happens rather than being
+            // left to whatever the tasks do when their owner disappears.
+            connectionQueue.sync {
+                for (_, task) in relayConnections {
+                    task.cancel(with: .goingAway, reason: nil)
+                }
+                relayConnections.removeAll()
+                relayConnected.removeAll()
+                subscriptionIds.removeAll()
             }
-            self.relayConnections.removeAll()
-            self.relayConnected.removeAll()
-            self.subscriptionIds.removeAll()
+        } else {
+            connectionQueue.async { [weak self] in
+                guard let self = self else { return }
+                for (_, task) in self.relayConnections {
+                    task.cancel(with: .goingAway, reason: nil)
+                }
+                self.relayConnections.removeAll()
+                self.relayConnected.removeAll()
+                self.subscriptionIds.removeAll()
+            }
         }
         isConnected = false
     }
