@@ -37,15 +37,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: "signatures/version1/cla.json"
-          # Pinned to the immutable tag `cla-v1.0`, which freezes the agreed CLA
+          # Pinned to the immutable tag `cla-v1.1`, which freezes the agreed CLA
           # text at a specific revision. A bare commit SHA is unsafe here: PRs are
           # squash-merged, so a feature-branch commit is orphaned from main and
           # 404s once its branch is pruned (exactly what happened to the previous
           # c1193863 pin). A tag stays reachable regardless of merge strategy or
-          # branch cleanup. If you amend CLA.md, cut a NEW tag (cla-v1.1) on the
+          # branch cleanup. If you amend CLA.md, cut a NEW tag (cla-v1.2) on the
           # amending commit and bump this ref in the same commit — never move an
           # existing CLA tag; contributors have signed against it.
-          path-to-document: "https://github.com/Offline-Protocol/offline-protocol-sdk/blob/cla-v1.0/CLA.md"
+          path-to-document: "https://github.com/Offline-Protocol/offline-protocol-sdk/blob/cla-v1.1/CLA.md"
           # Signatures are committed to this branch — leave it unprotected.
           branch: "cla-signatures"
           # Allowlist GitHub App bot accounts (they have a "[bot]" suffix on the
