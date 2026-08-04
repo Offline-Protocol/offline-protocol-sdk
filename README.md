@@ -227,3 +227,6 @@ The Offline Protocol SDK is **dual-licensed**:
 
 You may use the SDK under **either** license; you do not need both. Contributions
 are accepted under the terms described in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Neither license grants rights to the "Offline Protocol" name or logo — see
+[TRADEMARKS.md](TRADEMARKS.md).
