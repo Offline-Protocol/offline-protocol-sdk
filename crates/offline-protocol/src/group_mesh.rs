@@ -435,6 +435,26 @@ pub(crate) struct GroupMlsWelcomePayload {
     /// overrides its attested entry.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub(crate) member_rich: HashMap<String, Vec<u8>>,
+    /// The group creator the inviter has on record (additive; absent from
+    /// old SDKs and from inviters whose own metadata never learned it).
+    ///
+    /// Without this, a joiner's metadata is materialized by `set_member_role`
+    /// via `GroupMetadata::new(None)`, leaving `created_by` permanently
+    /// `None` — so `check_is_admin`'s creator fallback is dead code for
+    /// every joiner, and a group whose role snapshot arrived incomplete
+    /// resolves to deny-by-default. Propagating it makes the fallback
+    /// reachable.
+    ///
+    /// Trust bounds mirror [`Self::member_roles`]: this is the inviter's
+    /// unauthenticated claim, adopted only when the joiner has no creator on
+    /// record (first write wins, see `MlsManager::set_group_creator`), and
+    /// deliberately **not** bounded to the joined MLS roster — the creator of
+    /// record may have already left the group. It feeds only the admin
+    /// *fallback* used for send-side gating and the authorization report; it
+    /// is never consulted by receive-side commit enforcement, which fails
+    /// open on an unknown admin set rather than trusting a single claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) created_by: Option<String>,
 }
 
 /// Type of group membership commit operation.
@@ -1225,12 +1245,25 @@ impl OfflineProtocol {
 
             self.group_mesh.members.insert(group_id.clone(), members);
 
-            // Store member roles from welcome payload
-            if !payload.member_roles.is_empty() {
+            // Store member roles and the creator of record from the welcome
+            // payload. The creator is what makes `check_is_admin`'s fallback
+            // reachable for a joiner: without it our metadata is materialized
+            // by `set_member_role` via `GroupMetadata::new(None)`, so a group
+            // whose role snapshot arrived incomplete would resolve to
+            // deny-by-default with no way back. Deliberately not bounded to
+            // the roster we just joined — the creator of record may already
+            // have left. `set_group_creator` is first-write-wins, so a
+            // duplicate or later Welcome cannot rewrite it.
+            if !payload.member_roles.is_empty() || payload.created_by.is_some() {
                 if let Ok(mls_guard) = self.read_mls_guard() {
                     for (user_id, role) in &payload.member_roles {
                         if let Err(e) = mls_guard.set_member_role(&gid, user_id, *role) {
                             warn!(user_id = %user_id, error = %e, "Failed to store member role from welcome");
+                        }
+                    }
+                    if let Some(creator) = &payload.created_by {
+                        if let Err(e) = mls_guard.set_group_creator(&gid, creator) {
+                            warn!(creator = %creator, error = %e, "Failed to store group creator from welcome");
                         }
                     }
                 }
@@ -2623,8 +2656,10 @@ impl OfflineProtocol {
         // Refresh member list after add
         let members = self.refresh_group_members(group_id)?;
 
-        // Store invitee as member role and load all roles for the welcome payload
-        let member_roles = {
+        // Store invitee as member role, then read back both role-overlay
+        // fields the Welcome carries (roles and the creator of record) from a
+        // single metadata load.
+        let (member_roles, created_by) = {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id)?;
             if let Err(e) = mls_guard.set_member_role(&gid, invitee_user_id, GroupRole::Member) {
@@ -2634,7 +2669,7 @@ impl OfflineProtocol {
                 .get_group_metadata(&gid)
                 .ok()
                 .flatten()
-                .map(|m| m.get_all_roles())
+                .map(|m| (m.get_all_roles(), m.created_by.clone()))
                 .unwrap_or_default()
         };
 
@@ -2671,6 +2706,11 @@ impl OfflineProtocol {
             member_list: members.clone(),
             member_roles,
             member_rich,
+            // Carries our creator of record so the joiner's `check_is_admin`
+            // has a fallback when the role snapshot above is incomplete.
+            // Absent when we never learned it ourselves (joined via an older
+            // SDK's Welcome) — absence is "no information", not a downgrade.
+            created_by,
         };
         let welcome_content = format!(
             "{}{}",

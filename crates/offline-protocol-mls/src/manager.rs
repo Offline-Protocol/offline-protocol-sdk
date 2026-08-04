@@ -829,6 +829,31 @@ impl MlsManager {
         self.save_group_metadata(group_id, &metadata)
     }
 
+    /// Records the group's creator, **only if none is on record yet**.
+    ///
+    /// `created_by` is the fallback [`GroupMetadata`] consults when no admin
+    /// role is stored (see the protocol layer's `check_is_admin`), so it must
+    /// behave monotonically: a device that created the group, or already
+    /// adopted a creator from the Welcome that admitted it, keeps what it has.
+    /// Only the "no information" state is fillable. That makes the write
+    /// idempotent under duplicate Welcomes and stops a later invite — from an
+    /// inviter whose own metadata disagrees — from rewriting an established
+    /// admin fallback.
+    ///
+    /// Returns `Ok(())` whether or not the value was adopted; use
+    /// [`Self::get_group_metadata`] to observe the result.
+    pub fn set_group_creator(&self, group_id: &GroupId, creator_id: &str) -> Result<()> {
+        let mut metadata = self
+            .load_group_metadata(group_id)?
+            .unwrap_or_else(|| GroupMetadata::new(None));
+        if metadata.created_by.is_some() {
+            return Ok(());
+        }
+        metadata.created_by = Some(creator_id.to_string());
+        metadata.touch();
+        self.save_group_metadata(group_id, &metadata)
+    }
+
     /// Removes a member's role metadata from a group.
     pub fn remove_member_role(&self, group_id: &GroupId, user_id: &str) -> Result<()> {
         let mut metadata = self

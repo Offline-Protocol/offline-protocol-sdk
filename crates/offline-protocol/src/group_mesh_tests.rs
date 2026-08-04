@@ -131,6 +131,7 @@ fn test_group_welcome_cannot_squat_session_slot() {
     // 1:1 session slot.
     let squat = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        created_by: None,
         group_id: "session:alice:bob".to_string(),
         group_name: None,
         welcome_data: base64_encode(&welcome.welcome_data),
@@ -514,6 +515,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
 
     let welcome_payload = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        created_by: None,
         group_id: "group:def".to_string(),
         group_name: Some("Test Group".to_string()),
         welcome_data: "d2VsY29tZQ==".to_string(),
@@ -1127,6 +1129,7 @@ fn test_group_mls_welcome_bad_data_no_panic() {
     // Send a Welcome with invalid base64 welcome_data
     let welcome_payload = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        created_by: None,
         group_id: "group:bad-welcome".to_string(),
         group_name: Some("Bad Group".to_string()),
         welcome_data: "not-valid-base64!!!".to_string(),
@@ -1161,6 +1164,7 @@ fn test_group_mls_welcome_valid_base64_bad_mls_no_panic() {
     // Send a Welcome with valid base64 but garbage MLS data
     let welcome_payload = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        created_by: None,
         group_id: "group:garbage-mls".to_string(),
         group_name: Some("Garbage MLS".to_string()),
         welcome_data: base64_encode(b"this is not valid MLS data"),
@@ -7118,6 +7122,7 @@ fn test_welcome_payload_carries_roles() {
 
     let payload = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
+        created_by: None,
         group_id: "group:test".to_string(),
         group_name: Some("Test".to_string()),
         welcome_data: "d2VsY29tZQ==".to_string(),
@@ -11505,12 +11510,21 @@ fn non_admin_commit_attestation_is_ignored() {
     let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
 
     // Strip alice's admin role in bob's local metadata before the commit
-    // arrives, so the sender fails bob's admin check.
+    // arrives, so the sender fails bob's admin check. Promote bob in the same
+    // breath: `check_is_admin` falls back to the group *creator* when no admin
+    // role is stored at all, and bob now learns that creator from the Welcome
+    // — so demoting alice alone would leave her resolving as admin through
+    // that fallback rather than failing the check. Leaving one real admin
+    // makes the stored roles authoritative, which is the state this test
+    // means to exercise.
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
             .set_member_role(&gid, "alice", GroupRole::Member)
+            .unwrap();
+        bob_mls
+            .set_member_role(&gid, "bob", GroupRole::Admin)
             .unwrap();
     }
 
@@ -12326,5 +12340,196 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     assert!(
         !members.iter().any(|m| m == "charlie"),
         "the roster must converge to MLS state once reads succeed again"
+    );
+}
+
+// ============================================================================
+// GROUP CREATOR REPLICATION (Stage 2 — makes the admin fallback reachable)
+// ============================================================================
+
+/// Builds a `__GRP_MLS_WELCOME__` frame body, letting a test control the
+/// role-overlay fields (`member_roles`, `created_by`) independently of the
+/// real MLS Welcome they wrap.
+fn group_welcome_frame(
+    welcome: &offline_protocol_mls::WelcomeMessage,
+    group_id: &str,
+    member_list: &[&str],
+    member_roles: serde_json::Value,
+    created_by: Option<&str>,
+) -> String {
+    let mut body = serde_json::json!({
+        "group_id": group_id,
+        "group_name": "Creator Group",
+        "welcome_data": base64_encode(&welcome.welcome_data),
+        "member_list": member_list,
+        "member_roles": member_roles,
+    });
+    if let Some(creator) = created_by {
+        body["created_by"] = serde_json::json!(creator);
+    }
+    body.to_string()
+}
+
+/// Alice creates a group and stages a real Welcome for Bob without sending it.
+fn stage_welcome_for_bob(
+    group_name: &str,
+) -> (
+    OfflineProtocol,
+    OfflineProtocol,
+    String,
+    offline_protocol_mls::WelcomeMessage,
+) {
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    let group_info = alice.create_group(group_name).unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    let welcome = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        let (welcome, _commit) = alice_mls
+            .add_group_member(&gid, &bob_kp.key_package_data)
+            .unwrap();
+        welcome
+    };
+    alice.refresh_group_members(&group_id).unwrap();
+
+    (alice, bob, group_id, welcome)
+}
+
+fn creator_of(protocol: &OfflineProtocol, group_id: &str) -> Option<String> {
+    let mls = protocol.mls_manager_for_testing().read().unwrap();
+    let gid = offline_protocol_mls::GroupId::new(group_id).unwrap();
+    mls.get_group_metadata(&gid)
+        .unwrap()
+        .and_then(|m| m.created_by)
+}
+
+#[test]
+fn test_welcome_propagates_group_creator_to_joiner() {
+    // The inviter's `invite_to_group` reads `created_by` out of its own
+    // metadata and puts it on the wire; the joiner adopts it. Before this,
+    // a joiner's metadata was materialized by `set_member_role` via
+    // `GroupMetadata::new(None)` and `created_by` stayed permanently absent.
+    let (_alice, mut bob, group_id, welcome) = stage_welcome_for_bob("Creator Group");
+
+    assert_eq!(
+        creator_of(&bob, &group_id),
+        None,
+        "precondition: Bob has no metadata for a group he has not joined"
+    );
+
+    let frame = group_welcome_frame(
+        &welcome,
+        &group_id,
+        &["alice", "bob"],
+        serde_json::json!({"alice": "admin", "bob": "member"}),
+        Some("alice"),
+    );
+    bob.handle_group_mls_welcome("welcome-creator-1", "alice", &frame);
+
+    assert_eq!(
+        creator_of(&bob, &group_id),
+        Some("alice".to_string()),
+        "the joiner must adopt the creator the Welcome carried"
+    );
+}
+
+#[test]
+fn test_joiner_without_role_snapshot_resolves_admin_via_created_by() {
+    // The whole point of replicating the creator: an inviter whose
+    // `get_all_roles()` was incomplete used to leave the joiner with an
+    // empty role map, `has_any_admin() == false`, an absent `created_by`,
+    // and therefore deny-by-default for *every* member — including the real
+    // admin. With the creator replicated, the fallback resolves.
+    let (_alice, mut bob, group_id, welcome) = stage_welcome_for_bob("Creator Group");
+
+    let frame = group_welcome_frame(
+        &welcome,
+        &group_id,
+        &["alice", "bob"],
+        // Empty role snapshot — the degenerate case the fallback exists for.
+        serde_json::json!({}),
+        Some("alice"),
+    );
+    bob.handle_group_mls_welcome("welcome-creator-2", "alice", &frame);
+
+    assert!(
+        bob.check_is_admin(&group_id, "alice").unwrap(),
+        "with no roles stored, the creator fallback must resolve the creator as admin"
+    );
+    assert!(
+        !bob.check_is_admin(&group_id, "bob").unwrap(),
+        "the fallback must not promote anyone but the creator"
+    );
+}
+
+#[test]
+fn test_welcome_created_by_does_not_overwrite_existing() {
+    // `created_by` is the admin fallback, so the write is monotone:
+    // first-write-wins. A device that created the group — or already adopted
+    // a creator — keeps it, so a later invite from an inviter with a
+    // different view cannot rewrite an established admin fallback, and a
+    // duplicate Welcome is idempotent.
+    let (alice, _bob, group_id, _welcome) = stage_welcome_for_bob("Creator Group");
+
+    assert_eq!(
+        creator_of(&alice, &group_id),
+        Some("alice".to_string()),
+        "precondition: the creator has itself on record"
+    );
+
+    {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        alice_mls.set_group_creator(&gid, "mallory").unwrap();
+    }
+
+    assert_eq!(
+        creator_of(&alice, &group_id),
+        Some("alice".to_string()),
+        "an established creator must never be rewritten"
+    );
+}
+
+#[test]
+fn test_welcome_without_created_by_leaves_metadata_unchanged() {
+    // Additive field: a Welcome from an older SDK (no `created_by`) must
+    // still join cleanly, and absence must read as "no information" rather
+    // than clearing or fabricating a creator.
+    let (_alice, mut bob, group_id, welcome) = stage_welcome_for_bob("Creator Group");
+
+    let frame = group_welcome_frame(
+        &welcome,
+        &group_id,
+        &["alice", "bob"],
+        serde_json::json!({"alice": "admin"}),
+        None,
+    );
+    bob.handle_group_mls_welcome("welcome-creator-3", "alice", &frame);
+
+    assert!(
+        bob.group_mesh.members.contains_key(&group_id),
+        "a Welcome without the additive field must still join"
+    );
+    assert_eq!(
+        creator_of(&bob, &group_id),
+        None,
+        "absence means no information — never a fabricated creator"
+    );
+    assert!(
+        bob.check_is_admin(&group_id, "alice").unwrap(),
+        "the role snapshot still resolves admin without the fallback"
     );
 }
