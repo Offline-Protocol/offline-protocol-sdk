@@ -318,7 +318,9 @@ func onEvent(eventJson: String) {
 ```
 
 **Security invariants:**
-- Only admins can invite, remove members, change roles, or rename groups
+- Only admins can *call* invite, remove, change-role, or rename — these are checked before sending
+- Role changes and renames are additionally enforced on receive: a non-admin's frame is rejected by every peer
+- Membership changes (invite/remove) are **not** enforced on receive. MLS authenticates the committer as a group member, but a member running a modified client can add or remove anyone; the change applies and is reported via `group_unauthorized_membership_change`. See [Group authorization model](./mls-integration.md#group-authorization-model)
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
 - If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
 

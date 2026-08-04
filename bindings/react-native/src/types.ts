@@ -1206,6 +1206,25 @@ export interface GroupMemberAddedEvent extends BaseEvent {
   user_id: string;
   added_by: string;
   group_name?: string;
+  /**
+   * Whether `added_by` was authorized to make this change.
+   *
+   * `false` means the change **did** happen — MLS accepted the commit and
+   * the roster really has changed — but the committer was not a known
+   * admin. See `GroupUnauthorizedMembershipChangeEvent`.
+   *
+   * **Absent means "not evaluated"**, not "authorized": your own join from
+   * a Welcome (there is no prior group state to judge the inviter against),
+   * relay reconciliation frames (no authenticated committer to judge), and
+   * events from an older core all omit the field. Only a present value is
+   * a positive statement either way.
+   *
+   * Judged against this device's local replica of role state, which
+   * replicates best-effort and can lag — a legitimate change may be flagged
+   * `false`, and different members can disagree. Do not act on it
+   * automatically.
+   */
+  authorized?: boolean;
 }
 
 /**
@@ -1216,6 +1235,13 @@ export interface GroupMemberRemovedEvent extends BaseEvent {
   group_id: string;
   user_id: string;
   removed_by: string;
+  /**
+   * See `GroupMemberAddedEvent.authorized` (absent = not evaluated). On the
+   * relay reconciliation path the judgment applies to the frame's
+   * authenticated wire sender, which is not necessarily the `removed_by`
+   * named here.
+   */
+  authorized?: boolean;
 }
 
 /**
@@ -1364,6 +1390,50 @@ export interface GroupRichExtrasDroppedEvent extends BaseEvent {
    * for their capability automatically, so a later retry may stop dropping.
    */
   unknown_members: string[];
+}
+
+/**
+ * An MLS membership change was applied that its committer was not
+ * authorized to make.
+ *
+ * The change **has been applied** — MLS authenticated the committer as a
+ * group member and accepted the commit. The SDK's admin model is an
+ * application-layer overlay on MLS (which has no admin concept), enforced
+ * when *sending*; refusing the change on receipt would mean refusing the
+ * MLS merge, permanently forking this member away from everyone who
+ * accepted it. So the change stands and is reported here instead.
+ *
+ * This signal can false-positive: "unauthorized" is judged against this
+ * device's local replica of role state, which replicates best-effort and
+ * can lag — a legitimate change may be reported, and different members can
+ * disagree about the same commit.
+ *
+ * Treat this as a moderation signal for a *human* admin: an admin can undo
+ * it with `meshRemoveFromGroup` / `meshInviteToGroup`. Never reverse a
+ * change automatically off a single member's event — corroborate first. A
+ * member added this way can read all subsequent group traffic until removed.
+ *
+ * Reports are rate-limited per (group, committer): a repeat within a short
+ * window is not re-emitted, but every affected `group_member_added` /
+ * `group_member_removed` still carries `authorized: false`.
+ *
+ * Known limitation: the member removed by an unauthorized Remove does not
+ * receive this event — only the remaining members report the removal.
+ */
+export interface GroupUnauthorizedMembershipChangeEvent extends BaseEvent {
+  type: 'group_unauthorized_membership_change';
+  group_id: string;
+  /** The MLS-authenticated committer that made the change. */
+  committer: string;
+  /** Members the commit added, sorted. Empty for a pure removal. */
+  added: string[];
+  /** Members the commit removed, sorted. Empty for a pure addition. */
+  removed: string[];
+  /**
+   * Why the change was judged unauthorized: `'sender_not_admin'` or
+   * `'affected_member_mismatch'`. Treat as opaque — values may be added.
+   */
+  reason: string;
 }
 
 /**
@@ -1841,6 +1911,7 @@ export type ProtocolEvent =
   | GroupMessagePartialFailureEvent
   | GroupMessageDeliveryReportEvent
   | GroupRichExtrasDroppedEvent
+  | GroupUnauthorizedMembershipChangeEvent
   | GroupEpochForkDetectedEvent
   | GroupEpochForkResolvedEvent
   | GroupRoleChangedEvent

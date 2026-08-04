@@ -1271,6 +1271,13 @@ impl OfflineProtocol {
                         payload.user_id,
                         payload.added_by,
                         payload.group_name,
+                        // Not evaluated: the Internet-arrival gate above
+                        // authenticates the *path*, not the committer — per
+                        // the residual documented above, `added_by` is
+                        // unauthenticated and may be the literal "relay".
+                        // `Some(true)` would claim a check this frame cannot
+                        // carry.
+                        None,
                     ));
                 }
             } else {
@@ -1409,6 +1416,12 @@ impl OfflineProtocol {
                         payload.group_id,
                         payload.user_id,
                         payload.removed_by,
+                        // Reached only through the admin gate above. That
+                        // gate judged the authenticated wire `sender`;
+                        // `removed_by` is unauthenticated payload
+                        // attribution and may name someone else — the field
+                        // doc carries this caveat.
+                        Some(true),
                     ));
                 }
             } else {

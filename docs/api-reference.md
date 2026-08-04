@@ -769,6 +769,29 @@ switch is off — then `unknown_members` is empty). The text was still sent.
 The SDK probes the unknown members' capability automatically; apps can warn
 the sender and retry later, or pre-check with `group_rich_readiness`.
 
+#### GroupUnauthorizedMembershipChange
+
+```rust
+GroupUnauthorizedMembershipChange {
+    group_id: String,
+    committer: String,       // MLS-authenticated committer
+    added: Vec<String>,      // sorted; empty for a pure removal
+    removed: Vec<String>,    // sorted; empty for a pure addition
+    reason: String,          // "sender_not_admin" | "affected_member_mismatch"
+}
+```
+
+An MLS membership change was applied that its committer was not authorized
+to make. The change **has been applied** — refusing it would mean refusing
+the MLS merge, permanently forking this member from the group — so it is
+reported instead; the corresponding `GroupMemberAdded` / `GroupMemberRemoved`
+events still fire with `authorized: Some(false)`. The judgment runs against
+the local, best-effort role replica, so it can false-positive; treat it as a
+moderation signal for a human admin and never reverse automatically. Reports
+are rate-limited per `(group, committer)`. Treat `reason` as an opaque
+string — values may be added. See
+[Group authorization model](./mls-integration.md#group-authorization-model).
+
 #### GroupRoleChanged
 
 ```rust
@@ -882,6 +905,7 @@ pub fn reset_tofu_for_peer(
 
 - The group creator is automatically assigned `Admin`.
 - Only admins can call `invite_to_group`, `remove_from_group`, `set_member_role`, and `rename_group`.
+- Membership changes (invite/remove) are **not** enforced on receive — an unauthorized commit is applied and reported via `GroupUnauthorizedMembershipChange`. See [Group authorization model](./mls-integration.md#group-authorization-model).
 - The last admin cannot be demoted, removed, or leave — returns `Error::LastAdmin`.
 - If the last admin leaves unexpectedly, deterministic election promotes the lexicographically smallest member.
 

@@ -463,6 +463,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             user_id,
             added_by,
             group_name: _,
+            authorized: _,
         } => {
             hash_string(group_id, scrubber);
             hash_string(user_id, scrubber);
@@ -472,10 +473,27 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             group_id,
             user_id,
             removed_by,
+            authorized: _,
         } => {
             hash_string(group_id, scrubber);
             hash_string(user_id, scrubber);
             hash_string(removed_by, scrubber);
+        }
+        Event::GroupUnauthorizedMembershipChange {
+            group_id,
+            committer,
+            added,
+            removed,
+            reason: _,
+        } => {
+            hash_string(group_id, scrubber);
+            hash_string(committer, scrubber);
+            for member in added.iter_mut() {
+                hash_string(member, scrubber);
+            }
+            for member in removed.iter_mut() {
+                hash_string(member, scrubber);
+            }
         }
         Event::GroupInfo {
             group_id,
@@ -735,6 +753,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::GroupMessagePartialFailure { .. }
         | Event::GroupMessageDeliveryReport { .. }
         | Event::GroupRichExtrasDropped { .. }
+        | Event::GroupUnauthorizedMembershipChange { .. }
         | Event::GroupEpochForkDetected { .. }
         | Event::GroupEpochForkResolved { .. }
         | Event::GroupRoleChanged { .. }
