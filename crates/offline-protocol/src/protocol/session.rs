@@ -585,22 +585,44 @@ impl OfflineProtocol {
     /// genuine second desync within the window heals up to one interval later —
     /// an acceptable trade for a rare event against a bounded-churn guarantee.
     ///
-    /// **SECURITY — remotely-triggerable (rate-limited) re-key.** `peer_id` here
-    /// is the *wire-claimed* sender, not an MLS-authenticated one: the
-    /// `SenderIdentityMismatch` gate in `handle_encrypted_message` only runs on a
-    /// **successful** decrypt, whereas a desync is a `WrongEpoch`/`NoPastEpochData`
-    /// decrypt *failure* that never reaches the credential check. An outsider
-    /// still cannot forge a frame that produces this classification — only a
-    /// structurally-valid MLS message for our existing `session:<peer>:me` group
-    /// can — but a network attacker who **replays a genuine peer's captured
-    /// old-epoch ciphertext** (the outer message id is unauthenticated, so
-    /// transport dedup does not reliably stop a mutated-id replay) can force a
-    /// teardown + re-establishment of that one session. This is strictly better
-    /// than the old silent drop (delivery stays honest and the channel
-    /// self-heals), and the unconditional [`REKEY_INTERVAL_SECS`] rate limit is
-    /// the mitigation that hard-bounds it to one re-key per peer per window
-    /// rather than continuous churn. Also see the CLAUDE.md "Crypto-failure
-    /// recovery" note.
+    /// **SECURITY — this trigger is unauthenticated, and cannot be made
+    /// otherwise.** `peer_id` is the *wire-claimed* sender. Three facts compose:
+    /// `__MLS_ENC__` is a data-plane prefix, deliberately exempt from the
+    /// Ed25519 + TOFU control-message gate (see `DATA_PLANE_PREFIXES`); OpenMLS
+    /// validates the framing header — group id, then epoch — *before* any AEAD,
+    /// sender-data decryption or signature check, so `WrongEpoch` /
+    /// `NoPastEpochData` is produced with the sender still entirely unverified;
+    /// and a 1:1 slot id is `session:<a>:<b>` over two public user ids. So the
+    /// classification that lands here is reachable by **anyone who can inject a
+    /// frame** — no key material, no captured ciphertext, no session, no replay
+    /// needed. `test_forged_frame_reaches_session_desync_without_any_key_material`
+    /// builds such a frame from scratch to keep this statement honest. It is
+    /// inherent to MLS framing, not an OpenMLS defect, so no upgrade changes it.
+    ///
+    /// The `SenderIdentityMismatch` gate cannot help: it compares the MLS
+    /// credential to the claimed sender, and that credential only exists once
+    /// `process_message` **succeeds**. Every pre-authentication verdict is
+    /// structurally outside its reach.
+    ///
+    /// Because the trigger cannot be authenticated, the mitigation is that
+    /// acting on it is **harmless**, not that it is trusted:
+    /// - `SessionManager::decrypt_message` requires the envelope to name the
+    ///   slot shared with the claimed sender, so one derivable session id
+    ///   cannot be aimed at arbitrary peers, and `rekey_due_at` cannot be grown
+    ///   with attacker-chosen keys.
+    /// - [`REKEY_INTERVAL_SECS`] bounds this to one re-key per peer per window.
+    /// - The heal destroys nothing: queued plaintext survives a reset (it seals
+    ///   at flush time against the rebuilt session), and Tier 2 re-seals
+    ///   in-flight resends.
+    /// - Each re-key emits `SecurityWarningCode::SessionRekeyTriggered`, so a
+    ///   sustained rate — the signature of injected frames rather than a real
+    ///   fork — is visible to the app.
+    ///
+    /// **Residual:** an injector can still force bounded re-key churn on a pair
+    /// (delayed delivery, never lost). Closing that needs a signed
+    /// epoch-corroboration exchange before teardown; a liveness-only probe does
+    /// not work, since a healthy peer answers and we would tear down anyway.
+    /// Also see the CLAUDE.md "Crypto-failure recovery" note.
     pub(super) fn schedule_session_rekey(&mut self, peer_id: &str) {
         let now = Utc::now();
         if let Some(due_at) = self.rekey_due_at.get(peer_id) {
