@@ -12543,6 +12543,112 @@ fn pump_between(
     }
 }
 
+/// Feeds `target` a `session_reset` key package genuinely minted by `from`,
+/// mirroring what `schedule_session_rekey` puts on the wire when it re-keys.
+fn feed_session_reset_key_package(
+    target: &mut OfflineProtocol,
+    from: &mut OfflineProtocol,
+    from_id: &str,
+) {
+    let kp = {
+        let m = from.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let payload = KeyPackagePayload {
+        user_id: from_id.to_string(),
+        key_package_data: kp.key_package_data.clone(),
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: true,
+        wire_versions: Vec::new(),
+        env_versions: Vec::new(),
+        rich_versions: Vec::new(),
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    );
+    let target_id = target.config.user_id.clone();
+    let message = Message::new(
+        UserId::new(from_id).unwrap(),
+        UserId::new(&target_id).unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+    target.process_internal_message(&message);
+}
+
+/// A `session_reset` must not destroy the receiver's queued outbound messages.
+/// The pending queue holds *plaintext*, sealed at flush time against whatever
+/// session is current then — so the rebuild a reset triggers is exactly what
+/// makes those entries deliverable. Dropping them also skipped settlement, and
+/// since a re-key is remotely triggerable (see `schedule_session_rekey`) that
+/// handed an injected frame the power to silently delete messages the app was
+/// already holding ids for.
+#[test]
+fn test_session_reset_retains_pending_outbound_and_delivers_after_rebuild() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+
+    let alice_failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&alice_failed);
+        alice.on_event(move |e| {
+            if let Event::MessageFailed { message_id, .. } = e {
+                h.lock().unwrap().push(message_id);
+            }
+        });
+        let h = Arc::clone(&bob_rx);
+        bob.on_event(move |e| {
+            if let Event::MessageReceived { content, .. } = e {
+                h.lock().unwrap().push(content);
+            }
+        });
+    }
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    establish_confirmed_session(&mut alice, "alice", &mut bob, "bob");
+
+    // The window the bug lives in: the MLS session exists (so the reset branch
+    // fires at all) but is not confirmed, so alice's sends queue as plaintext
+    // rather than going out.
+    alice.confirmed_sessions.remove("bob");
+    alice
+        .send_message("bob", "queued-before-reset", None, None::<String>)
+        .unwrap();
+    assert!(
+        alice.pending_encrypted_messages.contains_key("bob"),
+        "precondition: the message must be queued, not sent"
+    );
+
+    feed_session_reset_key_package(&mut alice, &mut bob, "bob");
+
+    assert!(
+        alice.pending_encrypted_messages.contains_key("bob"),
+        "a session reset must not discard queued outbound plaintext"
+    );
+    assert!(
+        alice_failed.lock().unwrap().is_empty(),
+        "a session reset must settle nothing as failed (got {:?})",
+        alice_failed.lock().unwrap()
+    );
+
+    // And the rebuild the reset kicks off is what delivers them.
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+    assert!(
+        bob_rx
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "queued-before-reset"),
+        "the retained message must flush once the rebuilt session confirms (got {:?})",
+        bob_rx.lock().unwrap()
+    );
+}
+
 /// End-to-end heal, detector id > peer id (single-round convergence). Alice
 /// (the peer) forks ahead; Bob (the detector, "bob" > "alice") fails to decrypt,
 /// re-keys, and — being the greater id — adopts Alice's returning Welcome in one

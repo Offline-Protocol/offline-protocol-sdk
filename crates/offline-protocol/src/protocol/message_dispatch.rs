@@ -116,9 +116,22 @@ impl OfflineProtocol {
                             if let Err(e) = self.manual_mls_delete_session(sender) {
                                 debug!(sender = %sender, error = %e, "No MLS session to clean up for session reset");
                             }
-                            // Clear outbound pending messages (encrypted for the old session)
-                            self.drop_pending_queue_for_peer(sender);
-                            // Drain inbound pending decryption queue (old ciphertexts)
+                            // The outbound pending queue is deliberately KEPT.
+                            // `PendingMessage` holds original plaintext and is
+                            // sealed at flush time by `prepare_outbound_content`
+                            // against whatever session is current then — so
+                            // these entries are not bound to the epoch we just
+                            // discarded, and the reset is precisely what
+                            // produces the session they will seal against.
+                            // Dropping them here destroyed messages the app had
+                            // been handed ids for, and a re-key is remotely
+                            // triggerable (see `schedule_session_rekey`), which
+                            // made that reachable by an injected frame.
+                            //
+                            // Drain the inbound pending decryption queue though:
+                            // unlike the outbound side those really are
+                            // ciphertexts sealed to the session just deleted, so
+                            // they can never decrypt.
                             self.pending_queue
                                 .drain_for_peer(&self.config.encryption.pending_queue, sender);
                             // Allow fresh key exchange
