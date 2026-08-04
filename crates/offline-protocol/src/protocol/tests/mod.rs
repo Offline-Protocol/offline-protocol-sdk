@@ -12649,6 +12649,55 @@ fn test_session_reset_retains_pending_outbound_and_delivers_after_rebuild() {
     );
 }
 
+/// `rekey_due_at` is keyed by a wire-claimed peer id — the desync that reaches
+/// `schedule_session_rekey` is classified before MLS authenticates anything — so
+/// it must be bounded like every other map fed from the wire.
+#[test]
+fn test_rekey_tracking_map_is_bounded() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    alice.start().unwrap();
+
+    for i in 0..(MAX_REKEY_TRACKED_PEERS + 5) {
+        alice.schedule_session_rekey(&format!("peer-{i}"));
+    }
+
+    assert!(
+        alice.rekey_due_at.len() <= MAX_REKEY_TRACKED_PEERS,
+        "rekey tracking must stay bounded, got {}",
+        alice.rekey_due_at.len()
+    );
+}
+
+/// A re-key must be visible to the app. It is remotely triggerable, so a
+/// sustained rate for one peer is the only signal an operator has that frames
+/// are being injected rather than a session genuinely forking.
+#[test]
+fn test_rekey_emits_security_warning() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings: Arc<Mutex<Vec<SecurityWarningCode>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&warnings);
+        alice.on_event(move |e| {
+            if let Event::SecurityWarning { reason_code, .. } = e {
+                h.lock().unwrap().push(reason_code);
+            }
+        });
+    }
+    alice.start().unwrap();
+
+    alice.schedule_session_rekey("bob");
+
+    assert!(
+        warnings
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| *c == SecurityWarningCode::SessionRekeyTriggered),
+        "a re-key must surface a SessionRekeyTriggered warning (got {:?})",
+        warnings.lock().unwrap()
+    );
+}
+
 /// Every path that drops a pending queue must settle the ids it destroys. The
 /// app was handed those ids by `send_message*` at queue time, so an unsettled
 /// drop leaves it waiting on messages that can never resolve either way — the

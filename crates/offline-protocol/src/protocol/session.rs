@@ -3,12 +3,13 @@
 use super::{
     internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle, PruneAllowance,
     RestorableRecord, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS,
-    REKEY_INTERVAL_SECS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
-    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
+    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS,
+    RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS,
+    WELCOME_LIFECYCLE_TTL_SECS, WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
 };
+use crate::events::SecurityWarningCode;
 use crate::mls_observability::MlsOperationContext;
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -607,9 +608,26 @@ impl OfflineProtocol {
                 return;
             }
         }
+        // Bounded like every other map keyed by a wire-claimed id: the desync
+        // that gets us here is classified before MLS authenticates anything.
+        if !self.rekey_due_at.contains_key(peer_id)
+            && self.rekey_due_at.len() >= MAX_REKEY_TRACKED_PEERS
+        {
+            self.rekey_due_at.clear();
+        }
         self.rekey_due_at.insert(
             peer_id.to_string(),
             now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
+        );
+
+        // A re-key is remotely triggerable and, until now, entirely silent to
+        // the app. A genuine fork produces these occasionally; a sustained rate
+        // for one peer is the signature of injected frames, which an operator
+        // cannot otherwise distinguish.
+        self.emit_security_warning(
+            peer_id,
+            SecurityWarningCode::SessionRekeyTriggered,
+            "1:1 session torn down and re-advertised after an epoch desync",
         );
         // Tear down our own stale session before advertising the reset key
         // package, mirroring the unblock `session_reset` flow. This is what makes

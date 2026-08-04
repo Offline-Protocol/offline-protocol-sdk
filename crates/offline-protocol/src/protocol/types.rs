@@ -325,6 +325,18 @@ pub(crate) const MAX_PROTOCOL_STATE_RECORD_BYTES: usize = 4 * 1024 * 1024;
 /// of forgetting a peer is a one-time idempotent re-send of our key package.
 pub(crate) const MAX_KEY_PACKAGE_SENT_TO: usize = 1000;
 
+/// Maximum number of peers tracked in `rekey_due_at` (the per-peer epoch-desync
+/// re-key floor).
+///
+/// The desync classification that reaches `schedule_session_rekey` is produced
+/// by OpenMLS *before* it authenticates anything, so the peer id keying this map
+/// is wire-claimed. The envelope/sender binding in `SessionManager::decrypt_message`
+/// already confines that id to peers we hold a session with, which bounds the map
+/// on its own; this cap is the same defence-in-depth every other wire-keyed map
+/// carries. Resets at capacity like [`MAX_KEY_PACKAGE_SENT_TO`] — forgetting a
+/// peer only costs one extra re-key being allowed through early.
+pub(crate) const MAX_REKEY_TRACKED_PEERS: usize = 1000;
+
 /// Maximum lifetime (in milliseconds) honored for a *received* peer key
 /// package's cached expiry.
 ///
