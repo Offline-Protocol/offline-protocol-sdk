@@ -10,6 +10,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// `Display` (the `#[error(...)]` text) is human-facing and free to change.
 /// [`Error::code`] is the stable, machine-readable contract — downstream
 /// telemetry classifies on the code, never on the `Display` wording.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum Error {
     /// Transport is not available or supported.

@@ -6,6 +6,9 @@
 use thiserror::Error;
 
 /// Errors that can occur during storage operations.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum StorageError {
     /// Failed to store data.

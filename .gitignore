@@ -38,6 +38,10 @@ yarn-error.log*
 *.xcuserdata
 Pods/
 *.framework
+# Per-developer Xcode env override (React Native's own .xcode.env documents it
+# as "not versioned"); it pins an absolute NODE_BINARY path that is valid on
+# exactly one machine.
+.xcode.env.local
 
 # Android
 *.apk

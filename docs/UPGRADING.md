@@ -1,10 +1,18 @@
 # Upgrading
 
-Everything an application team has to change to move onto the **storage-split
-release** — `v0.17.0`, the first release after `v0.16.6`. It is an explicitly
-breaking release: `initialize_mls` changes shape, three config updaters become
-fallible, and several previously-accepted inputs are now rejected at the
-boundary.
+Everything an application team has to change to move off `v0.16.x` and onto the
+current `v0.18.x` line.
+
+The breaking changes all landed in the **storage-split release**, `v0.17.0` —
+`initialize_mls` changes shape, three config updaters become fallible, and
+several previously-accepted inputs are now rejected at the boundary. Sections
+1–12 below cover that release and are the ones that can stop your build.
+
+`v0.18.x` added no further breaking changes, only additive APIs. Where a section
+documents one, it is labelled inline with the release that introduced it (for
+example, `wipePersistedState` in [§10](#10-storage-is-now-isolated-per-app_id-user_id)
+arrived in `v0.18.2`). If you are already on `v0.17.0`, those labelled
+paragraphs are the only parts you still need.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
@@ -815,7 +823,8 @@ that account's namespace. Two consequences are worth planning for:
   user adopts that material again — identity, sessions, and, through the
   pre-split store, delivery state.
 
-React Native applications can now erase all of it:
+React Native applications can erase all of it (**added in `v0.18.2`**; on
+`v0.17.0` this API does not exist):
 
 ```ts
 await protocol.destroy();

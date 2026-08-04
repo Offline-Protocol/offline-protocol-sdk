@@ -35,6 +35,8 @@ The same task runs in the `Android Unit Tests` job in `.github/workflows/ci.yml`
 ## Version notes
 
 Kotlin is pinned to **1.9.24** to match the module's current source. Moving to
-Kotlin 2.x requires the `optString`/nullability fixes tracked in `todo.md`
-first, or the module will not compile under strict 2.x platform-type rules.
+Kotlin 2.x first requires auditing every `ReadableMap.optString(...)` call site
+in `android/src/main/` and giving the results explicit nullable types: Kotlin
+2.x stops treating Java platform types as implicitly non-null, so those call
+sites fail to compile until each one declares whether it can return null.
 AGP 8.5.2 / Gradle 8.9 / `compileSdk 34` / JDK 17 form the validated matrix.

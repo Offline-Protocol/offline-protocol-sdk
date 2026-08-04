@@ -204,8 +204,13 @@ function sanitize<T extends object>(value: T | undefined | null): T | undefined 
  *
  * **Supported Transports:**
  * - BLE (Bluetooth Low Energy) - Automatically managed
- * - WiFi Direct - Future support
- * - Internet - Future support
+ * - WiFi Direct - Peer-to-peer LAN transport
+ * - Internet - WebSocket relay transport
+ * - Reticulum - Long-range LoRa/packet-radio transport
+ * - Nostr - Relay transport over the Nostr protocol
+ *
+ * DORS (the transport selector) scores and switches between whichever of these
+ * are enabled in the configuration; you do not pick one manually.
  *
  * @example
  * ```typescript

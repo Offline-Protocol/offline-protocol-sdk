@@ -6,6 +6,9 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Core errors that can occur in the Offline Protocol SDK.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum Error {
     /// Invalid message format or content.

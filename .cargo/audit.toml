@@ -1,9 +1,89 @@
+# Advisory waivers for `cargo audit`.
+#
+# This list must stay a SUPERSET of `deny.toml`'s `[advisories].ignore`.
+#
+# The two tools disagree by construction: cargo-audit scans `Cargo.lock`, which
+# records every *optional* dependency the resolver ever considered, while
+# cargo-deny scans the feature-resolved build graph and drops the ones nothing
+# enables. That is why CI's Dependency Audit job (cargo-deny) is green while a
+# bare `cargo audit` was red — the extra entries here are the lockfile-only
+# crates that cargo-deny never sees.
+#
+# Verify any "not in the build graph" claim below with:
+#
+#     cargo tree --workspace --target all -i <crate>
+#
+# which prints "nothing to print" when the crate is genuinely unreachable.
+#
+# Note: cargo-audit's `ignore` accepts bare advisory IDs only — the
+# `{ id, reason }` table form used in deny.toml is a cargo-deny extension and
+# fails to parse here. Rationale therefore lives in these comments.
+
 [advisories]
 ignore = [
-    # hpke-rs 0.6.1 records its optional libcrux backend in Cargo.lock even
-    # though OpenMLS is compiled with hpke-rs-rust-crypto only. The vulnerable
-    # crate is absent from every workspace build graph, and the latest hpke-rs
+    # --- Lockfile-only: the libcrux HPKE backend is never compiled ---------
+    #
+    # `hpke-rs-libcrux` and its `libcrux-aesgcm` dependency appear in Cargo.lock
+    # as optional deps of hpke-rs 0.6.1, but nothing enables them:
+    # openmls_rust_crypto 0.4.4 turns on only `hazmat` / `serialization` /
+    # `std` / `tls_codec`, so AES-GCM is provided by hpke-rs-rust-crypto (the
+    # RustCrypto `aes-gcm` crate) instead.
+    #
+    # This distinction is load-bearing, not cosmetic: our ciphersuite
+    # (MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519) really does use AES-GCM, so
+    # these would be *reachable and serious* if the libcrux backend were the one
+    # in use. Re-run the `cargo tree` check above before renewing these waivers,
+    # and never widen them to an advisory against `aes-gcm` itself.
+    #
+    # RUSTSEC-2026-0209 — libcrux-aesgcm did not enforce limits on AAD length.
+    "RUSTSEC-2026-0209",
+    # RUSTSEC-2026-0211 — libcrux-aesgcm non-constant-time auth tag check.
+    "RUSTSEC-2026-0211",
+    # RUSTSEC-2026-0210 — libcrux-aesgcm renamed to libcrux-aes (unmaintained).
+    "RUSTSEC-2026-0210",
+    # RUSTSEC-2026-0124 — libcrux-aead, same unused backend. The latest hpke-rs
     # release still pins libcrux-aead 0.0.7, so no resolvable upgrade exists.
-    # Re-evaluate when hpke-rs publishes support for libcrux-aead >=0.0.8.
+    # Re-evaluate when hpke-rs supports libcrux-aead >= 0.0.8.
     "RUSTSEC-2026-0124",
+
+    # --- Compiled but unreachable: SHAKE / PQ-KEM paths --------------------
+    #
+    # Mirrors deny.toml. These arrive through openmls_rust_crypto 0.4 ->
+    # hpke-rs 0.6 -> libcrux-sha3, which IS in the build graph. The vulnerable
+    # code is hpke-rs's SHAKE/ML-KEM support; our only ciphersuite is classical
+    # (X25519 + AES-GCM + SHA-256 — see DEFAULT_CIPHERSUITE in
+    # offline-protocol-mls), so these paths are compiled but never invoked.
+    # The patched libcrux is only reachable via hpke-rs 0.7, which no released
+    # openmls_rust_crypto accepts yet (0.5.1 still requires ^0.6).
+    # Re-evaluate on the next openmls_rust_crypto release.
+    #
+    # RUSTSEC-2026-0207 — incremental portable SHAKE, multiple squeeze calls.
+    "RUSTSEC-2026-0207",
+    # RUSTSEC-2026-0208 — potential panic in AVX2 SHAKE-256.
+    "RUSTSEC-2026-0208",
+    # RUSTSEC-2026-0212 — libcrux-secrets aarch64 constant-time swap/select,
+    # used only beneath the unreachable SHAKE/ML-KEM path.
+    "RUSTSEC-2026-0212",
+
+    # --- Build-time only ---------------------------------------------------
+    #
+    # Mirrors deny.toml. Unmaintained notice for a proc-macro pulled in by
+    # libcrux's formal-verification tooling (libcrux-sha3 -> libcrux-intrinsics
+    # -> core-models -> hax-lib -> hax-lib-macros -> proc-macro-error2). It
+    # never links into a shipped artifact, and the advisory itself states no
+    # safe upgrade exists.
+    "RUSTSEC-2026-0173",
+
+    # --- Unsoundness notices in transitive dependencies --------------------
+    #
+    # Neither is a vulnerability, and neither is triggerable from SDK code:
+    # `anyhow::Error::downcast_mut()` is never called (anyhow arrives
+    # transitively), and the `rand` unsoundness requires a custom global logger
+    # that re-enters `rand::rng()` during seeding, which this workspace does not
+    # install.
+    #
+    # RUSTSEC-2026-0190 — unsoundness in anyhow's `Error::downcast_mut()`.
+    "RUSTSEC-2026-0190",
+    # RUSTSEC-2026-0097 — rand unsound with a custom logger using `rand::rng()`.
+    "RUSTSEC-2026-0097",
 ]

@@ -7,6 +7,9 @@ use std::fmt;
 ///
 /// `type_name` is the caller-supplied label (e.g. `"User ID"`) used only to
 /// prefix the error message.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IdValidationError {
     /// The identifier is empty.

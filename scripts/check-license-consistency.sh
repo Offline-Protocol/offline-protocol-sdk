@@ -50,20 +50,38 @@ done
 # A crate published to crates.io ships as its own archive, and cargo packages
 # only what is inside the crate directory -- so a workspace-root LICENSE reaches
 # no recipient of one. AGPL-3.0 section 4 obliges us to convey the license text
-# with the program, so every publishable crate declares license-file and cargo
-# copies the root LICENSE into its .crate archive. A crate added later inherits
-# nothing here, and the omission is invisible until someone downloads the
-# published archive, so assert it.
+# with the program, so every publishable crate carries its own LICENSE copy at
+# its root, which cargo includes automatically (it packages every git-tracked
+# file under the crate directory).
+#
+# This replaces the earlier `license-file = "../../LICENSE"` approach: setting
+# both `license` and `license-file` makes cargo warn "only one of license or
+# license-file is necessary" on every single invocation, and dropping `license`
+# instead would cost the SPDX identifier that crates.io and cargo-deny classify
+# on. A crate added later inherits nothing here, and the omission is invisible
+# until someone downloads the published archive, so assert it.
 for manifest in crates/*/Cargo.toml; do
+  crate_dir="$(dirname "$manifest")"
   # A harness or internal crate opts out by declaring publish = false, which
   # cargo enforces -- no license copy is owed on something never distributed.
   if grep -qE '^publish[[:space:]]*=[[:space:]]*false' "$manifest"; then
     continue
   fi
-  if ! grep -qF 'license-file = "../../LICENSE"' "$manifest"; then
-    echo "error: $manifest is publishable but declares no license-file" >&2
-    echo "       add 'license-file = \"../../LICENSE\"' so cargo package ships" >&2
-    echo "       the AGPL text, or 'publish = false' if it is not distributed" >&2
+  if [ ! -f "$crate_dir/LICENSE" ]; then
+    echo "error: $crate_dir is publishable but has no LICENSE copy" >&2
+    echo "       run 'cp LICENSE $crate_dir/LICENSE' so cargo package ships the" >&2
+    echo "       AGPL text, or set 'publish = false' if it is not distributed" >&2
+    status=1
+  elif ! cmp -s LICENSE "$crate_dir/LICENSE"; then
+    echo "error: $crate_dir/LICENSE has drifted from the root LICENSE" >&2
+    echo "       run 'cp LICENSE $crate_dir/LICENSE' to resync" >&2
+    status=1
+  fi
+  # Belt and braces: the two fields together are what produced the warning.
+  # Matches an active key only -- the comment above it mentions the name too.
+  if grep -qE '^[[:space:]]*license-file[[:space:]]*=' "$manifest"; then
+    echo "error: $manifest sets license-file alongside license" >&2
+    echo "       drop it -- the crate-root LICENSE copy is what ships the text" >&2
     status=1
   fi
 done

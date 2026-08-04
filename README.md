@@ -188,6 +188,7 @@ See the [docs/](docs/) directory for detailed guides:
 - [Architecture Deep Dive](docs/architecture.md)
 - [API Reference](docs/api-reference.md)
 - [Configuration Guide](docs/configuration.md)
+- [Message Delivery](docs/message-delivery.md) — ACK ladder, retries, offline park/push, group delivery reports
 - [DORS Deep Dive](docs/dors.md) / [DORS Configuration](docs/dors-configuration.md)
 - [Mesh Networking Guide](docs/mesh.md)
 - [MLS Encryption Integration](docs/mls-integration.md)

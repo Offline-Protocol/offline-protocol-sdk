@@ -1,4 +1,7 @@
 /// Errors from mesh service operations.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
     /// Serialization or deserialization failed.

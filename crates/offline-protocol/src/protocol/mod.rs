@@ -507,6 +507,9 @@ pub(crate) fn map_test_storage_error(
         S::LoadFailed(detail) => P::LoadFailed(detail),
         S::DeleteFailed(detail) => P::DeleteFailed(detail),
         S::Unavailable(detail) => P::LoadFailed(detail),
+        // Required by `#[non_exhaustive]` on StorageError. This fixture mirrors
+        // the UniFFI adapter, whose own fallback also degrades to `LoadFailed`.
+        ref other => P::LoadFailed(other.to_string()),
     }
 }
 

@@ -232,6 +232,16 @@ impl From<CoreStorageError> for MlsStorageError {
             CoreStorageError::KeyNotFound(_) => MlsStorageError::KeyNotFound,
             CoreStorageError::CorruptedData(_) => MlsStorageError::CorruptedData,
             CoreStorageError::Unavailable(_) => MlsStorageError::LoadFailed,
+            // Required by `#[non_exhaustive]`, NOT a licence to stop
+            // classifying — see the note on `From<offline_protocol::Error>`.
+            ref other => {
+                tracing::warn!(
+                    error = %other,
+                    "unmapped StorageError variant reached the FFI boundary; \
+                     add an explicit arm in offline-protocol-uniffi"
+                );
+                MlsStorageError::LoadFailed
+            }
         }
     }
 }
@@ -422,9 +432,20 @@ impl CoreProtocolStateStorage for ProtocolStateStorageWrapper {
 }
 
 impl From<offline_protocol::Error> for ProtocolError {
-    // Exhaustive on purpose (no `_` arm): a new engine error variant must
-    // be classified here explicitly instead of silently degrading to
-    // `Other`, which foreign callers cannot act on.
+    // Every variant that exists is still classified explicitly here: a new
+    // engine error must get its own arm rather than silently degrading to
+    // `Other`, which foreign callers cannot act on. (The original taxonomy rot
+    // this guards against came from exactly such a catch-all plus blanket
+    // `Other(e.to_string())` wraps accreting per-PR — see PR #144.)
+    //
+    // The trailing `_` arms below are forced by `#[non_exhaustive]` on the
+    // engine error enums, which the library crates carry so that adding a
+    // variant is not a semver break for published downstream consumers. That
+    // trade costs the compile error that used to enforce the rule above, so it
+    // is replaced with a runtime `warn!`: an unmapped variant now shows up in
+    // logs and telemetry instead of vanishing into `Other`. When you add an
+    // engine error variant, add its arm here — the wildcard is a tripwire, not
+    // a destination.
     fn from(err: offline_protocol::Error) -> Self {
         use offline_protocol::Error as E;
         use offline_protocol_core::Error as CoreErr;
@@ -462,12 +483,28 @@ impl From<offline_protocol::Error> for ProtocolError {
                 | CoreErr::InvalidTTL(_)
                 | CoreErr::InvalidHopCount(_)
                 | CoreErr::InvalidServiceId(_)) => ProtocolError::InvalidArgument(err.to_string()),
+                ref other => {
+                    tracing::warn!(
+                        error = %other,
+                        "unmapped core Error variant reached the FFI boundary; \
+                         add an explicit arm in offline-protocol-uniffi"
+                    );
+                    ProtocolError::Other(other.to_string())
+                }
             },
             // Router/reliability failures are delivery-infrastructure
             // internals with no FFI-visible producer today; the first one
             // that appears forces an explicit decision here.
             err @ (E::Router(_) | E::Reliability(_)) => ProtocolError::Other(err.to_string()),
             E::Other(msg) => ProtocolError::Other(msg),
+            ref other => {
+                tracing::warn!(
+                    error = %other,
+                    "unmapped engine Error variant reached the FFI boundary; \
+                     add an explicit arm in offline-protocol-uniffi"
+                );
+                ProtocolError::Other(other.to_string())
+            }
         }
     }
 }
@@ -3414,7 +3451,7 @@ impl OfflineProtocol {
     /// unattributed ingest so the message is still processed best-effort.
     ///
     /// **`sender_id` is a reachability assertion, not just an attribution.**
-    /// A non-empty value routes through [`Self::notify_neighbor_reachable`],
+    /// A non-empty value routes through `notify_neighbor_reachable` (private),
     /// so the core starts tracking it as a live neighbor: outbox flush,
     /// Welcome re-arm, auto key exchange (an outbound key-package DM),
     /// `NeighborDiscovered`, and service-discovery fan-out. Bridges that
