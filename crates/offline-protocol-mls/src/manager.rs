@@ -684,9 +684,12 @@ impl MlsManager {
         let mls_message = MlsMessageIn::tls_deserialize_exact(&encrypted.ciphertext)
             .map_err(|e| MlsError::Deserialization(e.to_string()))?;
 
-        let result = self
-            .group_manager
-            .decrypt_message(&mut group, mls_message, claimed_sender)?;
+        let result = self.group_manager.decrypt_message(
+            &mut group,
+            &encrypted.group_id,
+            mls_message,
+            claimed_sender,
+        )?;
 
         self.group_manager.save_group(&encrypted.group_id, &group)?;
 
@@ -827,6 +830,18 @@ impl MlsManager {
         metadata.set_role(user_id, role);
         metadata.touch();
         self.save_group_metadata(group_id, &metadata)
+    }
+
+    /// Enables or disables receive-side authorization of group membership
+    /// commits. See [`crate::group::GroupManager::set_enforce_admin_commits`]
+    /// for the fork consequence — this is off by default and enabling it is a
+    /// deployment decision, not a hardening toggle.
+    ///
+    /// Applies to group commits only. The session manager owns a separate
+    /// group manager and is left untouched, so 1:1 sessions are unaffected
+    /// regardless of this setting.
+    pub fn set_enforce_admin_commits(&mut self, enforce: bool) {
+        self.group_manager.set_enforce_admin_commits(enforce);
     }
 
     /// Records the group's creator, **only if none is on record yet**.

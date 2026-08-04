@@ -1083,6 +1083,24 @@ pub enum Event {
         /// unencrypted framing named a different member than the MLS delta
         /// actually changed). Treat as an opaque string — values may be added.
         reason: String,
+        /// Whether the commit was *refused* rather than applied.
+        ///
+        /// `false` (the default configuration) means the membership change
+        /// happened and is being reported after the fact — `added`/`removed`
+        /// describe real roster changes an admin can undo. `true` means
+        /// `GroupConfig::enforce_admin_commits` was on and the commit was
+        /// rejected before merging: no roster event accompanies this one, no
+        /// membership changed locally, and `added`/`removed` describe what the
+        /// commit *would* have done.
+        ///
+        /// A `true` here also means this device declined an epoch every
+        /// accepting member advanced to, so it can no longer decrypt that
+        /// group's traffic and needs re-inviting — treat it as a partition
+        /// alarm, not just a moderation signal. Note the re-invite arrives as
+        /// a Welcome, which is not policy-gated, so it readmits us to the
+        /// group *including* whatever the refused commit did; the change
+        /// itself still has to be resolved separately.
+        enforced: bool,
     },
 
     /// An epoch fork was detected in a group — concurrent commits caused
@@ -2027,6 +2045,7 @@ impl Event {
         added: Vec<String>,
         removed: Vec<String>,
         reason: String,
+        enforced: bool,
     ) -> Self {
         Self::GroupUnauthorizedMembershipChange {
             group_id,
@@ -2034,6 +2053,7 @@ impl Event {
             added,
             removed,
             reason,
+            enforced,
         }
     }
 
@@ -2927,6 +2947,7 @@ impl fmt::Debug for Event {
                 added,
                 removed,
                 reason,
+                enforced,
             } => f
                 .debug_struct("GroupUnauthorizedMembershipChange")
                 .field("group_id", group_id)
@@ -2934,6 +2955,7 @@ impl fmt::Debug for Event {
                 .field("added_count", &added.len())
                 .field("removed_count", &removed.len())
                 .field("reason", reason)
+                .field("enforced", enforced)
                 .finish(),
             Self::GroupEpochForkDetected {
                 group_id,

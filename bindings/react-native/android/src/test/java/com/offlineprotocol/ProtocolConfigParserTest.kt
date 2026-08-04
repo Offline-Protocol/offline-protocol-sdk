@@ -193,44 +193,55 @@ class ProtocolConfigParserTest {
         // Broadcast defaults on; the core's capability gate is what keeps it
         // off against a v1 relay.
         assertTrue(config.groupRelayBroadcastEnabled)
+        // Enforcement defaults OFF. This bridge fallback is what an app that
+        // sends no group section actually gets, so it must not drift from the
+        // Rust default — on, a lagging admin overlay forks the device out of
+        // its own group.
+        assertFalse(config.groupEnforceAdminCommits)
     }
 
     @Test
     fun groupSectionReadsItsNestedHome() {
         val config = parse(
-            """{"appId":"app","userId":"alice","group":{"maxGroupMembers":32,"relayEnabled":false,"relayBroadcastEnabled":false}}"""
+            """{"appId":"app","userId":"alice","group":{"maxGroupMembers":32,"relayEnabled":false,"relayBroadcastEnabled":false,"enforceAdminCommits":true}}"""
         )
         assertEquals(32, config.maxGroupMembers.toInt())
         assertFalse(config.groupRelayEnabled)
         assertFalse(config.groupRelayBroadcastEnabled)
+        assertTrue(config.groupEnforceAdminCommits)
     }
 
     @Test
     fun groupSectionReadsNestedSnakeCase() {
         val config = parse(
-            """{"appId":"app","userId":"alice","group":{"max_group_members":48,"relay_enabled":false,"relay_broadcast_enabled":false}}"""
+            """{"appId":"app","userId":"alice","group":{"max_group_members":48,"relay_enabled":false,"relay_broadcast_enabled":false,"enforce_admin_commits":true}}"""
         )
         assertEquals(48, config.maxGroupMembers.toInt())
         assertFalse(config.groupRelayEnabled)
         assertFalse(config.groupRelayBroadcastEnabled)
+        assertTrue(config.groupEnforceAdminCommits)
     }
 
     @Test
     fun groupFlagsReadTheFlatShape() {
         val config = parse(
-            """{"appId":"app","userId":"alice","maxGroupMembers":64,"groupRelayEnabled":false,"groupRelayBroadcastEnabled":false}"""
+            """{"appId":"app","userId":"alice","maxGroupMembers":64,"groupRelayEnabled":false,"groupRelayBroadcastEnabled":false,"groupEnforceAdminCommits":true}"""
         )
         assertEquals(64, config.maxGroupMembers.toInt())
         assertFalse(config.groupRelayEnabled)
         assertFalse(config.groupRelayBroadcastEnabled)
+        assertTrue(config.groupEnforceAdminCommits)
     }
 
     @Test
     fun nestedGroupSectionWinsOverFlat() {
         val config = parse(
-            """{"appId":"app","userId":"alice","groupRelayBroadcastEnabled":true,"group":{"relayBroadcastEnabled":false}}"""
+            """{"appId":"app","userId":"alice","groupRelayBroadcastEnabled":true,"groupEnforceAdminCommits":true,"group":{"relayBroadcastEnabled":false,"enforceAdminCommits":false}}"""
         )
         assertFalse(config.groupRelayBroadcastEnabled)
+        // Nested wins for the new flag too, in the safer direction: a nested
+        // opt-out must beat a flat opt-in.
+        assertFalse(config.groupEnforceAdminCommits)
         assertTrue(config.groupRelayEnabled)
         assertEquals(256, config.maxGroupMembers.toInt())
     }

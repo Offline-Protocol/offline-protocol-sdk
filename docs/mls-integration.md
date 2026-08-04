@@ -672,8 +672,8 @@ What this means concretely:
 | --- | --- | --- |
 | `set_member_role` | Yes | **Yes** — non-admin role frames are dropped |
 | `rename_group` | Yes | **Yes** — non-admin rename frames are dropped |
-| `invite_to_group` (MLS Add commit) | Yes | **No** |
-| `remove_from_group` (MLS Remove commit) | Yes | **No** |
+| `invite_to_group` (MLS Add commit) | Yes | **No** (opt-in — see below) |
+| `remove_from_group` (MLS Remove commit) | Yes | **No** (opt-in — see below) |
 
 Membership changes travel as authenticated MLS commits. MLS verifies that the
 committer is a genuine group member — an outsider cannot forge one — but the
@@ -699,7 +699,10 @@ protocol.on('group_unauthorized_membership_change', (event) => {
   // event.committer made a membership change they were not authorized to make.
   // event.added / event.removed list the affected members (sorted).
   // event.reason is 'sender_not_admin' or 'affected_member_mismatch'.
-  // The change HAS been applied — an admin can undo it.
+  // event.enforced is false by default: the change HAS been applied and an
+  // admin can undo it. It is true only when enforce_admin_commits refused the
+  // commit, in which case nothing changed locally — but this device is now an
+  // epoch behind the group and needs re-inviting.
 });
 ```
 
@@ -749,6 +752,34 @@ traffic, and may later surface an epoch-fork signal instead. Only the
 remaining members report the unauthorized removal. Closing this requires
 replicating the admin set with the group state, which is planned follow-up
 work.
+
+**Opt-in enforcement.** `GroupConfig::enforce_admin_commits` (RN:
+`group.enforceAdminCommits`, default `false`) makes the SDK *refuse* a
+membership commit it cannot authorize, rather than applying and reporting it.
+The refusal happens before the MLS merge, so nothing changes locally and the
+`group_unauthorized_membership_change` event carries `enforced: true` with no
+accompanying roster event.
+
+Everything above about partitions still applies, which is why it is off by
+default: a refused commit leaves this device an epoch behind every member that
+accepted it, unrecoverable without an app-level re-invite. The check fails open
+on absent knowledge — no metadata, no admin role stored, an unreadable roster —
+but cannot detect divergent knowledge, so enable it only for a closed
+deployment that controls role distribution, and never on part of a fleet. Pure
+key-update commits and 1:1 sessions are never gated. See
+[Group Configuration](configuration.md#group-configuration) for the full
+trade-off.
+
+**Re-inviting is not by itself the remedy.** What enforcement guarantees is
+that this device never *merges* an unauthorized commit — not that it never ends
+up in a group the commit changed. A re-invite arrives as a Welcome, and a
+Welcome is not a commit and is not policy-gated: it readmits the device to the
+group as it stands, including the member an unauthorized Add spliced in (whose
+roster attribution then carries `authorized: null`, since a Welcome join
+evaluates nothing). So on `enforced: true`, resolve the refused change as well
+— have an admin remove the intruder, or confirm the removal was legitimate
+before restoring the member — rather than re-inviting and considering the
+matter closed.
 
 **Guidance for apps that need stronger guarantees:** treat
 `group_unauthorized_membership_change` as a moderation alert for a *human*

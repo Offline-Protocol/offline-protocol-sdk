@@ -505,8 +505,9 @@ deployment is still your call.
 | `maxGroupMembers` | number | 256 | Maximum members in a single group (must be > 0) |
 | `relayEnabled` | boolean | `true` | Register groups with the relay server |
 | `relayBroadcastEnabled` | boolean | `true` | Allow a relay-synced group to send via one O(1) relay broadcast instead of per-member fan-out — taken only against a relay that advertised the `group_delivery_v2` capability |
+| `enforceAdminCommits` | boolean | `false` | Refuse an incoming MLS membership commit whose committer the local admin overlay does not authorize, instead of applying and reporting it |
 
-**These two flags are not the same switch.**
+**These two relay flags are not the same switch.**
 
 `relayEnabled` gates *registration*. The relay's group registry is what invite
 links resolve against, so turning it off breaks invite links. Leave it on.
@@ -536,6 +537,36 @@ ACK timer starting at local enqueue — the strongest reason large groups should
 leave the broadcast on. See
 [Group sends](message-delivery.md#group-sends) for the full analysis.
 
+#### `enforceAdminCommits` — opt-in, and a partition decision
+
+Leaving this off does **not** mean unauthorized membership changes go
+unnoticed. They are applied and reported: `group_unauthorized_membership_change`
+fires and the affected `group_member_added` / `group_member_removed` events
+carry `authorized: false`. The flag only decides whether the commit is *also*
+refused.
+
+Turning it on is a decision about partition risk, not a hardening tweak.
+Refusing a commit means declining the MLS merge, so the refusing device's epoch
+stays behind every member that accepted it — and MLS cannot heal that. The
+device stops being able to decrypt the group and has to be re-invited by the
+app. Enforcement is fork-free only if *every* member reaches the same verdict,
+and the admin overlay is replicated best-effort: role changes ride
+unreconciled mesh notifications, and a joiner receives a point-in-time
+snapshot.
+
+The check therefore fails open on every *absent* input — no group metadata, no
+admin role stored yet, an unreadable roster — so the common "my role map is
+behind" case merges normally. What it cannot detect is *divergent* knowledge:
+two members who each hold a non-empty but disagreeing admin set will refuse
+each other's commits. That residual risk is why this is opt-in. Enable it only
+for a closed deployment that controls role distribution, and never on part of a
+fleet — members with it off will apply a commit that members with it on
+rejected. Note also that rejection is receiver-local: the sender's frame is
+still acknowledged, so a committer gets no signal that anyone refused.
+
+Pure key-update commits (which carry no membership change) and 1:1 sessions are
+never gated.
+
 **React Native:** the `group` section is plumbed through both bridges. Its
 documented home is the nested object (top-level flat keys are also accepted,
 camelCase or snake_case, nested winning over flat — the same shape rules as
@@ -547,6 +578,7 @@ const config = {
     maxGroupMembers: 256,        // default
     relayEnabled: true,          // default — invite links depend on it
     relayBroadcastEnabled: true, // default — capability-gated; false forces per-member fan-out
+    enforceAdminCommits: false,  // default — see the partition warning above before enabling
   },
 };
 ```

@@ -117,6 +117,14 @@ impl From<&offline_protocol_mls::MlsError> for SessionStateError {
             | offline_protocol_mls::MlsError::Signing(_)
             | offline_protocol_mls::MlsError::VerificationFailed(_)
             | offline_protocol_mls::MlsError::InvalidPublicKey(_) => Self::CryptoFailure,
+            // Not a session-state condition: commit enforcement is a group
+            // policy, and 1:1 sessions are exempt from it. It can only reach
+            // this classifier when a *group* commit ciphertext arrives wrapped
+            // in an `__MLS_ENC__` envelope, where `Unknown` is the disposition
+            // we want — drop and ACK, never queue (the refusal is permanent,
+            // so the same frame can never become decryptable) and never re-key
+            // (the session is healthy).
+            offline_protocol_mls::MlsError::CommitNotAuthorized { .. } => Self::Unknown,
             _ => Self::Unknown,
         }
     }

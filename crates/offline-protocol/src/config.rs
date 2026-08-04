@@ -383,6 +383,38 @@ pub struct GroupConfig {
     /// bucket and lower the threshold. This is the strongest reason to leave
     /// the broadcast enabled for large groups.
     pub relay_broadcast_enabled: bool,
+
+    /// Whether an incoming MLS membership commit is refused when the local
+    /// admin overlay does not authorize its committer.
+    ///
+    /// **Off by default, and turning it on is a decision about partition
+    /// risk, not a hardening toggle.** Refusing a commit means declining the
+    /// MLS merge: our epoch stays behind every member who did merge, and MLS
+    /// has no way back — the application has to re-invite us. Enforcement is
+    /// therefore fork-free only if every member reaches the *same* verdict,
+    /// and the admin overlay is replicated best-effort (role changes ride
+    /// unreconciled mesh notifications; a joiner gets a point-in-time
+    /// snapshot). Two members whose role maps merely disagree will partition
+    /// each other with no attacker involved.
+    ///
+    /// The check fails open on every *absent* input — no metadata, no admin
+    /// role stored, an unreadable roster — so the common lag case stays
+    /// harmless. It cannot detect *divergent* views, which is the residual
+    /// risk that keeps this opt-in. Enable it only for a closed deployment
+    /// that controls role distribution.
+    ///
+    /// With it off (the default), unauthorized membership changes are still
+    /// applied and reported: `group_unauthorized_membership_change` fires and
+    /// the roster events carry `authorized: false`. That reporting is
+    /// unaffected by this flag; the flag only decides whether the commit is
+    /// *also* refused.
+    ///
+    /// Rejection is receiver-local. The sender's message is still ACKed, so
+    /// a committer gets no signal that anyone refused, and members with the
+    /// flag off will apply a commit that members with it on rejected — do not
+    /// enable it on part of a fleet.
+    #[serde(default)]
+    pub enforce_admin_commits: bool,
 }
 
 impl Default for GroupConfig {
@@ -391,6 +423,7 @@ impl Default for GroupConfig {
             max_group_members: 256,
             relay_enabled: true,
             relay_broadcast_enabled: true,
+            enforce_admin_commits: false,
         }
     }
 }
@@ -807,6 +840,15 @@ impl ProtocolConfigBuilder {
         self
     }
 
+    /// Sets whether unauthorized MLS membership commits are refused rather
+    /// than applied-and-reported. See
+    /// [`GroupConfig::enforce_admin_commits`] — off by default, and enabling
+    /// it risks permanently forking members whose admin overlay disagrees.
+    pub fn group_enforce_admin_commits(mut self, enabled: bool) -> Self {
+        self.config.group.enforce_admin_commits = enabled;
+        self
+    }
+
     /// Configures security settings.
     pub fn security(mut self, config: SecurityConfig) -> Self {
         self.config.security = config;
@@ -1057,6 +1099,25 @@ mod tests {
         // what gives the broadcast a per-recipient delivery contract.
         assert!(group.relay_enabled);
         assert!(group.relay_broadcast_enabled);
+        // Commit enforcement must stay OFF by default. On, a member whose
+        // admin overlay merely lagged would refuse a legitimate commit and
+        // fork itself out of a healthy group with no attacker involved —
+        // unrecoverable without an app-level re-invite. Flipping this default
+        // is a fleet-wide partition decision, not a hardening tweak.
+        assert!(!group.enforce_admin_commits);
+    }
+
+    #[test]
+    fn test_group_enforce_admin_commits_builder_opt_in() {
+        let config = ProtocolConfig::builder("test-app", "user123")
+            .group_enforce_admin_commits(true)
+            .build()
+            .unwrap();
+        assert!(config.group.enforce_admin_commits);
+        assert!(
+            config.group.relay_enabled && config.group.relay_broadcast_enabled,
+            "opting into enforcement must not disturb the relay flags"
+        );
     }
 
     #[test]

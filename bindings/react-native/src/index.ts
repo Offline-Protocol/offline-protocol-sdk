@@ -136,6 +136,7 @@ interface NativeConfig {
     maxGroupMembers?: number;
     relayEnabled?: boolean;
     relayBroadcastEnabled?: boolean;
+    enforceAdminCommits?: boolean;
   };
   dors?: {
     preferOnline: boolean;
@@ -406,6 +407,7 @@ export class OfflineProtocol {
         maxGroupMembers: this.config.group.maxGroupMembers,
         relayEnabled: this.config.group.relayEnabled,
         relayBroadcastEnabled: this.config.group.relayBroadcastEnabled,
+        enforceAdminCommits: this.config.group.enforceAdminCommits,
       });
       if (groupConfig) {
         nativeConfig.group = groupConfig;
