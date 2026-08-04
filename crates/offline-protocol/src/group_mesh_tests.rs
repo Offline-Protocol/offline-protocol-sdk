@@ -11948,6 +11948,53 @@ fn test_admin_commit_does_not_emit_security_event() {
 }
 
 #[test]
+fn test_admin_commit_with_mismatched_claim_reports_affected_member_mismatch() {
+    let (mut alice, bob, group_id) = setup_alice_bob_charlie_group("Mismatched Claim");
+
+    // Bob is a genuine admin and the commit is real — only the unencrypted
+    // framing lies: it names "dave" while the MLS delta removes charlie.
+    // This pins the second `reason` branch of the security event.
+    {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        alice_mls
+            .set_member_role(&gid, "bob", GroupRole::Admin)
+            .unwrap();
+    }
+    let events = collect_events(&mut alice);
+
+    let commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    let frame = group_commit_frame(&commit, &group_id, "remove", "dave");
+    alice.handle_group_mls_commit("mismatched-claim-1", "bob", &frame);
+
+    let (committer, added, removed, reason) = unauthorized_change(&events)
+        .expect("an admin commit whose framing names the wrong member must surface the event");
+    assert_eq!(committer, "bob");
+    assert!(added.is_empty(), "a Remove commit adds nobody");
+    assert_eq!(
+        removed,
+        vec!["charlie".to_string()],
+        "the event must carry the actual MLS delta, not the claimed member"
+    );
+    assert_eq!(reason, "affected_member_mismatch");
+
+    // The roster event reflects the actual delta, flagged unauthorized.
+    let removed_event = events.lock().unwrap().iter().find_map(|e| match e {
+        Event::GroupMemberRemoved {
+            user_id,
+            authorized,
+            ..
+        } => Some((user_id.clone(), *authorized)),
+        _ => None,
+    });
+    assert_eq!(removed_event, Some(("charlie".to_string(), false)));
+}
+
+#[test]
 fn test_unauthorized_commit_still_applies_membership_and_does_not_fork() {
     // TRIPWIRE. This pins a deliberate design decision, not an accident.
     //
