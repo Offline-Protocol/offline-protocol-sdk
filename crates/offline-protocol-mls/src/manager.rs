@@ -1370,18 +1370,29 @@ mod tests {
     fn test_session_decrypt_rejects_spoofed_sender() {
         let (alice, bob) = create_test_session();
 
-        // A message authenticated as alice must not be attributable to a
-        // different wire sender (SEC-M1).
+        // A message from alice's session must not be attributable to a
+        // different wire sender. The envelope names `session:alice:bob`, which
+        // is not the slot bob shares with "mallory", so the slot binding
+        // rejects it *before* the group is loaded — strictly earlier than the
+        // SEC-M1 credential check, which cannot run until a decrypt succeeds.
         let ct = alice.encrypt_for_user("bob", b"hello").unwrap();
         let err = bob.decrypt_from_user(&ct, "mallory").unwrap_err();
-        assert!(matches!(err, MlsError::SenderIdentityMismatch { .. }));
+        assert!(
+            matches!(err, MlsError::SessionIdentityMismatch { .. }),
+            "spoofed sender must be rejected by the slot binding, got {:?}",
+            err
+        );
 
-        // With the correct claimed sender, a fresh message decrypts. (The
-        // spoofed attempt above consumed its ratchet generation — that
-        // message is burned, which is fine for a forgery.)
-        let ct2 = alice.encrypt_for_user("bob", b"hello again").unwrap();
-        let pt = bob.decrypt_from_user(&ct2, "alice").unwrap();
-        assert_eq!(pt.as_deref(), Some(&b"hello again"[..]));
+        // Rejecting pre-decrypt also means the forgery does not consume the
+        // ratchet generation it named, so the *same* generation still decrypts
+        // for the legitimate sender. (Before the binding, a spoofed frame
+        // burned the generation and the genuine message was lost.)
+        let pt = bob.decrypt_from_user(&ct, "alice").unwrap();
+        assert_eq!(pt.as_deref(), Some(&b"hello"[..]));
+
+        // SEC-M1 itself (correct slot, wrong credential) stays reachable and is
+        // covered by `test_group_decrypt_rejects_spoofed_sender`, where a group
+        // has enough members for the two identities to differ.
     }
 
     #[test]
@@ -1408,12 +1419,95 @@ mod tests {
         );
     }
 
+    /// Serializes an `MlsMessage(PrivateMessage)` from scratch — no group, no
+    /// keys, no captured ciphertext. Wire format per RFC 9420:
+    /// `version(u16) || wire_format(u16) || group_id<V> || epoch(u64) ||
+    /// content_type(u8) || authenticated_data<V> || encrypted_sender_data<V> ||
+    /// ciphertext<V>`, where `<V>` is a QUIC varint length (single byte below
+    /// 64). Used to demonstrate what an off-path attacker can actually build.
+    fn forge_private_message(group_id: &str, epoch: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes()); // ProtocolVersion::Mls10
+        out.extend_from_slice(&2u16.to_be_bytes()); // WireFormat::PrivateMessage
+        assert!(group_id.len() < 64, "test group ids stay in 1-byte varints");
+        out.push(group_id.len() as u8);
+        out.extend_from_slice(group_id.as_bytes());
+        out.extend_from_slice(&epoch.to_be_bytes());
+        out.push(1); // ContentType::Application
+        out.push(0); // authenticated_data: empty
+        out.push(8); // encrypted_sender_data: 8 bytes of nothing
+        out.extend_from_slice(&[0u8; 8]);
+        out.push(16); // ciphertext: 16 bytes of nothing
+        out.extend_from_slice(&[0u8; 16]);
+        out
+    }
+
+    #[test]
+    fn test_forged_frame_reaches_session_desync_without_any_key_material() {
+        // Honest statement of the residual threat model. OpenMLS validates the
+        // framing header (group id, then epoch) *before* any AEAD, sender-data
+        // decryption, or signature check, and a 1:1 slot id is derivable from
+        // two public user ids. So an attacker with no key material, no captured
+        // ciphertext and no session can hand-serialize a frame that classifies
+        // as the recoverable `SessionDesync` — the classification that drives a
+        // re-key. This is inherent to MLS framing, not an OpenMLS bug.
+        //
+        // The mitigation is NOT that this is unreachable (it is reachable, as
+        // asserted here) but that everything hung off it is bounded and
+        // non-destructive: the slot binding below, the per-peer re-key floor,
+        // and a heal that no longer discards queued plaintext.
+        let (_alice, bob) = create_test_session();
+
+        let forged = EncryptedMessage {
+            group_id: GroupId::new("session:alice:bob").unwrap(),
+            message_type: MlsMessageType::Application,
+            epoch: 9_999,
+            ciphertext: forge_private_message("session:alice:bob", 9_999),
+            sender_id: "alice".to_string(),
+            timestamp_ms: 0,
+        };
+
+        let err = bob.decrypt_from_user(&forged, "alice").unwrap_err();
+        assert!(
+            matches!(err, MlsError::SessionDesync(_)),
+            "a forged future-epoch frame reaches the desync classification pre-AEAD, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_forged_frame_naming_a_foreign_slot_is_rejected_before_desync() {
+        // The slot binding is what stops the forgery above from being pointed
+        // at *any* session while naming *any* sender. Without it the claimed
+        // sender and the targeted group are independent, so one derivable slot
+        // id yields a re-key (and a peer-keyed map entry, and a key-package
+        // send) for arbitrary attacker-chosen identities.
+        let (_alice, bob) = create_test_session();
+
+        let forged = EncryptedMessage {
+            group_id: GroupId::new("session:alice:bob").unwrap(),
+            message_type: MlsMessageType::Application,
+            epoch: 9_999,
+            ciphertext: forge_private_message("session:alice:bob", 9_999),
+            sender_id: "mallory".to_string(),
+            timestamp_ms: 0,
+        };
+
+        let err = bob.decrypt_from_user(&forged, "mallory").unwrap_err();
+        assert!(
+            matches!(err, MlsError::SessionIdentityMismatch { .. }),
+            "a frame naming another pair's slot must not classify as recoverable, got {:?}",
+            err
+        );
+    }
+
     #[test]
     fn test_corrupt_ciphertext_is_not_classified_as_session_desync() {
-        // Safety property behind the re-key DoS guard: a corrupt or forged
-        // ciphertext must NEVER be classified `SessionDesync`, or an attacker
-        // could drive session re-keys by injecting garbage. It stays a plain
-        // decrypt failure (AEAD/parse), which the protocol layer fails closed.
+        // A malformed frame must stay a plain decrypt failure, which the
+        // protocol layer fails closed on. Note this covers only *malformed*
+        // input — it never reaches the framing validation, so it is not
+        // evidence that forged frames cannot reach `SessionDesync`. They can:
+        // see `test_forged_frame_reaches_session_desync_without_any_key_material`.
         let (alice, bob) = create_test_session();
         let mut ct = alice.encrypt_for_user("bob", b"hello").unwrap();
         // Corrupt the AEAD-protected body.

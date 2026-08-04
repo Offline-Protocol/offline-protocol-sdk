@@ -126,6 +126,18 @@ pub enum SecurityWarningCode {
     /// tracking set is bounded, so after a flood of forged sender ids a
     /// peer may warn again.
     PlaintextReceiveRejected,
+    /// An encrypted 1:1 envelope named an MLS group that is not the session
+    /// slot shared with the claimed wire sender. The text-path counterpart to
+    /// [`Self::MediaSenderGroupMismatch`]: it catches the same misattribution
+    /// on paths where MLS cannot, because the envelope failed before it
+    /// authenticated anything.
+    SessionSenderGroupMismatch,
+    /// A 1:1 MLS session was torn down and re-advertised after an epoch
+    /// desync. Expected occasionally (a genuine fork heals this way), but the
+    /// triggering frame is not authenticated — see `schedule_session_rekey` —
+    /// so a sustained rate of these for one peer indicates injected frames
+    /// rather than a real fork.
+    SessionRekeyTriggered,
 }
 
 impl SecurityWarningCode {
@@ -141,6 +153,8 @@ impl SecurityWarningCode {
             Self::MediaSenderGroupMismatch => "MEDIA_SENDER_GROUP_MISMATCH",
             Self::PlaintextSend => "PLAINTEXT_SEND",
             Self::PlaintextReceiveRejected => "PLAINTEXT_RECEIVE_REJECTED",
+            Self::SessionSenderGroupMismatch => "SESSION_SENDER_GROUP_MISMATCH",
+            Self::SessionRekeyTriggered => "SESSION_REKEY_TRIGGERED",
         }
     }
 }
@@ -3458,6 +3472,8 @@ mod tests {
             SecurityWarningCode::MediaSenderGroupMismatch,
             SecurityWarningCode::PlaintextSend,
             SecurityWarningCode::PlaintextReceiveRejected,
+            SecurityWarningCode::SessionSenderGroupMismatch,
+            SecurityWarningCode::SessionRekeyTriggered,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -3479,7 +3495,9 @@ mod tests {
                 | SecurityWarningCode::UnsignedControlRejected
                 | SecurityWarningCode::MediaSenderGroupMismatch
                 | SecurityWarningCode::PlaintextSend
-                | SecurityWarningCode::PlaintextReceiveRejected => {}
+                | SecurityWarningCode::PlaintextReceiveRejected
+                | SecurityWarningCode::SessionSenderGroupMismatch
+                | SecurityWarningCode::SessionRekeyTriggered => {}
             }
         }
     }

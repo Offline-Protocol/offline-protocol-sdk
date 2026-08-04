@@ -9,7 +9,7 @@ use super::{
     MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO, MAX_PENDING_KEY_PACKAGES,
     MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
-use crate::events::{DecryptionFailureCode, Event};
+use crate::events::{DecryptionFailureCode, Event, SecurityWarningCode};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 use crate::SessionStateError;
 use chrono::Utc;
@@ -639,6 +639,7 @@ impl OfflineProtocol {
                     kind: DecryptionFailureKind,
                 },
                 SecurityRejected,
+                SessionSlotMismatch,
                 MlsNotInitialized,
             }
 
@@ -677,6 +678,26 @@ impl OfflineProtocol {
                                 "SECURITY: wire sender does not match MLS-authenticated sender, rejecting message"
                             );
                             DecryptResult::SecurityRejected
+                        }
+                        Err(offline_protocol_mls::MlsError::SessionIdentityMismatch {
+                            expected,
+                            found,
+                        }) => {
+                            // The envelope named another pair's session slot.
+                            // Handled here rather than through
+                            // `SessionStateError` so it can never be classified
+                            // as recoverable: this is the one check that covers
+                            // the pre-authentication failure paths (notably the
+                            // desync classification, which OpenMLS reaches
+                            // before any AEAD), so routing it anywhere that
+                            // queues or re-keys would defeat its purpose.
+                            error!(
+                                sender = %sender,
+                                expected = %expected,
+                                found = %found,
+                                "SECURITY: encrypted envelope names a group that is not the claimed sender's session, rejecting"
+                            );
+                            DecryptResult::SessionSlotMismatch
                         }
                         Err(e) => {
                             let session_state_error = SessionStateError::from(&e);
@@ -867,6 +888,14 @@ impl OfflineProtocol {
                     // Spoofed sender: the MLS credential proves the message came
                     // from a different member than the wire envelope claims. Do
                     // not surface, do not ACK (handled by SecurityRejected).
+                    Some(InternalMessageResult::SecurityRejected)
+                }
+                DecryptResult::SessionSlotMismatch => {
+                    self.emit_security_warning(
+                        sender,
+                        SecurityWarningCode::SessionSenderGroupMismatch,
+                        "Encrypted envelope MLS group does not match the claimed sender's session",
+                    );
                     Some(InternalMessageResult::SecurityRejected)
                 }
                 DecryptResult::MlsNotInitialized => {

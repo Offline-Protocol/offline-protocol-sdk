@@ -125,6 +125,15 @@ impl From<&offline_protocol_mls::MlsError> for SessionStateError {
             // so the same frame can never become decryptable) and never re-key
             // (the session is healthy).
             offline_protocol_mls::MlsError::CommitNotAuthorized { .. } => Self::Unknown,
+            // Not a session-state condition either: the envelope named a slot
+            // that is not the claimed sender's, which is a security rejection,
+            // not a readiness problem. `Unknown` is the disposition we want on
+            // any path that reaches this classifier — never queue (the frame
+            // can never become legitimate) and never re-key (there is no
+            // evidence our session with the claimed sender is unhealthy). The
+            // 1:1 text path intercepts this variant before classification so it
+            // can withhold the ACK; see `handle_encrypted_message`.
+            offline_protocol_mls::MlsError::SessionIdentityMismatch { .. } => Self::Unknown,
             _ => Self::Unknown,
         }
     }
