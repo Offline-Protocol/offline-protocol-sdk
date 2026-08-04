@@ -108,8 +108,13 @@ pub struct EncryptionConfig {
     /// inject it under a contact's name); each rejection emits a
     /// [`crate::events::SecurityWarningCode::PlaintextReceiveRejected`]
     /// warning, once per peer. Even under the opt-out, inbound plaintext
-    /// from a peer with a confirmed MLS session is rejected as a
-    /// downgrade/forgery attempt.
+    /// from a peer *known to run MLS* is rejected as a downgrade/forgery
+    /// attempt — see `OfflineProtocol::encryption_capable_peers`. A
+    /// confirmed session is not required, and deliberately so: an honest
+    /// peer queues rather than downgrading while a session is pending, so
+    /// cleartext from a peer we know speaks MLS is never legitimate.
+    /// Peers that have shown no MLS signal stay readable, which is what
+    /// makes this opt-out usable for legacy interop.
     ///
     /// Disable only for deployments that deliberately send cleartext
     /// (e.g. open broadcast/mesh bootstrap without provisioned MLS

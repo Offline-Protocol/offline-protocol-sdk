@@ -496,8 +496,11 @@ Inbound plaintext is gated by the same policy: with `require_encryption = true`,
 plaintext text and legacy media from the mesh are rejected instead of being
 surfaced (plaintext carries no sender authentication), emitting a
 `SecurityWarning` with the `PLAINTEXT_RECEIVE_REJECTED` reason code (once per
-peer). Even under the opt-out, inbound plaintext from a peer with a confirmed
-MLS session is rejected as a downgrade/forgery attempt. The `message_received`
+peer). Even under the opt-out, inbound plaintext from a peer known to run MLS —
+an MLS session exists with them, or their signing key is TOFU-pinned — is
+rejected as a downgrade/forgery attempt; a confirmed session is not required,
+because an honest peer queues rather than downgrading while one is pending.
+Peers that have shown no MLS signal remain readable. The `message_received`
 event's `encrypted` field tells apps whether the content was MLS-decrypted
 (`true`) or accepted as plaintext under the opt-out (`false`).
 
