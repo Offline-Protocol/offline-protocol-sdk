@@ -9,7 +9,7 @@ version = "0.2.0"
 description = "Python bindings for the Offline Protocol SDK — offline-first mesh networking with MLS encryption"
 readme = "README.md"
 license = "AGPL-3.0-only"
-license-files = ["LICENSE", "LICENSE-COMMERCIAL.md", "THIRD-PARTY-NOTICES.md"]
+license-files = ["LICENSE", "LICENSE-COMMERCIAL.md", "THIRD-PARTY-NOTICES.md", "EXPORT.md"]
 requires-python = ">=3.10"
 authors = [{ name = "Offline Protocol, Inc." }]
 keywords = ["offline", "messaging", "p2p", "mesh", "ble", "mls", "encryption"]

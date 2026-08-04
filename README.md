@@ -228,5 +228,10 @@ The Offline Protocol SDK is **dual-licensed**:
 You may use the SDK under **either** license; you do not need both. Contributions
 are accepted under the terms described in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+App-store distribution has consequences under the AGPL — see the
+[Licensing FAQ](docs/licensing-faq.md). And this software contains encryption:
+[EXPORT.md](EXPORT.md) describes its export-control status and what app teams
+must handle themselves.
+
 Neither license grants rights to the "Offline Protocol" name or logo — see
 [TRADEMARKS.md](TRADEMARKS.md).

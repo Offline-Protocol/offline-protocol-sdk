@@ -585,7 +585,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
-          files: THIRD-PARTY-NOTICES.md
+          files: |
+            THIRD-PARTY-NOTICES.md
+            EXPORT.md
           draft: false
           prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
         env:

@@ -47,3 +47,10 @@
 |----------|-------------|
 | [Contributing Guide](../CONTRIBUTING.md) | Development setup, code quality standards, and PR process |
 | [Security Policy](../SECURITY.md) | Vulnerability reporting and security design |
+
+## Licensing
+
+| Resource | Description |
+|----------|-------------|
+| [Licensing FAQ](licensing-faq.md) | The dual license in practice — app stores, the AGPL's reach, commercial licensing |
+| [Export Control Notice](../EXPORT.md) | Encryption export status of the SDK and what app teams must handle themselves |
