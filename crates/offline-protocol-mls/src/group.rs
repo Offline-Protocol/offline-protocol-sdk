@@ -461,13 +461,28 @@ impl GroupManager {
             return Ok(());
         }
 
-        // Every principal behind the change must be an admin: the committer,
-        // plus each proposal's own sender. A non-member proposal sender
-        // (external, new-member) can never be an admin of this group.
+        // Every principal behind the *membership* change must be an admin:
+        // the committer, plus the sender of each Add/Remove proposal, since
+        // MLS lets a member commit a proposal another member made. A
+        // non-member proposal sender (external, new-member) can never be an
+        // admin of this group.
+        //
+        // Scoped to membership proposals on purpose, defensively: a commit may
+        // also carry Update or PSK proposals, and an Update is legitimate
+        // self-service that needs no admin, so rejecting an admin's Add because
+        // it batched a member's key update would fork the group over a proposal
+        // that changes no membership. No SDK client produces that shape today —
+        // there is no propose-only API, and a received `ProposalMessage` is
+        // dropped rather than stored — but the check should not become the
+        // thing that forks a group if that ever changes.
+        let membership_proposal_senders = staged_commit
+            .add_proposals()
+            .map(|p| p.sender().clone())
+            .chain(staged_commit.remove_proposals().map(|p| p.sender().clone()));
         let mut unauthorized = metadata.get_role(committer) != GroupRole::Admin;
         if !unauthorized {
-            unauthorized = staged_commit.queued_proposals().any(|p| match p.sender() {
-                Sender::Member(index) => resolve(*index)
+            unauthorized = membership_proposal_senders.into_iter().any(|s| match s {
+                Sender::Member(index) => resolve(index)
                     .map(|id| metadata.get_role(&id) != GroupRole::Admin)
                     .unwrap_or(true),
                 _ => true,
