@@ -12966,3 +12966,115 @@ fn test_session_paths_unaffected_by_enforcement() {
         "1:1 sessions must be unaffected by group commit enforcement"
     );
 }
+
+#[test]
+fn test_enforced_alarm_is_not_suppressed_by_an_earlier_applied_report() {
+    // A refusal is not just a louder version of the applied report — it says
+    // this device stopped merging and now trails the group's epoch, which is
+    // the one outcome an app has to act on. So the rate-limit window of an
+    // earlier applied-and-reported change by the same committer must not
+    // swallow it. Walks the real transition: alice's admin knowledge arrives
+    // between bob's two commits, so the first fails open and the second is
+    // refused, both inside one suppression window.
+    let (mut alice, bob, group_id) = setup_enforcing_group("Alarm Not Suppressed", true, false);
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+
+    // Start with no admin on record. Enforcement fails open, but the
+    // post-merge judgment still reports: `check_is_admin` falls back to
+    // `created_by`, which is alice, not bob.
+    {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        alice_mls
+            .set_member_role(&gid, "alice", GroupRole::Member)
+            .unwrap();
+    }
+    let events = collect_events(&mut alice);
+
+    let remove_commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    let frame = group_commit_frame(&remove_commit, &group_id, "remove", Some("charlie"));
+    alice.handle_group_mls_commit("alarm-applied-1", "bob", &frame);
+
+    // Alice's role snapshot lands: now the admin set is known and non-empty,
+    // so the next commit from the same non-admin is refused rather than
+    // applied.
+    {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        alice_mls
+            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .unwrap();
+    }
+
+    let storage_d = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut dave = OfflineProtocol::new(create_test_config_for_user("dave")).unwrap();
+    dave.initialize_mls_for_test(storage_d).unwrap();
+    let dave_kp = {
+        let dave_mls = dave.mls_manager_for_testing().read().unwrap();
+        dave_mls.generate_key_package().unwrap()
+    };
+    let add_commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let (_welcome, commit) = bob_mls
+            .add_group_member(&gid, &dave_kp.key_package_data)
+            .unwrap();
+        commit
+    };
+    let frame = group_commit_frame(&add_commit, &group_id, "add", Some("dave"));
+    alice.handle_group_mls_commit("alarm-enforced-1", "bob", &frame);
+
+    let flags: Vec<bool> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::GroupUnauthorizedMembershipChange { enforced, .. } => Some(*enforced),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        flags,
+        vec![false, true],
+        "the refusal alarm must survive the applied report's rate-limit window"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::GroupMemberAdded { user_id, .. } if user_id == "dave")),
+        "the refused Add must not have spliced dave into the roster"
+    );
+}
+
+#[test]
+fn test_repeated_refusals_by_one_committer_are_still_rate_limited() {
+    // Splitting the window by outcome must not cost the suppression that the
+    // rate limit exists for: an enforcing device facing a peer whose commits
+    // it keeps refusing would otherwise re-alarm on every one.
+    let (mut alice, bob, group_id) = setup_enforcing_group("Refusal Rate Limit", true, false);
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+    let events = collect_events(&mut alice);
+
+    let remove_commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    let frame = group_commit_frame(&remove_commit, &group_id, "remove", Some("charlie"));
+    alice.handle_group_mls_commit("refusal-1", "bob", &frame);
+    // Bob's own state advanced, so this is a second, distinct commit — but it
+    // is refused for the same reason by the same committer.
+    alice.handle_group_mls_commit("refusal-2", "bob", &frame);
+
+    let reports = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, Event::GroupUnauthorizedMembershipChange { .. }))
+        .count();
+    assert_eq!(
+        reports, 1,
+        "repeat refusals by the same (group, committer) must stay suppressed within the window"
+    );
+}

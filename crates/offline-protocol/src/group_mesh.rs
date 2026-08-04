@@ -264,11 +264,16 @@ pub(crate) struct GroupMeshState {
     /// Suspected epoch forks awaiting resolution. Key: group_id.
     pub(crate) epoch_forks: HashMap<String, EpochForkState>,
 
-    /// When an unauthorized membership change by (group_id, committer) was
-    /// last reported, for rate-limiting the security event — see
-    /// [`UNAUTHORIZED_REPORT_SUPPRESS_SECS`]. Bounded by
+    /// When an unauthorized membership change by (group_id, committer,
+    /// enforced) was last reported, for rate-limiting the security event —
+    /// see [`UNAUTHORIZED_REPORT_SUPPRESS_SECS`]. Bounded by
     /// [`MAX_UNAUTHORIZED_REPORT_ENTRIES`] with oldest-entry eviction.
-    pub(crate) unauthorized_change_reports: HashMap<(String, String), Instant>,
+    ///
+    /// The `enforced` flag is part of the key on purpose: an applied change
+    /// and a refused one are different signals with different urgency (the
+    /// refusal doubles as a partition alarm), so neither may suppress the
+    /// other's first report inside one window.
+    pub(crate) unauthorized_change_reports: HashMap<(String, String, bool), Instant>,
 }
 
 /// Outcome of attempting to process an MLS Commit.
@@ -1833,10 +1838,15 @@ impl OfflineProtocol {
     /// reported after the fact (the default), `enforced == true` means the
     /// commit was refused before merging and no membership change occurred.
     ///
-    /// Rate-limited per `(group, committer)` because divergent role metadata
-    /// would otherwise re-fire on every commit from the same peer. The
-    /// tracking map is bounded: lapsed windows are dropped first, then the
-    /// oldest live entry.
+    /// Rate-limited per `(group, committer, enforced)` because divergent role
+    /// metadata would otherwise re-fire on every commit from the same peer.
+    /// `enforced` is part of the key so the two outcomes never suppress each
+    /// other: a refusal is a partition alarm — the device stopped merging and
+    /// now trails the group's epoch — and losing the first one of those behind
+    /// an earlier report-only event would hide the very condition the app is
+    /// told to act on. Within one outcome class the window still collapses
+    /// repeats, which is what the limit is for. The tracking map is bounded:
+    /// lapsed windows are dropped first, then the oldest live entry.
     fn report_unauthorized_membership_change(
         &mut self,
         group_id: &str,
@@ -1846,7 +1856,7 @@ impl OfflineProtocol {
         reason: &str,
         enforced: bool,
     ) {
-        let key = (group_id.to_string(), committer.to_string());
+        let key = (group_id.to_string(), committer.to_string(), enforced);
         let now = Instant::now();
         let suppressed = self
             .group_mesh
