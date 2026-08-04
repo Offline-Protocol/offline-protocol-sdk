@@ -169,6 +169,58 @@ pub struct OfflineProtocol {
     /// Only encrypt messages when the session is confirmed to avoid race conditions.
     confirmed_sessions: std::collections::HashSet<String>,
 
+    /// Peers that have demonstrated they run MLS, used by
+    /// [`Self::accept_plaintext_content`] to reject cleartext claiming to come
+    /// from an encryption-capable peer.
+    ///
+    /// # Why this is not `confirmed_sessions`, and not a storage read
+    ///
+    /// The gate used to ask `is_session_confirmed`, which reads the
+    /// `session_states` protocol-state record. That record lives in the
+    /// install-scoped app container, where an attacker with write access can
+    /// simply **delete** it: restore then treats absence as `Pending` (it must
+    /// — see `bootstrap_missing_session_state`), the peer drops out of
+    /// `confirmed_sessions`, and the gate opens for unauthenticated cleartext
+    /// carrying an attacker-chosen `sender`. Sealing the record does not help;
+    /// a seal authenticates bytes that are present, and this attack removes
+    /// them. So the signal has to come from somewhere the app container cannot
+    /// reach.
+    ///
+    /// Both sources here are credential-store-resident: the MLS session list
+    /// and the TOFU pin store. Neither is sufficient alone. A session can exist
+    /// with no pin (`security_gate_control_message` accepts an *unsigned*
+    /// control message from a not-yet-pinned peer), and a pin can outlive its
+    /// session. The union is what actually tracks "this peer speaks MLS".
+    ///
+    /// # Monotone within a run — deliberately, and this is load-bearing
+    ///
+    /// Entries are added and **never removed on session teardown**. That looks
+    /// like a leak and is in fact the whole security property. Teardown is
+    /// reachable from an *unauthenticated* frame: an injected `__MLS_ENC__`
+    /// classifies as `SessionDesync`, `schedule_session_rekey` tears down our
+    /// session and advertises a `session_reset` key package, and the peer's
+    /// `handle_key_package_message` then deletes its own. A set that shrank on
+    /// teardown would therefore let one injected frame re-open the very gate
+    /// this field exists to hold shut — moving the attack from "needs
+    /// app-container write access" to "needs one forged packet", which is
+    /// strictly worse than the bug it fixes.
+    ///
+    /// Keeping a peer after teardown costs nothing real: a peer that spoke MLS
+    /// a moment ago is still encryption-capable, so its cleartext is still a
+    /// downgrade. The invariant to preserve is one-directional — this set may
+    /// **over**-approximate (which fails closed) but must never
+    /// **under**-approximate (which fails open). Anything that populates it may
+    /// be lossy; nothing may prune it.
+    ///
+    /// The one legitimate way out is [`Self::reset_tofu_for_peer`], an explicit
+    /// operator action meaning "treat this peer as new", which is exactly when
+    /// forgetting is correct.
+    ///
+    /// Bounded by [`MAX_ENCRYPTION_CAPABLE_PEERS`], enforced as a refusal rather
+    /// than an eviction so the monotonicity above survives the cap — see
+    /// [`Self::mark_encryption_capable`].
+    encryption_capable_peers: std::collections::HashSet<String>,
+
     /// Peers whose key package advertised the compact MLS envelope
     /// ([`MLS_ENVELOPE_COMPACT_V1`] in `env_versions`), so
     /// `seal_encrypted_content` may emit it instead of the legacy JSON form.
@@ -534,6 +586,7 @@ impl OfflineProtocol {
             key_package_sent_to: std::collections::HashSet::new(),
             known_peers: HashMap::new(),
             confirmed_sessions: std::collections::HashSet::new(),
+            encryption_capable_peers: std::collections::HashSet::new(),
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_rich_payload: std::collections::HashSet::new(),
             peer_rich_attested: std::collections::HashSet::new(),
@@ -654,6 +707,7 @@ impl OfflineProtocol {
         let previous_restored_media_descriptors = self.restored_media_descriptors.clone();
         let previous_both_create_awaiting_decrypt = self.both_create_awaiting_decrypt.clone();
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
+        let previous_encryption_capable_peers = self.encryption_capable_peers.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
         // The debounce watermark travels with the clock: `restore_lamport_clock`
@@ -771,6 +825,11 @@ impl OfflineProtocol {
             self.restored_media_descriptors = previous_restored_media_descriptors;
             self.both_create_awaiting_decrypt = previous_both_create_awaiting_decrypt;
             self.confirmed_sessions = previous_confirmed_sessions;
+            // Restored for consistency with the rest of the transaction, not
+            // for safety: this set only ever grows, so keeping the wider view
+            // would also have been sound. Rolling it back keeps "a failed
+            // initialize_mls leaves no trace" true without exception.
+            self.encryption_capable_peers = previous_encryption_capable_peers;
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
             self.last_persisted_lamport = previous_last_persisted_lamport;
@@ -828,6 +887,71 @@ impl OfflineProtocol {
     /// Checks if MLS encryption is initialized.
     pub fn is_mls_initialized(&self) -> bool {
         self.mls_manager.is_some()
+    }
+
+    /// Records that `peer_id` has demonstrated it runs MLS.
+    ///
+    /// The only way into [`Self::encryption_capable_peers`]. Call it from
+    /// anywhere a peer proves encryption capability — creating or joining a 1:1
+    /// session with them, or pinning their signing key. Calling it redundantly
+    /// is free and calling it too often is safe; the failure that matters is
+    /// *not* calling it, which leaves the plaintext gate open for that peer.
+    ///
+    /// # Bounded by refusal, never by eviction
+    ///
+    /// Some marking paths are reachable without authentication: an unsigned
+    /// `__MLS_WELCOME__` from a never-pinned sender marks it (deliberately —
+    /// see `handle_welcome_message` — so a failing handshake does not leave the
+    /// gate open), and `tofu_check_or_pin` marks before its own store-full
+    /// branch. The keys are therefore wire-claimed ids and need their own cap,
+    /// like every other map keyed that way.
+    ///
+    /// It has to be a refusal. Evicting would un-mark a peer that really is
+    /// encryption-capable — the fail-open direction this field exists to
+    /// prevent — and would hand an attacker a way to unprotect a *chosen*
+    /// victim by flooding. Refusing only declines to add knowledge: that peer
+    /// falls through to the `is_session_confirmed` check in
+    /// [`Self::accept_plaintext_content`], which is exactly what shipped before
+    /// this set existed. So a flood costs later peers the improvement and never
+    /// costs anyone the protection they already had.
+    ///
+    /// Legitimate peers are also first in line by construction: restore seeds
+    /// the set from the session list and the TOFU pins during `initialize_mls`,
+    /// before `start()` admits any traffic.
+    pub(crate) fn mark_encryption_capable(&mut self, peer_id: &str) {
+        if peer_id.is_empty() || peer_id == self.config.user_id {
+            return;
+        }
+        if self.encryption_capable_peers.contains(peer_id) {
+            return;
+        }
+        if self.encryption_capable_peers.len() >= MAX_ENCRYPTION_CAPABLE_PEERS {
+            debug!(
+                peer_id = %peer_id,
+                cap = MAX_ENCRYPTION_CAPABLE_PEERS,
+                "Encryption-capability set at capacity; peer falls back to the session-state check"
+            );
+            return;
+        }
+        self.encryption_capable_peers.insert(peer_id.to_string());
+        debug!(peer_id = %peer_id, "Peer marked encryption-capable");
+        if self.encryption_capable_peers.len() == MAX_ENCRYPTION_CAPABLE_PEERS {
+            // Emitted on the transition into full, so it cannot become a
+            // per-frame flood: the set only grows, so this line is reachable
+            // once per fill and a refill needs an intervening
+            // `reset_tofu_for_peer`.
+            warn!(
+                cap = MAX_ENCRYPTION_CAPABLE_PEERS,
+                "Encryption-capability set reached capacity; further peers fall back to the \
+                 session-state check. Expected only under a forged-sender flood."
+            );
+        }
+    }
+
+    /// Whether `peer_id` is known to run MLS. See
+    /// [`Self::encryption_capable_peers`] for why this is not a storage read.
+    pub(crate) fn is_encryption_capable(&self, peer_id: &str) -> bool {
+        self.encryption_capable_peers.contains(peer_id)
     }
 
     /// Returns whether auto-encryption should be applied.
@@ -1605,10 +1729,11 @@ impl OfflineProtocol {
                 self.delete_peer_key_package_from_storage(peer_id);
             } else {
                 {
+                    let trust = self.key_package_trust(peer_id);
                     let manager = mls
                         .read()
                         .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                    manager.import_key_package(peer_id, &received_pkg.key_package_data)?;
+                    manager.import_key_package(peer_id, &received_pkg.key_package_data, trust)?;
                 }
 
                 // Create session and get welcome message
@@ -1618,6 +1743,9 @@ impl OfflineProtocol {
                         .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                     manager.create_session(peer_id)?
                 };
+                // We only ever build a session from a key package the peer
+                // published, so reaching here proves they run MLS.
+                self.mark_encryption_capable(peer_id);
 
                 // Send welcome message to peer
                 let welcome_sent = self.send_welcome_message(peer_id, &welcome)?;
@@ -1704,6 +1832,7 @@ impl OfflineProtocol {
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
             manager.create_session(peer_id)?
         };
+        self.mark_encryption_capable(peer_id);
         if let Err(err) = self.ensure_session_state_entry(peer_id, "manual_session_created") {
             warn!(
                 peer_id = %peer_id,
@@ -1712,6 +1841,32 @@ impl OfflineProtocol {
             );
         }
         Ok(welcome)
+    }
+
+    /// Imports a contact's key package, applying this node's TOFU verdict.
+    ///
+    /// The entry point for bindings that expose low-level MLS APIs. It exists
+    /// because the FFI wrapper used to reach straight for the `MlsManager`,
+    /// which cannot see the TOFU store — so an app could import a key package
+    /// under any peer id with no correlation to the pinned key for that peer,
+    /// bypassing the check `establish_secure_session` performs. Routing through
+    /// the protocol object closes that, and leaves the FFI signature untouched.
+    pub fn manual_mls_import_key_package(
+        &mut self,
+        peer_id: &str,
+        key_package_data: &[u8],
+    ) -> Result<()> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        {
+            let trust = self.key_package_trust(peer_id);
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.import_key_package(peer_id, key_package_data, trust)?;
+        }
+        // A key package we accepted for this peer is proof they run MLS.
+        self.mark_encryption_capable(peer_id);
+        Ok(())
     }
 
     /// Deletes a 1:1 session and clears protocol-level lifecycle state.
@@ -1807,6 +1962,9 @@ impl OfflineProtocol {
     }
 
     fn handle_manual_welcome_confirmation(&mut self, peer_id: &str) {
+        // Shared by `manual_mls_join_session` and `manual_mls_process_welcome`:
+        // in both cases we just joined a session this peer built for us.
+        self.mark_encryption_capable(peer_id);
         match self.confirm_session_state(peer_id, "welcome_received") {
             Ok(true) => {
                 let _ = self.flush_pending_messages(peer_id);

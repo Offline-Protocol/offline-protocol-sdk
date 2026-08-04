@@ -502,25 +502,55 @@ gets more than the peer graph:
 | Category | What a write buys | Consequence |
 | --- | --- | --- |
 | `blocked_users` | delete a marker | that peer is silently unblocked on the next launch |
+| `blocked_users` | add many markers | the list is restored up to `MAX_BLOCKED_USERS` and stops there, so blocking keeps working — before that bound was applied, planted markers could push the set past the live cap and make every new `block_user` fail |
 | `both_create_awaiting_decrypt` | delete a marker | the owner gate that requires a group-aware decrypt before confirming a peer is gone, so a stale plaintext probe can confirm a session the handshake never converged |
 | `session_states` | write `Confirmed` | a peer whose session was still pending is treated as confirmed |
+| `session_states` | **delete** a record | *(fixed)* the peer used to drop out of the confirmed set on the next launch, re-opening the inbound plaintext gate for them. The gate no longer reads this category — see below |
 | `welcome_lifecycles` | edit state or retry schedule | Welcome delivery can be stalled or forced to retry |
 
-None of this forges or reads message content — that is MLS, and MLS keys never
-leave the credential store — but it does mean **container write access degrades
-safety and liveness controls, not just privacy.** Before the storage split these
-records sat behind the OS keystore, so the same attacker could do none of it.
+Note the two `session_states` rows are not the same attack, and the second is
+the one that mattered. Writing `Confirmed` makes this node *stricter*. Deleting
+the record made it more permissive: restore treats an absent record as `Pending`
+— it must, or a single unreadable record would brick initialization — so the
+peer silently left the confirmed set, and the inbound plaintext gate, which used
+to ask "is this peer's session confirmed?", opened for them. With
+`requireEncryption: false` that admitted unauthenticated cleartext under an
+attacker-chosen sender.
+
+**Sealing would not have fixed that**, which is worth stating plainly because it
+is the intuitive move: a seal authenticates bytes that are *present*, and this
+attack removes them. The fix was to stop deriving the answer from a deletable
+record. The gate now asks whether the peer is known to run MLS at all, sourced
+from the MLS session list and the TOFU pin store — both in the credential store,
+which a container write cannot reach.
+
+This also means **container write access can no longer be used to forge message
+content**, which an earlier version of this document claimed outright and should
+not have. Substituting a cached record in `peer_key_packages` was enough to make
+this node build a session around an attacker's leaf — MLS keys never left the
+credential store, but they did not need to. That category is now sealed *and*
+every use of a key package is checked against the peer's pinned signature key.
 
 On stock iOS and Android the app container is writable only by the app itself,
 so this matters on a rooted or jailbroken device, or wherever else your threat
 model grants an attacker filesystem write. If it does, do not treat
-`blocked_users` or session confirmation as durable security state: re-derive them
-from a source you do trust. Sealing these categories instead is *not* the fix —
-it would make the block list fail closed, which is strictly worse (see the
-paragraph above).
+`blocked_users` as durable security state: re-derive it from a source you do
+trust. Sealing these remaining categories is *not* the fix — for the
+marker-style ones the fact lives in the record **key**, which is never sealed,
+so sealing the (empty) value is decorative; and for `blocked_users` it would
+make the list fail closed, which is strictly worse (see the paragraph above).
 
 Consequences worth knowing:
 
+- **Sealing does not protect against deletion or rollback.** The AEAD tag covers
+  a record's value and binds it to its slot, so an edit or a relocation is
+  caught. Nothing binds a record to a *version* or to the set it belongs to, so
+  removing one, or restoring an earlier copy of one, is undetectable. Adding
+  that would need a manifest over the whole category plus a monotonic counter in
+  the credential store — a credential-store write on every protocol-state write,
+  which is far more expensive than the durable-write budget this restore path is
+  already built around. So it is a known limitation, not an oversight: do not
+  build a control that must survive a deletion on top of sealing.
 - **Fail closed.** If the per-install key cannot be read or written, those
   categories are not persisted at all for that session rather than written in the
   clear. Delivery still works from memory; only crash recovery is lost. Records

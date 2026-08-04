@@ -10,6 +10,7 @@ use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
 use chrono::Utc;
 use offline_protocol_core::{Message, UserId};
+use offline_protocol_mls::KeyPackageTrust;
 use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {
@@ -147,6 +148,25 @@ impl OfflineProtocol {
         self.tofu_check_or_pin(message.sender.as_str(), public_key)
     }
 
+    /// The Authentication Service verdict for `peer_id`, for handing to code
+    /// that consumes a key package.
+    ///
+    /// [`KeyPackageTrust::FirstUse`] when no key is pinned. That is a truthful
+    /// "nothing to compare against", not a waiver: it is reached for a genuinely
+    /// new peer, and — because `security_gate_control_message` accepts an
+    /// unsigned control message from a peer that has never been pinned — for one
+    /// whose key package arrived unsigned. The pin lands on their first signed
+    /// message and every later use of their key package is checked against it.
+    ///
+    /// `pub(crate)` rather than `pub(super)` because `group_mesh` is a sibling
+    /// module of `protocol`, and the group invite path needs this too.
+    pub(crate) fn key_package_trust(&self, peer_id: &str) -> KeyPackageTrust<'_> {
+        match self.known_peer_public_keys.get(peer_id) {
+            Some(entry) => KeyPackageTrust::Pinned(&entry.public_key),
+            None => KeyPackageTrust::FirstUse,
+        }
+    }
+
     /// Checks a verified public key against the TOFU store, or pins it on
     /// first contact. Handles bounded-capacity eviction with a minimum age
     /// threshold to resist cache-filling attacks.
@@ -159,6 +179,15 @@ impl OfflineProtocol {
                 "Cannot TOFU-pin an empty public key".to_string(),
             ));
         }
+        // Reaching this function means `verify_control_message` already checked
+        // an Ed25519 signature over the canonical payload, and the signing key
+        // *is* the peer's MLS identity key (`get_identity_public_key` returns
+        // the credential's `signature_key`). So this is proof the peer runs
+        // MLS, independent of whether a pin is ultimately stored — the
+        // store-full branch below returns without pinning, and that peer is no
+        // less encryption-capable for it. Marked here rather than at the exits
+        // so no future branch can slip out without it.
+        self.mark_encryption_capable(sender);
         let now_ms = Utc::now().timestamp_millis();
 
         // Deferred persistence actions collected here to avoid borrow conflicts
@@ -570,6 +599,14 @@ impl OfflineProtocol {
     pub fn reset_tofu_for_peer(&mut self, peer_id: &str) -> bool {
         if self.known_peer_public_keys.remove(peer_id).is_some() {
             self.delete_tofu_entry(peer_id);
+            // The one sanctioned way out of `encryption_capable_peers`. That
+            // set is otherwise monotone precisely because session teardown is
+            // remotely triggerable; this is not teardown, it is an explicit
+            // operator statement that the identity behind `peer_id` is to be
+            // treated as unknown from here on. If they are still an MLS peer
+            // they re-pin on their next signed control message and the entry
+            // comes straight back.
+            self.encryption_capable_peers.remove(peer_id);
             // The peer re-identified, so any existing session is bound to their
             // now-dead credential — drop it so re-establishment isn't a no-op
             // against a stale session. The drop is best-effort, not atomic: the
@@ -688,6 +725,14 @@ impl OfflineProtocol {
         }
         let restored = valid_entries.len() as u32;
         for (peer_id, entry) in valid_entries {
+            // A restored pin is a durable record that this peer signed a
+            // control message with its MLS identity key, so it seeds the
+            // capability set exactly as a live pin does. This is the half that
+            // survives session teardown: an injected frame can drive both sides
+            // to delete their sessions, and without this the next launch would
+            // come up with no capability knowledge at all and re-open the
+            // plaintext gate for that peer.
+            self.mark_encryption_capable(&peer_id);
             self.known_peer_public_keys.insert(peer_id, entry);
         }
         if restored > 0 {

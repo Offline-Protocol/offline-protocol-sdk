@@ -295,6 +295,14 @@ impl OfflineProtocol {
         // per peer, with nothing counting them until now.
         let mut budget = allowance.refusing();
         for peer_id in sessions {
+            // Before anything that can `continue`: an MLS session with this
+            // peer exists, which is the capability fact, and it holds whether
+            // or not the peer's `session_states` record turns out to be
+            // readable. Deriving it from the record instead would reintroduce
+            // exactly the deletable dependency `encryption_capable_peers`
+            // exists to escape.
+            self.mark_encryption_capable(&peer_id);
+
             // Restore-path read: a record whose bytes will not decode is
             // dropped and re-bootstrapped as `Pending` rather than failing
             // initialization forever. The send path deliberately keeps the

@@ -4883,12 +4883,13 @@ impl OfflineProtocol {
         user_id: String,
         key_package_data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
+        // Routed through the protocol object rather than straight to the
+        // MlsManager: the TOFU store lives on `OfflineProtocol`, and without it
+        // this entry point imported a key package under any peer id with no
+        // check against that peer's pinned signature key.
+        let mut guard = self.lock_inner()?;
         guard
-            .import_key_package(&user_id, &key_package_data)
+            .manual_mls_import_key_package(&user_id, &key_package_data)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 

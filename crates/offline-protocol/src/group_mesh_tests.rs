@@ -63,7 +63,12 @@ fn setup_alice_bob_group(group_name: &str) -> (OfflineProtocol, OfflineProtocol,
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap()
     };
     {
@@ -123,7 +128,12 @@ fn test_group_welcome_cannot_squat_session_slot() {
     let (welcome, _commit) = {
         let mallory_mls = mallory.mls_manager_for_testing().read().unwrap();
         mallory_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap()
     };
 
@@ -2139,7 +2149,12 @@ fn test_group_mls_invite_sends_commit_to_existing_members() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
     }
     alice.refresh_group_members(&group_id).unwrap();
@@ -5351,7 +5366,12 @@ fn test_epoch_fork_resolution_includes_failed_members() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
     }
     alice.refresh_group_members(&group_id).unwrap();
@@ -7302,7 +7322,12 @@ fn test_fallback_admin_denies_non_creator() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap()
     };
     {
@@ -7765,7 +7790,12 @@ fn test_welcome_payload_roles_stored_on_join() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap()
     };
 
@@ -8688,7 +8718,12 @@ fn setup_race_alice_bob() -> (
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (welcome, _commit) = alice_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         welcome
     };
@@ -9111,7 +9146,12 @@ fn test_group_message_at_future_epoch_buffered_then_delivered_after_commit() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "charlie",
+                &charlie_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -9220,7 +9260,12 @@ fn test_commit_riding_message_channel_drains_buffered_messages() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "charlie",
+                &charlie_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -9279,7 +9324,12 @@ fn test_buffered_commit_riding_message_channel_unblocks_earlier_entries() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "charlie",
+                &charlie_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -9457,7 +9507,12 @@ fn test_commit_and_message_both_outrun_welcome() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "charlie",
+                &charlie_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -11768,7 +11823,12 @@ fn setup_alice_bob_charlie_group(group_name: &str) -> (OfflineProtocol, OfflineP
     let commit = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "charlie",
+                &charlie_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -11893,7 +11953,12 @@ fn test_unauthorized_add_commit_emits_security_event_and_marks_unauthorized() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = bob_mls
-            .add_group_member(&gid, &dave_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "dave",
+                &dave_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -12113,7 +12178,12 @@ fn test_unauthorized_report_is_rate_limited_per_group_and_committer() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = bob_mls
-            .add_group_member(&gid, &dave_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "dave",
+                &dave_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -12275,7 +12345,12 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     let (welcome, _commit) = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         alice_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap()
     };
     {
@@ -12294,7 +12369,12 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     let add_commit = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "charlie",
+                &charlie_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -12399,7 +12479,12 @@ fn stage_welcome_for_bob(
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (welcome, _commit) = alice_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         welcome
     };
@@ -12573,7 +12658,12 @@ fn setup_enforcing_group(
     let welcome = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let (welcome, _commit) = alice_mls
-            .add_group_member(&gid, &bob_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         welcome
     };
@@ -12592,7 +12682,12 @@ fn setup_enforcing_group(
     let commit = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let (_welcome, commit) = alice_mls
-            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "charlie",
+                &charlie_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -12740,7 +12835,12 @@ fn test_enforced_non_admin_add_commit_is_rejected_without_merge() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         let (_welcome, commit) = bob_mls
-            .add_group_member(&gid, &dave_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "dave",
+                &dave_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };
@@ -12943,7 +13043,11 @@ fn test_session_paths_unaffected_by_enforcement() {
     let welcome = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         bob_mls
-            .import_key_package("alice", &alice_kp.key_package_data)
+            .import_key_package(
+                "alice",
+                &alice_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         bob_mls.create_session("alice").unwrap()
     };
@@ -13017,7 +13121,12 @@ fn test_enforced_alarm_is_not_suppressed_by_an_earlier_applied_report() {
     let add_commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let (_welcome, commit) = bob_mls
-            .add_group_member(&gid, &dave_kp.key_package_data)
+            .add_group_member(
+                &gid,
+                "dave",
+                &dave_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         commit
     };

@@ -4,7 +4,7 @@ use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECOR
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingMessage, PendingMessageRecord, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, MAX_KEY_PACKAGE_SENT_TO,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
     MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL,
     MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
     MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
@@ -101,19 +101,35 @@ impl StateCategory {
     ///   forward path.
     /// - [`storage_keys::MEDIA_DESCRIPTORS`]: file names and recipients of
     ///   in-flight transfers.
+    /// - [`storage_keys::PEER_KEY_PACKAGES`]: the odd one out, sealed for
+    ///   **integrity** rather than confidentiality. The bytes are public wire
+    ///   material and hiding them buys nothing; what matters is that a seal is
+    ///   an AEAD, so a record that has been edited or moved between peers no
+    ///   longer opens. Substituting a cached key package is otherwise enough to
+    ///   make this node build its session around the attacker's leaf — the
+    ///   embedded credential is a *basic* credential, i.e. a self-asserted
+    ///   identity string that anyone can write. `KeyPackageTrust` is the real
+    ///   fix and covers the paths storage cannot see; this shortens the reach of
+    ///   a container write as well. Failing closed is cheap here: an unsealable
+    ///   key package costs one re-exchange.
     ///
-    /// Everything else is public wire material (key packages, advertised
-    /// capability versions), a small state enum, a logical clock, or a
-    /// value-less marker whose only information is the key id — which sealing
-    /// cannot hide anyway, because the store addresses records by it.
+    /// Everything else is advertised capability versions, a small state enum, a
+    /// logical clock, or a value-less marker whose only information is the key
+    /// id — which sealing cannot hide anyway, because the store addresses
+    /// records by it.
+    ///
+    /// Note what sealing does **not** provide, for any category: it authenticates
+    /// bytes that are present, so it cannot detect a record that was deleted or
+    /// rolled back to an earlier version. Controls that must survive a deletion
+    /// cannot be built on it — see `encryption_capable_peers`.
     fn requires_sealing(self) -> bool {
         match self {
             Self::PendingMessages
             | Self::PendingMessageEntries
             | Self::Outbox
-            | Self::MediaDescriptors => true,
-            Self::PeerKeyPackages
-            | Self::PeerCapabilities
+            | Self::MediaDescriptors
+            | Self::PeerKeyPackages => true,
+            Self::PeerCapabilities
             | Self::SessionStates
             | Self::WelcomeLifecycles
             | Self::BlockedUsers
@@ -3953,10 +3969,52 @@ impl OfflineProtocol {
         let user_ids = Self::list_state_keys(storage.as_ref(), storage_keys::BLOCKED_USERS)
             .map_err(|e| Error::Other(format!("Failed to list blocked users: {}", e)))?;
         let listed = user_ids.len();
+        // Two bounds, because they do two different jobs and neither implies
+        // the other. This one bounds *work*: how many keys a single pass may
+        // look at, like every other category walk. The `MAX_BLOCKED_USERS`
+        // break below bounds the *set*. Only the walk bound covers the entries
+        // that never reach the set at all — an invalid user id or a planted
+        // self-block `continue`s without counting toward the live cap, so a
+        // container filled with unparseable keys would otherwise cost one
+        // iteration and one `warn!` line each, unbounded, on every launch.
         for user_id in user_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if offline_protocol_core::UserId::new(user_id).is_err() {
                 warn!(user_id = %user_id, "Skipping blocked user entry with invalid user ID");
                 continue;
+            }
+            // The live path refuses to block your own id; restore has to refuse
+            // it too, or a planted record blocks the local user — which
+            // `block_user` would never have produced.
+            if user_id.as_str() == self.config.user_id {
+                warn!("Skipping blocked user entry naming the local user");
+                continue;
+            }
+            // Bounded by the *live* cap, not the restore-walk cap.
+            //
+            // These are two different numbers for two different jobs, and using
+            // the walk bound here let them disagree by 6384 entries.
+            // `MAX_RESTORE_KEYS_PER_CATEGORY` bounds work — how many keys one
+            // pass may look at. `MAX_BLOCKED_USERS` bounds the block list
+            // itself, and `block_user` enforces it on every insert. Restoring
+            // past it left the set in a state the live path cannot reach, where
+            // every subsequent `block_user` fails with "limit reached" until the
+            // user manually unblocks. Since this category is never consumed by
+            // restore, planted records persist across every launch — so an
+            // attacker who can write the container could permanently disable
+            // blocking by adding markers, without unblocking anyone.
+            //
+            // Stopping at the cap keeps the blocks already restored, which is
+            // the fail-closed direction: an over-full store still blocks the
+            // first MAX_BLOCKED_USERS peers it names.
+            if self.blocked_users.len() >= MAX_BLOCKED_USERS {
+                warn!(
+                    listed,
+                    cap = MAX_BLOCKED_USERS,
+                    "Blocked-user store holds more entries than the live cap admits; \
+                     restoring the first {} and ignoring the rest",
+                    MAX_BLOCKED_USERS
+                );
+                break;
             }
             self.blocked_users.insert(user_id.clone());
         }

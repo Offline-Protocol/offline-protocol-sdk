@@ -163,6 +163,21 @@ pub(crate) const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 /// future version for automatic cross-device key updates.
 pub(crate) const MAX_TOFU_PEERS: usize = 1000;
 
+/// Maximum number of peers retained in the encryption-capability set that gates
+/// inbound plaintext.
+///
+/// Sized to hold every legitimate source at once — [`MAX_TOFU_PEERS`] pins plus
+/// the MLS session list — with room to spare, so a real deployment never
+/// reaches it. The cap exists because several of the paths that mark a peer are
+/// reachable from unauthenticated frames keyed by a wire-claimed sender id, and
+/// because `tofu_check_or_pin` marks *before* its own store-full branch, so
+/// [`MAX_TOFU_PEERS`] does not transitively bound this set.
+///
+/// Unlike the other maps keyed by a wire-claimed id, this one **refuses** at
+/// capacity instead of resetting or evicting: forgetting a peer here is the
+/// fail-open direction. See `OfflineProtocol::mark_encryption_capable`.
+pub(crate) const MAX_ENCRYPTION_CAPABLE_PEERS: usize = 8192;
+
 /// Maximum number of blocked users to retain.
 pub(crate) const MAX_BLOCKED_USERS: usize = 10_000;
 

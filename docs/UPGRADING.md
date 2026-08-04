@@ -331,6 +331,13 @@ sealing `blocked_users` is *not* the fix, because a block list that stops
 persisting whenever the seal key is unavailable is a worse failure than a
 readable one.
 
+Note that **sealing protects against edits, not deletions**. The AEAD tag binds a
+record to its slot, so a modified or relocated record will not open — but nothing
+binds it to a version or to the set it belongs to, so removing a record, or
+restoring an older copy of it, is undetectable. Two controls that used to depend
+on a deletable record have been moved off it (see 1.10); if you build your own,
+do not assume a sealed category can notice something going missing.
+
 The full discussion lives in
 [MLS Integration → Protocol-State Confidentiality](mls-integration.md#protocol-state-confidentiality).
 
@@ -356,6 +363,67 @@ fails closed.
 do not proceed as if the SDK is usable and do not present the user as unblocked.
 Surface it and retry — initialization is transactional, so a rolled-back attempt
 leaves no partial state and a retry is safe.
+
+### 1.10 The inbound plaintext gate no longer reads `session_states`
+
+Only affects `encryption.enabled = true` **with** `requireEncryption: false` —
+the mixed-mode opt-out. Every other configuration is unchanged.
+
+The gate that rejects inbound cleartext used to ask whether a *confirmed* MLS
+session existed with the claimed sender, which it answered from the
+`session_states` protocol-state record. That record lives in the app container,
+so deleting it made the peer look unconfirmed on the next launch and re-opened
+the gate for them. It now asks whether the peer is **known to run MLS at all**,
+sourced from the MLS session list and the TOFU pin store — both in the credential
+store.
+
+What changes in practice:
+
+- Cleartext from a peer you hold an MLS session *or* a TOFU pin for is now
+  rejected even when the session was never confirmed. No honest peer sends
+  cleartext in that state (a sender with a pending session queues rather than
+  downgrading), so this should only ever fire on an injection or a real
+  downgrade.
+- Capability is **not** forgotten when a session is torn down, because teardown
+  can be triggered remotely by an injected frame. It is forgotten by
+  `resetTofuForPeer`, which is the deliberate "treat this identity as new"
+  action.
+- A peer that genuinely loses its MLS state — a failed `initialize_mls`, a
+  reinstall — and then sends plaintext will have it rejected, with the usual
+  once-per-peer `PLAINTEXT_RECEIVE_REJECTED` warning, and no delivery ACK, so
+  they will retry. Watch for that warning if you support such a downgrade;
+  `resetTofuForPeer` is the supported way to accept them as a new identity.
+- Peers that have never shown any MLS signal are unaffected, so plaintext-only
+  interop keeps working.
+- Capability is learned from unauthenticated signals as well as authenticated
+  ones: a well-formed `__MLS_WELCOME__` marks its sender even if the join fails,
+  deliberately, so a peer whose handshake is breaking does not keep the gate
+  open. The trade-off is that an injected frame naming a plaintext-only peer can
+  mark that peer capable and suppress their cleartext for the rest of the run.
+  It does not persist — a restart clears it, since restore seeds only from
+  sessions and pins — and `resetTofuForPeer` clears it immediately. **If a
+  legacy peer goes unreadable with `PLAINTEXT_RECEIVE_REJECTED` and you hold no
+  session or pin for them, that is the case you are looking at.** The set is
+  also capped; past the cap new peers fall back to the old session-state check
+  rather than displacing anyone already in it.
+
+### 1.11 Key packages are checked against the pinned signing key
+
+`peer_key_packages` is now a sealed category, and every use of a key package is
+checked against the peer's TOFU-pinned signature key.
+
+- **Cached key packages written by earlier builds are unsealed and will be
+  dropped on first launch after upgrade.** This is not an error and does not
+  fail initialization; it costs one key-package re-exchange with those peers,
+  which the SDK performs automatically on next contact.
+- `mlsImportKeyPackage` now applies the same check, and returns an error if the
+  package's leaf signature key is not the pinned key for that peer id. Apps
+  driving the low-level MLS API against a *different* identity than the one the
+  peer signed with will start seeing that error — which is the point, but it is
+  a behaviour change for that entry point. The FFI signature is unchanged, so no
+  bindings regeneration is needed.
+- `inviteToGroup` now also verifies the invitee's key package identity, which
+  that path previously did not check at all.
 
 ---
 

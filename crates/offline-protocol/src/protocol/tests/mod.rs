@@ -869,7 +869,11 @@ fn test_encrypted_receive_drops_relay_injected_reply_context() {
     {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         let welcome = manager.create_session("bob").unwrap();
         let bob_manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
@@ -1177,7 +1181,11 @@ fn test_mls_observability_emits_encryption_used_for_successful_encrypt() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -2351,7 +2359,11 @@ fn create_local_session_with(protocol: &OfflineProtocol, peer: &str) {
     let mls = protocol.mls_manager.as_ref().unwrap().clone();
     let manager = mls.read().unwrap();
     manager
-        .import_key_package(peer, &peer_kp.key_package_data)
+        .import_key_package(
+            peer,
+            &peer_kp.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     manager.create_session(peer).unwrap();
 }
@@ -4932,7 +4944,11 @@ fn test_require_encryption_returns_typed_failures() {
             .read()
             .unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -5181,7 +5197,11 @@ fn test_require_encryption_pending_flush_encrypts_and_delivers() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -5239,7 +5259,11 @@ fn test_flush_pending_message_keeps_queued_id() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -7584,7 +7608,11 @@ fn test_flush_dedup_hit_drops_already_dispatched_message() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -9614,7 +9642,11 @@ fn test_auto_send_and_manual_mls_share_single_state_under_concurrency() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -9714,7 +9746,11 @@ fn test_manual_welcome_processing_confirms_session_for_auto_encrypt_flow() {
         manager.get_or_create_key_package().unwrap()
     };
     bob_manager
-        .import_key_package("alice", &alice_key_package.key_package_data)
+        .import_key_package(
+            "alice",
+            &alice_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = bob_manager.create_session("alice").unwrap();
 
@@ -9757,7 +9793,11 @@ fn test_manual_delete_session_clears_protocol_session_state() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -9870,7 +9910,11 @@ fn test_encrypt_confirmed_session_transient_error_preserves_cache() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -9929,7 +9973,11 @@ fn test_externally_deleted_confirmed_session_queues_message() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -9992,7 +10040,11 @@ fn test_confirmation_crash_recovery_before_first_send() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         let welcome = manager.create_session("bob").unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -10541,7 +10593,11 @@ fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
         manager.get_or_create_key_package().unwrap()
     };
     zoe_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = zoe_manager.create_session("bob").unwrap();
     let welcome_content = format!(
@@ -11454,7 +11510,11 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -11535,7 +11595,11 @@ fn test_both_create_owner_confirms_via_decrypt_after_welcome_expired() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -11799,7 +11863,11 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = alice_manager.create_session("bob").unwrap();
     let encrypted = alice_manager
@@ -11902,7 +11970,11 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = alice_manager.create_session("bob").unwrap();
     let encrypted = alice_manager
@@ -12045,7 +12117,11 @@ fn test_crypto_recovery_disabled_falls_back_to_drop_and_ack() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = alice_manager.create_session("bob").unwrap();
     let welcome_wire = Message::new(
@@ -12152,7 +12228,11 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = alice_manager.create_session("bob").unwrap();
     let welcome_wire = Message::new(
@@ -12349,8 +12429,12 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
     let bob_kp = bob_manager.get_or_create_key_package().unwrap();
     {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
-        mgr.import_key_package("bob", &bob_kp.key_package_data)
-            .unwrap();
+        mgr.import_key_package(
+            "bob",
+            &bob_kp.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
+        .unwrap();
     }
     let welcome = {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
@@ -12390,8 +12474,12 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
     let bob_kp2 = bob_manager.get_or_create_key_package().unwrap();
     {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
-        mgr.import_key_package("bob", &bob_kp2.key_package_data)
-            .unwrap();
+        mgr.import_key_package(
+            "bob",
+            &bob_kp2.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
+        .unwrap();
     }
     let welcome2 = {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
@@ -12492,7 +12580,12 @@ fn establish_confirmed_session(
     };
     let welcome = {
         let m = b.mls_manager.as_ref().unwrap().read().unwrap();
-        m.import_key_package(a_id, &a_kp.key_package_data).unwrap();
+        m.import_key_package(
+            a_id,
+            &a_kp.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
+        .unwrap();
         m.create_session(a_id).unwrap()
     };
     {
@@ -12907,7 +13000,11 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = alice_manager.create_session("bob").unwrap();
 
@@ -13154,7 +13251,11 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_kp.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -13278,7 +13379,11 @@ fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = alice_manager.create_session("bob").unwrap();
     let encrypted = alice_manager
@@ -13441,7 +13546,11 @@ fn test_welcome_duplicate_delivery_emits_single_established_event() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = alice_manager.create_session("bob").unwrap();
     let welcome_wire = Message::new(
@@ -13490,7 +13599,11 @@ fn test_restore_session_state_migrates_legacy_session_to_pending_without_inferen
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         let welcome = manager.create_session("bob").unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -13553,7 +13666,11 @@ fn test_corrupt_session_state_record_does_not_fail_initialization() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         let welcome = manager.create_session("bob").unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -13623,7 +13740,11 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         let welcome = manager.create_session("bob").unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -13676,7 +13797,11 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         let welcome = manager.create_session("bob").unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -13748,7 +13873,11 @@ fn test_pending_sessions_reconcile_via_probe_after_restart() {
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -13883,7 +14012,11 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -14034,7 +14167,11 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -14301,7 +14438,11 @@ fn test_send_message_fails_closed_when_confirmation_state_is_corrupted() {
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         let welcome = manager.create_session("bob").unwrap();
         bob_manager.join_session(&welcome).unwrap();
@@ -14346,7 +14487,11 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -14664,7 +14809,11 @@ fn test_mls_pipeline_happy_path_init_send_encrypted_receive_decrypted() {
     let welcome = {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -14733,7 +14882,11 @@ fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     alice_manager.create_session("bob").unwrap();
 
@@ -15254,7 +15407,11 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
         manager.get_or_create_key_package().unwrap()
     };
     let welcome = alice_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .and_then(|_| alice_manager.create_session("bob"))
         .unwrap();
 
@@ -16899,7 +17056,11 @@ fn test_session_state_restore_deletes_come_out_of_the_shared_pool() {
             let key_package = peer_manager.get_or_create_key_package().unwrap();
             let manager = writer.mls_manager.as_ref().unwrap().read().unwrap();
             manager
-                .import_key_package(peer, &key_package.key_package_data)
+                .import_key_package(
+                    peer,
+                    &key_package.key_package_data,
+                    offline_protocol_mls::KeyPackageTrust::FirstUse,
+                )
                 .unwrap();
             let welcome = manager.create_session(peer).unwrap();
             peer_manager.join_session(&welcome).unwrap();
@@ -17485,7 +17646,11 @@ fn test_unreadable_session_state_record_is_neither_fatal_nor_overwritten() {
         {
             let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
             manager
-                .import_key_package("bob", &bob_key_package.key_package_data)
+                .import_key_package(
+                    "bob",
+                    &bob_key_package.key_package_data,
+                    offline_protocol_mls::KeyPackageTrust::FirstUse,
+                )
                 .unwrap();
             let welcome = manager.create_session("bob").unwrap();
             bob_manager.join_session(&welcome).unwrap();
@@ -17557,7 +17722,11 @@ fn test_establishment_state_returns_correct_states() {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -19151,7 +19320,11 @@ fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
     {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
-            .import_key_package("bob", &bob_key_package.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_key_package.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         let welcome = manager.create_session("bob").unwrap();
         let bob_manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
@@ -19595,7 +19768,11 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_kp.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -19671,7 +19848,11 @@ fn test_mls_enc_non_utf8_plaintext_rejected() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_kp.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -19727,7 +19908,11 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
         manager.get_or_create_key_package().unwrap()
     };
     zoe_manager
-        .import_key_package("bob", &bob_key_package.key_package_data)
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let mut welcome = zoe_manager.create_session("bob").unwrap();
     // Tamper: the payload claims a different inviter than the wire sender.
@@ -23838,7 +24023,11 @@ fn establish_media_session(alice: &mut OfflineProtocol, bob: &mut OfflineProtoco
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_kp.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -24029,7 +24218,11 @@ fn compact_envelope_interop_legacy_recipient_and_ungated_parsing() {
         let mls = dave.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("carol", &carol_kp.key_package_data)
+            .import_key_package(
+                "carol",
+                &carol_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("carol").unwrap()
     };
@@ -24720,7 +24913,11 @@ fn wire_size_and_fragment_report_for_encrypted_dms() {
         crate::mls::MlsManager::new(bob_id, Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
     let bob_kp = bob_mgr.generate_key_package().unwrap();
     alice_mgr
-        .import_key_package(bob_id, &bob_kp.key_package_data)
+        .import_key_package(
+            bob_id,
+            &bob_kp.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
         .unwrap();
     let welcome = alice_mgr.create_session(bob_id).unwrap();
     bob_mgr.join_session(&welcome).unwrap();
@@ -25950,7 +26147,11 @@ fn test_encrypted_media_chunk_queued_until_session_ready() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_kp.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap()
     };
@@ -26020,7 +26221,11 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
             let mls = carol.mls_manager.as_ref().unwrap().clone();
             let manager = mls.read().unwrap();
             manager
-                .import_key_package("bob", &bob_kp.key_package_data)
+                .import_key_package(
+                    "bob",
+                    &bob_kp.key_package_data,
+                    offline_protocol_mls::KeyPackageTrust::FirstUse,
+                )
                 .unwrap();
             manager.create_session("bob").unwrap()
         };
@@ -26185,7 +26390,11 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .import_key_package("bob", &bob_kp.key_package_data)
+            .import_key_package(
+                "bob",
+                &bob_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
             .unwrap();
         manager.create_session("bob").unwrap();
     }
@@ -30295,5 +30504,501 @@ fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
             Event::MessageSent { message_id, .. } if *message_id == expired_id.as_str()
         )),
         "no MessageSent may exist for an entry past its lifetime"
+    );
+}
+
+// ============================================================================
+// PLAINTEXT DOWNGRADE GATE — CAPABILITY SOURCED FROM THE CREDENTIAL STORE
+// ============================================================================
+
+/// A "mixed mode" node: encryption on, but plaintext peers tolerated
+/// (`require_encryption = false`). This is the only configuration in which the
+/// downgrade gate is load-bearing — with `require_encryption` on (the default)
+/// it short-circuits, and with encryption off `should_auto_encrypt()` is false.
+fn mixed_mode_node(
+    user_id: &str,
+    secure: &Arc<InMemoryStorage>,
+    state: &Arc<InMemoryStorage>,
+) -> (OfflineProtocol, MockTransport) {
+    let mut config = create_test_config_for_user(user_id);
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = false;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let (secure_handle, state_handle) = split_storage(secure, state);
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let handle = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+    (protocol, handle)
+}
+
+/// Builds a real 1:1 MLS session between the node and `peer`, and pins the
+/// peer's identity key the way a signed key-package exchange would.
+fn establish_session_and_pin(protocol: &mut OfflineProtocol, peer: &str) {
+    let peer_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let peer_manager = MlsManager::new(peer, peer_storage).unwrap();
+    let peer_kp = peer_manager.get_or_create_key_package().unwrap();
+    let peer_identity = peer_manager.get_identity_public_key().unwrap();
+    {
+        let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package(
+                peer,
+                &peer_kp.key_package_data,
+                offline_protocol_mls::KeyPackageTrust::FirstUse,
+            )
+            .unwrap();
+        let welcome = manager.create_session(peer).unwrap();
+        peer_manager.join_session(&welcome).unwrap();
+    }
+    // What the real receive path does for any signed control message.
+    protocol.tofu_check_or_pin(peer, peer_identity).unwrap();
+    protocol
+        .persist_session_state(peer, SessionState::Confirmed, "test")
+        .unwrap();
+    protocol.confirmed_sessions.insert(peer.to_string());
+}
+
+#[test]
+fn test_deleted_session_state_record_cannot_reopen_the_plaintext_gate() {
+    // The regression this whole change exists for. `session_states` lives in
+    // the install-scoped app container, so an attacker with write access there
+    // can delete a peer's record. Restore then *correctly* re-bootstraps it as
+    // `Pending` — it must, or one unreadable record bricks initialization — the
+    // peer drops out of `confirmed_sessions`, and `is_session_confirmed`
+    // answers `Ok(false)` cleanly, so the deliberate `.unwrap_or(true)`
+    // fail-closed never fires. Before the capability set, that delivered
+    // unauthenticated cleartext to the app under an attacker-chosen `sender`.
+    //
+    // Sealing the record would not have helped: the attack removes bytes rather
+    // than forging them.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    {
+        let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+        establish_session_and_pin(&mut alice, "bob");
+
+        handle.queue_message(plaintext_text_message("bob", "alice", "injected #1"));
+        assert!(
+            alice.receive_message().is_none(),
+            "baseline: cleartext claiming to be from a session peer is rejected"
+        );
+    }
+
+    // The attacker's move: delete the record, nothing else.
+    assert!(
+        state
+            .load(storage_keys::SESSION_STATES, "bob")
+            .unwrap()
+            .is_some(),
+        "precondition: the session-state record exists"
+    );
+    state.delete(storage_keys::SESSION_STATES, "bob").unwrap();
+
+    {
+        let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+
+        // The deletion did land: restore wrote a fresh `Pending` over the hole,
+        // so the old confirmation signal really is gone.
+        assert_eq!(
+            alice.load_session_state_entry("bob").unwrap(),
+            Some(SessionState::Pending),
+            "restore re-bootstrapped the deleted record as Pending"
+        );
+        assert!(
+            !alice.confirmed_sessions.contains("bob"),
+            "and the peer is no longer confirmed"
+        );
+
+        // But capability came back from the credential store, which the app
+        // container cannot reach.
+        assert!(
+            alice.is_encryption_capable("bob"),
+            "capability must survive a deleted session-state record"
+        );
+
+        handle.queue_message(plaintext_text_message("bob", "alice", "injected #2"));
+        let delivered = alice.receive_message();
+        assert!(
+            delivered.is_none(),
+            "deleting the session-state record must NOT re-open the plaintext gate; \
+             delivered: {:?}",
+            delivered.map(|m| m.content)
+        );
+    }
+}
+
+#[test]
+fn test_plaintext_rejected_from_peer_with_an_unconfirmed_session() {
+    // The gate now asks about capability, not confirmation. A peer we have
+    // merely *begun* a session with never legitimately sends cleartext: while
+    // the session is pending its own send path queues rather than downgrading.
+    //
+    // Worth pinning separately because the pre-existing "rejected once
+    // confirmed" tests build their sessions by poking `MlsManager` directly and
+    // would keep passing on the old `is_session_confirmed` branch alone.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+
+    alice.mark_encryption_capable("bob");
+    assert!(
+        !alice.confirmed_sessions.contains("bob"),
+        "precondition: no confirmed session, so only the capability check can fire"
+    );
+
+    handle.queue_message(plaintext_text_message("bob", "alice", "downgrade"));
+    assert!(
+        alice.receive_message().is_none(),
+        "an encryption-capable peer's cleartext is a downgrade even unconfirmed"
+    );
+}
+
+#[test]
+fn test_encryption_capability_survives_session_teardown() {
+    // Monotonicity, and why it is a security property rather than a leak.
+    // Session teardown is reachable from an *unauthenticated* frame: an
+    // injected `__MLS_ENC__` classifies as `SessionDesync`, which tears down
+    // locally and advertises a `session_reset` key package that makes the peer
+    // drop its session too. If capability were forgotten on teardown, one
+    // forged packet would re-open the plaintext gate — turning a bug that needs
+    // app-container write access into one that needs a single injected frame.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+    establish_session_and_pin(&mut alice, "bob");
+
+    alice
+        .manual_mls_delete_session("bob")
+        .expect("session teardown succeeds");
+    assert!(
+        !alice.confirmed_sessions.contains("bob"),
+        "teardown clears confirmation"
+    );
+    assert!(
+        alice.is_encryption_capable("bob"),
+        "but NOT capability — a peer that spoke MLS a moment ago still speaks it"
+    );
+
+    handle.queue_message(plaintext_text_message("bob", "alice", "post-teardown"));
+    assert!(
+        alice.receive_message().is_none(),
+        "so cleartext after a teardown is still a downgrade"
+    );
+}
+
+#[test]
+fn test_capability_survives_restart_through_persisted_tofu_pins() {
+    // The durability half. Seeding capability from `list_sessions()` alone
+    // would lose it across teardown-then-restart, which is exactly the sequence
+    // a forged desync frame can drive. TOFU pins persist to the credential
+    // store, so they carry the signal across the restart.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    {
+        let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+        establish_session_and_pin(&mut alice, "bob");
+        alice
+            .manual_mls_delete_session("bob")
+            .expect("session teardown succeeds");
+    }
+
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+    {
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        assert!(
+            !manager.has_session("bob").unwrap(),
+            "precondition: no MLS session survives, so only the pin can carry capability"
+        );
+    }
+    assert!(
+        alice.is_encryption_capable("bob"),
+        "the restored TOFU pin re-seeds capability"
+    );
+
+    handle.queue_message(plaintext_text_message("bob", "alice", "after restart"));
+    assert!(
+        alice.receive_message().is_none(),
+        "capability must not be forgotten across a restart"
+    );
+}
+
+#[test]
+fn test_reset_tofu_for_peer_clears_encryption_capability() {
+    // The one sanctioned way out of the set. `reset_tofu_for_peer` is an
+    // explicit operator action meaning "treat this identity as unknown", which
+    // is precisely when forgetting is right — unlike teardown, it cannot be
+    // driven by a remote frame.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+    establish_session_and_pin(&mut alice, "bob");
+
+    assert!(alice.reset_tofu_for_peer("bob"), "an entry was pinned");
+    assert!(
+        !alice.is_encryption_capable("bob"),
+        "an explicit identity reset forgets capability too"
+    );
+
+    handle.queue_message(plaintext_text_message("bob", "alice", "post-reset"));
+    assert!(
+        alice.receive_message().is_some(),
+        "after a deliberate reset the peer is a stranger again, so the mixed-mode \
+         opt-out applies to them like any other unknown peer"
+    );
+}
+
+#[test]
+fn test_legacy_plaintext_peer_is_still_accepted_in_mixed_mode() {
+    // The interop mode this gate must not break: `enabled: true` +
+    // `requireEncryption: false` exists so a node can auto-encrypt with capable
+    // peers while staying readable by plaintext-only ones. A peer that has
+    // never shown any MLS signal keeps working.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+
+    handle.queue_message(plaintext_text_message("legacy-peer", "alice", "hello"));
+    let received = alice.receive_message();
+    assert_eq!(
+        received.map(|m| m.content),
+        Some("hello".to_string()),
+        "a peer with no MLS signal at all is still readable under the opt-out"
+    );
+}
+
+#[test]
+fn test_encryption_capability_set_is_bounded_without_evicting() {
+    // The set is fed from paths reachable without authentication — a
+    // well-formed `__MLS_WELCOME__` marks its sender even when the join fails,
+    // and `tofu_check_or_pin` marks before its own store-full branch — so the
+    // keys are wire-claimed ids and it needs a cap like every other map fed
+    // that way.
+    //
+    // The cap must be a *refusal*. Evicting would un-mark a peer that really is
+    // encryption-capable, which is the fail-open direction this set exists to
+    // prevent, and would let a flood unprotect a chosen victim. So the assertion
+    // that matters is not just that the set stays bounded, but that a peer
+    // already in it survives a flood that runs well past capacity.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+    establish_session_and_pin(&mut alice, "bob");
+    assert!(alice.is_encryption_capable("bob"), "precondition");
+
+    for i in 0..(MAX_ENCRYPTION_CAPABLE_PEERS + 50) {
+        alice.mark_encryption_capable(&format!("flood-{i}"));
+    }
+
+    assert!(
+        alice.encryption_capable_peers.len() <= MAX_ENCRYPTION_CAPABLE_PEERS,
+        "the capability set must stay bounded, got {}",
+        alice.encryption_capable_peers.len()
+    );
+    assert!(
+        alice.is_encryption_capable("bob"),
+        "a flood must not displace a peer already known to run MLS"
+    );
+
+    // And the protection that entry buys is still in force.
+    handle.queue_message(plaintext_text_message("bob", "alice", "post-flood"));
+    assert!(
+        alice.receive_message().is_none(),
+        "cleartext from the established peer must still be rejected after the flood"
+    );
+
+    // A peer refused at capacity is not marked — it simply falls through to the
+    // `is_session_confirmed` check, which is what shipped before this set
+    // existed. Declining to add knowledge is the safe direction; the unsafe one
+    // would have been dropping knowledge already held.
+    assert!(
+        !alice.is_encryption_capable(&format!("flood-{}", MAX_ENCRYPTION_CAPABLE_PEERS + 49)),
+        "peers arriving past the cap are refused, not admitted by eviction"
+    );
+}
+
+// ============================================================================
+// KEY PACKAGE / TOFU PIN BINDING
+// ============================================================================
+
+#[test]
+fn test_ffi_key_package_import_is_checked_against_the_pin() {
+    // `mls_import_key_package` used to reach straight for the MlsManager, which
+    // cannot see the TOFU store — so an app (or anything holding the FFI
+    // handle) could import a key package under any peer id with no correlation
+    // to that peer's pinned key. It now routes through the protocol object.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+
+    let real_bob = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let impostor = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let pin = real_bob.get_identity_public_key().unwrap();
+    alice.tofu_check_or_pin("bob", pin).unwrap();
+
+    let impostor_kp = impostor.get_or_create_key_package().unwrap();
+    let err = alice
+        .manual_mls_import_key_package("bob", &impostor_kp.key_package_data)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("does not match the pinned key"),
+        "a substituted key package must be refused, got: {}",
+        err
+    );
+
+    // The real peer's package still imports against the same pin.
+    let real_kp = real_bob.get_or_create_key_package().unwrap();
+    alice
+        .manual_mls_import_key_package("bob", &real_kp.key_package_data)
+        .expect("the genuine key package matches its pin");
+}
+
+#[test]
+fn test_key_package_records_are_sealed_at_rest() {
+    // Sealed for integrity, not secrecy: the bytes are public wire material,
+    // but an AEAD record that has been edited or moved between peers no longer
+    // opens, so a container write cannot swap in another key package.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (alice, _handle) = mixed_mode_node("alice", &secure, &state);
+
+    let bob = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let bob_kp = bob.get_or_create_key_package().unwrap();
+    let pkg = ReceivedKeyPackage {
+        key_package_data: bob_kp.key_package_data.clone(),
+        local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 600_000,
+    };
+    alice.persist_peer_key_package("bob", &pkg);
+
+    let raw = state
+        .load(storage_keys::PEER_KEY_PACKAGES, "bob")
+        .unwrap()
+        .expect("a record was written");
+    assert!(
+        !raw.windows(bob_kp.key_package_data.len())
+            .any(|w| w == bob_kp.key_package_data.as_slice()),
+        "the raw key package bytes must not sit in the container in the clear"
+    );
+    assert!(
+        alice.load_peer_key_package_from_storage("bob").is_some(),
+        "and it must still read back through the seal"
+    );
+
+    // Moved to another peer's slot, the AAD binding refuses it.
+    state
+        .store(storage_keys::PEER_KEY_PACKAGES, "carol", &raw)
+        .unwrap();
+    assert!(
+        alice.load_peer_key_package_from_storage("carol").is_none(),
+        "a record lifted into another peer's slot must not open"
+    );
+}
+
+#[test]
+fn test_legacy_unsealed_key_package_record_is_dropped_not_fatal() {
+    // Upgrade path. Installs written before this change hold *unsealed*
+    // key-package records; they cannot open now and are dropped. That costs one
+    // re-exchange, which is exactly what the category's restore already treats
+    // as recoverable — the important part is that it is not an error and does
+    // not fail initialization.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (alice, _handle) = mixed_mode_node("alice", &secure, &state);
+
+    let bob = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let bob_kp = bob.get_or_create_key_package().unwrap();
+    let legacy = serde_json::to_vec(&ReceivedKeyPackage {
+        key_package_data: bob_kp.key_package_data,
+        local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 600_000,
+    })
+    .unwrap();
+    state
+        .store(storage_keys::PEER_KEY_PACKAGES, "bob", &legacy)
+        .unwrap();
+
+    assert!(
+        alice.load_peer_key_package_from_storage("bob").is_none(),
+        "an unsealed legacy record is not accepted at face value"
+    );
+
+    // And a relaunch over that store still comes up.
+    let (_restarted, _h) = mixed_mode_node("alice", &secure, &state);
+}
+
+#[test]
+fn test_blocked_users_restore_is_bounded_by_the_live_cap() {
+    // Restore used to bound this walk by MAX_RESTORE_KEYS_PER_CATEGORY (16384)
+    // while `block_user` enforces MAX_BLOCKED_USERS (10000). The gap left the
+    // set in a state the live path cannot reach, where every subsequent
+    // `block_user` fails with "limit reached". Because restore never consumes
+    // this category, planted records persist across every launch — so writing
+    // markers into the container permanently disabled blocking, without
+    // unblocking anyone.
+    use crate::protocol::types::MAX_BLOCKED_USERS;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    for i in 0..(MAX_BLOCKED_USERS + 500) {
+        state
+            .store(storage_keys::BLOCKED_USERS, &format!("spam-{}", i), &[])
+            .unwrap();
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert_eq!(
+        protocol.get_blocked_users().len(),
+        MAX_BLOCKED_USERS,
+        "restore must stop at the live cap, not the restore-walk cap"
+    );
+    // The control still works: at the cap, blocking an already-blocked peer is
+    // idempotent rather than an error, and the set is in a state the live path
+    // can actually reach.
+    let already = protocol.get_blocked_users()[0].clone();
+    assert!(
+        protocol.block_user(&already).is_ok(),
+        "re-blocking an existing entry stays idempotent at the cap"
+    );
+}
+
+#[test]
+fn test_blocked_users_restore_skips_a_record_naming_the_local_user() {
+    // `block_user` refuses to block your own id, so no legitimate run produces
+    // this record. Restoring it would block the local user.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    state
+        .store(storage_keys::BLOCKED_USERS, "alice", &[])
+        .unwrap();
+    state
+        .store(storage_keys::BLOCKED_USERS, "bob", &[])
+        .unwrap();
+
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert!(
+        !protocol.is_user_blocked("alice"),
+        "a planted self-block record must be ignored"
+    );
+    assert!(
+        protocol.is_user_blocked("bob"),
+        "and genuine entries still restore"
     );
 }
