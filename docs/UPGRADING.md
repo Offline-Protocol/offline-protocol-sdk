@@ -768,7 +768,9 @@ The pre-namespace store was shared by every account on the install, so **at most
 one account may inherit it.** The first to launch writes a claim, reads it back
 to verify, and then adopts by read-through: a miss in the namespaced store falls
 through to the legacy store and promotes what it finds. `delete` removes the
-legacy copy too, so a deleted key cannot be resurrected. The whole
+legacy copy too, so a deleted key cannot be resurrected; if that removal fails,
+the key is tombstoned in the namespaced store instead and read-through treats it
+as absent from then on, so the guarantee holds either way. The whole
 probe → claim → read-back sequence holds a process-wide lock, so two accounts
 starting at once cannot both adopt.
 
@@ -840,9 +842,11 @@ What it erases, for that account only:
 The pre-namespace store is only erased when this account owns the claim or the
 store is unclaimed. Another account's claim makes it off-limits, and a claim
 that cannot be *read* also stops the wipe — unreadable and foreign are
-indistinguishable, and only one of those two mistakes is recoverable. The
-androidx master key is never touched: it is shared with every other account's
-store.
+indistinguishable, and only one of those two mistakes is recoverable. A claim
+that is present but not decodable counts as another account's, for the same
+reason: bytes this SDK cannot interpret are still evidence that something
+claimed the store. The androidx master key is never touched: it is shared with
+every other account's store.
 
 Three things to know before wiring it in:
 

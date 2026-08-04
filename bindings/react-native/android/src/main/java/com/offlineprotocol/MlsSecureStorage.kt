@@ -155,13 +155,30 @@ class MlsSecureStorage internal constructor(
             context: Context,
             accountNamespace: String,
             wipeLegacyStore: Boolean = true
+        ) = wipeAccount(context, accountNamespace, wipeLegacyStore, ::readLegacyClaim)
+
+        /**
+         * [wipeAccount] with the legacy claim read by [readClaim].
+         *
+         * The reader is injectable so the branch that *destroys* the shared
+         * pre-namespace store can be exercised. It cannot be reached otherwise
+         * under a JVM harness: the real reader opens an
+         * `EncryptedSharedPreferences`, which needs a real AndroidKeyStore, so
+         * every claim reads as `Unreadable` and the wipe always fails closed —
+         * the one outcome that was already covered, and only by accident.
+         */
+        internal fun wipeAccount(
+            context: Context,
+            accountNamespace: String,
+            wipeLegacyStore: Boolean,
+            readClaim: (Context) -> LegacyStoreAdoption.LegacyClaim
         ) {
             val namespace = StorageNamespace.requireAccount(accountNamespace)
             synchronized(LOCK) {
                 var firstError: Exception? = null
                 if (wipeLegacyStore) {
                     try {
-                        wipeLegacy(context, namespace)
+                        wipeLegacy(context, namespace, readClaim)
                     } catch (error: Exception) {
                         firstError = error
                     }
@@ -181,11 +198,15 @@ class MlsSecureStorage internal constructor(
             }
         }
 
-        private fun wipeLegacy(context: Context, namespace: String) {
+        private fun wipeLegacy(
+            context: Context,
+            namespace: String,
+            readClaim: (Context) -> LegacyStoreAdoption.LegacyClaim
+        ) {
             if (!legacyPreferencesFile(context).exists()) {
                 return
             }
-            val claim = readLegacyClaim(context)
+            val claim = readClaim(context)
             if (!LegacyStoreAdoption.shouldWipeLegacy(claim, namespace)) {
                 Log.i(
                     TAG,
