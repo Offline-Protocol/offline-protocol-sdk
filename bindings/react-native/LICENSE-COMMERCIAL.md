@@ -23,6 +23,13 @@ following licenses, at your option:
 
 You only need **one** of the two licenses, not both.
 
+One distribution channel deserves a specific call-out: Apple's standard App
+Store terms are widely regarded as incompatible with the AGPL-3.0's
+prohibition on further restrictions, so the commercial license is the
+supported option for apps distributed through the Apple App Store — the
+reasoning is laid out in the
+[Licensing FAQ](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/licensing-faq.md).
+
 ## Obtaining a Commercial License
 
 Commercial licenses are offered by **Offline Protocol, Inc.** To request a quote
