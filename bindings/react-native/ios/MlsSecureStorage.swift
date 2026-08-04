@@ -529,6 +529,20 @@ final class MlsSecureStorage: MlsStorageProvider {
 
     // MARK: - Keychain primitives
 
+    /// Writes one item, replacing any existing value.
+    ///
+    /// Add first, then update on `errSecDuplicateItem` — never delete first. A
+    /// delete-then-add loses the *previous* value whenever the add fails: the
+    /// old item is already gone, the new one never lands, and the throw reports
+    /// a failed write for a key that no longer has any value at all. For MLS
+    /// material that is unrecoverable — a session's ratchet state, or the
+    /// signing identity — where the honest outcome is that a failed write
+    /// leaves the last good value in place. Android's `commit()` and Python's
+    /// `set_password` both overwrite; this is the same guarantee.
+    ///
+    /// Both arms pin `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: the
+    /// update path has to restate it, because an item's accessibility is not
+    /// carried over by a value-only update.
     private static func store(
         keyType: String,
         keyId: String,
@@ -541,18 +555,33 @@ final class MlsSecureStorage: MlsStorageProvider {
 
         let key = makeKey(keyType: keyType, keyId: keyId)
 
-        // Delete any existing item first
-        let deleteQuery = baseQuery(for: key, in: service, accessGroup: accessGroup)
-        SecItemDelete(deleteQuery as CFDictionary)
-
-        // Add new item
         var addQuery = baseQuery(for: key, in: service, accessGroup: accessGroup)
         addQuery[kSecValueData as String] = Data(data)
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw MlsStorageError.StoreFailed(message: "Keychain store failed with status: \(status)")
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        if addStatus == errSecSuccess {
+            return
+        }
+        guard addStatus == errSecDuplicateItem else {
+            throw MlsStorageError.StoreFailed(
+                message: "Keychain store failed with status: \(addStatus)"
+            )
+        }
+
+        let updateQuery = baseQuery(for: key, in: service, accessGroup: accessGroup)
+        let attributes: [String: Any] = [
+            kSecValueData as String: Data(data),
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        let updateStatus = SecItemUpdate(
+            updateQuery as CFDictionary,
+            attributes as CFDictionary
+        )
+        guard updateStatus == errSecSuccess else {
+            throw MlsStorageError.StoreFailed(
+                message: "Keychain overwrite failed with status: \(updateStatus)"
+            )
         }
     }
 
