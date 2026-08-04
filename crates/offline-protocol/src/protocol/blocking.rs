@@ -125,7 +125,7 @@ impl OfflineProtocol {
 
         // 3. Drop queued outbound messages that were waiting for session
         //    establishment with this peer.
-        if !self.drop_pending_queue_for_peer(user_id).is_empty() {
+        if self.drop_pending_queue_for_peer(user_id, "Peer session state reset on unblock") > 0 {
             debug!(user_id = %user_id, "Cleared pending encrypted messages for unblocked user");
         }
 

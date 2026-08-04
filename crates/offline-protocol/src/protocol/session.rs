@@ -3,12 +3,13 @@
 use super::{
     internal_prefixes, lock_shared_state, OfflineProtocol, PresenceRescueThrottle, PruneAllowance,
     RestorableRecord, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, RECONCILIATION_THROTTLE_MS,
-    REKEY_INTERVAL_SECS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
-    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
+    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS,
+    RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS,
+    WELCOME_LIFECYCLE_TTL_SECS, WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
 };
+use crate::events::SecurityWarningCode;
 use crate::mls_observability::MlsOperationContext;
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -584,22 +585,44 @@ impl OfflineProtocol {
     /// genuine second desync within the window heals up to one interval later —
     /// an acceptable trade for a rare event against a bounded-churn guarantee.
     ///
-    /// **SECURITY — remotely-triggerable (rate-limited) re-key.** `peer_id` here
-    /// is the *wire-claimed* sender, not an MLS-authenticated one: the
-    /// `SenderIdentityMismatch` gate in `handle_encrypted_message` only runs on a
-    /// **successful** decrypt, whereas a desync is a `WrongEpoch`/`NoPastEpochData`
-    /// decrypt *failure* that never reaches the credential check. An outsider
-    /// still cannot forge a frame that produces this classification — only a
-    /// structurally-valid MLS message for our existing `session:<peer>:me` group
-    /// can — but a network attacker who **replays a genuine peer's captured
-    /// old-epoch ciphertext** (the outer message id is unauthenticated, so
-    /// transport dedup does not reliably stop a mutated-id replay) can force a
-    /// teardown + re-establishment of that one session. This is strictly better
-    /// than the old silent drop (delivery stays honest and the channel
-    /// self-heals), and the unconditional [`REKEY_INTERVAL_SECS`] rate limit is
-    /// the mitigation that hard-bounds it to one re-key per peer per window
-    /// rather than continuous churn. Also see the CLAUDE.md "Crypto-failure
-    /// recovery" note.
+    /// **SECURITY — this trigger is unauthenticated, and cannot be made
+    /// otherwise.** `peer_id` is the *wire-claimed* sender. Three facts compose:
+    /// `__MLS_ENC__` is a data-plane prefix, deliberately exempt from the
+    /// Ed25519 + TOFU control-message gate (see `DATA_PLANE_PREFIXES`); OpenMLS
+    /// validates the framing header — group id, then epoch — *before* any AEAD,
+    /// sender-data decryption or signature check, so `WrongEpoch` /
+    /// `NoPastEpochData` is produced with the sender still entirely unverified;
+    /// and a 1:1 slot id is `session:<a>:<b>` over two public user ids. So the
+    /// classification that lands here is reachable by **anyone who can inject a
+    /// frame** — no key material, no captured ciphertext, no session, no replay
+    /// needed. `test_forged_frame_reaches_session_desync_without_any_key_material`
+    /// builds such a frame from scratch to keep this statement honest. It is
+    /// inherent to MLS framing, not an OpenMLS defect, so no upgrade changes it.
+    ///
+    /// The `SenderIdentityMismatch` gate cannot help: it compares the MLS
+    /// credential to the claimed sender, and that credential only exists once
+    /// `process_message` **succeeds**. Every pre-authentication verdict is
+    /// structurally outside its reach.
+    ///
+    /// Because the trigger cannot be authenticated, the mitigation is that
+    /// acting on it is **harmless**, not that it is trusted:
+    /// - `SessionManager::decrypt_message` requires the envelope to name the
+    ///   slot shared with the claimed sender, so one derivable session id
+    ///   cannot be aimed at arbitrary peers, and `rekey_due_at` cannot be grown
+    ///   with attacker-chosen keys.
+    /// - [`REKEY_INTERVAL_SECS`] bounds this to one re-key per peer per window.
+    /// - The heal destroys nothing: queued plaintext survives a reset (it seals
+    ///   at flush time against the rebuilt session), and Tier 2 re-seals
+    ///   in-flight resends.
+    /// - Each re-key emits `SecurityWarningCode::SessionRekeyTriggered`, so a
+    ///   sustained rate — the signature of injected frames rather than a real
+    ///   fork — is visible to the app.
+    ///
+    /// **Residual:** an injector can still force bounded re-key churn on a pair
+    /// (delayed delivery, never lost). Closing that needs a signed
+    /// epoch-corroboration exchange before teardown; a liveness-only probe does
+    /// not work, since a healthy peer answers and we would tear down anyway.
+    /// Also see the CLAUDE.md "Crypto-failure recovery" note.
     pub(super) fn schedule_session_rekey(&mut self, peer_id: &str) {
         let now = Utc::now();
         if let Some(due_at) = self.rekey_due_at.get(peer_id) {
@@ -607,9 +630,26 @@ impl OfflineProtocol {
                 return;
             }
         }
+        // Bounded like every other map keyed by a wire-claimed id: the desync
+        // that gets us here is classified before MLS authenticates anything.
+        if !self.rekey_due_at.contains_key(peer_id)
+            && self.rekey_due_at.len() >= MAX_REKEY_TRACKED_PEERS
+        {
+            self.rekey_due_at.clear();
+        }
         self.rekey_due_at.insert(
             peer_id.to_string(),
             now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
+        );
+
+        // A re-key is remotely triggerable and, until now, entirely silent to
+        // the app. A genuine fork produces these occasionally; a sustained rate
+        // for one peer is the signature of injected frames, which an operator
+        // cannot otherwise distinguish.
+        self.emit_security_warning(
+            peer_id,
+            SecurityWarningCode::SessionRekeyTriggered,
+            "1:1 session torn down and re-advertised after an epoch desync",
         );
         // Tear down our own stale session before advertising the reset key
         // package, mirroring the unblock `session_reset` flow. This is what makes
@@ -791,7 +831,10 @@ impl OfflineProtocol {
         peer_id: &str,
         reason: crate::events::WelcomeReasonCode,
     ) {
-        self.drop_pending_queue_for_peer(peer_id);
+        self.drop_pending_queue_for_peer(
+            peer_id,
+            &format!("Welcome delivery failed: {}", reason.as_str()),
+        );
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::secure_session_failed(
                 peer_id.to_string(),

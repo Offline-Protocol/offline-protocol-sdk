@@ -165,6 +165,30 @@ pub enum MlsError {
         authenticated: String,
     },
 
+    /// A 1:1 envelope's `group_id` does not name the session slot shared with
+    /// the sender the transport layer attributed it to.
+    ///
+    /// This is the **failure-path** counterpart to
+    /// [`MlsError::SenderIdentityMismatch`], and the two are not
+    /// interchangeable: SEC-M1 binds the wire sender to the MLS credential, but
+    /// that credential only exists once `process_message` *succeeds*. Every
+    /// pre-authentication verdict — most importantly the framing checks OpenMLS
+    /// runs before any AEAD (group id, then epoch, yielding
+    /// [`MlsError::SessionDesync`]) — is reached with the wire sender still
+    /// entirely unverified. Since a 1:1 slot id is `session:<a>:<b>` over two
+    /// public user ids, anything keyed off such a verdict would otherwise be
+    /// reachable by a stranger naming any session and any sender, with no key
+    /// material at all. Requiring the envelope's slot to be the one shared with
+    /// the claimed sender is the only binding that covers those paths, so it
+    /// runs before the group is loaded.
+    #[error("Session identity mismatch: envelope names '{found}', sender's session slot is '{expected}'")]
+    SessionIdentityMismatch {
+        /// The session slot shared with the claimed sender.
+        expected: String,
+        /// The slot the envelope's `group_id` actually named.
+        found: String,
+    },
+
     /// A 1:1-session Welcome's `group_id` — the session storage slot it would
     /// install into — does not match the slot for the (local user,
     /// authenticated inviter) pair. Rejecting this stops an authenticated peer

@@ -217,11 +217,27 @@ impl SessionManager {
     ///
     /// `claimed_sender` is the transport-level sender this message will be
     /// attributed to; it must match the MLS-authenticated credential.
+    ///
+    /// The envelope's `group_id` is bound to `claimed_sender` before the group
+    /// is loaded, because every failure OpenMLS raises below happens *before*
+    /// it authenticates anything — see [`MlsError::SessionIdentityMismatch`].
+    /// This is the single chokepoint for the binding: `decrypt_from_user` is
+    /// reachable both from the receive path and from the public
+    /// `manual_mls_decrypt_from_user` API, so checking it in either caller
+    /// alone leaves the other as a bypass.
     pub fn decrypt_message(
         &self,
         encrypted: &EncryptedMessage,
         claimed_sender: &str,
     ) -> Result<Option<Vec<u8>>> {
+        let expected_id = GroupId::for_session(&self.user_id, claimed_sender)?;
+        if encrypted.group_id != expected_id {
+            return Err(MlsError::SessionIdentityMismatch {
+                expected: expected_id.to_string(),
+                found: encrypted.group_id.to_string(),
+            });
+        }
+
         let mut group = self
             .group_manager
             .load_group(&encrypted.group_id)?

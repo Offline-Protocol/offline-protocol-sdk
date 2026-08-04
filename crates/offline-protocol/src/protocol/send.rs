@@ -1614,19 +1614,37 @@ impl OfflineProtocol {
         Some((recipient, message))
     }
 
-    /// Drops a recipient's whole queue from memory *and* from storage.
+    /// Drops a recipient's whole queue from memory *and* from storage, settling
+    /// every dropped entry as `MessageFailed`.
     ///
     /// The storage half is a delete per entry rather than one whole-queue
     /// delete, which is the cost side of keying records by message id. Callers
     /// are the paths where every queued message for a peer becomes undeliverable
-    /// at once — blocking, an aborted session, a session reset.
-    pub(super) fn drop_pending_queue_for_peer(&mut self, recipient: &str) -> Vec<PendingMessage> {
+    /// at once — blocking, an aborted session.
+    ///
+    /// Settlement happens *here* rather than in the callers on purpose. The
+    /// caller holds ids handed to the app by `send_message*` at queue time, so
+    /// a silent drop leaves the app waiting forever on ids that will never
+    /// resolve — the same contract the blocked-recipient branch of
+    /// [`Self::flush_pending_messages`] and the pending-expiry pass already
+    /// honour. Returning the messages for the caller to settle is what let all
+    /// three call sites discard them instead, so there is nothing to discard
+    /// any more.
+    pub(super) fn drop_pending_queue_for_peer(&mut self, recipient: &str, reason: &str) -> usize {
         let messages = self
             .pending_encrypted_messages
             .remove(recipient)
             .unwrap_or_default();
         self.delete_pending_messages_from_storage(messages.iter().map(|m| &m.message_id));
-        messages
+        for message in &messages {
+            self.emit_event(Event::message_failed(
+                message.message_id.clone(),
+                reason.to_string(),
+                0,
+            ));
+        }
+        self.recompute_next_pending_message_expiry();
+        messages.len()
     }
 
     fn pending_message_expiry(queued_at: DateTime<Utc>, lifetime_ms: u64) -> Option<DateTime<Utc>> {

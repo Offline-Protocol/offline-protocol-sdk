@@ -5974,11 +5974,11 @@ fn test_unreadable_pending_queue_is_not_overwritten_or_cleared_by_later_writes()
         "an enqueue must not persist over a queue that could not be read"
     );
 
-    // The delete paths (block_user, aborted pending session, session reset) must
-    // not destroy it either — those ids have still never been named. They delete
-    // per-message records for the ids they hold in memory, and the unread legacy
-    // queue's ids are not among them.
-    protocol.drop_pending_queue_for_peer("bob");
+    // The delete paths (block_user, aborted pending session) must not destroy it
+    // either — those ids have still never been named. They delete per-message
+    // records for the ids they hold in memory, and the unread legacy queue's ids
+    // are not among them.
+    protocol.drop_pending_queue_for_peer("bob", "test");
     assert_eq!(
         backing.load(storage_keys::PENDING_MESSAGES, "bob").unwrap(),
         Some(sealed_before),
@@ -12541,6 +12541,210 @@ fn pump_between(
             a_h.queue_message_from(m, peer);
         }
     }
+}
+
+/// Feeds `target` a `session_reset` key package genuinely minted by `from`,
+/// mirroring what `schedule_session_rekey` puts on the wire when it re-keys.
+fn feed_session_reset_key_package(
+    target: &mut OfflineProtocol,
+    from: &mut OfflineProtocol,
+    from_id: &str,
+) {
+    let kp = {
+        let m = from.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let payload = KeyPackagePayload {
+        user_id: from_id.to_string(),
+        key_package_data: kp.key_package_data.clone(),
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: true,
+        wire_versions: Vec::new(),
+        env_versions: Vec::new(),
+        rich_versions: Vec::new(),
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    );
+    let target_id = target.config.user_id.clone();
+    let message = Message::new(
+        UserId::new(from_id).unwrap(),
+        UserId::new(&target_id).unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+    target.process_internal_message(&message);
+}
+
+/// A `session_reset` must not destroy the receiver's queued outbound messages.
+/// The pending queue holds *plaintext*, sealed at flush time against whatever
+/// session is current then — so the rebuild a reset triggers is exactly what
+/// makes those entries deliverable. Dropping them also skipped settlement, and
+/// since a re-key is remotely triggerable (see `schedule_session_rekey`) that
+/// handed an injected frame the power to silently delete messages the app was
+/// already holding ids for.
+#[test]
+fn test_session_reset_retains_pending_outbound_and_delivers_after_rebuild() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+
+    let alice_failed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&alice_failed);
+        alice.on_event(move |e| {
+            if let Event::MessageFailed { message_id, .. } = e {
+                h.lock().unwrap().push(message_id);
+            }
+        });
+        let h = Arc::clone(&bob_rx);
+        bob.on_event(move |e| {
+            if let Event::MessageReceived { content, .. } = e {
+                h.lock().unwrap().push(content);
+            }
+        });
+    }
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    establish_confirmed_session(&mut alice, "alice", &mut bob, "bob");
+
+    // The window the bug lives in: the MLS session exists (so the reset branch
+    // fires at all) but is not confirmed, so alice's sends queue as plaintext
+    // rather than going out.
+    alice.confirmed_sessions.remove("bob");
+    alice
+        .send_message("bob", "queued-before-reset", None, None::<String>)
+        .unwrap();
+    assert!(
+        alice.pending_encrypted_messages.contains_key("bob"),
+        "precondition: the message must be queued, not sent"
+    );
+
+    feed_session_reset_key_package(&mut alice, &mut bob, "bob");
+
+    assert!(
+        alice.pending_encrypted_messages.contains_key("bob"),
+        "a session reset must not discard queued outbound plaintext"
+    );
+    assert!(
+        alice_failed.lock().unwrap().is_empty(),
+        "a session reset must settle nothing as failed (got {:?})",
+        alice_failed.lock().unwrap()
+    );
+
+    // And the rebuild the reset kicks off is what delivers them.
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+    assert!(
+        bob_rx
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "queued-before-reset"),
+        "the retained message must flush once the rebuilt session confirms (got {:?})",
+        bob_rx.lock().unwrap()
+    );
+}
+
+/// `rekey_due_at` is keyed by a wire-claimed peer id — the desync that reaches
+/// `schedule_session_rekey` is classified before MLS authenticates anything — so
+/// it must be bounded like every other map fed from the wire.
+#[test]
+fn test_rekey_tracking_map_is_bounded() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    alice.start().unwrap();
+
+    for i in 0..(MAX_REKEY_TRACKED_PEERS + 5) {
+        alice.schedule_session_rekey(&format!("peer-{i}"));
+    }
+
+    assert!(
+        alice.rekey_due_at.len() <= MAX_REKEY_TRACKED_PEERS,
+        "rekey tracking must stay bounded, got {}",
+        alice.rekey_due_at.len()
+    );
+}
+
+/// A re-key must be visible to the app. It is remotely triggerable, so a
+/// sustained rate for one peer is the only signal an operator has that frames
+/// are being injected rather than a session genuinely forking.
+#[test]
+fn test_rekey_emits_security_warning() {
+    let (mut alice, _h) = make_encrypted_protocol("alice");
+    let warnings: Arc<Mutex<Vec<SecurityWarningCode>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&warnings);
+        alice.on_event(move |e| {
+            if let Event::SecurityWarning { reason_code, .. } = e {
+                h.lock().unwrap().push(reason_code);
+            }
+        });
+    }
+    alice.start().unwrap();
+
+    alice.schedule_session_rekey("bob");
+
+    assert!(
+        warnings
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| *c == SecurityWarningCode::SessionRekeyTriggered),
+        "a re-key must surface a SessionRekeyTriggered warning (got {:?})",
+        warnings.lock().unwrap()
+    );
+}
+
+/// Every path that drops a pending queue must settle the ids it destroys. The
+/// app was handed those ids by `send_message*` at queue time, so an unsettled
+/// drop leaves it waiting on messages that can never resolve either way — the
+/// contract the blocked-flush and expiry paths already honour.
+#[test]
+fn test_aborted_session_settles_pending_queue_with_message_failed() {
+    let (mut alice, _alice_h) = make_encrypted_protocol("alice");
+    let failed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&failed);
+        alice.on_event(move |e| {
+            if let Event::MessageFailed {
+                message_id, reason, ..
+            } = e
+            {
+                h.lock().unwrap().push((message_id, reason));
+            }
+        });
+    }
+    alice.start().unwrap();
+
+    let queued_id = alice
+        .send_message("bob", "never-deliverable", None, None::<String>)
+        .unwrap();
+    assert!(
+        alice.pending_encrypted_messages.contains_key("bob"),
+        "precondition: the message must be queued, not sent"
+    );
+
+    alice.abort_pending_session_for_peer("bob", crate::events::WelcomeReasonCode::RetryExhausted);
+
+    assert!(
+        !alice.pending_encrypted_messages.contains_key("bob"),
+        "an aborted session must clear the queue"
+    );
+    let settled = failed.lock().unwrap();
+    assert_eq!(
+        settled.len(),
+        1,
+        "the dropped message must be settled exactly once (got {settled:?})"
+    );
+    assert_eq!(settled[0].0, queued_id.as_str());
+    assert!(
+        settled[0].1.contains("Welcome delivery failed"),
+        "the settlement must carry the abort reason (got {:?})",
+        settled[0].1
+    );
 }
 
 /// End-to-end heal, detector id > peer id (single-round convergence). Alice
@@ -28862,7 +29066,7 @@ fn test_pending_tail_the_restore_walk_never_reached_survives_runtime_writes() {
     // it either — those ids have still never been named. They delete the
     // per-message records for the ids they hold in memory, and never touch the
     // legacy category at all.
-    protocol.drop_pending_queue_for_peer(&untouched);
+    protocol.drop_pending_queue_for_peer(&untouched, "test");
     assert_eq!(
         state
             .load(storage_keys::PENDING_MESSAGES, &untouched)

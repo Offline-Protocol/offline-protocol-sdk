@@ -1810,13 +1810,20 @@ export type SecurityWarningCode =
   | 'UNSIGNED_CONTROL_REJECTED'
   | 'MEDIA_SENDER_GROUP_MISMATCH'
   | 'PLAINTEXT_SEND'
-  | 'PLAINTEXT_RECEIVE_REJECTED';
+  | 'PLAINTEXT_RECEIVE_REJECTED'
+  | 'SESSION_SENDER_GROUP_MISMATCH'
+  | 'SESSION_REKEY_TRIGGERED';
 
 /**
  * A security-relevant anomaly was detected for a peer. `TOFU_KEY_MISMATCH`
  * signals the peer re-identified (reinstall / new device); the remedy, if the
  * change is legitimate, is `resetTofuForPeer` followed by re-establishing the
  * session.
+ *
+ * `SESSION_REKEY_TRIGGERED` is rate-based rather than per-event: a genuine
+ * epoch fork heals this way occasionally, but the frame that triggers it is
+ * not authenticated (see `schedule_session_rekey`), so a sustained rate for
+ * one peer indicates injected frames. Delivery is delayed, never lost.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';
