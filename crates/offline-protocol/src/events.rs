@@ -8,13 +8,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-/// Serde default for additive `bool` fields whose backwards-compatible value
-/// is `true` (an older payload that omits the field predates the distinction,
-/// so the permissive reading is the correct one).
-pub(crate) fn default_true() -> bool {
-    true
-}
-
 /// Presence status for a peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -880,19 +873,26 @@ pub enum Event {
         group_name: Option<String>,
         /// Whether `added_by` was authorized to make this change.
         ///
-        /// `false` means the change **did** happen — MLS accepted the commit
-        /// and the roster really has changed — but the committer was not a
-        /// known admin. The membership event is still emitted because the
-        /// local roster must not diverge from MLS state; see
+        /// `Some(false)` means the change **did** happen — MLS accepted the
+        /// commit and the roster really has changed — but the committer was
+        /// not a known admin. The membership event is still emitted because
+        /// the local roster must not diverge from MLS state; see
         /// [`Event::GroupUnauthorizedMembershipChange`] for the full signal.
+        ///
+        /// `None` (absent in JSON) means authorization was **not evaluated**
+        /// on the path that produced this event: our own join accepted from
+        /// a Welcome (there is no prior group state to judge the inviter
+        /// against) and relay reconciliation frames (no authenticated
+        /// committer to judge). Events from an older core also omit the
+        /// field. Only `Some(_)` is a positive statement either way.
         ///
         /// The judgment is made against this member's **local replica** of
         /// role state, which replicates best-effort and can lag — a
-        /// legitimate change may be flagged `false`, and different members
-        /// can disagree about the same commit. Do not act on it
+        /// legitimate change may be flagged `Some(false)`, and different
+        /// members can disagree about the same commit. Do not act on it
         /// automatically.
-        #[serde(default = "crate::events::default_true")]
-        authorized: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorized: Option<bool>,
     },
 
     /// A member was removed from a group (from relay).
@@ -903,10 +903,13 @@ pub enum Event {
         user_id: String,
         /// User ID of who performed the removal.
         removed_by: String,
-        /// Whether `removed_by` was authorized to make this change. See
-        /// [`Event::GroupMemberAdded::authorized`].
-        #[serde(default = "crate::events::default_true")]
-        authorized: bool,
+        /// Whether this change was authorized (`None` = not evaluated on
+        /// this path). See [`Event::GroupMemberAdded::authorized`]. On the
+        /// relay reconciliation path the judgment applies to the frame's
+        /// authenticated wire sender, which is not necessarily the
+        /// `removed_by` named here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorized: Option<bool>,
     },
 
     /// Group info was received (from relay).
@@ -1054,6 +1057,12 @@ pub enum Event {
     /// `invite_to_group`. Never reverse a change automatically off a single
     /// member's event — corroborate first. A member added this way can read
     /// all subsequent group traffic until removed.
+    ///
+    /// Reports are rate-limited per `(group, committer)`: a repeat within a
+    /// short window is not re-emitted (divergent role metadata would
+    /// otherwise re-fire it on every commit), but every affected
+    /// [`Event::GroupMemberAdded`] / [`Event::GroupMemberRemoved`] still
+    /// carries `authorized: Some(false)`.
     ///
     /// Known limitation: the member *removed* by an unauthorized Remove does
     /// not receive this event — it can no longer decrypt the commit that
@@ -1868,7 +1877,7 @@ impl Event {
         user_id: String,
         added_by: String,
         group_name: Option<String>,
-        authorized: bool,
+        authorized: Option<bool>,
     ) -> Self {
         Self::GroupMemberAdded {
             group_id,
@@ -1884,7 +1893,7 @@ impl Event {
         group_id: String,
         user_id: String,
         removed_by: String,
-        authorized: bool,
+        authorized: Option<bool>,
     ) -> Self {
         Self::GroupMemberRemoved {
             group_id,

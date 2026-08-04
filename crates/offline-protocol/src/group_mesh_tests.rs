@@ -11772,7 +11772,7 @@ fn group_commit_frame(
     commit: &offline_protocol_mls::EncryptedMessage,
     group_id: &str,
     commit_type: &str,
-    affected_member: &str,
+    affected_member: Option<&str>,
 ) -> String {
     serde_json::json!({
         "group_id": group_id,
@@ -11833,7 +11833,7 @@ fn test_unauthorized_remove_commit_emits_security_event_and_marks_unauthorized()
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls.remove_group_member(&gid, "charlie").unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", "charlie");
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
     alice.handle_group_mls_commit("insider-remove-1", "bob", &frame);
 
     let (committer, added, removed, reason) = unauthorized_change(&events)
@@ -11855,7 +11855,7 @@ fn test_unauthorized_remove_commit_emits_security_event_and_marks_unauthorized()
     });
     assert_eq!(
         removed_event,
-        Some(("charlie".to_string(), false)),
+        Some(("charlie".to_string(), Some(false))),
         "GroupMemberRemoved must still fire, flagged authorized = false"
     );
 }
@@ -11883,7 +11883,7 @@ fn test_unauthorized_add_commit_emits_security_event_and_marks_unauthorized() {
             .unwrap();
         commit
     };
-    let frame = group_commit_frame(&commit, &group_id, "add", "dave");
+    let frame = group_commit_frame(&commit, &group_id, "add", Some("dave"));
     alice.handle_group_mls_commit("insider-add-1", "bob", &frame);
 
     let (committer, added, removed, reason) = unauthorized_change(&events)
@@ -11903,7 +11903,7 @@ fn test_unauthorized_add_commit_emits_security_event_and_marks_unauthorized() {
     });
     assert_eq!(
         added_event,
-        Some(("dave".to_string(), false)),
+        Some(("dave".to_string(), Some(false))),
         "GroupMemberAdded must still fire, flagged authorized = false"
     );
 }
@@ -11929,7 +11929,7 @@ fn test_admin_commit_does_not_emit_security_event() {
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls.remove_group_member(&gid, "charlie").unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", "charlie");
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
     alice.handle_group_mls_commit("admin-remove-1", "bob", &frame);
 
     assert!(
@@ -11944,7 +11944,7 @@ fn test_admin_commit_does_not_emit_security_event() {
         } => Some((user_id.clone(), *authorized)),
         _ => None,
     });
-    assert_eq!(removed_event, Some(("charlie".to_string(), true)));
+    assert_eq!(removed_event, Some(("charlie".to_string(), Some(true))));
 }
 
 #[test]
@@ -11968,7 +11968,7 @@ fn test_admin_commit_with_mismatched_claim_reports_affected_member_mismatch() {
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls.remove_group_member(&gid, "charlie").unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", "dave");
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some("dave"));
     alice.handle_group_mls_commit("mismatched-claim-1", "bob", &frame);
 
     let (committer, added, removed, reason) = unauthorized_change(&events)
@@ -11991,7 +11991,7 @@ fn test_admin_commit_with_mismatched_claim_reports_affected_member_mismatch() {
         } => Some((user_id.clone(), *authorized)),
         _ => None,
     });
-    assert_eq!(removed_event, Some(("charlie".to_string(), false)));
+    assert_eq!(removed_event, Some(("charlie".to_string(), Some(false))));
 }
 
 #[test]
@@ -12018,7 +12018,7 @@ fn test_unauthorized_commit_still_applies_membership_and_does_not_fork() {
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls.remove_group_member(&gid, "charlie").unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", "charlie");
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
     alice.handle_group_mls_commit("no-fork-1", "bob", &frame);
 
     assert_eq!(
@@ -12034,5 +12034,297 @@ fn test_unauthorized_commit_still_applies_membership_and_does_not_fork() {
     assert!(
         members.contains(&"alice".to_string()) && members.contains(&"bob".to_string()),
         "no other member should be affected"
+    );
+}
+
+#[test]
+fn test_keyupdate_commit_emits_no_membership_or_security_events() {
+    // A pure KeyUpdate has no membership delta, so there is nothing to
+    // judge — and it must NOT be admin-gated: fork-resolution KeyUpdates
+    // are issued by the deterministic leader, who is often a plain member.
+    let (mut alice, bob, group_id) = setup_alice_bob_charlie_group("KeyUpdate Quiet");
+    let events = collect_events(&mut alice);
+    let epoch_before = group_epoch_of(&alice, &group_id);
+
+    let commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls.update_keys(&gid).unwrap()
+    };
+    let frame = group_commit_frame(&commit, &group_id, "keyupdate", None);
+    alice.handle_group_mls_commit("keyupdate-1", "bob", &frame);
+
+    assert_eq!(
+        group_epoch_of(&alice, &group_id),
+        epoch_before + 1,
+        "the KeyUpdate must merge even though bob is not an admin"
+    );
+    let events = events.lock().unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            Event::GroupMemberAdded { .. }
+                | Event::GroupMemberRemoved { .. }
+                | Event::GroupUnauthorizedMembershipChange { .. }
+        )),
+        "a no-delta commit must emit no membership or security events"
+    );
+}
+
+#[test]
+fn test_unauthorized_report_is_rate_limited_per_group_and_committer() {
+    let (mut alice, bob, group_id) = setup_alice_bob_charlie_group("Report Rate Limit");
+
+    // Dave's key package, so bob can follow his unauthorized Remove with an
+    // unauthorized Add inside the same rate-limit window.
+    let storage_d = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut dave = OfflineProtocol::new(create_test_config_for_user("dave")).unwrap();
+    dave.initialize_mls_for_test(storage_d).unwrap();
+    let dave_kp = {
+        let dave_mls = dave.mls_manager_for_testing().read().unwrap();
+        dave_mls.generate_key_package().unwrap()
+    };
+
+    let events = collect_events(&mut alice);
+
+    let remove_commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    let frame = group_commit_frame(&remove_commit, &group_id, "remove", Some("charlie"));
+    alice.handle_group_mls_commit("rate-limit-remove-1", "bob", &frame);
+
+    let add_commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        let (_welcome, commit) = bob_mls
+            .add_group_member(&gid, &dave_kp.key_package_data)
+            .unwrap();
+        commit
+    };
+    let frame = group_commit_frame(&add_commit, &group_id, "add", Some("dave"));
+    alice.handle_group_mls_commit("rate-limit-add-1", "bob", &frame);
+
+    let events = events.lock().unwrap();
+    let reports = events
+        .iter()
+        .filter(|e| matches!(e, Event::GroupUnauthorizedMembershipChange { .. }))
+        .count();
+    assert_eq!(
+        reports, 1,
+        "a repeat by the same (group, committer) within the window must not re-emit the report"
+    );
+
+    // The roster events are NOT suppressed, and every one stays flagged.
+    let removed_flag = events.iter().find_map(|e| match e {
+        Event::GroupMemberRemoved {
+            user_id,
+            authorized,
+            ..
+        } if user_id == "charlie" => Some(*authorized),
+        _ => None,
+    });
+    assert_eq!(removed_flag, Some(Some(false)));
+    let added_flag = events.iter().find_map(|e| match e {
+        Event::GroupMemberAdded {
+            user_id,
+            authorized,
+            ..
+        } if user_id == "dave" => Some(*authorized),
+        _ => None,
+    });
+    assert_eq!(added_flag, Some(Some(false)));
+}
+
+#[test]
+fn test_judgment_covers_combined_add_and_remove_delta() {
+    // A single MLS commit can both add and remove members. The MLS wrapper
+    // only builds single-proposal commits, so pin the judgment seam
+    // directly: one report must carry both vectors under one reason.
+    let (mut alice, _bob, group_id) = setup_alice_bob_charlie_group("Combined Delta");
+    let events = collect_events(&mut alice);
+
+    let judgment = alice.judge_membership_change(
+        &group_id,
+        "bob",
+        &["dave".to_string()],
+        &["charlie".to_string()],
+        true,
+    );
+    assert!(!judgment.sender_is_admin);
+    assert!(!judgment.authorized);
+
+    let (committer, added, removed, reason) = unauthorized_change(&events)
+        .expect("a combined add+remove delta must surface a single report");
+    assert_eq!(committer, "bob");
+    assert_eq!(added, vec!["dave".to_string()]);
+    assert_eq!(removed, vec!["charlie".to_string()]);
+    assert_eq!(reason, "sender_not_admin");
+}
+
+/// `InMemoryStorage` wrapper that can be switched to fail group-*metadata*
+/// loads, simulating a transient platform keychain/keystore read failure.
+/// Group **state** loads keep working, so MLS decrypt/merge is unaffected —
+/// exactly the failure shape that used to fabricate a full-roster
+/// membership delta (a failed roster read silently defaulted to empty).
+struct FailingMetadataStorage {
+    inner: crate::mls::InMemoryStorage,
+    fail_metadata_loads: std::sync::atomic::AtomicBool,
+}
+
+impl FailingMetadataStorage {
+    fn new() -> Self {
+        Self {
+            inner: crate::mls::InMemoryStorage::default(),
+            fail_metadata_loads: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn set_failing(&self, failing: bool) {
+        self.fail_metadata_loads
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl crate::mls::MlsStorage for FailingMetadataStorage {
+    fn store(
+        &self,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+        if key_type == "group_metadata"
+            && self
+                .fail_metadata_loads
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(crate::mls::StorageError::LoadFailed(
+                "injected metadata read failure".to_string(),
+            ));
+        }
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.inner.delete(key_type, key_id)
+    }
+
+    fn list_keys(
+        &self,
+        key_type: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        self.inner.list_keys(key_type)
+    }
+}
+
+#[test]
+fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
+    // A transient storage failure while deriving the membership delta must
+    // not fabricate one: before the guard, a failed roster read silently
+    // defaulted to an empty set, which reported the committer as having
+    // added (or removed) the entire roster — including a SECURITY-level
+    // GroupUnauthorizedMembershipChange naming an innocent committer. The
+    // commit itself still merges (no fork); only the delta-derived
+    // reporting is skipped, and the roster self-heals on the next
+    // successful refresh.
+    let storage_a = Arc::new(FailingMetadataStorage::new());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    alice.initialize_mls_for_test(storage_a.clone()).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    let group_info = alice.create_group("Roster Read Failure").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+
+    // Alice invites bob, bob joins.
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    let (welcome, _commit) = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        alice_mls
+            .add_group_member(&gid, &bob_kp.key_package_data)
+            .unwrap()
+    };
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.join_group(&welcome).unwrap();
+    }
+
+    // Charlie joins too, so bob has someone to remove.
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
+    charlie.initialize_mls_for_test(storage_c).unwrap();
+    let charlie_kp = {
+        let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
+        charlie_mls.generate_key_package().unwrap()
+    };
+    let add_commit = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let (_welcome, commit) = alice_mls
+            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .unwrap();
+        commit
+    };
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.decrypt_from_group(&add_commit, "alice").unwrap();
+    }
+    alice.refresh_group_members(&group_id).unwrap();
+
+    let events = collect_events(&mut alice);
+    let epoch_before = group_epoch_of(&alice, &group_id);
+
+    // Bob removes charlie while alice's metadata reads are failing.
+    let commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
+    storage_a.set_failing(true);
+    alice.handle_group_mls_commit("storage-fail-1", "bob", &frame);
+    storage_a.set_failing(false);
+
+    assert_eq!(
+        group_epoch_of(&alice, &group_id),
+        epoch_before + 1,
+        "the commit must still merge — a local read failure must not fork us from the group"
+    );
+    {
+        let events = events.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                Event::GroupMemberAdded { .. }
+                    | Event::GroupMemberRemoved { .. }
+                    | Event::GroupUnauthorizedMembershipChange { .. }
+            )),
+            "an unknowable delta must be skipped, not fabricated from an empty default"
+        );
+    }
+
+    // Self-heal: the next successful refresh restores the true roster.
+    let members = alice.refresh_group_members(&group_id).unwrap();
+    assert!(
+        !members.iter().any(|m| m == "charlie"),
+        "the roster must converge to MLS state once reads succeed again"
     );
 }

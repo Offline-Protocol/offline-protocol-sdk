@@ -1211,8 +1211,13 @@ export interface GroupMemberAddedEvent extends BaseEvent {
    *
    * `false` means the change **did** happen — MLS accepted the commit and
    * the roster really has changed — but the committer was not a known
-   * admin. See `GroupUnauthorizedMembershipChangeEvent`. Absent on events
-   * from an older core; treat absence as `true`.
+   * admin. See `GroupUnauthorizedMembershipChangeEvent`.
+   *
+   * **Absent means "not evaluated"**, not "authorized": your own join from
+   * a Welcome (there is no prior group state to judge the inviter against),
+   * relay reconciliation frames (no authenticated committer to judge), and
+   * events from an older core all omit the field. Only a present value is
+   * a positive statement either way.
    *
    * Judged against this device's local replica of role state, which
    * replicates best-effort and can lag — a legitimate change may be flagged
@@ -1230,7 +1235,12 @@ export interface GroupMemberRemovedEvent extends BaseEvent {
   group_id: string;
   user_id: string;
   removed_by: string;
-  /** See `GroupMemberAddedEvent.authorized`. */
+  /**
+   * See `GroupMemberAddedEvent.authorized` (absent = not evaluated). On the
+   * relay reconciliation path the judgment applies to the frame's
+   * authenticated wire sender, which is not necessarily the `removed_by`
+   * named here.
+   */
   authorized?: boolean;
 }
 
@@ -1402,6 +1412,10 @@ export interface GroupRichExtrasDroppedEvent extends BaseEvent {
  * it with `meshRemoveFromGroup` / `meshInviteToGroup`. Never reverse a
  * change automatically off a single member's event — corroborate first. A
  * member added this way can read all subsequent group traffic until removed.
+ *
+ * Reports are rate-limited per (group, committer): a repeat within a short
+ * window is not re-emitted, but every affected `group_member_added` /
+ * `group_member_removed` still carries `authorized: false`.
  *
  * Known limitation: the member removed by an unauthorized Remove does not
  * receive this event — only the remaining members report the removal.

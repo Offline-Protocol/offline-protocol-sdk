@@ -129,6 +129,17 @@ pub(super) const LEAVE_ELECTION_MAX_LIFETIME_SECS: u64 = 300;
 /// Minimum cooldown between re-election attempts for the same leave election
 /// to prevent spamming MLS operations on every process tick (5 seconds).
 pub(super) const LEAVE_ELECTION_ATTEMPT_COOLDOWN_SECS: u64 = 5;
+/// Minimum interval between `GroupUnauthorizedMembershipChange` reports for
+/// the same (group, committer) pair (5 minutes). Divergent role metadata —
+/// e.g. two members auto-promoting different admins — re-fires the judgment
+/// on every commit from the "wrong" admin until Stage 2 adds reconciliation;
+/// without a window that is an unbounded stream of security events and log
+/// lines for one underlying condition. Roster events still carry
+/// `authorized: Some(false)` on every occurrence.
+pub(super) const UNAUTHORIZED_REPORT_SUPPRESS_SECS: u64 = 300;
+/// Maximum number of tracked (group, committer) report timestamps to prevent
+/// unbounded growth (both key halves are wire-influenced strings).
+pub(super) const MAX_UNAUTHORIZED_REPORT_ENTRIES: usize = 256;
 
 /// Correlation state for one in-flight relay group registration.
 #[derive(Debug, Clone)]
@@ -252,6 +263,12 @@ pub(crate) struct GroupMeshState {
 
     /// Suspected epoch forks awaiting resolution. Key: group_id.
     pub(crate) epoch_forks: HashMap<String, EpochForkState>,
+
+    /// When an unauthorized membership change by (group_id, committer) was
+    /// last reported, for rate-limiting the security event — see
+    /// [`UNAUTHORIZED_REPORT_SUPPRESS_SECS`]. Bounded by
+    /// [`MAX_UNAUTHORIZED_REPORT_ENTRIES`] with oldest-entry eviction.
+    pub(crate) unauthorized_change_reports: HashMap<(String, String), Instant>,
 }
 
 /// Outcome of attempting to process an MLS Commit.
@@ -265,6 +282,17 @@ enum CommitOutcome {
     /// Permanently failed (parse error, bad ciphertext, MLS unavailable);
     /// should not be retried.
     Rejected,
+}
+
+/// Verdict from [`OfflineProtocol::judge_membership_change`] for one commit's
+/// applied membership delta.
+pub(crate) struct MembershipJudgment {
+    /// Whether the authenticated committer is a known admin of the group.
+    /// Gates trust in the commit-payload metadata (role, rich attestation).
+    pub(crate) sender_is_admin: bool,
+    /// Whether the change as a whole was authorized: an admin committed it
+    /// *and* the commit's own framing agrees with the delta it produced.
+    pub(crate) authorized: bool,
 }
 
 /// Outcome of attempting to decrypt a group application message.
@@ -1226,8 +1254,11 @@ impl OfflineProtocol {
                 self.config.user_id.clone(),
                 sender.to_string(),
                 payload.group_name.clone(),
-                // Our own join, accepted from a Welcome we chose to process.
-                true,
+                // Not evaluated: this Welcome is what creates our view of the
+                // group, so there is no prior role state to judge the inviter
+                // against. `Some(true)` here would claim a check that cannot
+                // exist on this path.
+                None,
             ));
 
             // A commit or group message can race ahead of its Welcome (they
@@ -1331,13 +1362,33 @@ impl OfflineProtocol {
             }
         };
 
-        // Capture members before commit for delta validation
-        let members_before: HashSet<String> = mls_guard
-            .get_group_info(&gid)
-            .ok()
-            .flatten()
-            .map(|info| info.members.into_iter().collect())
-            .unwrap_or_default();
+        // Capture members before commit for delta validation. `None` marks a
+        // failed read: this and the post-commit refresh below are the two
+        // inputs to the membership delta, and a transient storage failure
+        // (`MlsStorage` is a platform keychain/keystore) silently defaulting
+        // to an empty roster would fabricate a full-roster delta — and, with
+        // it, a security report naming an innocent committer as having added
+        // every member. `Ok(None)` (no local group yet) stays an empty
+        // roster: past a successful decrypt it is unreachable anyway.
+        //
+        // Deliberately MLS-derived, not the `group_mesh.members` cache: relay
+        // reconciliation can splice ids into the cache that MLS never
+        // admitted, and a cache-derived "before" would report such a phantom
+        // as an unauthorized removal on the next real commit.
+        let members_before: Option<HashSet<String>> = match mls_guard.get_group_info(&gid) {
+            Ok(info) => Some(
+                info.map(|i| i.members.into_iter().collect())
+                    .unwrap_or_default(),
+            ),
+            Err(e) => {
+                warn!(
+                    group_id = %payload.group_id,
+                    error = %e,
+                    "Failed to read pre-commit roster — this commit's membership delta will not be derived or judged"
+                );
+                None
+            }
+        };
 
         // Process Commit via MLS to advance epoch (single lock acquisition)
         let encrypted = offline_protocol_mls::EncryptedMessage {
@@ -1406,7 +1457,7 @@ impl OfflineProtocol {
                         self_id,
                         sender.to_string(),
                         // Reached only through the `check_is_admin` gate above.
-                        true,
+                        Some(true),
                     ));
                     return CommitOutcome::Rejected;
                 }
@@ -1445,17 +1496,41 @@ impl OfflineProtocol {
             }
         }
 
-        // Refresh cache and compute actual membership delta
-        let _ = self.refresh_group_members(&payload.group_id);
-        let members_after: HashSet<String> = self
-            .group_mesh
-            .members
-            .get(&payload.group_id)
-            .map(|m| m.iter().cloned().collect())
-            .unwrap_or_default();
+        // Refresh cache and compute the actual membership delta. Like the
+        // pre-commit read above, a failed refresh must not default to an
+        // empty roster — so when either read failed, the delta is unknowable
+        // and everything derived from it (roster events, the authorization
+        // judgment, leave-election cleanup, auto-promotion) is skipped for
+        // this commit rather than fabricated. The commit itself has already
+        // merged; the member cache and events self-heal on the next
+        // successful commit or refresh.
+        let members_after: Option<HashSet<String>> = match self
+            .refresh_group_members(&payload.group_id)
+        {
+            Ok(members) => Some(members.into_iter().collect()),
+            Err(e) => {
+                warn!(
+                    group_id = %payload.group_id,
+                    error = %e,
+                    "Failed to refresh post-commit roster — this commit's membership delta will not be derived or judged"
+                );
+                None
+            }
+        };
+        let (Some(members_before), Some(members_after)) = (members_before, members_after) else {
+            if matches!(payload.commit_type, GroupCommitType::KeyUpdate) {
+                self.group_mesh.epoch_forks.remove(&payload.group_id);
+            }
+            return CommitOutcome::Success(payload.group_id);
+        };
 
-        let actual_added: HashSet<&String> = members_after.difference(&members_before).collect();
-        let actual_removed: HashSet<&String> = members_before.difference(&members_after).collect();
+        // Sorted so event payloads and log lines are deterministic.
+        let mut actual_added: Vec<String> =
+            members_after.difference(&members_before).cloned().collect();
+        actual_added.sort();
+        let mut actual_removed: Vec<String> =
+            members_before.difference(&members_after).cloned().collect();
+        actual_removed.sort();
 
         let has_membership_change = !actual_added.is_empty() || !actual_removed.is_empty();
 
@@ -1483,72 +1558,37 @@ impl OfflineProtocol {
             }
         }
 
-        // Whether the authenticated committer is an admin of this group.
-        //
-        // This deliberately does **not** gate the membership change. MLS
-        // authorizes membership by MLS membership — RFC 9420 leaves access
-        // control to the application — and by the time we reach here
-        // `decrypt_from_group` has already merged the commit, advancing our
-        // epoch irreversibly. The only way to reject would be to refuse the
-        // merge, which forks us permanently from every peer that accepted it
-        // (see `check_epoch_forks`: members left on a forked branch have to be
-        // re-invited by the app, and a fork the local role metadata caused —
-        // it is best-effort and can legitimately lag — would be a partition
-        // with no attacker involved). An unrecoverable partition is a worse
-        // failure than an insider membership change, so the change is applied
-        // and reported truthfully, and an unauthorized one is additionally
-        // surfaced as `GroupUnauthorizedMembershipChange` for the app's
-        // moderation layer.
-        //
-        // Unlike the metadata gate below, this covers removals too.
-        let sender_is_admin = has_membership_change
-            && self
-                .check_is_admin(&payload.group_id, sender)
-                .unwrap_or(false);
-
-        // A membership change is authorized only when an admin committed it
-        // *and* the commit's own framing agrees with the delta it produced.
-        let authorized = sender_is_admin && claim_matches_delta;
-
-        if has_membership_change && !authorized {
-            let mut added: Vec<String> = actual_added.iter().map(|m| (*m).clone()).collect();
-            added.sort();
-            let mut removed: Vec<String> = actual_removed.iter().map(|m| (*m).clone()).collect();
-            removed.sort();
-            let reason = if sender_is_admin {
-                "affected_member_mismatch"
-            } else {
-                "sender_not_admin"
-            };
-            error!(
-                group_id = %payload.group_id,
-                sender = %sender,
-                reason,
-                added = ?added,
-                removed = ?removed,
-                "SECURITY: Unauthorized group membership change applied — MLS accepted the commit, but the SDK's admin policy did not authorize it"
-            );
-            self.emit_event(Event::group_unauthorized_membership_change(
-                payload.group_id.clone(),
-                sender.to_string(),
-                added,
-                removed,
-                reason.to_string(),
-            ));
-        }
+        // No delta, no judgment: a pure KeyUpdate changes no membership and
+        // needs no admin (fork-resolution KeyUpdates are issued by the
+        // deterministic leader, who is often not one).
+        let judgment = if has_membership_change {
+            Some(self.judge_membership_change(
+                &payload.group_id,
+                sender,
+                &actual_added,
+                &actual_removed,
+                claim_matches_delta,
+            ))
+        } else {
+            None
+        };
 
         // Commit-payload metadata (role, rich attestation) is honored only
         // for the member the MLS delta actually added and only from an
         // admin sender — adds are admin-only, so a non-admin sender means
         // forged metadata on a replayed/crafted frame.
-        let metadata_sender_is_admin = sender_is_admin && !actual_added.is_empty();
+        let metadata_sender_is_admin =
+            judgment.as_ref().is_some_and(|j| j.sender_is_admin) && !actual_added.is_empty();
+        // What the roster events below carry. `None` never reaches them: an
+        // empty delta emits no events.
+        let authorized = judgment.map(|j| j.authorized);
 
         // Emit events based on actual MLS membership changes, not claimed affected_member
         for member in &actual_added {
             // Store the role from the commit payload only for the specific affected member,
             // and only if the sender is an admin (prevents non-admins from injecting elevated roles).
             if let (Some(role), Some(affected)) = (&payload.role, &payload.affected_member) {
-                if *member == affected {
+                if member == affected {
                     if metadata_sender_is_admin {
                         if let Ok(mls_guard) = self.read_mls_guard() {
                             if let Err(e) = mls_guard.set_member_role(&gid, member, *role) {
@@ -1572,13 +1612,13 @@ impl OfflineProtocol {
             if let (Some(versions), Some(affected)) =
                 (&payload.affected_member_rich, &payload.affected_member)
             {
-                if *member == affected && metadata_sender_is_admin {
+                if member == affected && metadata_sender_is_admin {
                     self.record_attested_rich(member, versions);
                 }
             }
             self.emit_event(Event::group_member_added(
                 payload.group_id.clone(),
-                (*member).clone(),
+                member.clone(),
                 sender.to_string(),
                 None,
                 authorized,
@@ -1593,7 +1633,7 @@ impl OfflineProtocol {
             }
             self.emit_event(Event::group_member_removed(
                 payload.group_id.clone(),
-                (*member).clone(),
+                member.clone(),
                 sender.to_string(),
                 authorized,
             ));
@@ -1624,6 +1664,113 @@ impl OfflineProtocol {
         }
 
         CommitOutcome::Success(payload.group_id)
+    }
+
+    /// Judges one **applied** membership delta against the local admin
+    /// overlay, reporting an unauthorized change (rate-limited) via
+    /// `GroupUnauthorizedMembershipChange`.
+    ///
+    /// This deliberately does **not** gate the membership change. MLS
+    /// authorizes membership by MLS membership — RFC 9420 leaves access
+    /// control to the application — and by the time the delta exists,
+    /// `decrypt_from_group` has already merged the commit, advancing our
+    /// epoch irreversibly. The only way to reject would be to refuse the
+    /// merge, which forks us permanently from every peer that accepted it
+    /// (see `check_epoch_forks`: members left on a forked branch have to be
+    /// re-invited by the app, and a fork the local role metadata caused —
+    /// it is best-effort and can legitimately lag — would be a partition
+    /// with no attacker involved). An unrecoverable partition is a worse
+    /// failure than an insider membership change, so the change is applied
+    /// and reported truthfully.
+    ///
+    /// Unlike the commit-metadata gate in `process_commit_core`, this covers
+    /// removals too. If receive-side enforcement is ever added (Stage 3),
+    /// this judgment is the seam it replaces — after admin-set replication
+    /// (Stage 2) makes the verdict trustworthy enough to act on.
+    pub(crate) fn judge_membership_change(
+        &mut self,
+        group_id: &str,
+        sender: &str,
+        added: &[String],
+        removed: &[String],
+        claim_matches_delta: bool,
+    ) -> MembershipJudgment {
+        let sender_is_admin = self.check_is_admin(group_id, sender).unwrap_or(false);
+
+        // A membership change is authorized only when an admin committed it
+        // *and* the commit's own framing agrees with the delta it produced.
+        let authorized = sender_is_admin && claim_matches_delta;
+
+        if !authorized {
+            let reason = if sender_is_admin {
+                "affected_member_mismatch"
+            } else {
+                "sender_not_admin"
+            };
+            let key = (group_id.to_string(), sender.to_string());
+            let now = Instant::now();
+            let suppressed = self
+                .group_mesh
+                .unauthorized_change_reports
+                .get(&key)
+                .is_some_and(|last| {
+                    now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
+                });
+            if suppressed {
+                debug!(
+                    group_id = %group_id,
+                    sender = %sender,
+                    reason,
+                    "Suppressing repeated unauthorized-membership-change report within the rate-limit window"
+                );
+            } else {
+                // Bound the tracking map: drop lapsed windows first, then the
+                // oldest live entry if still at cap.
+                if self.group_mesh.unauthorized_change_reports.len()
+                    >= MAX_UNAUTHORIZED_REPORT_ENTRIES
+                {
+                    self.group_mesh
+                        .unauthorized_change_reports
+                        .retain(|_, last| {
+                            now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
+                        });
+                }
+                if self.group_mesh.unauthorized_change_reports.len()
+                    >= MAX_UNAUTHORIZED_REPORT_ENTRIES
+                {
+                    if let Some(oldest) = self
+                        .group_mesh
+                        .unauthorized_change_reports
+                        .iter()
+                        .min_by_key(|(_, t)| **t)
+                        .map(|(k, _)| k.clone())
+                    {
+                        self.group_mesh.unauthorized_change_reports.remove(&oldest);
+                    }
+                }
+                self.group_mesh.unauthorized_change_reports.insert(key, now);
+                warn!(
+                    group_id = %group_id,
+                    sender = %sender,
+                    reason,
+                    added = ?added,
+                    removed = ?removed,
+                    "SECURITY: Unauthorized group membership change applied — MLS accepted the commit, but the SDK's admin policy did not authorize it"
+                );
+                self.emit_event(Event::group_unauthorized_membership_change(
+                    group_id.to_string(),
+                    sender.to_string(),
+                    added.to_vec(),
+                    removed.to_vec(),
+                    reason.to_string(),
+                ));
+            }
+        }
+
+        MembershipJudgment {
+            sender_is_admin,
+            authorized,
+        }
     }
 
     /// Releases every replay-protection record for a buffered entry dropped
@@ -2579,7 +2726,7 @@ impl OfflineProtocol {
             self_id,
             None,
             // Our own invite, gated by the admin check at the top of this fn.
-            true,
+            Some(true),
         ));
 
         // Sync membership update to relay
@@ -2733,7 +2880,7 @@ impl OfflineProtocol {
             member_id.to_string(),
             self_id,
             // Our own removal, gated by the admin check at the top of this fn.
-            true,
+            Some(true),
         ));
 
         // Sync membership update to relay

@@ -604,13 +604,13 @@ mod tests {
                 user_id: String::new(),
                 added_by: String::new(),
                 group_name: None,
-                authorized: true,
+                authorized: Some(true),
             },
             Event::GroupMemberRemoved {
                 group_id: String::new(),
                 user_id: String::new(),
                 removed_by: String::new(),
-                authorized: true,
+                authorized: Some(true),
             },
             Event::GroupInfo {
                 group_id: String::new(),
