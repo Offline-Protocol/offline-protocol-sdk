@@ -885,6 +885,12 @@ pub enum Event {
         /// known admin. The membership event is still emitted because the
         /// local roster must not diverge from MLS state; see
         /// [`Event::GroupUnauthorizedMembershipChange`] for the full signal.
+        ///
+        /// The judgment is made against this member's **local replica** of
+        /// role state, which replicates best-effort and can lag — a
+        /// legitimate change may be flagged `false`, and different members
+        /// can disagree about the same commit. Do not act on it
+        /// automatically.
         #[serde(default = "crate::events::default_true")]
         authorized: bool,
     },
@@ -1035,9 +1041,24 @@ pub enum Event {
     /// refusing the merge, which permanently forks this member away from every
     /// peer that accepted it. So the change stands and is reported here instead.
     ///
-    /// Apps should treat this as a moderation signal: an admin can undo the
-    /// change with `remove_from_group` / `invite_to_group`. A member added this
-    /// way can read all subsequent group traffic until removed.
+    /// **This signal can false-positive.** "Unauthorized" is judged against
+    /// this member's local replica of role state, which replicates
+    /// best-effort (a joiner receives a point-in-time snapshot, role changes
+    /// ride unreconciled mesh notifications) and can lag — so a legitimate
+    /// change, e.g. a voluntary leave committed by a member whose admin role
+    /// this device has not yet learned, may be reported here, and different
+    /// members can disagree about the same commit.
+    ///
+    /// Apps should treat this as a moderation signal for a *human* admin: an
+    /// admin can undo the change with `remove_from_group` /
+    /// `invite_to_group`. Never reverse a change automatically off a single
+    /// member's event — corroborate first. A member added this way can read
+    /// all subsequent group traffic until removed.
+    ///
+    /// Known limitation: the member *removed* by an unauthorized Remove does
+    /// not receive this event — it can no longer decrypt the commit that
+    /// removed it, and it refuses to trust a non-admin's unencrypted claim
+    /// that it was removed. Only the remaining members report the removal.
     GroupUnauthorizedMembershipChange {
         /// MLS group identifier.
         group_id: String,

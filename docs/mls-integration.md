@@ -707,12 +707,36 @@ The corresponding `group_member_added` / `group_member_removed` events still
 fire (your roster must not diverge from MLS state) and carry an `authorized`
 boolean so a single handler can render the distinction inline.
 
+**The signal can false-positive.** "Unauthorized" is judged against the
+receiving member's *local replica* of role state — the same best-effort
+metadata that makes receive-side enforcement unsafe. A member whose role map
+lags (a joiner's point-in-time snapshot, a missed role-change notification, a
+divergent auto-promotion) will report a perfectly legitimate change — for
+example a voluntary leave committed by a member it does not yet know is an
+admin — and different members can disagree about the same commit. Treat one
+member's report as a suspicion, not a verdict; if you aggregate these events
+(telemetry, moderation dashboards), corroborate across members — a change
+flagged by every member is almost certainly real, one flagged by a single
+member is usually role-metadata lag.
+
+**Known limitation:** the member *removed* by an unauthorized Remove receives
+no `group_unauthorized_membership_change` event. It can no longer decrypt the
+commit that removed it, and it deliberately refuses to trust a non-admin's
+unencrypted claim that it was removed — so it simply stops receiving group
+traffic, and may later surface an epoch-fork signal instead. Only the
+remaining members report the unauthorized removal. Closing this requires
+replicating the admin set with the group state, which is planned follow-up
+work.
+
 **Guidance for apps that need stronger guarantees:** treat
-`group_unauthorized_membership_change` as a moderation alert and have an admin
-reverse the change with `remove_from_group`. If your threat model does not
-tolerate insider membership changes at all, do not rely on group membership
-alone for authorization — gate sensitive actions on an admin-signed
-application-layer check.
+`group_unauthorized_membership_change` as a moderation alert for a *human*
+admin, who can reverse the change with `remove_from_group` /
+`invite_to_group`. **Never reverse the change automatically** off a single
+member's event — on a false positive, automated reversal would evict a
+legitimately added member, and two clients doing so can fight each other. If
+your threat model does not tolerate insider membership changes at all, do not
+rely on group membership alone for authorization — gate sensitive actions on
+an admin-signed application-layer check.
 
 ### Message Format
 

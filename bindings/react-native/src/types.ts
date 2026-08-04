@@ -1213,6 +1213,11 @@ export interface GroupMemberAddedEvent extends BaseEvent {
    * the roster really has changed — but the committer was not a known
    * admin. See `GroupUnauthorizedMembershipChangeEvent`. Absent on events
    * from an older core; treat absence as `true`.
+   *
+   * Judged against this device's local replica of role state, which
+   * replicates best-effort and can lag — a legitimate change may be flagged
+   * `false`, and different members can disagree. Do not act on it
+   * automatically.
    */
   authorized?: boolean;
 }
@@ -1388,9 +1393,18 @@ export interface GroupRichExtrasDroppedEvent extends BaseEvent {
  * MLS merge, permanently forking this member away from everyone who
  * accepted it. So the change stands and is reported here instead.
  *
- * Treat this as a moderation signal: an admin can undo it with
- * `meshRemoveFromGroup` / `meshInviteToGroup`. A member added this way can
- * read all subsequent group traffic until removed.
+ * This signal can false-positive: "unauthorized" is judged against this
+ * device's local replica of role state, which replicates best-effort and
+ * can lag — a legitimate change may be reported, and different members can
+ * disagree about the same commit.
+ *
+ * Treat this as a moderation signal for a *human* admin: an admin can undo
+ * it with `meshRemoveFromGroup` / `meshInviteToGroup`. Never reverse a
+ * change automatically off a single member's event — corroborate first. A
+ * member added this way can read all subsequent group traffic until removed.
+ *
+ * Known limitation: the member removed by an unauthorized Remove does not
+ * receive this event — only the remaining members report the removal.
  */
 export interface GroupUnauthorizedMembershipChangeEvent extends BaseEvent {
   type: 'group_unauthorized_membership_change';
