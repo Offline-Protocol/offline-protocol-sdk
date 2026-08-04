@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Guards the hand-maintained license surface against drift.
 #
-# Three license documents are triplicated into each package that redistributes
-# the binaries (root, react-native, python) -- LICENSE and LICENSE-COMMERCIAL.md
-# by hand, THIRD-PARTY-NOTICES.md by generate-third-party-notices.sh. Nothing
+# Four license documents are triplicated into each package that redistributes
+# the binaries (root, react-native, python) -- LICENSE, LICENSE-COMMERCIAL.md,
+# and EXPORT.md by hand, THIRD-PARTY-NOTICES.md by
+# generate-third-party-notices.sh. Nothing
 # else stops an edit from landing in one copy and not the others, and a
 # divergent license text in a published artifact is not a bug you find by
 # testing. This asserts the copies are byte-identical, that every notice-bearing
@@ -15,7 +16,7 @@ cd "$(dirname "$0")/.."
 status=0
 
 # Documents copied verbatim into each redistributing package.
-for doc in LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md; do
+for doc in LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md; do
   for pkg in bindings/react-native bindings/python; do
     if ! cmp -s "$doc" "$pkg/$doc"; then
       echo "error: $pkg/$doc has drifted from $doc" >&2

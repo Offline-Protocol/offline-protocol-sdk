@@ -22,7 +22,8 @@
     "README.md",
     "LICENSE",
     "LICENSE-COMMERCIAL.md",
-    "THIRD-PARTY-NOTICES.md"
+    "THIRD-PARTY-NOTICES.md",
+    "EXPORT.md"
   ],
   "scripts": {
     "prepare": "tsc",
