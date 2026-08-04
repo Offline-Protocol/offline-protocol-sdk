@@ -2,6 +2,7 @@ package com.offlineprotocol
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -183,6 +184,53 @@ class LegacyStoreAdoptionTest {
     }
 
     /**
+     * Bytes that are present but not UTF-8 are still evidence that something
+     * claimed the store. Reading them as *absent* would authorise a wipe of the
+     * shared pre-namespace store — another account's MLS identity, sessions,
+     * and block list — on the strength of a claim this reader merely failed to
+     * interpret. So the lossy decode keeps it owned, the mismatch refuses the
+     * wipe, and adoption conflicts rather than inheriting an identity whose
+     * owner it could not establish.
+     */
+    @Test
+    fun nonUtf8ClaimIsOwnedNotAbsent() {
+        val garbage = byteArrayOf(-1, -2, -3)
+        val claim = LegacyStoreAdoption.LegacyClaim.of(garbage)
+
+        assertTrue(claim is LegacyStoreAdoption.LegacyClaim.Owned)
+        assertFalse(LegacyStoreAdoption.shouldWipeLegacy(claim, namespace))
+
+        val owner = (claim as LegacyStoreAdoption.LegacyClaim.Owned).namespace
+        assertNotEquals(namespace, owner)
+        assertEquals(
+            LegacyStoreAdoption.Decision.Conflict(owner),
+            LegacyStoreAdoption.decide(owner, namespace)
+        )
+    }
+
+    /**
+     * The byte and string classifications must agree, so routing a read through
+     * either one cannot change who may destroy the store.
+     */
+    @Test
+    fun byteAndStringClaimsAgree() {
+        assertEquals(
+            LegacyStoreAdoption.LegacyClaim.Owned(namespace),
+            LegacyStoreAdoption.LegacyClaim.of(namespace.toByteArray(Charsets.UTF_8))
+        )
+        assertEquals(
+            LegacyStoreAdoption.LegacyClaim.Absent,
+            LegacyStoreAdoption.LegacyClaim.of(ByteArray(0))
+        )
+        assertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                LegacyStoreAdoption.LegacyClaim.of(namespace.toByteArray(Charsets.UTF_8)),
+                namespace
+            )
+        )
+    }
+
+    /**
      * The claim entry is bookkeeping, not key material: promoting it into the
      * new store would make a later account read its own namespace back as an
      * inherited value.
@@ -191,5 +239,41 @@ class LegacyStoreAdoptionTest {
     fun claimEntryIsNeverReadThrough() {
         assertTrue(LegacyStoreAdoption.isClaimEntry(LegacyStoreAdoption.CLAIM_KEY_TYPE))
         assertFalse(LegacyStoreAdoption.isClaimEntry("identity"))
+    }
+
+    /**
+     * Both reserved entries are the provider's own bookkeeping. Neither may be
+     * promoted, listed, or handed back as key material — a tombstone escaping
+     * as a loadable key would be the provider advertising a corpse.
+     */
+    @Test
+    fun reservedEntriesCoverTheClaimAndTombstones() {
+        assertTrue(LegacyStoreAdoption.isReservedEntry(LegacyStoreAdoption.CLAIM_KEY_TYPE))
+        assertTrue(
+            LegacyStoreAdoption.isReservedEntry(LegacyStoreAdoption.TOMBSTONE_KEY_TYPE)
+        )
+        assertFalse(LegacyStoreAdoption.isReservedEntry("identity"))
+        assertFalse(LegacyStoreAdoption.isReservedEntry("key_package"))
+        assertNotEquals(
+            LegacyStoreAdoption.CLAIM_KEY_TYPE,
+            LegacyStoreAdoption.TOMBSTONE_KEY_TYPE
+        )
+    }
+
+    /**
+     * One tombstone names exactly one legacy key. Keyed like the stores' own
+     * account keys, so it inherits their existing ambiguity rather than adding
+     * a new one.
+     */
+    @Test
+    fun tombstoneIdNamesOneKey() {
+        assertEquals(
+            "key_package:peer-1",
+            LegacyStoreAdoption.tombstoneKeyId("key_package", "peer-1")
+        )
+        assertNotEquals(
+            LegacyStoreAdoption.tombstoneKeyId("key_package", "peer-1"),
+            LegacyStoreAdoption.tombstoneKeyId("key_package", "peer-2")
+        )
     }
 }

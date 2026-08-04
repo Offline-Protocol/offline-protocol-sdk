@@ -143,6 +143,29 @@ enum LegacyStoreAdoption {
             }
             return .owned(by: value)
         }
+
+        /// Classifies a claim read as raw bytes.
+        ///
+        /// Decoded *lossily* — invalid sequences become U+FFFD rather than
+        /// failing the decode — so bytes that are present but not UTF-8
+        /// classify as `.owned`, never `.absent`.
+        ///
+        /// The distinction is load-bearing for the wipe. Bytes this SDK did not
+        /// write are still evidence that *something* claimed the store, and
+        /// `.absent` is the one classification that authorises destroying it —
+        /// the shared, pre-namespace store holding another account's MLS
+        /// identity, sessions, and block list. A garbled claim is far more
+        /// likely a claim this reader cannot interpret than no claim at all, so
+        /// it fails closed: the mismatch against any real namespace refuses the
+        /// wipe, and refusing costs only a leftover the next wipe removes.
+        ///
+        /// Adoption gets the same answer, which is also right and is what the
+        /// Kotlin and Python providers already did: an account facing an
+        /// unreadable claim starts fresh and says so, rather than inheriting an
+        /// identity whose owner it could not establish.
+        static func of(bytes: [UInt8]) -> LegacyClaim {
+            of(String(decoding: bytes, as: UTF8.self))
+        }
     }
 
     /// Whether `namespace` may delete the legacy store outright.

@@ -133,6 +133,46 @@ final class LegacyStoreAdoptionTests: XCTestCase {
         )
     }
 
+    /// Bytes that are present but not UTF-8 are still evidence that something
+    /// claimed the store. Reading them as *absent* would authorise a wipe of
+    /// the shared pre-namespace store — another account's MLS identity,
+    /// sessions, and block list — on the strength of a claim this reader merely
+    /// failed to interpret. So the lossy decode keeps it `owned`, the mismatch
+    /// refuses the wipe, and adoption conflicts rather than inheriting an
+    /// identity whose owner it could not establish.
+    func testNonUtf8ClaimIsOwnedNotAbsent() {
+        let garbage: [UInt8] = [0xFF, 0xFE, 0xFD]
+        let claim = LegacyStoreAdoption.LegacyClaim.of(bytes: garbage)
+
+        XCTAssertNotEqual(claim, .absent)
+        XCTAssertFalse(LegacyStoreAdoption.shouldWipeLegacy(claim, namespace: namespace))
+
+        guard case .owned(let owner) = claim else {
+            return XCTFail("expected a garbled claim to read as owned, got \(claim)")
+        }
+        XCTAssertNotEqual(owner, namespace)
+        XCTAssertEqual(
+            LegacyStoreAdoption.decide(existingClaim: owner, namespace: namespace),
+            .conflict(claimedBy: owner)
+        )
+    }
+
+    /// The byte and string classifications must agree, so routing a read
+    /// through either one cannot change who may destroy the store.
+    func testByteAndStringClaimsAgree() {
+        XCTAssertEqual(
+            LegacyStoreAdoption.LegacyClaim.of(bytes: Array(namespace.utf8)),
+            .owned(by: namespace)
+        )
+        XCTAssertEqual(LegacyStoreAdoption.LegacyClaim.of(bytes: []), .absent)
+        XCTAssertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                .of(bytes: Array(namespace.utf8)),
+                namespace: namespace
+            )
+        )
+    }
+
     /// The claim entry is bookkeeping, not key material: promoting it into the
     /// new store would make a later account read its own namespace back as an
     /// inherited value.

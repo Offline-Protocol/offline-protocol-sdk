@@ -490,9 +490,10 @@ final class MlsSecureStorage: MlsStorageProvider {
     /// read" apart.
     ///
     /// `readLegacyClaim` above collapses them, which is right for adoption and
-    /// wrong for `wipeAccount` — see `LegacyStoreAdoption.LegacyClaim`. A value
-    /// that is present but not UTF-8 reads as absent, matching adoption: the
-    /// SDK never wrote it, so no account's ownership rests on it.
+    /// wrong for `wipeAccount` — see `LegacyStoreAdoption.LegacyClaim`. Bytes
+    /// that are present but not UTF-8 are decoded lossily and read as *owned*,
+    /// never absent: they are still evidence that something claimed the store,
+    /// and absence is the classification that authorises destroying it.
     private static func readClaim(
         from legacy: String,
         accessGroup: String?
@@ -506,7 +507,7 @@ final class MlsSecureStorage: MlsStorageProvider {
             ) else {
                 return .absent
             }
-            return LegacyStoreAdoption.LegacyClaim.of(String(bytes: raw, encoding: .utf8))
+            return LegacyStoreAdoption.LegacyClaim.of(bytes: raw)
         } catch {
             return .unreadable
         }

@@ -214,9 +214,11 @@ class MlsSecureStorage internal constructor(
                 "${LegacyStoreAdoption.CLAIM_KEY_TYPE}:${LegacyStoreAdoption.CLAIM_KEY_ID}",
                 null
             )
-            LegacyStoreAdoption.LegacyClaim.of(
-                encoded?.let { String(Base64.decode(it, Base64.NO_WRAP), Charsets.UTF_8) }
-            )
+            if (encoded == null) {
+                LegacyStoreAdoption.LegacyClaim.Absent
+            } else {
+                LegacyStoreAdoption.LegacyClaim.of(Base64.decode(encoded, Base64.NO_WRAP))
+            }
         } catch (error: Exception) {
             Log.w(TAG, "Could not read the legacy secure store claim; not wiping it", error)
             LegacyStoreAdoption.LegacyClaim.Unreadable

@@ -156,6 +156,34 @@ internal object LegacyStoreAdoption {
              */
             fun of(value: String?): LegacyClaim =
                 if (value.isNullOrEmpty()) Absent else Owned(value)
+
+            /**
+             * Classifies a claim read as raw bytes.
+             *
+             * Decoded *lossily* — invalid sequences become U+FFFD rather than
+             * failing the decode — so bytes that are present but not UTF-8
+             * classify as [Owned], never [Absent].
+             *
+             * The distinction is load-bearing for the wipe. Bytes this SDK did
+             * not write are still evidence that *something* claimed the store,
+             * and [Absent] is the one classification that authorises destroying
+             * it — the shared, pre-namespace store holding another account's
+             * MLS identity, sessions, and block list. A garbled claim is far
+             * more likely a claim this reader cannot interpret than no claim at
+             * all, so it fails closed: the mismatch against any real namespace
+             * refuses the wipe, and refusing costs only a leftover the next wipe
+             * removes.
+             *
+             * Adoption gets the same answer, which is also right: an account
+             * facing an unreadable claim starts fresh and says so, rather than
+             * inheriting an identity whose owner it could not establish.
+             *
+             * Non-nullable on purpose, matching the Swift overload: a caller
+             * that has no bytes at all knows it is looking at [Absent] without
+             * decoding anything, and a nullable overload here would make the
+             * bare `of(null)` ambiguous.
+             */
+            fun of(bytes: ByteArray): LegacyClaim = of(String(bytes, Charsets.UTF_8))
         }
     }
 
