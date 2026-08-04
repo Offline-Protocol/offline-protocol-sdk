@@ -3,6 +3,7 @@ package com.offlineprotocol
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -79,6 +80,22 @@ class MeshForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // Enter the foreground here rather than waiting for onStartCommand.
+        // Android gives an app 5 seconds after startForegroundService() to
+        // call startForeground(); if onStartCommand is delayed past that
+        // window (JS-thread initialization on cold start, main-thread work
+        // during app resume on mid-range devices), the OS terminates the
+        // process with a fatal RemoteServiceException. Promoting in
+        // onCreate — which runs before any onStartCommand dispatch — makes
+        // the deadline unreachable. Subsequent startForeground() calls in
+        // onStartCommand are idempotent on the same service instance and
+        // remain safe re-promotes.
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+            isRunning = true
+        } catch (e: Exception) {
+            Log.w(TAG, "startForeground in onCreate failed: ${e.message}", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -129,6 +146,22 @@ class MeshForegroundService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        // Route the notification's stop action back through this service's
+        // own ACTION_STOP handler. Using PendingIntent.getForegroundService
+        // on O+ keeps the delivery legal under the background service-start
+        // restrictions that apply when the user taps the action from the
+        // notification shade while the app itself is in the background;
+        // pre-O falls back to getService which has no such restriction.
+        val stopIntent = Intent(this, MeshForegroundService::class.java).apply {
+            action = ACTION_STOP
+        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val stopPendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(this, 0, stopIntent, flags)
+        } else {
+            PendingIntent.getService(this, 0, stopIntent, flags)
+        }
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Mesh Active")
             .setContentText("Offline mesh networking is running")
@@ -136,6 +169,7 @@ class MeshForegroundService : Service() {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .addAction(android.R.drawable.ic_media_pause, "Stop", stopPendingIntent)
             .build()
     }
 }
