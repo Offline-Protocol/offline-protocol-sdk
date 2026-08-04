@@ -3969,7 +3969,15 @@ impl OfflineProtocol {
         let user_ids = Self::list_state_keys(storage.as_ref(), storage_keys::BLOCKED_USERS)
             .map_err(|e| Error::Other(format!("Failed to list blocked users: {}", e)))?;
         let listed = user_ids.len();
-        for user_id in user_ids.iter() {
+        // Two bounds, because they do two different jobs and neither implies
+        // the other. This one bounds *work*: how many keys a single pass may
+        // look at, like every other category walk. The `MAX_BLOCKED_USERS`
+        // break below bounds the *set*. Only the walk bound covers the entries
+        // that never reach the set at all — an invalid user id or a planted
+        // self-block `continue`s without counting toward the live cap, so a
+        // container filled with unparseable keys would otherwise cost one
+        // iteration and one `warn!` line each, unbounded, on every launch.
+        for user_id in user_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             if offline_protocol_core::UserId::new(user_id).is_err() {
                 warn!(user_id = %user_id, "Skipping blocked user entry with invalid user ID");
                 continue;
@@ -4009,6 +4017,13 @@ impl OfflineProtocol {
                 break;
             }
             self.blocked_users.insert(user_id.clone());
+        }
+        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
+            warn!(
+                listed,
+                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
+                "Blocked-user store listed more entries than any legitimate run can produce; ignoring the tail"
+            );
         }
         if !self.blocked_users.is_empty() {
             info!(
