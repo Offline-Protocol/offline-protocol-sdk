@@ -159,10 +159,14 @@ class SecureStorage(MlsStorageProvider):
         legacy = self._read_through_service(key_type)
         if legacy is None:
             return None
-        if self._is_tombstoned(key_type, key_id):
-            # Opportunistic heal: the removal that failed may succeed now, which
-            # is the only thing that retires a tombstone. Absent either way.
-            self._retry_tombstoned_removal(legacy, key_type, key_id)
+        tombstone = self._tombstone_state(key_type, key_id)
+        if tombstone.suppresses_read_through:
+            if tombstone.allows_removal_retry:
+                # Opportunistic heal: the removal that failed may succeed now,
+                # which is the only thing that retires a tombstone. Gated on a
+                # *confirmed* tombstone — a read that merely failed must not
+                # delete a copy that may still be inheritable.
+                self._retry_tombstoned_removal(legacy, key_type, key_id)
             return None
         inherited = self._read(legacy, key_type, key_id)
         if inherited is None:
@@ -202,14 +206,14 @@ class SecureStorage(MlsStorageProvider):
                 return
             try:
                 self._remove(legacy, key_type, key_id)
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "failed to delete inherited entry for %s; tombstoning it so "
                     "read-through cannot resurrect it",
                     key_type,
                     exc_info=True,
                 )
-                self._tombstone(key_type, key_id)
+                self._tombstone(key_type, key_id, exc)
                 return
             self._clear_tombstone(key_type, key_id)
 
@@ -231,8 +235,13 @@ class SecureStorage(MlsStorageProvider):
                 legacy = self._read_through_service(key_type)
                 if legacy is not None:
                     for key in self._index_get(legacy, key_type):
-                        if key not in keys and not self._is_tombstoned(key_type, key):
-                            keys.append(key)
+                        if key in keys:
+                            continue
+                        if self._tombstone_state(
+                            key_type, key
+                        ).suppresses_read_through:
+                            continue
+                        keys.append(key)
                 return keys
             except Exception as exc:
                 raise MlsStorageError.LoadFailed(
@@ -241,8 +250,12 @@ class SecureStorage(MlsStorageProvider):
 
     # -- tombstones ----------------------------------------------------------
 
-    def _tombstone(self, key_type: str, key_id: str) -> None:
-        """Record that a legacy copy survived its deletion."""
+    def _tombstone(self, key_type: str, key_id: str, cause: Exception) -> None:
+        """Record that a legacy copy survived its deletion.
+
+        *cause* is the removal failure this stands in for, folded into the
+        raised message so a double fault names both halves.
+        """
 
         try:
             self._store(
@@ -254,21 +267,26 @@ class SecureStorage(MlsStorageProvider):
         except Exception as exc:
             raise MlsStorageError.DeleteFailed(
                 f"keyring delete left an inherited copy of {key_type} in place "
-                f"and could not tombstone it: {exc}"
+                f"({cause}) and could not tombstone it: {exc}"
             ) from exc
 
-    def _is_tombstoned(self, key_type: str, key_id: str) -> bool:
-        """Whether this key's legacy copy is known to have outlived a delete.
+    def _tombstone_state(
+        self, key_type: str, key_id: str
+    ) -> legacy_store_adoption.TombstoneState:
+        """What the namespaced store says about this key's legacy copy.
 
-        Fails closed: a tombstone read that raises means read-through cannot be
-        proven safe, and suppressing a legitimate inherited entry costs an
-        identity rotation while resurrecting a consumed key costs forward
-        secrecy. Near-unreachable in practice — the namespaced read in
-        :meth:`load` runs first against the same store and would have raised.
+        A read that raises is ``UNREADABLE``, which fails closed as far as
+        *reading* goes: read-through cannot be proven safe, and suppressing a
+        legitimate inherited entry costs an identity rotation while resurrecting
+        a consumed key costs forward secrecy. It deliberately stops short of
+        authorising the removal retry — see
+        :class:`legacy_store_adoption.TombstoneState`. Near-unreachable in
+        practice: the namespaced read in :meth:`load` runs first against the
+        same store and would have raised.
         """
 
         try:
-            return (
+            recorded = (
                 self._read(
                     self._service,
                     legacy_store_adoption.TOMBSTONE_KEY_TYPE,
@@ -278,11 +296,17 @@ class SecureStorage(MlsStorageProvider):
             )
         except Exception:
             logger.warning(
-                "could not read the tombstone for %s; treating it as absent",
+                "could not read the tombstone for %s; suppressing read-through "
+                "without retiring the legacy copy",
                 key_type,
                 exc_info=True,
             )
-            return True
+            return legacy_store_adoption.TombstoneState.UNREADABLE
+        return (
+            legacy_store_adoption.TombstoneState.RECORDED
+            if recorded
+            else legacy_store_adoption.TombstoneState.ABSENT
+        )
 
     def _retry_tombstoned_removal(
         self, legacy: str, key_type: str, key_id: str

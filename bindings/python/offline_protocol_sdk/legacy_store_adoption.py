@@ -33,6 +33,7 @@ Keep this policy in sync with ``LegacyStoreAdoption.swift`` and
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 #: Key under which an adopting account records its claim in the *legacy* store.
 #: Namespaced away from any real key type so it can never collide with MLS
@@ -68,6 +69,41 @@ def tombstone_key_id(key_type: str, key_id: str) -> str:
     """
 
     return f"{key_type}:{key_id}"
+
+
+class TombstoneState(Enum):
+    """What a tombstone read established about one legacy key.
+
+    Three-way for the same reason the wipe's claim classification is: the two
+    non-``ABSENT`` answers authorise different things. Both suppress
+    read-through, because a read that failed cannot prove read-through is safe.
+    Only ``RECORDED`` additionally authorises *deleting* the legacy copy, and
+    that asymmetry is the point — a failed read is not evidence that a tombstone
+    exists, so deleting on it would destroy the last copy of a key that was
+    legitimately inheritable, which on a first post-upgrade launch can be the
+    MLS signing identity. Suppression costs a read-through until the store
+    recovers and the next read heals it; the deletion cannot be walked back.
+    """
+
+    #: A tombstone is recorded: this key's legacy copy outlived a delete.
+    RECORDED = "recorded"
+    #: No tombstone recorded. Read-through may proceed.
+    ABSENT = "absent"
+    #: The tombstone could not be read, so it is unknown either way.
+    UNREADABLE = "unreadable"
+
+    @property
+    def suppresses_read_through(self) -> bool:
+        """Whether the legacy store must not be consulted for this key."""
+
+        return self is not TombstoneState.ABSENT
+
+    @property
+    def allows_removal_retry(self) -> bool:
+        """Whether the legacy copy may be deleted on sight. Only a *confirmed*
+        tombstone: see the class note."""
+
+        return self is TombstoneState.RECORDED
 
 
 @dataclass(frozen=True)

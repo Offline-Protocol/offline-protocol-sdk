@@ -261,6 +261,42 @@ class LegacyStoreAdoptionTest {
     }
 
     /**
+     * The asymmetry the three-way exists for. Both non-`ABSENT` answers stop
+     * read-through, because a read that failed cannot prove read-through is
+     * safe. Only a confirmed tombstone also authorises deleting the legacy
+     * copy: acting on a failed read would destroy the last copy of a key that
+     * was legitimately inheritable — on a first post-upgrade launch, possibly
+     * the signing identity — and unlike suppression that cannot be walked back.
+     */
+    @Test
+    fun anUnreadableTombstoneSuppressesWithoutAuthorisingDeletion() {
+        val unreadable = LegacyStoreAdoption.TombstoneState.UNREADABLE
+
+        assertTrue(unreadable.suppressesReadThrough)
+        assertFalse(unreadable.allowsRemovalRetry)
+    }
+
+    @Test
+    fun aRecordedTombstoneSuppressesAndAuthorisesDeletion() {
+        val recorded = LegacyStoreAdoption.TombstoneState.RECORDED
+
+        assertTrue(recorded.suppressesReadThrough)
+        assertTrue(recorded.allowsRemovalRetry)
+    }
+
+    /**
+     * The ordinary path: nothing was ever tombstoned, so an inherited entry is
+     * still promotable.
+     */
+    @Test
+    fun anAbsentTombstonePermitsReadThrough() {
+        val absent = LegacyStoreAdoption.TombstoneState.ABSENT
+
+        assertFalse(absent.suppressesReadThrough)
+        assertFalse(absent.allowsRemovalRetry)
+    }
+
+    /**
      * One tombstone names exactly one legacy key. Keyed like the stores' own
      * account keys, so it inherits their existing ambiguity rather than adding
      * a new one.

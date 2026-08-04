@@ -72,6 +72,34 @@ enum LegacyStoreAdoption {
         "\(keyType):\(keyId)"
     }
 
+    /// What a tombstone read established about one legacy key.
+    ///
+    /// Three-way for the same reason `LegacyClaim` is: the two non-`absent`
+    /// answers authorise different things. Both suppress read-through, because
+    /// a read that failed cannot prove read-through is safe. Only `recorded`
+    /// additionally authorises *deleting* the legacy copy, and that asymmetry
+    /// is the point — a failed read is not evidence that a tombstone exists, so
+    /// deleting on it would destroy the last copy of a key that was
+    /// legitimately inheritable, which on a first post-upgrade launch can be
+    /// the MLS signing identity. Suppression costs a read-through until the
+    /// store recovers and the next read heals it; the deletion cannot be walked
+    /// back.
+    enum TombstoneState: Equatable {
+        /// A tombstone is recorded: this key's legacy copy outlived a delete.
+        case recorded
+        /// No tombstone recorded. Read-through may proceed.
+        case absent
+        /// The tombstone could not be read, so it is unknown either way.
+        case unreadable
+
+        /// Whether the legacy store must not be consulted for this key.
+        var suppressesReadThrough: Bool { self != .absent }
+
+        /// Whether the legacy copy may be deleted on sight. Only a *confirmed*
+        /// tombstone: see the type's note.
+        var allowsRemovalRetry: Bool { self == .recorded }
+    }
+
     enum Decision: Equatable {
         /// Legacy store is unclaimed: claim it and read through.
         case adopt

@@ -38,6 +38,10 @@ class FakeKeyring:
         #: Deliberately not ``PasswordDeleteError``, which the provider treats
         #: as "already gone" — this is a store that still holds the value.
         self.refuse_deletes_to: str | None = None
+        #: Key *prefix* whose reads raise. Scoped to a prefix rather than a
+        #: service because the tombstone read has to fail while the namespaced
+        #: miss immediately before it succeeds — both are the same service.
+        self.refuse_reads_with_prefix: str | None = None
         #: Hook run after a successful write, for simulating a concurrent
         #: writer landing between our probe and our read-back.
         self.on_write = None
@@ -50,6 +54,10 @@ class FakeKeyring:
             self.on_write(service, key)
 
     def get_password(self, service: str, key: str) -> str | None:
+        if self.refuse_reads_with_prefix and key.startswith(
+            self.refuse_reads_with_prefix
+        ):
+            raise RuntimeError(f"refusing reads of {key}")
         return self.entries.get((service, key))
 
     def delete_password(self, service: str, key: str) -> None:
@@ -387,6 +395,35 @@ class TestLegacyStoreAdoption:
         )
         assert tombstone not in fake_keyring.entries
 
+    def test_an_unreadable_tombstone_suppresses_but_does_not_destroy(
+        self, fake_keyring: FakeKeyring
+    ) -> None:
+        # A tombstone read that fails is not evidence that a tombstone exists.
+        # Suppressing read-through on it is right and costs a read-through until
+        # the store recovers; *deleting* the legacy copy on it is not, and would
+        # destroy the last copy of a key that was legitimately inheritable — on
+        # a first post-upgrade launch, possibly the signing identity.
+        fake_keyring.seed(
+            secure_storage_module._LEGACY_SERVICE, "key_package", "peer-1", b"pkg"
+        )
+        store = SecureStorage(namespace=ALICE)
+        fake_keyring.refuse_reads_with_prefix = (
+            legacy_store_adoption.TOMBSTONE_KEY_TYPE
+        )
+
+        assert store.load("key_package", "peer-1") is None
+
+        legacy_entry = (
+            secure_storage_module._LEGACY_SERVICE,
+            "key_package:peer-1",
+        )
+        assert legacy_entry in fake_keyring.entries
+
+        # And once the tombstone is readable again, the key it never tombstoned
+        # is inheritable exactly as before — the suppression was recoverable.
+        fake_keyring.refuse_reads_with_prefix = None
+        assert store.load("key_package", "peer-1") == list(b"pkg")
+
     def test_a_delete_that_can_neither_remove_nor_tombstone_is_reported(
         self, fake_keyring: FakeKeyring
     ) -> None:
@@ -400,8 +437,13 @@ class TestLegacyStoreAdoption:
         fake_keyring.refuse_deletes_to = secure_storage_module._LEGACY_SERVICE
         fake_keyring.refuse_writes_to = f"{secure_storage_module._DEFAULT_SERVICE}:{ALICE}"
 
-        with pytest.raises(Exception, match="could not tombstone"):
+        with pytest.raises(Exception, match="could not tombstone") as raised:
             store.delete("key_package", "peer-1")
+
+        # Both halves must be named: the tombstone write is the immediate
+        # failure, but the removal that stranded the copy is what an operator
+        # reading the crash actually needs.
+        assert "refusing deletes to" in str(raised.value)
 
     def test_tombstones_are_never_exposed_as_key_material(
         self, fake_keyring: FakeKeyring

@@ -314,10 +314,15 @@ class MlsSecureStorage internal constructor(
         read(sharedPreferences, keyType, keyId)?.let { return it.map { byte -> byte.toUByte() } }
 
         val legacy = readThroughStore(keyType) ?: return null
-        if (isTombstoned(keyType, keyId)) {
-            // Opportunistic heal: the removal that failed may succeed now, which
-            // is the only thing that retires a tombstone. Absent either way.
-            retryTombstonedRemoval(legacy, keyType, keyId)
+        val tombstone = tombstoneState(keyType, keyId)
+        if (tombstone.suppressesReadThrough) {
+            if (tombstone.allowsRemovalRetry) {
+                // Opportunistic heal: the removal that failed may succeed now,
+                // which is the only thing that retires a tombstone. Gated on a
+                // *confirmed* tombstone — a read that merely failed must not
+                // delete a copy that may still be inheritable.
+                retryTombstonedRemoval(legacy, keyType, keyId)
+            }
             return null
         }
         val inherited = read(legacy, keyType, keyId) ?: return null
@@ -381,7 +386,11 @@ class MlsSecureStorage internal constructor(
             val keys = LinkedHashSet(index(sharedPreferences, keyType))
             readThroughStore(keyType)?.let { legacy ->
                 try {
-                    keys.addAll(index(legacy, keyType).filterNot { isTombstoned(keyType, it) })
+                    keys.addAll(
+                        index(legacy, keyType).filterNot {
+                            tombstoneState(keyType, it).suppressesReadThrough
+                        }
+                    )
                 } catch (error: Exception) {
                     Log.w(TAG, "Failed to list inherited entries for $keyType", error)
                 }
@@ -415,23 +424,39 @@ class MlsSecureStorage internal constructor(
     }
 
     /**
-     * Whether this key's legacy copy is known to have outlived a delete.
+     * What the namespaced store says about this key's legacy copy.
      *
-     * Fails closed: a tombstone read that throws means read-through cannot be
+     * A read that throws is [LegacyStoreAdoption.TombstoneState.UNREADABLE],
+     * which fails closed as far as *reading* goes: read-through cannot be
      * proven safe, and suppressing a legitimate inherited entry costs an
      * identity rotation while resurrecting a consumed key costs forward
-     * secrecy. Near-unreachable in practice — the namespaced read in [load]
-     * runs first against the same store and would have thrown.
+     * secrecy. It deliberately stops short of authorising the removal retry —
+     * see [LegacyStoreAdoption.TombstoneState]. Near-unreachable in practice:
+     * the namespaced read in [load] runs first against the same store and would
+     * have thrown.
      */
-    private fun isTombstoned(keyType: String, keyId: String): Boolean = try {
-        read(
+    private fun tombstoneState(
+        keyType: String,
+        keyId: String
+    ): LegacyStoreAdoption.TombstoneState = try {
+        val recorded = read(
             sharedPreferences,
             LegacyStoreAdoption.TOMBSTONE_KEY_TYPE,
             LegacyStoreAdoption.tombstoneKeyId(keyType, keyId)
         ) != null
+        if (recorded) {
+            LegacyStoreAdoption.TombstoneState.RECORDED
+        } else {
+            LegacyStoreAdoption.TombstoneState.ABSENT
+        }
     } catch (error: Exception) {
-        Log.w(TAG, "Could not read the tombstone for $keyType; treating it as set", error)
-        true
+        Log.w(
+            TAG,
+            "Could not read the tombstone for $keyType; suppressing read-through " +
+                "without retiring the legacy copy",
+            error
+        )
+        LegacyStoreAdoption.TombstoneState.UNREADABLE
     }
 
     /** Best-effort retry of the legacy removal a tombstone stands in for. */

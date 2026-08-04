@@ -53,6 +53,22 @@ class MlsSecureStorageTest {
         var failRemovals = false
         var failWrites = false
 
+        /**
+         * Key *prefix* whose reads throw. Scoped to a prefix rather than the
+         * whole store because the tombstone read has to fail while the
+         * namespaced miss immediately before it succeeds — both are the same
+         * store.
+         */
+        var failReadsWithPrefix: String? = null
+
+        override fun getString(key: String?, defValue: String?): String? {
+            val prefix = failReadsWithPrefix
+            if (prefix != null && key != null && key.startsWith(prefix)) {
+                throw IllegalStateException("refusing reads of $key")
+            }
+            return delegate.getString(key, defValue)
+        }
+
         override fun edit(): SharedPreferences.Editor = Editor(delegate.edit())
 
         private inner class Editor(
@@ -228,6 +244,37 @@ class MlsSecureStorageTest {
     }
 
     /**
+     * A tombstone read that fails is not evidence that a tombstone exists.
+     * Suppressing read-through on it is right and costs a read-through until
+     * the store recovers; *deleting* the legacy copy on it is not, and would
+     * destroy the last copy of a key that was legitimately inheritable — on a
+     * first post-upgrade launch, possibly the signing identity.
+     */
+    @Test
+    fun anUnreadableTombstoneSuppressesButDoesNotDestroy() {
+        val account = namespace("tombstone-unreadable")
+        val namespaced = preferences("ns-$account")
+        val legacy = preferences("legacy-$account")
+        val storage = adoptedStore(namespaced, legacy, account)
+
+        namespaced.failReadsWithPrefix = LegacyStoreAdoption.TOMBSTONE_KEY_TYPE
+
+        assertNull(
+            "an unprovable tombstone must still suppress read-through",
+            storage.load("key_package", "peer-1")
+        )
+        assertNotNull(
+            "a read that merely failed must not retire the legacy copy",
+            rawEntry(legacy, "key_package", "peer-1")
+        )
+
+        // And once the tombstone is readable again, the key it never tombstoned
+        // is inheritable exactly as before — the suppression was recoverable.
+        namespaced.failReadsWithPrefix = null
+        assertNotNull(storage.load("key_package", "peer-1"))
+    }
+
+    /**
      * The one case that must throw. With the legacy copy alive and the
      * tombstone unwritable there is no way to keep the delete's promise, and a
      * store failing both is failing everything else too.
@@ -246,8 +293,13 @@ class MlsSecureStorageTest {
             storage.delete("key_package", "peer-1")
         }
         assertTrue(
-            "the message must name both halves of the fault: ${error.message}",
+            "the message must name the tombstone half: ${error.message}",
             error.message.orEmpty().contains("could not tombstone")
+        )
+        assertTrue(
+            "the message must also name the removal that stranded the copy, " +
+                "which is what an operator reading the crash needs: ${error.message}",
+            error.message.orEmpty().contains("commit rejected")
         )
     }
 

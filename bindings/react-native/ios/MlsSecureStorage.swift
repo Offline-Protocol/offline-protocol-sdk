@@ -147,10 +147,15 @@ final class MlsSecureStorage: MlsStorageProvider {
         guard let legacy = readThroughService(for: keyType) else {
             return nil
         }
-        if isTombstoned(keyType: keyType, keyId: keyId) {
-            // Opportunistic heal: the removal that failed may succeed now, which
-            // is the only thing that retires a tombstone. Absent either way.
-            retryTombstonedRemoval(from: legacy, keyType: keyType, keyId: keyId)
+        let tombstone = tombstoneState(keyType: keyType, keyId: keyId)
+        if tombstone.suppressesReadThrough {
+            if tombstone.allowsRemovalRetry {
+                // Opportunistic heal: the removal that failed may succeed now,
+                // which is the only thing that retires a tombstone. Gated on a
+                // *confirmed* tombstone — a read that merely failed must not
+                // delete a copy that may still be inheritable.
+                retryTombstonedRemoval(from: legacy, keyType: keyType, keyId: keyId)
+            }
             return nil
         }
         guard let inherited = try Self.load(
@@ -231,7 +236,7 @@ final class MlsSecureStorage: MlsStorageProvider {
                 accessGroup: accessGroup
             )) ?? []
             for key in inherited where !keys.contains(key)
-                && !isTombstoned(keyType: keyType, keyId: key) {
+                && !tombstoneState(keyType: keyType, keyId: key).suppressesReadThrough {
                 keys.append(key)
             }
         }
@@ -261,23 +266,30 @@ final class MlsSecureStorage: MlsStorageProvider {
         }
     }
 
-    /// Whether this key's legacy copy is known to have outlived a delete.
+    /// What the namespaced store says about this key's legacy copy.
     ///
-    /// Fails closed: a tombstone read that throws means read-through cannot be
-    /// proven safe, and suppressing a legitimate inherited entry costs an
-    /// identity rotation while resurrecting a consumed key costs forward
-    /// secrecy. Near-unreachable in practice — the namespaced read in `load`
-    /// runs first against the same service and would have thrown.
-    private func isTombstoned(keyType: String, keyId: String) -> Bool {
+    /// A read that throws is `.unreadable`, which fails closed as far as
+    /// *reading* goes: read-through cannot be proven safe, and suppressing a
+    /// legitimate inherited entry costs an identity rotation while resurrecting
+    /// a consumed key costs forward secrecy. It deliberately stops short of
+    /// authorising the removal retry — see
+    /// `LegacyStoreAdoption.TombstoneState`. Near-unreachable in practice: the
+    /// namespaced read in `load` runs first against the same service and would
+    /// have thrown.
+    private func tombstoneState(
+        keyType: String,
+        keyId: String
+    ) -> LegacyStoreAdoption.TombstoneState {
         do {
-            return try Self.load(
+            let recorded = try Self.load(
                 keyType: LegacyStoreAdoption.tombstoneKeyType,
                 keyId: LegacyStoreAdoption.tombstoneKeyId(keyType: keyType, keyId: keyId),
                 from: service,
                 accessGroup: accessGroup
             ) != nil
+            return recorded ? .recorded : .absent
         } catch {
-            return true
+            return .unreadable
         }
     }
 

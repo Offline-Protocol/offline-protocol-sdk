@@ -211,6 +211,36 @@ final class LegacyStoreAdoptionTests: XCTestCase {
         )
     }
 
+    /// The asymmetry the three-way exists for. Both non-`absent` answers stop
+    /// read-through, because a read that failed cannot prove read-through is
+    /// safe. Only a confirmed tombstone also authorises deleting the legacy
+    /// copy: acting on a failed read would destroy the last copy of a key that
+    /// was legitimately inheritable — on a first post-upgrade launch, possibly
+    /// the signing identity — and unlike suppression that cannot be walked
+    /// back.
+    func testAnUnreadableTombstoneSuppressesWithoutAuthorisingDeletion() {
+        let unreadable = LegacyStoreAdoption.TombstoneState.unreadable
+
+        XCTAssertTrue(unreadable.suppressesReadThrough)
+        XCTAssertFalse(unreadable.allowsRemovalRetry)
+    }
+
+    func testARecordedTombstoneSuppressesAndAuthorisesDeletion() {
+        let recorded = LegacyStoreAdoption.TombstoneState.recorded
+
+        XCTAssertTrue(recorded.suppressesReadThrough)
+        XCTAssertTrue(recorded.allowsRemovalRetry)
+    }
+
+    /// The ordinary path: nothing was ever tombstoned, so an inherited entry is
+    /// still promotable.
+    func testAnAbsentTombstonePermitsReadThrough() {
+        let absent = LegacyStoreAdoption.TombstoneState.absent
+
+        XCTAssertFalse(absent.suppressesReadThrough)
+        XCTAssertFalse(absent.allowsRemovalRetry)
+    }
+
     /// One tombstone names exactly one legacy key. Keyed like the stores' own
     /// account keys, so it inherits their existing ambiguity rather than adding
     /// a new one.
