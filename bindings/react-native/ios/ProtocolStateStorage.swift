@@ -199,6 +199,53 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     /// shared lock above, not from this set.
     private var swept = Set<URL>()
 
+    /// Data-protection class for every record.
+    ///
+    /// `completeUntilFirstUserAuthentication`, not `complete`: the SDK runs in
+    /// the background across device locks — BLE mesh delivery, relay
+    /// reconnects — and `complete` would make the outbox unreadable there,
+    /// turning a locked screen into dropped delivery state. It is deliberately
+    /// the same trade the Keychain side already makes with
+    /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
+    ///
+    /// Stated rather than inherited. It happens to be the container default for
+    /// third-party app data today, so this changes no behaviour — but the
+    /// records here are the peer graph, the outbox, and the seen-message id
+    /// set, deliberately unsealed, and a default is not a decision. Leaving the
+    /// security-relevant attribute implicit while pinning `isExcludedFromBackup`
+    /// right below had it backwards.
+    ///
+    /// Applied twice: to the directory, so entries created in it inherit the
+    /// class, and to each write, so a record does not depend on that
+    /// inheritance holding. `#if os(iOS)` because data protection does not
+    /// exist on the macOS host the SwiftPM suites run on — which is also why
+    /// nothing here is covered at runtime. To check the branch still compiles:
+    ///
+    ///     xcrun swiftc -typecheck -DSWIFT_PACKAGE -target arm64-apple-ios15.0 \
+    ///       -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+    ///       ProtocolStateStorage.swift StorageNamespace.swift
+    #if os(iOS)
+    private static let writeOptions: Data.WritingOptions =
+        [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+    #else
+    private static let writeOptions: Data.WritingOptions = [.atomic]
+    #endif
+
+    /// Pins the protection class on a directory, best effort.
+    ///
+    /// Unlike `isExcludedFromBackup` above, a failure here is not a regression:
+    /// the class this asks for is already the container default, so the records
+    /// keep it. Throwing would invent a new way for the store to fail to open
+    /// in exchange for nothing.
+    private static func pinFileProtection(at url: URL, fileManager: FileManager) {
+        #if os(iOS)
+        try? fileManager.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: url.path
+        )
+        #endif
+    }
+
     convenience init(
         accountNamespace: String,
         fileManager: FileManager = .default
@@ -306,6 +353,7 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
                 message: "Failed to initialize protocol-state directory: \(error)"
             )
         }
+        Self.pinFileProtection(at: root, fileManager: fileManager)
     }
 
     func store(keyType: String, keyId: String, data: Data) throws {
@@ -325,8 +373,9 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
                 at: directory,
                 withIntermediateDirectories: true
             )
+            Self.pinFileProtection(at: directory, fileManager: fileManager)
             sweepTemporaries(in: directory)
-            try framed.write(to: url, options: .atomic)
+            try framed.write(to: url, options: Self.writeOptions)
         } catch {
             throw MlsStorageError.StoreFailed(
                 message: "Failed to persist protocol state: \(error)"

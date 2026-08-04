@@ -77,3 +77,32 @@ def test_claim_entry_is_never_read_through() -> None:
     # inherited value.
     assert legacy_store_adoption.is_claim_entry(legacy_store_adoption.CLAIM_KEY_TYPE)
     assert not legacy_store_adoption.is_claim_entry("identity")
+
+
+def test_an_unreadable_tombstone_suppresses_without_authorising_deletion() -> None:
+    # The asymmetry the three-way exists for. Both non-absent answers stop
+    # read-through, because a read that failed cannot prove read-through is
+    # safe. Only a confirmed tombstone also authorises deleting the legacy
+    # copy: acting on a failed read would destroy the last copy of a key that
+    # was legitimately inheritable, and unlike suppression that cannot be
+    # walked back.
+    unreadable = legacy_store_adoption.TombstoneState.UNREADABLE
+
+    assert unreadable.suppresses_read_through
+    assert not unreadable.allows_removal_retry
+
+
+def test_a_recorded_tombstone_suppresses_and_authorises_deletion() -> None:
+    recorded = legacy_store_adoption.TombstoneState.RECORDED
+
+    assert recorded.suppresses_read_through
+    assert recorded.allows_removal_retry
+
+
+def test_an_absent_tombstone_permits_read_through() -> None:
+    # The ordinary path: nothing was ever tombstoned, so an inherited entry is
+    # still promotable.
+    absent = legacy_store_adoption.TombstoneState.ABSENT
+
+    assert not absent.suppresses_read_through
+    assert not absent.allows_removal_retry

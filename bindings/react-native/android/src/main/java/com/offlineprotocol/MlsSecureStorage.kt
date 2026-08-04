@@ -26,33 +26,18 @@ import java.io.File
  * (in-memory now, disk later, failure invisible). A crash in an `apply()`
  * window would leave durable ciphertext whose key was never written.
  */
-class MlsSecureStorage(
-    context: Context,
+class MlsSecureStorage internal constructor(
     accountNamespace: String,
-    adoptLegacyStore: Boolean = true
-) : MlsStorageProvider {
-
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
-
-    private val namespace = StorageNamespace.requireAccount(accountNamespace)
-
-    private val sharedPreferences = EncryptedSharedPreferences.create(
-        context,
-        "$PREFS_FILE_PREFIX$namespace",
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
-
+    private val sharedPreferences: SharedPreferences,
     /**
      * The pre-namespace preferences file, opened only when it already exists.
      * Opening it unconditionally would create an empty one on every fresh
      * install and make "is there anything to inherit?" unanswerable.
      */
-    private val legacyPreferences: SharedPreferences? =
-        if (adoptLegacyStore) openLegacyPreferences(context) else null
+    private val legacyPreferences: SharedPreferences?
+) : MlsStorageProvider {
+
+    private val namespace = StorageNamespace.requireAccount(accountNamespace)
 
     /**
      * Outcome of the one-time legacy-store adoption, for the caller to surface.
@@ -61,6 +46,28 @@ class MlsSecureStorage(
      */
     internal val legacyAdoption: LegacyStoreAdoption.Decision = resolveLegacyAdoption()
 
+    /**
+     * The production constructor: both stores are `EncryptedSharedPreferences`
+     * over the androidx master key.
+     *
+     * The stores are injectable above so the adoption, tombstone, and
+     * read-through logic can be exercised under a JVM harness.
+     * `EncryptedSharedPreferences` needs a real AndroidKeyStore and cannot run
+     * there — but none of that logic is encryption-aware, so a plain
+     * `SharedPreferences` pair drives exactly the same code. What the seam does
+     * *not* fake is the store this class actually ships with; keep the
+     * production path above this comment trivial enough to read.
+     */
+    constructor(
+        context: Context,
+        accountNamespace: String,
+        adoptLegacyStore: Boolean = true
+    ) : this(
+        accountNamespace,
+        openNamespacedPreferences(context, StorageNamespace.requireAccount(accountNamespace)),
+        if (adoptLegacyStore) openLegacyPreferences(context) else null
+    )
+
     companion object {
         private const val TAG = "MlsSecureStorage"
         private const val PREFS_FILE_PREFIX = "mls_secure_storage_v2_"
@@ -68,6 +75,46 @@ class MlsSecureStorage(
         private const val INDEX_PREFIX = "index:"
         // Global lock to ensure index consistency across instances/threads
         private val LOCK = Any()
+
+        /**
+         * Value written for a tombstone. Only its *presence* is the signal —
+         * nothing reads the bytes back — so it stays one byte rather than
+         * restating the key.
+         */
+        private val TOMBSTONE_VALUE = byteArrayOf(1)
+
+        private fun masterKey(context: Context): MasterKey =
+            MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+
+        private fun openPreferences(context: Context, name: String): SharedPreferences =
+            EncryptedSharedPreferences.create(
+                context,
+                name,
+                masterKey(context),
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+
+        private fun openNamespacedPreferences(
+            context: Context,
+            namespace: String
+        ): SharedPreferences = openPreferences(context, "$PREFS_FILE_PREFIX$namespace")
+
+        private fun openLegacyPreferences(context: Context): SharedPreferences? {
+            if (!legacyPreferencesFile(context).exists()) {
+                return null
+            }
+            return try {
+                openPreferences(context, LEGACY_PREFS_FILE_NAME)
+            } catch (error: Exception) {
+                // A legacy file we cannot open (rotated master key, corruption)
+                // is not inheritable. Report it rather than silently rotating.
+                Log.e(TAG, "Legacy secure store exists but could not be opened", error)
+                null
+            }
+        }
 
         /**
          * Erases every secure-store entry this SDK holds for one account.
@@ -108,13 +155,30 @@ class MlsSecureStorage(
             context: Context,
             accountNamespace: String,
             wipeLegacyStore: Boolean = true
+        ) = wipeAccount(context, accountNamespace, wipeLegacyStore, ::readLegacyClaim)
+
+        /**
+         * [wipeAccount] with the legacy claim read by [readClaim].
+         *
+         * The reader is injectable so the branch that *destroys* the shared
+         * pre-namespace store can be exercised. It cannot be reached otherwise
+         * under a JVM harness: the real reader opens an
+         * `EncryptedSharedPreferences`, which needs a real AndroidKeyStore, so
+         * every claim reads as `Unreadable` and the wipe always fails closed —
+         * the one outcome that was already covered, and only by accident.
+         */
+        internal fun wipeAccount(
+            context: Context,
+            accountNamespace: String,
+            wipeLegacyStore: Boolean,
+            readClaim: (Context) -> LegacyStoreAdoption.LegacyClaim
         ) {
             val namespace = StorageNamespace.requireAccount(accountNamespace)
             synchronized(LOCK) {
                 var firstError: Exception? = null
                 if (wipeLegacyStore) {
                     try {
-                        wipeLegacy(context, namespace)
+                        wipeLegacy(context, namespace, readClaim)
                     } catch (error: Exception) {
                         firstError = error
                     }
@@ -134,11 +198,15 @@ class MlsSecureStorage(
             }
         }
 
-        private fun wipeLegacy(context: Context, namespace: String) {
+        private fun wipeLegacy(
+            context: Context,
+            namespace: String,
+            readClaim: (Context) -> LegacyStoreAdoption.LegacyClaim
+        ) {
             if (!legacyPreferencesFile(context).exists()) {
                 return
             }
-            val claim = readLegacyClaim(context)
+            val claim = readClaim(context)
             if (!LegacyStoreAdoption.shouldWipeLegacy(claim, namespace)) {
                 Log.i(
                     TAG,
@@ -162,23 +230,16 @@ class MlsSecureStorage(
          * account's identity and block list.
          */
         private fun readLegacyClaim(context: Context): LegacyStoreAdoption.LegacyClaim = try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            val legacy = EncryptedSharedPreferences.create(
-                context,
-                LEGACY_PREFS_FILE_NAME,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
+            val legacy = openPreferences(context, LEGACY_PREFS_FILE_NAME)
             val encoded = legacy.getString(
                 "${LegacyStoreAdoption.CLAIM_KEY_TYPE}:${LegacyStoreAdoption.CLAIM_KEY_ID}",
                 null
             )
-            LegacyStoreAdoption.LegacyClaim.of(
-                encoded?.let { String(Base64.decode(it, Base64.NO_WRAP), Charsets.UTF_8) }
-            )
+            if (encoded == null) {
+                LegacyStoreAdoption.LegacyClaim.Absent
+            } else {
+                LegacyStoreAdoption.LegacyClaim.of(Base64.decode(encoded, Base64.NO_WRAP))
+            }
         } catch (error: Exception) {
             Log.w(TAG, "Could not read the legacy secure store claim; not wiping it", error)
             LegacyStoreAdoption.LegacyClaim.Unreadable
@@ -238,13 +299,32 @@ class MlsSecureStorage(
      * only ever for an account with no live instance — the bridge refuses to
      * wipe the one it is running — so it cannot interleave with a promotion on
      * the same preferences file.
+     *
+     * A tombstoned key reads as absent without consulting the legacy store at
+     * all: its copy there outlived a delete, and promoting it would resurrect
+     * key material the caller was told was gone.
      */
     override fun load(keyType: String, keyId: String): List<UByte>? {
+        if (LegacyStoreAdoption.isReservedEntry(keyType)) {
+            return null
+        }
+
         // No lock needed for simple reads of the namespaced store; the
         // promotion below takes it.
         read(sharedPreferences, keyType, keyId)?.let { return it.map { byte -> byte.toUByte() } }
 
         val legacy = readThroughStore(keyType) ?: return null
+        val tombstone = tombstoneState(keyType, keyId)
+        if (tombstone.suppressesReadThrough) {
+            if (tombstone.allowsRemovalRetry) {
+                // Opportunistic heal: the removal that failed may succeed now,
+                // which is the only thing that retires a tombstone. Gated on a
+                // *confirmed* tombstone — a read that merely failed must not
+                // delete a copy that may still be inheritable.
+                retryTombstonedRemoval(legacy, keyType, keyId)
+            }
+            return null
+        }
         val inherited = read(legacy, keyType, keyId) ?: return null
         synchronized(LOCK) {
             // Best-effort promotion: a failed copy still returns the value, it
@@ -260,32 +340,57 @@ class MlsSecureStorage(
 
     /**
      * Deletes data from the namespaced store, and from the legacy store too.
+     *
      * A delete that left the legacy copy in place would let read-through
-     * resurrect key material the caller believes is gone.
+     * resurrect key material the caller believes is gone. When that removal
+     * fails, the key is tombstoned rather than reported: see
+     * [LegacyStoreAdoption.TOMBSTONE_KEY_TYPE] for why this cannot be signalled
+     * by throwing. The delete has still done what it promised — nothing will
+     * hand that key back — so it returns successfully.
+     *
+     * Only a *double* fault throws: a legacy copy that will not delete and a
+     * namespaced store that will not record the tombstone leaves no way to keep
+     * the promise, and a store failing both is failing everything else too.
      */
     override fun delete(keyType: String, keyId: String) {
         synchronized(LOCK) {
             remove(sharedPreferences, keyType, keyId)
-            readThroughStore(keyType)?.let { legacy ->
-                try {
-                    remove(legacy, keyType, keyId)
-                } catch (error: Exception) {
-                    Log.w(TAG, "Failed to delete inherited entry for $keyType", error)
-                }
+            val legacy = readThroughStore(keyType) ?: return
+            try {
+                remove(legacy, keyType, keyId)
+            } catch (error: Exception) {
+                Log.w(
+                    TAG,
+                    "Failed to delete inherited entry for $keyType; tombstoning it " +
+                        "so read-through cannot resurrect it",
+                    error
+                )
+                tombstone(keyType, keyId, error)
+                return
             }
+            clearTombstone(keyType, keyId)
         }
     }
 
     /**
      * Lists all key IDs for a given key type, unioned across the adopted legacy
-     * store so a not-yet-promoted entry is still discoverable.
+     * store so a not-yet-promoted entry is still discoverable — except where a
+     * tombstone says that entry is a corpse, which must not be advertised as a
+     * key that can be loaded.
      */
     override fun listKeys(keyType: String): List<String> {
+        if (LegacyStoreAdoption.isReservedEntry(keyType)) {
+            return emptyList()
+        }
         synchronized(LOCK) {
             val keys = LinkedHashSet(index(sharedPreferences, keyType))
             readThroughStore(keyType)?.let { legacy ->
                 try {
-                    keys.addAll(index(legacy, keyType))
+                    keys.addAll(
+                        index(legacy, keyType).filterNot {
+                            tombstoneState(keyType, it).suppressesReadThrough
+                        }
+                    )
                 } catch (error: Exception) {
                     Log.w(TAG, "Failed to list inherited entries for $keyType", error)
                 }
@@ -294,28 +399,101 @@ class MlsSecureStorage(
         }
     }
 
-    // -- legacy adoption -----------------------------------------------------
+    // -- tombstones ----------------------------------------------------------
 
-    private fun openLegacyPreferences(context: Context): SharedPreferences? {
-        val file = File(context.dataDir, "shared_prefs/$LEGACY_PREFS_FILE_NAME.xml")
-        if (!file.exists()) {
-            return null
-        }
-        return try {
-            EncryptedSharedPreferences.create(
-                context,
-                LEGACY_PREFS_FILE_NAME,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+    /**
+     * Records that a legacy copy survived its deletion.
+     *
+     * @param cause the removal failure this stands in for, folded into the
+     *   thrown message so a double fault names both halves.
+     */
+    private fun tombstone(keyType: String, keyId: String, cause: Exception) {
+        try {
+            store(
+                sharedPreferences,
+                LegacyStoreAdoption.TOMBSTONE_KEY_TYPE,
+                LegacyStoreAdoption.tombstoneKeyId(keyType, keyId),
+                TOMBSTONE_VALUE
             )
         } catch (error: Exception) {
-            // A legacy file we cannot open (rotated master key, corruption) is
-            // not inheritable. Report it rather than silently rotating.
-            Log.e(TAG, "Legacy secure store exists but could not be opened", error)
-            null
+            throw MlsStorageException.DeleteFailed(
+                "Delete left an inherited copy of $keyType in place " +
+                    "(${cause.message}) and could not tombstone it: ${error.message}"
+            )
         }
     }
+
+    /**
+     * What the namespaced store says about this key's legacy copy.
+     *
+     * A read that throws is [LegacyStoreAdoption.TombstoneState.UNREADABLE],
+     * which fails closed as far as *reading* goes: read-through cannot be
+     * proven safe, and suppressing a legitimate inherited entry costs an
+     * identity rotation while resurrecting a consumed key costs forward
+     * secrecy. It deliberately stops short of authorising the removal retry —
+     * see [LegacyStoreAdoption.TombstoneState]. Near-unreachable in practice:
+     * the namespaced read in [load] runs first against the same store and would
+     * have thrown.
+     */
+    private fun tombstoneState(
+        keyType: String,
+        keyId: String
+    ): LegacyStoreAdoption.TombstoneState = try {
+        val recorded = read(
+            sharedPreferences,
+            LegacyStoreAdoption.TOMBSTONE_KEY_TYPE,
+            LegacyStoreAdoption.tombstoneKeyId(keyType, keyId)
+        ) != null
+        if (recorded) {
+            LegacyStoreAdoption.TombstoneState.RECORDED
+        } else {
+            LegacyStoreAdoption.TombstoneState.ABSENT
+        }
+    } catch (error: Exception) {
+        Log.w(
+            TAG,
+            "Could not read the tombstone for $keyType; suppressing read-through " +
+                "without retiring the legacy copy",
+            error
+        )
+        LegacyStoreAdoption.TombstoneState.UNREADABLE
+    }
+
+    /** Best-effort retry of the legacy removal a tombstone stands in for. */
+    private fun retryTombstonedRemoval(
+        legacy: SharedPreferences,
+        keyType: String,
+        keyId: String
+    ) {
+        synchronized(LOCK) {
+            try {
+                remove(legacy, keyType, keyId)
+            } catch (error: Exception) {
+                return
+            }
+            clearTombstone(keyType, keyId)
+        }
+    }
+
+    /**
+     * Retires a tombstone once the legacy copy is genuinely gone.
+     *
+     * Best effort: a tombstone that outlives its corpse only costs the
+     * inherited entry it suppresses, and there is nothing left to resurrect.
+     */
+    private fun clearTombstone(keyType: String, keyId: String) {
+        try {
+            remove(
+                sharedPreferences,
+                LegacyStoreAdoption.TOMBSTONE_KEY_TYPE,
+                LegacyStoreAdoption.tombstoneKeyId(keyType, keyId)
+            )
+        } catch (error: Exception) {
+            Log.d(TAG, "Failed to clear the tombstone for $keyType", error)
+        }
+    }
+
+    // -- legacy adoption -----------------------------------------------------
 
     /**
      * Resolves — and, when the legacy store is unclaimed, records and then
@@ -428,7 +606,7 @@ class MlsSecureStorage(
         if (!LegacyStoreAdoption.allowsReadThrough(legacyAdoption)) {
             return null
         }
-        if (LegacyStoreAdoption.isClaimEntry(keyType)) {
+        if (LegacyStoreAdoption.isReservedEntry(keyType)) {
             return null
         }
         return legacyPreferences

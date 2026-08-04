@@ -45,6 +45,61 @@ enum LegacyStoreAdoption {
     static let claimKeyType = "__offline_protocol_migration__"
     static let claimKeyId = "claimed_by"
 
+    /// Key type under which a *namespaced* store records that a legacy copy
+    /// survived its own deletion.
+    ///
+    /// `delete` removes both copies, because read-through would otherwise hand
+    /// back key material the caller believes is gone. The legacy removal can
+    /// fail on its own — a locked Keychain, a rotated master key — and it
+    /// cannot be reported by failing the delete: core treats a storage delete
+    /// as fatal almost everywhere (OpenMLS aborts Welcome processing and every
+    /// commit merge on one), and there is no retry anywhere to fall back on. So
+    /// a failed legacy removal is recorded instead: a tombstone makes
+    /// read-through treat that key as absent, which is the guarantee `delete`
+    /// actually owes its caller. The corpse in the legacy store is inert.
+    ///
+    /// Tombstones live only in the namespaced store, are never promoted, and
+    /// are never reported as key material.
+    static let tombstoneKeyType = "__offline_protocol_tombstone__"
+
+    /// The tombstone entry naming one legacy key.
+    ///
+    /// Joined exactly like the stores' own account keys, so it inherits their
+    /// existing (accepted) ambiguity between `("a", "b:c")` and `("a:b", "c")`
+    /// rather than introducing a new one. A collision would over-suppress a
+    /// legacy read — degraded, never a resurrection.
+    static func tombstoneKeyId(keyType: String, keyId: String) -> String {
+        "\(keyType):\(keyId)"
+    }
+
+    /// What a tombstone read established about one legacy key.
+    ///
+    /// Three-way for the same reason `LegacyClaim` is: the two non-`absent`
+    /// answers authorise different things. Both suppress read-through, because
+    /// a read that failed cannot prove read-through is safe. Only `recorded`
+    /// additionally authorises *deleting* the legacy copy, and that asymmetry
+    /// is the point — a failed read is not evidence that a tombstone exists, so
+    /// deleting on it would destroy the last copy of a key that was
+    /// legitimately inheritable, which on a first post-upgrade launch can be
+    /// the MLS signing identity. Suppression costs a read-through until the
+    /// store recovers and the next read heals it; the deletion cannot be walked
+    /// back.
+    enum TombstoneState: Equatable {
+        /// A tombstone is recorded: this key's legacy copy outlived a delete.
+        case recorded
+        /// No tombstone recorded. Read-through may proceed.
+        case absent
+        /// The tombstone could not be read, so it is unknown either way.
+        case unreadable
+
+        /// Whether the legacy store must not be consulted for this key.
+        var suppressesReadThrough: Bool { self != .absent }
+
+        /// Whether the legacy copy may be deleted on sight. Only a *confirmed*
+        /// tombstone: see the type's note.
+        var allowsRemovalRetry: Bool { self == .recorded }
+    }
+
     enum Decision: Equatable {
         /// Legacy store is unclaimed: claim it and read through.
         case adopt
@@ -116,6 +171,29 @@ enum LegacyStoreAdoption {
             }
             return .owned(by: value)
         }
+
+        /// Classifies a claim read as raw bytes.
+        ///
+        /// Decoded *lossily* — invalid sequences become U+FFFD rather than
+        /// failing the decode — so bytes that are present but not UTF-8
+        /// classify as `.owned`, never `.absent`.
+        ///
+        /// The distinction is load-bearing for the wipe. Bytes this SDK did not
+        /// write are still evidence that *something* claimed the store, and
+        /// `.absent` is the one classification that authorises destroying it —
+        /// the shared, pre-namespace store holding another account's MLS
+        /// identity, sessions, and block list. A garbled claim is far more
+        /// likely a claim this reader cannot interpret than no claim at all, so
+        /// it fails closed: the mismatch against any real namespace refuses the
+        /// wipe, and refusing costs only a leftover the next wipe removes.
+        ///
+        /// Adoption gets the same answer, which is also right and is what the
+        /// Kotlin and Python providers already did: an account facing an
+        /// unreadable claim starts fresh and says so, rather than inheriting an
+        /// identity whose owner it could not establish.
+        static func of(bytes: [UInt8]) -> LegacyClaim {
+            of(String(decoding: bytes, as: UTF8.self))
+        }
     }
 
     /// Whether `namespace` may delete the legacy store outright.
@@ -157,5 +235,16 @@ enum LegacyStoreAdoption {
     /// new store or reported by `listKeys`.
     static func isClaimEntry(keyType: String) -> Bool {
         keyType == claimKeyType
+    }
+
+    /// True for either reserved entry — the legacy store's claim and the
+    /// namespaced store's tombstones.
+    ///
+    /// Both are the provider's own bookkeeping rather than key material, so
+    /// neither may reach a caller: read-through skips them, `load` reports them
+    /// absent, and `listKeys` never names them. The provider reads its own
+    /// tombstones through the private primitives, which are not gated.
+    static func isReservedEntry(keyType: String) -> Bool {
+        keyType == claimKeyType || keyType == tombstoneKeyType
     }
 }

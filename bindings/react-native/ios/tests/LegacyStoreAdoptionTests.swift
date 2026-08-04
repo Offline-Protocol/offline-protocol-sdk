@@ -133,6 +133,46 @@ final class LegacyStoreAdoptionTests: XCTestCase {
         )
     }
 
+    /// Bytes that are present but not UTF-8 are still evidence that something
+    /// claimed the store. Reading them as *absent* would authorise a wipe of
+    /// the shared pre-namespace store — another account's MLS identity,
+    /// sessions, and block list — on the strength of a claim this reader merely
+    /// failed to interpret. So the lossy decode keeps it `owned`, the mismatch
+    /// refuses the wipe, and adoption conflicts rather than inheriting an
+    /// identity whose owner it could not establish.
+    func testNonUtf8ClaimIsOwnedNotAbsent() {
+        let garbage: [UInt8] = [0xFF, 0xFE, 0xFD]
+        let claim = LegacyStoreAdoption.LegacyClaim.of(bytes: garbage)
+
+        XCTAssertNotEqual(claim, .absent)
+        XCTAssertFalse(LegacyStoreAdoption.shouldWipeLegacy(claim, namespace: namespace))
+
+        guard case .owned(let owner) = claim else {
+            return XCTFail("expected a garbled claim to read as owned, got \(claim)")
+        }
+        XCTAssertNotEqual(owner, namespace)
+        XCTAssertEqual(
+            LegacyStoreAdoption.decide(existingClaim: owner, namespace: namespace),
+            .conflict(claimedBy: owner)
+        )
+    }
+
+    /// The byte and string classifications must agree, so routing a read
+    /// through either one cannot change who may destroy the store.
+    func testByteAndStringClaimsAgree() {
+        XCTAssertEqual(
+            LegacyStoreAdoption.LegacyClaim.of(bytes: Array(namespace.utf8)),
+            .owned(by: namespace)
+        )
+        XCTAssertEqual(LegacyStoreAdoption.LegacyClaim.of(bytes: []), .absent)
+        XCTAssertTrue(
+            LegacyStoreAdoption.shouldWipeLegacy(
+                .of(bytes: Array(namespace.utf8)),
+                namespace: namespace
+            )
+        )
+    }
+
     /// The claim entry is bookkeeping, not key material: promoting it into the
     /// new store would make a later account read its own namespace back as an
     /// inherited value.
@@ -141,5 +181,77 @@ final class LegacyStoreAdoptionTests: XCTestCase {
             LegacyStoreAdoption.isClaimEntry(keyType: LegacyStoreAdoption.claimKeyType)
         )
         XCTAssertFalse(LegacyStoreAdoption.isClaimEntry(keyType: "identity"))
+    }
+
+    // MARK: - Tombstones
+
+    /// Both reserved entries are the provider's own bookkeeping. Neither may be
+    /// promoted, listed, or handed back as key material — a tombstone escaping
+    /// as a loadable key would be the provider advertising a corpse.
+    func testReservedEntriesCoverTheClaimAndTombstones() {
+        XCTAssertTrue(
+            LegacyStoreAdoption.isReservedEntry(keyType: LegacyStoreAdoption.claimKeyType)
+        )
+        XCTAssertTrue(
+            LegacyStoreAdoption.isReservedEntry(
+                keyType: LegacyStoreAdoption.tombstoneKeyType
+            )
+        )
+        XCTAssertFalse(LegacyStoreAdoption.isReservedEntry(keyType: "identity"))
+        XCTAssertFalse(LegacyStoreAdoption.isReservedEntry(keyType: "key_package"))
+    }
+
+    /// The two reserved key types must stay distinct: collapsing them would let
+    /// a tombstone answer a claim read, and the claim decides which account
+    /// inherits the legacy identity.
+    func testReservedKeyTypesAreDistinct() {
+        XCTAssertNotEqual(
+            LegacyStoreAdoption.claimKeyType,
+            LegacyStoreAdoption.tombstoneKeyType
+        )
+    }
+
+    /// The asymmetry the three-way exists for. Both non-`absent` answers stop
+    /// read-through, because a read that failed cannot prove read-through is
+    /// safe. Only a confirmed tombstone also authorises deleting the legacy
+    /// copy: acting on a failed read would destroy the last copy of a key that
+    /// was legitimately inheritable — on a first post-upgrade launch, possibly
+    /// the signing identity — and unlike suppression that cannot be walked
+    /// back.
+    func testAnUnreadableTombstoneSuppressesWithoutAuthorisingDeletion() {
+        let unreadable = LegacyStoreAdoption.TombstoneState.unreadable
+
+        XCTAssertTrue(unreadable.suppressesReadThrough)
+        XCTAssertFalse(unreadable.allowsRemovalRetry)
+    }
+
+    func testARecordedTombstoneSuppressesAndAuthorisesDeletion() {
+        let recorded = LegacyStoreAdoption.TombstoneState.recorded
+
+        XCTAssertTrue(recorded.suppressesReadThrough)
+        XCTAssertTrue(recorded.allowsRemovalRetry)
+    }
+
+    /// The ordinary path: nothing was ever tombstoned, so an inherited entry is
+    /// still promotable.
+    func testAnAbsentTombstonePermitsReadThrough() {
+        let absent = LegacyStoreAdoption.TombstoneState.absent
+
+        XCTAssertFalse(absent.suppressesReadThrough)
+        XCTAssertFalse(absent.allowsRemovalRetry)
+    }
+
+    /// One tombstone names exactly one legacy key. Keyed like the stores' own
+    /// account keys, so it inherits their existing ambiguity rather than adding
+    /// a new one.
+    func testTombstoneIdNamesOneKey() {
+        XCTAssertEqual(
+            LegacyStoreAdoption.tombstoneKeyId(keyType: "key_package", keyId: "peer-1"),
+            "key_package:peer-1"
+        )
+        XCTAssertNotEqual(
+            LegacyStoreAdoption.tombstoneKeyId(keyType: "key_package", keyId: "peer-1"),
+            LegacyStoreAdoption.tombstoneKeyId(keyType: "key_package", keyId: "peer-2")
+        )
     }
 }
