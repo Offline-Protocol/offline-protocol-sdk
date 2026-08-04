@@ -770,6 +770,17 @@ key-update commits and 1:1 sessions are never gated. See
 [Group Configuration](configuration.md#group-configuration) for the full
 trade-off.
 
+**Re-inviting is not by itself the remedy.** What enforcement guarantees is
+that this device never *merges* an unauthorized commit — not that it never ends
+up in a group the commit changed. A re-invite arrives as a Welcome, and a
+Welcome is not a commit and is not policy-gated: it readmits the device to the
+group as it stands, including the member an unauthorized Add spliced in (whose
+roster attribution then carries `authorized: null`, since a Welcome join
+evaluates nothing). So on `enforced: true`, resolve the refused change as well
+— have an admin remove the intruder, or confirm the removal was legitimate
+before restoring the member — rather than re-inviting and considering the
+matter closed.
+
 **Guidance for apps that need stronger guarantees:** treat
 `group_unauthorized_membership_change` as a moderation alert for a *human*
 admin, who can reverse the change with `remove_from_group` /

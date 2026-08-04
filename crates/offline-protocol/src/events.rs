@@ -1096,7 +1096,10 @@ pub enum Event {
         /// A `true` here also means this device declined an epoch every
         /// accepting member advanced to, so it can no longer decrypt that
         /// group's traffic and needs re-inviting — treat it as a partition
-        /// alarm, not just a moderation signal.
+        /// alarm, not just a moderation signal. Note the re-invite arrives as
+        /// a Welcome, which is not policy-gated, so it readmits us to the
+        /// group *including* whatever the refused commit did; the change
+        /// itself still has to be resolved separately.
         enforced: bool,
     },
 

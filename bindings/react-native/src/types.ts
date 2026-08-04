@@ -1412,15 +1412,20 @@ export interface GroupRichExtrasDroppedEvent extends BaseEvent {
 }
 
 /**
- * An MLS membership change was applied that its committer was not
- * authorized to make.
+ * An MLS membership change was made that its committer was not authorized
+ * to make. Read `enforced` first — it decides what this event means.
  *
- * The change **has been applied** — MLS authenticated the committer as a
+ * With `group.enforceAdminCommits` off (the default), the change **has been
+ * applied** and `enforced` is `false`. MLS authenticated the committer as a
  * group member and accepted the commit. The SDK's admin model is an
  * application-layer overlay on MLS (which has no admin concept), enforced
  * when *sending*; refusing the change on receipt would mean refusing the
  * MLS merge, permanently forking this member away from everyone who
  * accepted it. So the change stands and is reported here instead.
+ *
+ * With that flag on, the commit was instead **refused before merging** and
+ * `enforced` is `true` — nothing changed locally, and this device is now an
+ * epoch behind the group. See the field doc below.
  *
  * This signal can false-positive: "unauthorized" is judged against this
  * device's local replica of role state, which replicates best-effort and
@@ -1432,9 +1437,10 @@ export interface GroupRichExtrasDroppedEvent extends BaseEvent {
  * change automatically off a single member's event — corroborate first. A
  * member added this way can read all subsequent group traffic until removed.
  *
- * Reports are rate-limited per (group, committer): a repeat within a short
- * window is not re-emitted, but every affected `group_member_added` /
- * `group_member_removed` still carries `authorized: false`.
+ * Reports are rate-limited per (group, committer, enforced): a repeat of the
+ * same outcome within a short window is not re-emitted, but every affected
+ * `group_member_added` / `group_member_removed` still carries
+ * `authorized: false`.
  *
  * Known limitation: the member removed by an unauthorized Remove does not
  * receive this event — only the remaining members report the removal.
@@ -1453,6 +1459,25 @@ export interface GroupUnauthorizedMembershipChangeEvent extends BaseEvent {
    * `'affected_member_mismatch'`. Treat as opaque — values may be added.
    */
   reason: string;
+  /**
+   * Whether the commit was *refused* rather than applied.
+   *
+   * `false` (the default configuration) means the membership change
+   * happened: `added` / `removed` describe real roster changes an admin can
+   * undo, and the matching roster events were emitted alongside this one.
+   *
+   * `true` means `group.enforceAdminCommits` was on and the commit was
+   * rejected before merging: no roster event accompanies this one, nothing
+   * changed locally, and `added` / `removed` describe what the commit
+   * *would* have done. Treat it as a partition alarm, not just a moderation
+   * signal — this device declined an epoch every accepting member advanced
+   * to, so it can no longer decrypt that group's traffic and has to be
+   * re-invited. Re-inviting arrives as a Welcome, which is not policy-gated,
+   * so it readmits this device into the group *including* whatever the
+   * refused commit did; resolve that change too rather than treating the
+   * re-invite as the whole remedy.
+   */
+  enforced: boolean;
 }
 
 /**
