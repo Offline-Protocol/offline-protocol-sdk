@@ -5974,11 +5974,11 @@ fn test_unreadable_pending_queue_is_not_overwritten_or_cleared_by_later_writes()
         "an enqueue must not persist over a queue that could not be read"
     );
 
-    // The delete paths (block_user, aborted pending session, session reset) must
-    // not destroy it either — those ids have still never been named. They delete
-    // per-message records for the ids they hold in memory, and the unread legacy
-    // queue's ids are not among them.
-    protocol.drop_pending_queue_for_peer("bob");
+    // The delete paths (block_user, aborted pending session) must not destroy it
+    // either — those ids have still never been named. They delete per-message
+    // records for the ids they hold in memory, and the unread legacy queue's ids
+    // are not among them.
+    protocol.drop_pending_queue_for_peer("bob", "test");
     assert_eq!(
         backing.load(storage_keys::PENDING_MESSAGES, "bob").unwrap(),
         Some(sealed_before),
@@ -12646,6 +12646,55 @@ fn test_session_reset_retains_pending_outbound_and_delivers_after_rebuild() {
             .any(|c| c == "queued-before-reset"),
         "the retained message must flush once the rebuilt session confirms (got {:?})",
         bob_rx.lock().unwrap()
+    );
+}
+
+/// Every path that drops a pending queue must settle the ids it destroys. The
+/// app was handed those ids by `send_message*` at queue time, so an unsettled
+/// drop leaves it waiting on messages that can never resolve either way — the
+/// contract the blocked-flush and expiry paths already honour.
+#[test]
+fn test_aborted_session_settles_pending_queue_with_message_failed() {
+    let (mut alice, _alice_h) = make_encrypted_protocol("alice");
+    let failed: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&failed);
+        alice.on_event(move |e| {
+            if let Event::MessageFailed {
+                message_id, reason, ..
+            } = e
+            {
+                h.lock().unwrap().push((message_id, reason));
+            }
+        });
+    }
+    alice.start().unwrap();
+
+    let queued_id = alice
+        .send_message("bob", "never-deliverable", None, None::<String>)
+        .unwrap();
+    assert!(
+        alice.pending_encrypted_messages.contains_key("bob"),
+        "precondition: the message must be queued, not sent"
+    );
+
+    alice.abort_pending_session_for_peer("bob", crate::events::WelcomeReasonCode::RetryExhausted);
+
+    assert!(
+        !alice.pending_encrypted_messages.contains_key("bob"),
+        "an aborted session must clear the queue"
+    );
+    let settled = failed.lock().unwrap();
+    assert_eq!(
+        settled.len(),
+        1,
+        "the dropped message must be settled exactly once (got {settled:?})"
+    );
+    assert_eq!(settled[0].0, queued_id.as_str());
+    assert!(
+        settled[0].1.contains("Welcome delivery failed"),
+        "the settlement must carry the abort reason (got {:?})",
+        settled[0].1
     );
 }
 
@@ -28968,7 +29017,7 @@ fn test_pending_tail_the_restore_walk_never_reached_survives_runtime_writes() {
     // it either — those ids have still never been named. They delete the
     // per-message records for the ids they hold in memory, and never touch the
     // legacy category at all.
-    protocol.drop_pending_queue_for_peer(&untouched);
+    protocol.drop_pending_queue_for_peer(&untouched, "test");
     assert_eq!(
         state
             .load(storage_keys::PENDING_MESSAGES, &untouched)

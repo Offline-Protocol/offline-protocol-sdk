@@ -791,7 +791,10 @@ impl OfflineProtocol {
         peer_id: &str,
         reason: crate::events::WelcomeReasonCode,
     ) {
-        self.drop_pending_queue_for_peer(peer_id);
+        self.drop_pending_queue_for_peer(
+            peer_id,
+            &format!("Welcome delivery failed: {}", reason.as_str()),
+        );
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::secure_session_failed(
                 peer_id.to_string(),
