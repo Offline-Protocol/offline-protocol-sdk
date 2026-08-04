@@ -1,18 +1,23 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.18.x` line.
+current `v0.19.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
 several previously-accepted inputs are now rejected at the boundary. Sections
 1–12 below cover that release and are the ones that can stop your build.
 
-`v0.18.x` added no further breaking changes, only additive APIs. Where a section
-documents one, it is labelled inline with the release that introduced it (for
-example, `wipePersistedState` in [§10](#10-storage-is-now-isolated-per-app_id-user_id)
-arrived in `v0.18.2`). If you are already on `v0.17.0`, those labelled
-paragraphs are the only parts you still need.
+Nothing since `v0.17.0` breaks a build. Where a later section documents an
+addition or a behaviour change, it is labelled inline with the release that
+introduced it (for example, `wipePersistedState` in
+[§10](#10-storage-is-now-isolated-per-app_id-user_id) arrived in `v0.18.2`). If
+you are already on `v0.17.0`, those labelled paragraphs are the only parts you
+still need — and on this release that means
+[§1.10](#110-the-inbound-plaintext-gate-no-longer-reads-session_states) and
+[§1.11](#111-key-packages-are-checked-against-the-pinned-signing-key), two
+receive-side behaviour changes in `v0.19.0` that compile fine and can still
+surprise you at runtime.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
@@ -374,8 +379,9 @@ leaves no partial state and a retry is safe.
 
 ### 1.10 The inbound plaintext gate no longer reads `session_states`
 
-Only affects `encryption.enabled = true` **with** `requireEncryption: false` —
-the mixed-mode opt-out. Every other configuration is unchanged.
+*New in `v0.19.0`.* Only affects `encryption.enabled = true` **with**
+`requireEncryption: false` — the mixed-mode opt-out. Every other configuration is
+unchanged.
 
 The gate that rejects inbound cleartext used to ask whether a *confirmed* MLS
 session existed with the claimed sender, which it answered from the
@@ -417,8 +423,8 @@ What changes in practice:
 
 ### 1.11 Key packages are checked against the pinned signing key
 
-`peer_key_packages` is now a sealed category, and every use of a key package is
-checked against the peer's TOFU-pinned signature key.
+*New in `v0.19.0`.* `peer_key_packages` is now a sealed category, and every use
+of a key package is checked against the peer's TOFU-pinned signature key.
 
 - **Cached key packages written by earlier builds are unsealed and will be
   dropped on first launch after upgrade.** This is not an error and does not
