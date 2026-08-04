@@ -97,9 +97,8 @@ litigation is filed.
 license. If your employer(s) has rights to intellectual property
 that you create that includes your Contributions, you represent
 that you have received permission to make Contributions on behalf
-of that employer, that your employer has waived such rights for
-your Contributions to the Project, or that your employer has
-executed a separate Corporate CLA with the Project.
+of that employer, or that your employer has waived such rights
+for your Contributions to the Project.
 
 5. You represent that each of Your Contributions is Your original
 creation (see section 7 for submissions on behalf of others). You
