@@ -1412,6 +1412,15 @@ class BleTransportFacade(
             Log.e(TAG, "Permission denied while starting scan", e)
             emitDiagnostic("error", "Permission denied while starting scan", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
             throw e
+        } catch (e: IllegalStateException) {
+            // The BT adapter can transition off between the isScanning check
+            // above and BluetoothLeScanner.startScan below. When that races,
+            // the framework throws IllegalStateException("BT Adapter is not
+            // turned ON") from the scanner. Log and swallow so the scan
+            // watchdog's restart path does not crash the app the moment the
+            // user toggles Bluetooth off mid-session.
+            Log.i(TAG, "Skipping startScan — BT adapter not on: ${e.message}")
+            emitDiagnostic("info", "Skipping startScan — BT adapter not on", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
     }
     
@@ -1455,6 +1464,21 @@ class BleTransportFacade(
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while stopping scan", e)
             emitDiagnostic("error", "Permission denied while stopping scan", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+        } catch (e: IllegalStateException) {
+            // The BT adapter can transition off between the isScanning check
+            // above and BluetoothLeScanner.stopScan below. When that races,
+            // the framework throws IllegalStateException("BT Adapter is not
+            // turned ON") from the scanner. Log and swallow, and mirror the
+            // post-stopScan cleanup here so state does not hang half-torn-
+            // down — leaving isScanning true would block the next start.
+            Log.i(TAG, "Skipping stopScan — BT adapter not on: ${e.message}")
+            scanCallback = null
+            isScanning = false
+            cancelScanWatchdog()
+            cancelConnectionMonitor()
+            lastDiscoveryAt = 0L
+            discoveryLogTimestamps.clear()
+            emitDiagnostic("info", "Skipping stopScan — BT adapter not on", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
     }
     
