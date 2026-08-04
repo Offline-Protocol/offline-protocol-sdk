@@ -8,6 +8,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+/// Serde default for additive `bool` fields whose backwards-compatible value
+/// is `true` (an older payload that omits the field predates the distinction,
+/// so the permissive reading is the correct one).
+pub(crate) fn default_true() -> bool {
+    true
+}
+
 /// Presence status for a peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -871,6 +878,15 @@ pub enum Event {
         /// Human-readable group name (present when the invitee first joins).
         #[serde(skip_serializing_if = "Option::is_none")]
         group_name: Option<String>,
+        /// Whether `added_by` was authorized to make this change.
+        ///
+        /// `false` means the change **did** happen — MLS accepted the commit
+        /// and the roster really has changed — but the committer was not a
+        /// known admin. The membership event is still emitted because the
+        /// local roster must not diverge from MLS state; see
+        /// [`Event::GroupUnauthorizedMembershipChange`] for the full signal.
+        #[serde(default = "crate::events::default_true")]
+        authorized: bool,
     },
 
     /// A member was removed from a group (from relay).
@@ -881,6 +897,10 @@ pub enum Event {
         user_id: String,
         /// User ID of who performed the removal.
         removed_by: String,
+        /// Whether `removed_by` was authorized to make this change. See
+        /// [`Event::GroupMemberAdded::authorized`].
+        #[serde(default = "crate::events::default_true")]
+        authorized: bool,
     },
 
     /// Group info was received (from relay).
@@ -1002,6 +1022,37 @@ pub enum Event {
         /// The SDK probes these members for their capability automatically;
         /// apps can retry the send once a later attempt stops dropping.
         unknown_members: Vec<String>,
+    },
+
+    /// An MLS membership change was applied that its committer was not
+    /// authorized to make.
+    ///
+    /// The change **has been applied** — MLS authenticated the committer as a
+    /// group member and accepted the commit, and the local epoch advanced with
+    /// it. The SDK's admin model is an application-layer overlay on top of MLS
+    /// (RFC 9420 leaves membership access control to the application), enforced
+    /// on the *sending* side; refusing the change on receipt would mean
+    /// refusing the merge, which permanently forks this member away from every
+    /// peer that accepted it. So the change stands and is reported here instead.
+    ///
+    /// Apps should treat this as a moderation signal: an admin can undo the
+    /// change with `remove_from_group` / `invite_to_group`. A member added this
+    /// way can read all subsequent group traffic until removed.
+    GroupUnauthorizedMembershipChange {
+        /// MLS group identifier.
+        group_id: String,
+        /// The MLS-authenticated committer that made the change.
+        committer: String,
+        /// Members the commit added, sorted. Empty for a pure removal.
+        added: Vec<String>,
+        /// Members the commit removed, sorted. Empty for a pure addition.
+        removed: Vec<String>,
+        /// Why the change was judged unauthorized. Currently
+        /// `"sender_not_admin"` (the committer is not a known admin) or
+        /// `"affected_member_mismatch"` (an admin committed, but the commit's
+        /// unencrypted framing named a different member than the MLS delta
+        /// actually changed). Treat as an opaque string — values may be added.
+        reason: String,
     },
 
     /// An epoch fork was detected in a group — concurrent commits caused
@@ -1796,21 +1847,29 @@ impl Event {
         user_id: String,
         added_by: String,
         group_name: Option<String>,
+        authorized: bool,
     ) -> Self {
         Self::GroupMemberAdded {
             group_id,
             user_id,
             added_by,
             group_name,
+            authorized,
         }
     }
 
     /// Creates a GroupMemberRemoved event.
-    pub fn group_member_removed(group_id: String, user_id: String, removed_by: String) -> Self {
+    pub fn group_member_removed(
+        group_id: String,
+        user_id: String,
+        removed_by: String,
+        authorized: bool,
+    ) -> Self {
         Self::GroupMemberRemoved {
             group_id,
             user_id,
             removed_by,
+            authorized,
         }
     }
 
@@ -1928,6 +1987,23 @@ impl Event {
         Self::GroupRichExtrasDropped {
             group_id,
             unknown_members,
+        }
+    }
+
+    /// Creates a GroupUnauthorizedMembershipChange event.
+    pub fn group_unauthorized_membership_change(
+        group_id: String,
+        committer: String,
+        added: Vec<String>,
+        removed: Vec<String>,
+        reason: String,
+    ) -> Self {
+        Self::GroupUnauthorizedMembershipChange {
+            group_id,
+            committer,
+            added,
+            removed,
+            reason,
         }
     }
 
@@ -2169,6 +2245,9 @@ impl Event {
             Self::GroupMessagePartialFailure { .. } => "protocol.group.message_partial_failure",
             Self::GroupMessageDeliveryReport { .. } => "protocol.group.delivery_report",
             Self::GroupRichExtrasDropped { .. } => "protocol.group.rich_extras_dropped",
+            Self::GroupUnauthorizedMembershipChange { .. } => {
+                "protocol.group.unauthorized_membership_change"
+            }
             Self::GroupEpochForkDetected { .. } => "protocol.group.epoch_fork_detected",
             Self::GroupEpochForkResolved { .. } => "protocol.group.epoch_fork_resolved",
             Self::GroupRoleChanged { .. } => "protocol.group.role_changed",
@@ -2717,22 +2796,26 @@ impl fmt::Debug for Event {
                 user_id: _,
                 added_by: _,
                 group_name,
+                authorized,
             } => f
                 .debug_struct("GroupMemberAdded")
                 .field("group_id", group_id)
                 .field("user_id", &"[REDACTED]")
                 .field("added_by", &"[REDACTED]")
                 .field("group_name", group_name)
+                .field("authorized", authorized)
                 .finish(),
             Self::GroupMemberRemoved {
                 group_id,
                 user_id: _,
                 removed_by: _,
+                authorized,
             } => f
                 .debug_struct("GroupMemberRemoved")
                 .field("group_id", group_id)
                 .field("user_id", &"[REDACTED]")
                 .field("removed_by", &"[REDACTED]")
+                .field("authorized", authorized)
                 .finish(),
             Self::GroupInfo {
                 group_id,
@@ -2807,6 +2890,20 @@ impl fmt::Debug for Event {
                 .debug_struct("GroupRichExtrasDropped")
                 .field("group_id", group_id)
                 .field("unknown_count", &unknown_members.len())
+                .finish(),
+            Self::GroupUnauthorizedMembershipChange {
+                group_id,
+                committer: _,
+                added,
+                removed,
+                reason,
+            } => f
+                .debug_struct("GroupUnauthorizedMembershipChange")
+                .field("group_id", group_id)
+                .field("committer", &"[REDACTED]")
+                .field("added_count", &added.len())
+                .field("removed_count", &removed.len())
+                .field("reason", reason)
                 .finish(),
             Self::GroupEpochForkDetected {
                 group_id,

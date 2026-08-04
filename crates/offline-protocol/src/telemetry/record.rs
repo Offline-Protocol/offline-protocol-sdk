@@ -154,6 +154,7 @@ mod tests {
         "protocol.group.message_partial_failure",
         "protocol.group.delivery_report",
         "protocol.group.rich_extras_dropped",
+        "protocol.group.unauthorized_membership_change",
         "protocol.group.epoch_fork_detected",
         "protocol.group.epoch_fork_resolved",
         "protocol.group.role_changed",
@@ -331,6 +332,7 @@ mod tests {
             | Event::GroupMessagePartialFailure { .. }
             | Event::GroupMessageDeliveryReport { .. }
             | Event::GroupRichExtrasDropped { .. }
+            | Event::GroupUnauthorizedMembershipChange { .. }
             | Event::GroupEpochForkDetected { .. }
             | Event::GroupEpochForkResolved { .. }
             | Event::GroupRoleChanged { .. }
@@ -602,11 +604,13 @@ mod tests {
                 user_id: String::new(),
                 added_by: String::new(),
                 group_name: None,
+                authorized: true,
             },
             Event::GroupMemberRemoved {
                 group_id: String::new(),
                 user_id: String::new(),
                 removed_by: String::new(),
+                authorized: true,
             },
             Event::GroupInfo {
                 group_id: String::new(),
@@ -644,6 +648,13 @@ mod tests {
             Event::GroupRichExtrasDropped {
                 group_id: String::new(),
                 unknown_members: Vec::new(),
+            },
+            Event::GroupUnauthorizedMembershipChange {
+                group_id: String::new(),
+                committer: String::new(),
+                added: Vec::new(),
+                removed: Vec::new(),
+                reason: String::new(),
             },
             Event::GroupEpochForkDetected {
                 group_id: String::new(),

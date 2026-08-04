@@ -1226,6 +1226,8 @@ impl OfflineProtocol {
                 self.config.user_id.clone(),
                 sender.to_string(),
                 payload.group_name.clone(),
+                // Our own join, accepted from a Welcome we chose to process.
+                true,
             ));
 
             // A commit or group message can race ahead of its Welcome (they
@@ -1403,6 +1405,8 @@ impl OfflineProtocol {
                         payload.group_id.clone(),
                         self_id,
                         sender.to_string(),
+                        // Reached only through the `check_is_admin` gate above.
+                        true,
                     ));
                     return CommitOutcome::Rejected;
                 }
@@ -1453,15 +1457,21 @@ impl OfflineProtocol {
         let actual_added: HashSet<&String> = members_after.difference(&members_before).collect();
         let actual_removed: HashSet<&String> = members_before.difference(&members_after).collect();
 
-        // Validate claimed affected_member against actual MLS delta.
-        // A mismatch may indicate a forged commit metadata — log at error level.
+        let has_membership_change = !actual_added.is_empty() || !actual_removed.is_empty();
+
+        // Validate claimed affected_member against actual MLS delta. A
+        // mismatch means the commit's unencrypted framing disagrees with the
+        // authenticated MLS state change it actually produced — forged or
+        // replayed metadata.
+        let mut claim_matches_delta = true;
         if let Some(claimed) = &payload.affected_member {
             let valid = match payload.commit_type {
                 GroupCommitType::Add => actual_added.contains(claimed),
                 GroupCommitType::Remove => actual_removed.contains(claimed),
                 GroupCommitType::KeyUpdate => true, // No membership change expected
             };
-            if !valid && (!actual_added.is_empty() || !actual_removed.is_empty()) {
+            if !valid && has_membership_change {
+                claim_matches_delta = false;
                 error!(
                     group_id = %payload.group_id,
                     sender = %sender,
@@ -1473,16 +1483,65 @@ impl OfflineProtocol {
             }
         }
 
+        // Whether the authenticated committer is an admin of this group.
+        //
+        // This deliberately does **not** gate the membership change. MLS
+        // authorizes membership by MLS membership — RFC 9420 leaves access
+        // control to the application — and by the time we reach here
+        // `decrypt_from_group` has already merged the commit, advancing our
+        // epoch irreversibly. The only way to reject would be to refuse the
+        // merge, which forks us permanently from every peer that accepted it
+        // (see `check_epoch_forks`: members left on a forked branch have to be
+        // re-invited by the app, and a fork the local role metadata caused —
+        // it is best-effort and can legitimately lag — would be a partition
+        // with no attacker involved). An unrecoverable partition is a worse
+        // failure than an insider membership change, so the change is applied
+        // and reported truthfully, and an unauthorized one is additionally
+        // surfaced as `GroupUnauthorizedMembershipChange` for the app's
+        // moderation layer.
+        //
+        // Unlike the metadata gate below, this covers removals too.
+        let sender_is_admin = has_membership_change
+            && self
+                .check_is_admin(&payload.group_id, sender)
+                .unwrap_or(false);
+
+        // A membership change is authorized only when an admin committed it
+        // *and* the commit's own framing agrees with the delta it produced.
+        let authorized = sender_is_admin && claim_matches_delta;
+
+        if has_membership_change && !authorized {
+            let mut added: Vec<String> = actual_added.iter().map(|m| (*m).clone()).collect();
+            added.sort();
+            let mut removed: Vec<String> = actual_removed.iter().map(|m| (*m).clone()).collect();
+            removed.sort();
+            let reason = if sender_is_admin {
+                "affected_member_mismatch"
+            } else {
+                "sender_not_admin"
+            };
+            error!(
+                group_id = %payload.group_id,
+                sender = %sender,
+                reason,
+                added = ?added,
+                removed = ?removed,
+                "SECURITY: Unauthorized group membership change applied — MLS accepted the commit, but the SDK's admin policy did not authorize it"
+            );
+            self.emit_event(Event::group_unauthorized_membership_change(
+                payload.group_id.clone(),
+                sender.to_string(),
+                added,
+                removed,
+                reason.to_string(),
+            ));
+        }
+
         // Commit-payload metadata (role, rich attestation) is honored only
         // for the member the MLS delta actually added and only from an
         // admin sender — adds are admin-only, so a non-admin sender means
         // forged metadata on a replayed/crafted frame.
-        let sender_is_admin = if actual_added.is_empty() {
-            false
-        } else {
-            self.check_is_admin(&payload.group_id, sender)
-                .unwrap_or(false)
-        };
+        let metadata_sender_is_admin = sender_is_admin && !actual_added.is_empty();
 
         // Emit events based on actual MLS membership changes, not claimed affected_member
         for member in &actual_added {
@@ -1490,7 +1549,7 @@ impl OfflineProtocol {
             // and only if the sender is an admin (prevents non-admins from injecting elevated roles).
             if let (Some(role), Some(affected)) = (&payload.role, &payload.affected_member) {
                 if *member == affected {
-                    if sender_is_admin {
+                    if metadata_sender_is_admin {
                         if let Ok(mls_guard) = self.read_mls_guard() {
                             if let Err(e) = mls_guard.set_member_role(&gid, member, *role) {
                                 warn!(user_id = %member, error = %e, "Failed to store member role from commit");
@@ -1513,7 +1572,7 @@ impl OfflineProtocol {
             if let (Some(versions), Some(affected)) =
                 (&payload.affected_member_rich, &payload.affected_member)
             {
-                if *member == affected && sender_is_admin {
+                if *member == affected && metadata_sender_is_admin {
                     self.record_attested_rich(member, versions);
                 }
             }
@@ -1522,6 +1581,7 @@ impl OfflineProtocol {
                 (*member).clone(),
                 sender.to_string(),
                 None,
+                authorized,
             ));
         }
         for member in &actual_removed {
@@ -1535,6 +1595,7 @@ impl OfflineProtocol {
                 payload.group_id.clone(),
                 (*member).clone(),
                 sender.to_string(),
+                authorized,
             ));
             // Clear any pending leave election for this member — the remove
             // has been committed successfully.
@@ -2517,6 +2578,8 @@ impl OfflineProtocol {
             invitee_user_id.to_string(),
             self_id,
             None,
+            // Our own invite, gated by the admin check at the top of this fn.
+            true,
         ));
 
         // Sync membership update to relay
@@ -2669,6 +2732,8 @@ impl OfflineProtocol {
             group_id.to_string(),
             member_id.to_string(),
             self_id,
+            // Our own removal, gated by the admin check at the top of this fn.
+            true,
         ));
 
         // Sync membership update to relay

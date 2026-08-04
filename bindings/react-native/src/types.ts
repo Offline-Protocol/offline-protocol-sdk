@@ -1206,6 +1206,15 @@ export interface GroupMemberAddedEvent extends BaseEvent {
   user_id: string;
   added_by: string;
   group_name?: string;
+  /**
+   * Whether `added_by` was authorized to make this change.
+   *
+   * `false` means the change **did** happen — MLS accepted the commit and
+   * the roster really has changed — but the committer was not a known
+   * admin. See `GroupUnauthorizedMembershipChangeEvent`. Absent on events
+   * from an older core; treat absence as `true`.
+   */
+  authorized?: boolean;
 }
 
 /**
@@ -1216,6 +1225,8 @@ export interface GroupMemberRemovedEvent extends BaseEvent {
   group_id: string;
   user_id: string;
   removed_by: string;
+  /** See `GroupMemberAddedEvent.authorized`. */
+  authorized?: boolean;
 }
 
 /**
@@ -1364,6 +1375,37 @@ export interface GroupRichExtrasDroppedEvent extends BaseEvent {
    * for their capability automatically, so a later retry may stop dropping.
    */
   unknown_members: string[];
+}
+
+/**
+ * An MLS membership change was applied that its committer was not
+ * authorized to make.
+ *
+ * The change **has been applied** — MLS authenticated the committer as a
+ * group member and accepted the commit. The SDK's admin model is an
+ * application-layer overlay on MLS (which has no admin concept), enforced
+ * when *sending*; refusing the change on receipt would mean refusing the
+ * MLS merge, permanently forking this member away from everyone who
+ * accepted it. So the change stands and is reported here instead.
+ *
+ * Treat this as a moderation signal: an admin can undo it with
+ * `meshRemoveFromGroup` / `meshInviteToGroup`. A member added this way can
+ * read all subsequent group traffic until removed.
+ */
+export interface GroupUnauthorizedMembershipChangeEvent extends BaseEvent {
+  type: 'group_unauthorized_membership_change';
+  group_id: string;
+  /** The MLS-authenticated committer that made the change. */
+  committer: string;
+  /** Members the commit added, sorted. Empty for a pure removal. */
+  added: string[];
+  /** Members the commit removed, sorted. Empty for a pure addition. */
+  removed: string[];
+  /**
+   * Why the change was judged unauthorized: `'sender_not_admin'` or
+   * `'affected_member_mismatch'`. Treat as opaque — values may be added.
+   */
+  reason: string;
 }
 
 /**
@@ -1841,6 +1883,7 @@ export type ProtocolEvent =
   | GroupMessagePartialFailureEvent
   | GroupMessageDeliveryReportEvent
   | GroupRichExtrasDroppedEvent
+  | GroupUnauthorizedMembershipChangeEvent
   | GroupEpochForkDetectedEvent
   | GroupEpochForkResolvedEvent
   | GroupRoleChangedEvent

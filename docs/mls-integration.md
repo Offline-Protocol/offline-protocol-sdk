@@ -650,11 +650,69 @@ protocol.on('group_role_changed', (event) => {
 ### Group Security
 
 - Use MLS's built-in member removal to ensure forward secrecy
-- Only admins can invite, remove members, or change roles — enforced at the protocol level
+- Role changes and group renames are admin-gated **on receive** — a non-admin's role or rename frame is rejected by every peer
+- Invite and removal are admin-gated **on send**; see [Group authorization model](#group-authorization-model) for what that does and does not guarantee
 - The last-admin invariant prevents orphaned groups
 - Removed members receive a notification and should clean up local group state
 - Rotate group keys periodically
 - Consider re-creating groups for maximum security after member removal
+
+### Group authorization model
+
+The admin/member roles are an **application-layer overlay on top of MLS**, not
+an MLS feature. MLS itself has no notion of an admin: [RFC 9420 §3.2](https://www.rfc-editor.org/rfc/rfc9420.html#section-3.2)
+notes that any member being *able* to evict another "does not necessarily imply
+that any member is actually allowed to evict other members; groups can enforce
+access control policies on top of these basic mechanisms." The SDK's roles are
+that policy layer.
+
+What this means concretely:
+
+| Operation | Enforced on send | Enforced on receive |
+| --- | --- | --- |
+| `set_member_role` | Yes | **Yes** — non-admin role frames are dropped |
+| `rename_group` | Yes | **Yes** — non-admin rename frames are dropped |
+| `invite_to_group` (MLS Add commit) | Yes | **No** |
+| `remove_from_group` (MLS Remove commit) | Yes | **No** |
+
+Membership changes travel as authenticated MLS commits. MLS verifies that the
+committer is a genuine group member — an outsider cannot forge one — but the
+SDK does **not** refuse a commit from a member who is not an admin. A group
+member running a modified client can therefore add or remove anyone, and the
+change is cryptographically real: an added member can read all subsequent group
+traffic, and a removed member is cut off from it.
+
+This is a deliberate trade-off, not an oversight. Rejecting a commit means
+refusing to merge it, which advances everyone else's epoch but not yours —
+permanently forking you from the group, with no recovery short of the app
+re-inviting you. Because admin state is replicated best-effort (a role change is
+a mesh notification, and a joiner receives a point-in-time snapshot), a member
+whose role metadata merely *lagged* would partition itself out of a healthy
+group with no attacker involved. An unrecoverable partition is a worse failure
+mode than an insider membership change, so the SDK applies the change and
+reports it instead.
+
+Unauthorized changes are surfaced, not silent:
+
+```typescript
+protocol.on('group_unauthorized_membership_change', (event) => {
+  // event.committer made a membership change they were not authorized to make.
+  // event.added / event.removed list the affected members (sorted).
+  // event.reason is 'sender_not_admin' or 'affected_member_mismatch'.
+  // The change HAS been applied — an admin can undo it.
+});
+```
+
+The corresponding `group_member_added` / `group_member_removed` events still
+fire (your roster must not diverge from MLS state) and carry an `authorized`
+boolean so a single handler can render the distinction inline.
+
+**Guidance for apps that need stronger guarantees:** treat
+`group_unauthorized_membership_change` as a moderation alert and have an admin
+reverse the change with `remove_from_group`. If your threat model does not
+tolerate insider membership changes at all, do not rely on group membership
+alone for authorization — gate sensitive actions on an admin-signed
+application-layer check.
 
 ### Message Format
 

@@ -1271,6 +1271,9 @@ impl OfflineProtocol {
                         payload.user_id,
                         payload.added_by,
                         payload.group_name,
+                        // Relay reconciliation frame, gated on Internet arrival
+                        // above; not an MLS commit.
+                        true,
                     ));
                 }
             } else {
@@ -1409,6 +1412,9 @@ impl OfflineProtocol {
                         payload.group_id,
                         payload.user_id,
                         payload.removed_by,
+                        // Reached only through the admin gate above; not an
+                        // MLS commit.
+                        true,
                     ));
                 }
             } else {

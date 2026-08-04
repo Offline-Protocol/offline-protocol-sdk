@@ -457,7 +457,9 @@ High-level group methods that handle MLS encryption and per-member fan-out autom
 
 **Security invariants:**
 - The group creator is automatically `Admin`.
-- Only admins can invite, remove, change roles, or rename groups.
+- Only admins can *call* invite, remove, change-role, or rename — these are checked before sending.
+- Role changes and renames are additionally enforced on receive: a non-admin's frame is rejected by every peer.
+- Membership changes (invite/remove) are **not** enforced on receive. MLS authenticates the committer as a group member, but a member running a modified client can add or remove anyone; the change applies and is reported via the `group_unauthorized_membership_change` event. See [Group authorization model](./mls-integration.md#group-authorization-model).
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups).
 - Deterministic election promotes the lexicographically smallest member if the last admin disconnects.
 
