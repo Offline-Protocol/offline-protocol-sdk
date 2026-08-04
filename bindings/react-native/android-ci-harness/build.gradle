@@ -6,9 +6,10 @@
 // classpath a host RN app would otherwise provide.
 //
 // Kotlin is pinned to 1.9.x to match the module's current (pre-Kotlin-2)
-// source. Bumping to 2.x first requires the `optString`/nullability fixes
-// tracked in todo.md, or the module will not compile under the strict 2.x
-// platform-type rules.
+// source. Bumping to 2.x first requires auditing every `ReadableMap.optString`
+// call site in `android/src/main/` and giving it an explicit nullable type —
+// Kotlin 2.x stops treating Java platform types as implicitly non-null, so the
+// module will not compile until each one is declared. See the harness README.
 buildscript {
     repositories {
         google()

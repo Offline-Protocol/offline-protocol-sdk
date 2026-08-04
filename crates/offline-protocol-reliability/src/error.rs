@@ -6,6 +6,9 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Reliability layer errors.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum Error {
     /// ACK timeout.

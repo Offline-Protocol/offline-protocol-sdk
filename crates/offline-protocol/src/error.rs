@@ -37,6 +37,9 @@ impl EstablishmentState {
 ///
 /// This enum is the single SDK boundary that maps heterogeneous upstream error
 /// types into deterministic categories for protocol control flow.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStateError {
     /// Session exists but cannot process application traffic yet.
@@ -140,6 +143,9 @@ impl From<&offline_protocol_mls::MlsError> for SessionStateError {
 }
 
 /// Protocol errors.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum Error {
     /// Protocol not started.

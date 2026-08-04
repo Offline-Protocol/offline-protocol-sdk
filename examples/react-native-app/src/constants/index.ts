@@ -15,26 +15,27 @@ export const DEFAULT_RELAY_SERVER_URL =
   ENV_RELAY_SERVER_URL || 'ws://localhost:3000/ws';
 
 /**
- * Authentication token for WebSocket relay server.
- * Must be set via RELAY_AUTH_TOKEN environment variable in .env file.
+ * Authentication token for the WebSocket relay server.
+ *
+ * Read from the `RELAY_AUTH_TOKEN` environment variable in your `.env` file —
+ * nothing is hardcoded here, and no token ever belongs in this file. Empty
+ * string means "no token", which the relay rejects when auth is enforced.
  */
-export const HARDCODED_TOKEN = ENV_RELAY_AUTH_TOKEN || '';
+export const RELAY_AUTH_TOKEN = ENV_RELAY_AUTH_TOKEN || '';
 
 if (__DEV__) {
   console.log('[Constants] ENV_RELAY_SERVER_URL:', ENV_RELAY_SERVER_URL);
   console.log(
-    '[Constants] ENV_RELAY_AUTH_TOKEN length:',
-    ENV_RELAY_AUTH_TOKEN?.length || 0,
-  );
-  console.log(
     '[Constants] DEFAULT_RELAY_SERVER_URL:',
     DEFAULT_RELAY_SERVER_URL,
   );
+  // Only ever log the token's length. Printing the value puts a live relay
+  // credential into Metro/device logs, which are routinely pasted into bug
+  // reports — and this example is copied into real apps.
   console.log(
-    '[Constants] HARDCODED_TOKEN length:',
-    HARDCODED_TOKEN?.length || 0,
+    '[Constants] RELAY_AUTH_TOKEN length:',
+    RELAY_AUTH_TOKEN?.length || 0,
   );
-  console.log('[Constants] HARDCODED_TOKEN:', HARDCODED_TOKEN || 0);
 }
 
 /**

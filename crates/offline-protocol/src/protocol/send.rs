@@ -3900,8 +3900,8 @@ impl OfflineProtocol {
     /// * `initial_message` - Optional first message shown with the request
     ///   (surfaced verbatim in the recipient's `ConnectionRequestReceived`
     ///   event; apps typically seed the conversation with it on accept).
-    ///   At most [`MAX_INITIAL_MESSAGE_BYTES`] UTF-8 bytes — longer input
-    ///   is rejected with `Error::InvalidArgument`.
+    ///   At most 4096 UTF-8 bytes (`MAX_INITIAL_MESSAGE_BYTES`, crate-private)
+    ///   — longer input is rejected with `Error::InvalidArgument`.
     ///
     /// # Encryption
     ///

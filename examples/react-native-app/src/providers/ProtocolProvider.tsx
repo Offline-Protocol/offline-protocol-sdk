@@ -28,7 +28,7 @@ import type { MediaSendExtras } from '../hooks/useFileTransfer';
 import { generateUserId } from '../utils/user';
 import {
   DEFAULT_RELAY_SERVER_URL,
-  HARDCODED_TOKEN,
+  RELAY_AUTH_TOKEN,
   MAX_PRESENCE_SENDS_PER_TICK,
   PRESENCE_MESSAGE_PREFIX,
   PRESENCE_REBROADCAST_INTERVAL_MS,
@@ -870,7 +870,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         enabled: true,
         serverAddress: DEFAULT_RELAY_SERVER_URL,
         autoReconnect: true,
-        authToken: HARDCODED_TOKEN || undefined,
+        authToken: RELAY_AUTH_TOKEN || undefined,
       },
       wifiDirect: {
         enabled: true,

@@ -4,7 +4,7 @@ Offline-first mesh networking SDK for React Native. Enables peer-to-peer messagi
 
 **Dual-licensed:** use it under [AGPL-3.0-only](./LICENSE), or buy a [commercial license](./LICENSE-COMMERCIAL.md), your call. The AGPL requires you to publish your source whenever you distribute the SDK or expose it over a network (section 13); the commercial license lifts that requirement for closed-source apps. The npm manifest can only name `AGPL-3.0-only` because SPDX has no identifier for the commercial offer — see [License](#license) for the full breakdown.
 
-> **Upgrading an existing app?** Read [docs/UPGRADING.md](../../docs/UPGRADING.md)
+> **Upgrading an existing app?** Read [docs/UPGRADING.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/UPGRADING.md)
 > first — this release changes storage, adds new input rejections, and is not
 > safely downgradable.
 
@@ -180,7 +180,7 @@ clears the config the namespace is derived from, which is why the identity is an
 argument. It is irreversible, it rotates the account's MLS and Nostr identities,
 and it leaves other accounts on the device untouched. Full semantics, including
 what happens to a pre-namespace store shared with another account:
-[UPGRADING §10](../../docs/UPGRADING.md#logging-out-and-switching-accounts).
+[UPGRADING §10](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/UPGRADING.md#logging-out-and-switching-accounts).
 
 ### End-to-End Encryption
 
@@ -215,10 +215,10 @@ format or the recovery path without an SDK release:
 
 Each degrades independently, and inbound parsing of every format stays on
 regardless, so a disabled fleet still interoperates with an enabled one. See
-[Wire Format Kill Switches](../../docs/configuration.md#wire-format-kill-switches)
-and [Crypto-Failure Recovery](../../docs/configuration.md#crypto-failure-recovery).
+[Wire Format Kill Switches](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/configuration.md#wire-format-kill-switches)
+and [Crypto-Failure Recovery](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/configuration.md#crypto-failure-recovery).
 
-See the [MLS Integration Guide](../../docs/mls-integration.md) for advanced usage.
+See the [MLS Integration Guide](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/mls-integration.md) for advanced usage.
 
 ---
 

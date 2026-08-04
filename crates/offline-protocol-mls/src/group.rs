@@ -81,7 +81,7 @@ impl GroupManager {
     /// role maps merely disagree will partition each other with no attacker
     /// involved.
     ///
-    /// [`Self::authorize_membership_commit`] fails open on *absent* knowledge
+    /// `authorize_membership_commit` (private) fails open on *absent* knowledge
     /// to keep the common lag case harmless, but it cannot detect *divergent*
     /// knowledge. Enable this only for a closed deployment that controls role
     /// distribution.

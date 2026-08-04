@@ -6,6 +6,9 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, MlsError>;
 
 /// Errors that can occur during MLS operations.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum MlsError {
     /// Storage operation failed.

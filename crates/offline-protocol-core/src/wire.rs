@@ -13,7 +13,7 @@
 //! `#[serde(skip_serializing_if)]` attributes plus validation-on-deserialize
 //! impls that a non-self-describing binary format (postcard) cannot honor
 //! field-for-field. Rather than serialize `Message` directly, this module defines
-//! [`WireMessageV1`], a flat DTO with a fixed field order, and converts to/from
+//! `WireMessageV1`, a flat DTO with a fixed field order, and converts to/from
 //! `Message` through the validating constructors (`UserId::new`,
 //! `LamportClock::from_value`, …). That keeps the security checks the JSON path
 //! enforces (identifier caps, Lamport clamp) intact on the binary path.
@@ -23,14 +23,19 @@
 //! postcard is positional: reordering, removing, retyping, or inserting a field
 //! silently corrupts decoding on peers running the previous layout. Therefore:
 //!
-//! * **Never** change [`WireMessageV1`]'s existing fields.
-//! * Additive, backward-compatible data goes into [`WireMessageV1::ext`], a
+//! * **Never** change `WireMessageV1`'s existing fields.
+//! * Additive, backward-compatible data goes into `WireMessageV1::ext`, a
 //!   trailing `(tag, bytes)` list that old decoders read and ignore.
 //! * A change that cannot be expressed as an `ext` entry requires a new magic
 //!   byte (`0xF6` = v2) and out-of-band version negotiation.
 //!
-//! The numeric enum mappings ([`priority_to_u8`], [`content_type_to_u8`]) are
+//! The numeric enum mappings (`priority_to_u8`, `content_type_to_u8`) are
 //! likewise a frozen wire contract.
+//!
+//! (`WireMessageV1` and the two mapping helpers are deliberately private — the
+//! DTO is an encoding detail, not API surface — so they are named here in code
+//! spans rather than as intra-doc links, which rustdoc rejects for private
+//! items in public documentation.)
 
 use crate::message::{ContentType, MessagePriority};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};

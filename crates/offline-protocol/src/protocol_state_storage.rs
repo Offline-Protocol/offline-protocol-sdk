@@ -30,6 +30,9 @@ use std::fmt;
 /// install-scoped delivery state does not share a contract — or a crate — with
 /// cryptographic storage. Implementations map their platform errors onto these
 /// variants.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolStateError {
     /// The requested entry does not exist.

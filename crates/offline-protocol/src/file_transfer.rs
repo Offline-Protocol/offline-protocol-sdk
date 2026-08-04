@@ -134,6 +134,9 @@ impl ChunkRejection {
 }
 
 /// Why [`FileChunk::from_bytes`] rejected a binary payload.
+// Adding a variant to a public error enum is a breaking change without
+// this attribute; downstream crates must carry a wildcard arm.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ChunkDecodeError {
     /// The payload ended before the named value could be read.

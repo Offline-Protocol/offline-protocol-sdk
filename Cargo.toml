@@ -73,14 +73,23 @@ zeroize = "1"
 # At-rest sealing for install-scoped protocol-state records.
 chacha20poly1305 = "0.10"
 
-# Internal dependencies
-offline-protocol-core = { path = "crates/offline-protocol-core" }
-offline-protocol-transport = { path = "crates/offline-protocol-transport" }
-offline-protocol-router = { path = "crates/offline-protocol-router" }
-offline-protocol-reliability = { path = "crates/offline-protocol-reliability" }
-offline-protocol-mls = { path = "crates/offline-protocol-mls" }
-offline-protocol-services = { path = "crates/offline-protocol-services" }
-offline-protocol = { path = "crates/offline-protocol" }
+# Internal dependencies.
+#
+# Each carries BOTH a `path` and a `version`. The path is what every workspace
+# build resolves against; the version is what `cargo package`/`cargo publish`
+# rewrites the dependency to in the generated .crate manifest. Without it,
+# packaging any crate that depends on a sibling fails outright:
+#   "all dependencies must have a version requirement specified when packaging"
+# Keep these in lockstep with `workspace.package.version` above — a crate can
+# only be published once its dependencies exist on the registry at the named
+# version, so all seven move together.
+offline-protocol-core = { path = "crates/offline-protocol-core", version = "0.2.0" }
+offline-protocol-transport = { path = "crates/offline-protocol-transport", version = "0.2.0" }
+offline-protocol-router = { path = "crates/offline-protocol-router", version = "0.2.0" }
+offline-protocol-reliability = { path = "crates/offline-protocol-reliability", version = "0.2.0" }
+offline-protocol-mls = { path = "crates/offline-protocol-mls", version = "0.2.0" }
+offline-protocol-services = { path = "crates/offline-protocol-services", version = "0.2.0" }
+offline-protocol = { path = "crates/offline-protocol", version = "0.2.0" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
