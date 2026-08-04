@@ -812,6 +812,7 @@ impl OfflineProtocol {
                             .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                         manager.create_session(recipient)?
                     };
+                    self.mark_encryption_capable(recipient);
 
                     // All operations succeeded, now safe to remove the key package
                     self.pending_key_packages.remove(recipient);

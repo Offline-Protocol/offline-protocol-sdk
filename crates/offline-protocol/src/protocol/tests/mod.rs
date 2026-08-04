@@ -30297,3 +30297,268 @@ fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
         "no MessageSent may exist for an entry past its lifetime"
     );
 }
+
+// ============================================================================
+// PLAINTEXT DOWNGRADE GATE — CAPABILITY SOURCED FROM THE CREDENTIAL STORE
+// ============================================================================
+
+/// A "mixed mode" node: encryption on, but plaintext peers tolerated
+/// (`require_encryption = false`). This is the only configuration in which the
+/// downgrade gate is load-bearing — with `require_encryption` on (the default)
+/// it short-circuits, and with encryption off `should_auto_encrypt()` is false.
+fn mixed_mode_node(
+    user_id: &str,
+    secure: &Arc<InMemoryStorage>,
+    state: &Arc<InMemoryStorage>,
+) -> (OfflineProtocol, MockTransport) {
+    let mut config = create_test_config_for_user(user_id);
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = false;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let (secure_handle, state_handle) = split_storage(secure, state);
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let handle = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+    (protocol, handle)
+}
+
+/// Builds a real 1:1 MLS session between the node and `peer`, and pins the
+/// peer's identity key the way a signed key-package exchange would.
+fn establish_session_and_pin(protocol: &mut OfflineProtocol, peer: &str) {
+    let peer_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let peer_manager = MlsManager::new(peer, peer_storage).unwrap();
+    let peer_kp = peer_manager.get_or_create_key_package().unwrap();
+    let peer_identity = peer_manager.get_identity_public_key().unwrap();
+    {
+        let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package(peer, &peer_kp.key_package_data)
+            .unwrap();
+        let welcome = manager.create_session(peer).unwrap();
+        peer_manager.join_session(&welcome).unwrap();
+    }
+    // What the real receive path does for any signed control message.
+    protocol.tofu_check_or_pin(peer, peer_identity).unwrap();
+    protocol
+        .persist_session_state(peer, SessionState::Confirmed, "test")
+        .unwrap();
+    protocol.confirmed_sessions.insert(peer.to_string());
+}
+
+#[test]
+fn test_deleted_session_state_record_cannot_reopen_the_plaintext_gate() {
+    // The regression this whole change exists for. `session_states` lives in
+    // the install-scoped app container, so an attacker with write access there
+    // can delete a peer's record. Restore then *correctly* re-bootstraps it as
+    // `Pending` — it must, or one unreadable record bricks initialization — the
+    // peer drops out of `confirmed_sessions`, and `is_session_confirmed`
+    // answers `Ok(false)` cleanly, so the deliberate `.unwrap_or(true)`
+    // fail-closed never fires. Before the capability set, that delivered
+    // unauthenticated cleartext to the app under an attacker-chosen `sender`.
+    //
+    // Sealing the record would not have helped: the attack removes bytes rather
+    // than forging them.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    {
+        let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+        establish_session_and_pin(&mut alice, "bob");
+
+        handle.queue_message(plaintext_text_message("bob", "alice", "injected #1"));
+        assert!(
+            alice.receive_message().is_none(),
+            "baseline: cleartext claiming to be from a session peer is rejected"
+        );
+    }
+
+    // The attacker's move: delete the record, nothing else.
+    assert!(
+        state
+            .load(storage_keys::SESSION_STATES, "bob")
+            .unwrap()
+            .is_some(),
+        "precondition: the session-state record exists"
+    );
+    state.delete(storage_keys::SESSION_STATES, "bob").unwrap();
+
+    {
+        let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+
+        // The deletion did land: restore wrote a fresh `Pending` over the hole,
+        // so the old confirmation signal really is gone.
+        assert_eq!(
+            alice.load_session_state_entry("bob").unwrap(),
+            Some(SessionState::Pending),
+            "restore re-bootstrapped the deleted record as Pending"
+        );
+        assert!(
+            !alice.confirmed_sessions.contains("bob"),
+            "and the peer is no longer confirmed"
+        );
+
+        // But capability came back from the credential store, which the app
+        // container cannot reach.
+        assert!(
+            alice.is_encryption_capable("bob"),
+            "capability must survive a deleted session-state record"
+        );
+
+        handle.queue_message(plaintext_text_message("bob", "alice", "injected #2"));
+        let delivered = alice.receive_message();
+        assert!(
+            delivered.is_none(),
+            "deleting the session-state record must NOT re-open the plaintext gate; \
+             delivered: {:?}",
+            delivered.map(|m| m.content)
+        );
+    }
+}
+
+#[test]
+fn test_plaintext_rejected_from_peer_with_an_unconfirmed_session() {
+    // The gate now asks about capability, not confirmation. A peer we have
+    // merely *begun* a session with never legitimately sends cleartext: while
+    // the session is pending its own send path queues rather than downgrading.
+    //
+    // Worth pinning separately because the pre-existing "rejected once
+    // confirmed" tests build their sessions by poking `MlsManager` directly and
+    // would keep passing on the old `is_session_confirmed` branch alone.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+
+    alice.mark_encryption_capable("bob");
+    assert!(
+        !alice.confirmed_sessions.contains("bob"),
+        "precondition: no confirmed session, so only the capability check can fire"
+    );
+
+    handle.queue_message(plaintext_text_message("bob", "alice", "downgrade"));
+    assert!(
+        alice.receive_message().is_none(),
+        "an encryption-capable peer's cleartext is a downgrade even unconfirmed"
+    );
+}
+
+#[test]
+fn test_encryption_capability_survives_session_teardown() {
+    // Monotonicity, and why it is a security property rather than a leak.
+    // Session teardown is reachable from an *unauthenticated* frame: an
+    // injected `__MLS_ENC__` classifies as `SessionDesync`, which tears down
+    // locally and advertises a `session_reset` key package that makes the peer
+    // drop its session too. If capability were forgotten on teardown, one
+    // forged packet would re-open the plaintext gate — turning a bug that needs
+    // app-container write access into one that needs a single injected frame.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+    establish_session_and_pin(&mut alice, "bob");
+
+    alice
+        .manual_mls_delete_session("bob")
+        .expect("session teardown succeeds");
+    assert!(
+        !alice.confirmed_sessions.contains("bob"),
+        "teardown clears confirmation"
+    );
+    assert!(
+        alice.is_encryption_capable("bob"),
+        "but NOT capability — a peer that spoke MLS a moment ago still speaks it"
+    );
+
+    handle.queue_message(plaintext_text_message("bob", "alice", "post-teardown"));
+    assert!(
+        alice.receive_message().is_none(),
+        "so cleartext after a teardown is still a downgrade"
+    );
+}
+
+#[test]
+fn test_capability_survives_restart_through_persisted_tofu_pins() {
+    // The durability half. Seeding capability from `list_sessions()` alone
+    // would lose it across teardown-then-restart, which is exactly the sequence
+    // a forged desync frame can drive. TOFU pins persist to the credential
+    // store, so they carry the signal across the restart.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+
+    {
+        let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+        establish_session_and_pin(&mut alice, "bob");
+        alice
+            .manual_mls_delete_session("bob")
+            .expect("session teardown succeeds");
+    }
+
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+    {
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        assert!(
+            !manager.has_session("bob").unwrap(),
+            "precondition: no MLS session survives, so only the pin can carry capability"
+        );
+    }
+    assert!(
+        alice.is_encryption_capable("bob"),
+        "the restored TOFU pin re-seeds capability"
+    );
+
+    handle.queue_message(plaintext_text_message("bob", "alice", "after restart"));
+    assert!(
+        alice.receive_message().is_none(),
+        "capability must not be forgotten across a restart"
+    );
+}
+
+#[test]
+fn test_reset_tofu_for_peer_clears_encryption_capability() {
+    // The one sanctioned way out of the set. `reset_tofu_for_peer` is an
+    // explicit operator action meaning "treat this identity as unknown", which
+    // is precisely when forgetting is right — unlike teardown, it cannot be
+    // driven by a remote frame.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+    establish_session_and_pin(&mut alice, "bob");
+
+    assert!(alice.reset_tofu_for_peer("bob"), "an entry was pinned");
+    assert!(
+        !alice.is_encryption_capable("bob"),
+        "an explicit identity reset forgets capability too"
+    );
+
+    handle.queue_message(plaintext_text_message("bob", "alice", "post-reset"));
+    assert!(
+        alice.receive_message().is_some(),
+        "after a deliberate reset the peer is a stranger again, so the mixed-mode \
+         opt-out applies to them like any other unknown peer"
+    );
+}
+
+#[test]
+fn test_legacy_plaintext_peer_is_still_accepted_in_mixed_mode() {
+    // The interop mode this gate must not break: `enabled: true` +
+    // `requireEncryption: false` exists so a node can auto-encrypt with capable
+    // peers while staying readable by plaintext-only ones. A peer that has
+    // never shown any MLS signal keeps working.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+
+    handle.queue_message(plaintext_text_message("legacy-peer", "alice", "hello"));
+    let received = alice.receive_message();
+    assert_eq!(
+        received.map(|m| m.content),
+        Some("hello".to_string()),
+        "a peer with no MLS signal at all is still readable under the opt-out"
+    );
+}

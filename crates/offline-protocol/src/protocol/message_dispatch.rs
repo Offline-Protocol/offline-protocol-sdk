@@ -488,6 +488,13 @@ impl OfflineProtocol {
                 }
             }
 
+            // Placed after the MLS lock release, and deliberately not gated on
+            // the join succeeding: a peer that sent us a well-formed Welcome
+            // naming itself as inviter runs MLS whether or not *we* managed to
+            // adopt it. Gating on success would leave the plaintext gate open
+            // for exactly the peers whose handshake is failing.
+            self.mark_encryption_capable(&sender_owned);
+
             // Owner side of a both-create race: record that this peer must prove
             // it adopted our group via a group-aware decrypt before we confirm
             // (and stop retransmitting). A plaintext probe/ack is not sufficient.

@@ -685,18 +685,53 @@ impl OfflineProtocol {
 
     /// Policy gate for inbound plaintext content — text messages and legacy
     /// (unencrypted) media chunks alike: rejected when this node requires
-    /// encryption, and rejected once a confirmed MLS session exists with the
-    /// sender — an encryption-capable peer sending plaintext is a
-    /// downgrade/forgery attempt (plaintext carries no sender authentication,
-    /// so anyone could inject it under a contact's name).
+    /// encryption, and rejected once the sender is known to run MLS — an
+    /// encryption-capable peer sending plaintext is a downgrade/forgery attempt
+    /// (plaintext carries no sender authentication, so anyone could inject it
+    /// under a contact's name).
+    ///
+    /// # Capability, not confirmation
+    ///
+    /// This asks whether the peer *can* encrypt, not whether a session is
+    /// confirmed. The distinction is the whole gate: a sender only ever emits
+    /// plaintext when its own `should_auto_encrypt()` is false, which precludes
+    /// it having established a session with us — while the session is merely
+    /// pending it *queues* (`prepare_outbound_content`) rather than downgrading.
+    /// So no honest peer sends cleartext while we know it speaks MLS, and
+    /// asking only about *confirmed* sessions left a hole: an attacker with
+    /// app-container write access deletes the `session_states` record, restore
+    /// re-bootstraps it as `Pending` (which it must), the peer silently drops
+    /// out of `confirmed_sessions`, and this gate re-opens. See
+    /// [`OfflineProtocol::encryption_capable_peers`] for why that signal now
+    /// comes from the credential store instead.
+    ///
+    /// The capability check is also *cheaper* than the confirmation one it
+    /// precedes: it is an in-memory set lookup, where `is_session_confirmed`
+    /// falls through to a protocol-state read plus a sealed-record open for any
+    /// sender not already in `confirmed_sessions` — a path driven by the
+    /// attacker-controlled `message.sender`. Ordering the cheap check first
+    /// makes a flood of forged sender ids cost less than it used to.
+    ///
+    /// The group path has gated on existence rather than confirmation since it
+    /// was written (`has_mls_group_state`); this brings the 1:1 path into line.
     fn accept_plaintext_content(&mut self, sender: &str) -> bool {
         if self.config.encryption.require_encryption {
+            return false;
+        }
+        // `should_auto_encrypt()` guards both checks: a node with encryption
+        // disabled or MLS uninitialized has no standing to call anything a
+        // downgrade, and removing this guard would reject legitimate plaintext
+        // on every plaintext-only deployment.
+        if !self.should_auto_encrypt() {
+            return true;
+        }
+        if self.is_encryption_capable(sender) {
             return false;
         }
         // Fail closed: if the confirmation lookup errors (storage failure),
         // treat the session as confirmed and reject — accepting plaintext on
         // error would let a storage fault disable the downgrade gate.
-        if self.should_auto_encrypt() && self.is_session_confirmed(sender).unwrap_or(true) {
+        if self.is_session_confirmed(sender).unwrap_or(true) {
             return false;
         }
         true
