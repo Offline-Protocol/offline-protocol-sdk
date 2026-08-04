@@ -128,7 +128,14 @@ final class MlsSecureStorage: MlsStorageProvider {
     /// but only ever for an account with no live instance — the bridge refuses
     /// to wipe the one it is running — so it cannot interleave with a promotion
     /// on the same service.
+    ///
+    /// A tombstoned key reads as absent without consulting the legacy store at
+    /// all: its copy there outlived a delete, and promoting it would resurrect
+    /// key material the caller was told was gone.
     func load(keyType: String, keyId: String) throws -> [UInt8]? {
+        if LegacyStoreAdoption.isReservedEntry(keyType: keyType) {
+            return nil
+        }
         if let data = try Self.load(
             keyType: keyType,
             keyId: keyId,
@@ -138,6 +145,12 @@ final class MlsSecureStorage: MlsStorageProvider {
             return data
         }
         guard let legacy = readThroughService(for: keyType) else {
+            return nil
+        }
+        if isTombstoned(keyType: keyType, keyId: keyId) {
+            // Opportunistic heal: the removal that failed may succeed now, which
+            // is the only thing that retires a tombstone. Absent either way.
+            retryTombstonedRemoval(from: legacy, keyType: keyType, keyId: keyId)
             return nil
         }
         guard let inherited = try Self.load(
@@ -160,11 +173,20 @@ final class MlsSecureStorage: MlsStorageProvider {
         return inherited
     }
 
-    /// Deletes data from the Keychain.
+    /// Deletes data from the Keychain, and from the legacy store too.
     ///
-    /// Deletes from the legacy store too. A delete that left the legacy copy in
-    /// place would let read-through resurrect key material the caller believes
-    /// is gone.
+    /// A delete that left the legacy copy in place would let read-through
+    /// resurrect key material the caller believes is gone. When that removal
+    /// fails, the key is tombstoned rather than reported: see
+    /// `LegacyStoreAdoption.tombstoneKeyType` for why this cannot be signalled
+    /// by throwing. The delete has still done what it promised — nothing will
+    /// hand that key back — so it returns successfully.
+    ///
+    /// Only a *double* fault throws: a legacy copy that will not delete and a
+    /// namespaced store that will not record the tombstone leaves no way to
+    /// keep the promise, and a Keychain failing both is failing everything else
+    /// too. Locking a device mid-delete is the realistic single fault, and it
+    /// heals on the next read.
     func delete(keyType: String, keyId: String) throws {
         try Self.delete(
             keyType: keyType,
@@ -172,19 +194,31 @@ final class MlsSecureStorage: MlsStorageProvider {
             from: service,
             accessGroup: accessGroup
         )
-        if let legacy = readThroughService(for: keyType) {
-            try? Self.delete(
+        guard let legacy = readThroughService(for: keyType) else {
+            return
+        }
+        do {
+            try Self.delete(
                 keyType: keyType,
                 keyId: keyId,
                 from: legacy,
                 accessGroup: accessGroup
             )
+        } catch {
+            try tombstone(keyType: keyType, keyId: keyId, cause: error)
+            return
         }
+        clearTombstone(keyType: keyType, keyId: keyId)
     }
 
     /// Lists all key IDs for a given key type, unioned across the adopted
-    /// legacy store so a not-yet-promoted entry is still discoverable.
+    /// legacy store so a not-yet-promoted entry is still discoverable — except
+    /// where a tombstone says that entry is a corpse, which must not be
+    /// advertised as a key that can be loaded.
     func listKeys(keyType: String) throws -> [String] {
+        if LegacyStoreAdoption.isReservedEntry(keyType: keyType) {
+            return []
+        }
         var keys = try Self.listKeys(
             keyType: keyType,
             in: service,
@@ -196,12 +230,89 @@ final class MlsSecureStorage: MlsStorageProvider {
                 in: legacy,
                 accessGroup: accessGroup
             )) ?? []
-            for key in inherited where !keys.contains(key) {
+            for key in inherited where !keys.contains(key)
+                && !isTombstoned(keyType: keyType, keyId: key) {
                 keys.append(key)
             }
         }
         return keys
     }
+
+    // MARK: - Tombstones
+
+    /// Records that a legacy copy survived its deletion.
+    ///
+    /// - Parameter cause: the removal failure this stands in for, folded into
+    ///   the thrown message so a double fault names both halves.
+    private func tombstone(keyType: String, keyId: String, cause: Error) throws {
+        do {
+            try Self.store(
+                keyType: LegacyStoreAdoption.tombstoneKeyType,
+                keyId: LegacyStoreAdoption.tombstoneKeyId(keyType: keyType, keyId: keyId),
+                data: Self.tombstoneValue,
+                in: service,
+                accessGroup: accessGroup
+            )
+        } catch {
+            throw MlsStorageError.DeleteFailed(
+                message: "Keychain delete left an inherited copy of \(keyType) in "
+                    + "place (\(cause)) and could not tombstone it: \(error)"
+            )
+        }
+    }
+
+    /// Whether this key's legacy copy is known to have outlived a delete.
+    ///
+    /// Fails closed: a tombstone read that throws means read-through cannot be
+    /// proven safe, and suppressing a legitimate inherited entry costs an
+    /// identity rotation while resurrecting a consumed key costs forward
+    /// secrecy. Near-unreachable in practice — the namespaced read in `load`
+    /// runs first against the same service and would have thrown.
+    private func isTombstoned(keyType: String, keyId: String) -> Bool {
+        do {
+            return try Self.load(
+                keyType: LegacyStoreAdoption.tombstoneKeyType,
+                keyId: LegacyStoreAdoption.tombstoneKeyId(keyType: keyType, keyId: keyId),
+                from: service,
+                accessGroup: accessGroup
+            ) != nil
+        } catch {
+            return true
+        }
+    }
+
+    /// Best-effort retry of the legacy removal a tombstone stands in for.
+    private func retryTombstonedRemoval(from legacy: String, keyType: String, keyId: String) {
+        do {
+            try Self.delete(
+                keyType: keyType,
+                keyId: keyId,
+                from: legacy,
+                accessGroup: accessGroup
+            )
+        } catch {
+            return
+        }
+        clearTombstone(keyType: keyType, keyId: keyId)
+    }
+
+    /// Retires a tombstone once the legacy copy is genuinely gone.
+    ///
+    /// Best effort: a tombstone that outlives its corpse only costs the
+    /// inherited entry it suppresses, and there is nothing left to resurrect.
+    private func clearTombstone(keyType: String, keyId: String) {
+        try? Self.delete(
+            keyType: LegacyStoreAdoption.tombstoneKeyType,
+            keyId: LegacyStoreAdoption.tombstoneKeyId(keyType: keyType, keyId: keyId),
+            from: service,
+            accessGroup: accessGroup
+        )
+    }
+
+    /// Value written for a tombstone. Only its *presence* is the signal —
+    /// nothing reads the bytes back — so it stays one byte rather than
+    /// restating the key.
+    private static let tombstoneValue: [UInt8] = [0x01]
 
     // MARK: - Account wipe
 
@@ -408,7 +519,7 @@ final class MlsSecureStorage: MlsStorageProvider {
         guard let legacy = legacyService,
               let decision = legacyAdoption,
               LegacyStoreAdoption.allowsReadThrough(decision),
-              !LegacyStoreAdoption.isClaimEntry(keyType: keyType)
+              !LegacyStoreAdoption.isReservedEntry(keyType: keyType)
         else {
             return nil
         }

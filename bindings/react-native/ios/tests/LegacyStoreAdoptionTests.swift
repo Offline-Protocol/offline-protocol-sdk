@@ -142,4 +142,46 @@ final class LegacyStoreAdoptionTests: XCTestCase {
         )
         XCTAssertFalse(LegacyStoreAdoption.isClaimEntry(keyType: "identity"))
     }
+
+    // MARK: - Tombstones
+
+    /// Both reserved entries are the provider's own bookkeeping. Neither may be
+    /// promoted, listed, or handed back as key material — a tombstone escaping
+    /// as a loadable key would be the provider advertising a corpse.
+    func testReservedEntriesCoverTheClaimAndTombstones() {
+        XCTAssertTrue(
+            LegacyStoreAdoption.isReservedEntry(keyType: LegacyStoreAdoption.claimKeyType)
+        )
+        XCTAssertTrue(
+            LegacyStoreAdoption.isReservedEntry(
+                keyType: LegacyStoreAdoption.tombstoneKeyType
+            )
+        )
+        XCTAssertFalse(LegacyStoreAdoption.isReservedEntry(keyType: "identity"))
+        XCTAssertFalse(LegacyStoreAdoption.isReservedEntry(keyType: "key_package"))
+    }
+
+    /// The two reserved key types must stay distinct: collapsing them would let
+    /// a tombstone answer a claim read, and the claim decides which account
+    /// inherits the legacy identity.
+    func testReservedKeyTypesAreDistinct() {
+        XCTAssertNotEqual(
+            LegacyStoreAdoption.claimKeyType,
+            LegacyStoreAdoption.tombstoneKeyType
+        )
+    }
+
+    /// One tombstone names exactly one legacy key. Keyed like the stores' own
+    /// account keys, so it inherits their existing ambiguity rather than adding
+    /// a new one.
+    func testTombstoneIdNamesOneKey() {
+        XCTAssertEqual(
+            LegacyStoreAdoption.tombstoneKeyId(keyType: "key_package", keyId: "peer-1"),
+            "key_package:peer-1"
+        )
+        XCTAssertNotEqual(
+            LegacyStoreAdoption.tombstoneKeyId(keyType: "key_package", keyId: "peer-1"),
+            LegacyStoreAdoption.tombstoneKeyId(keyType: "key_package", keyId: "peer-2")
+        )
+    }
 }

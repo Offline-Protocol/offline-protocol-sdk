@@ -45,6 +45,33 @@ enum LegacyStoreAdoption {
     static let claimKeyType = "__offline_protocol_migration__"
     static let claimKeyId = "claimed_by"
 
+    /// Key type under which a *namespaced* store records that a legacy copy
+    /// survived its own deletion.
+    ///
+    /// `delete` removes both copies, because read-through would otherwise hand
+    /// back key material the caller believes is gone. The legacy removal can
+    /// fail on its own — a locked Keychain, a rotated master key — and it
+    /// cannot be reported by failing the delete: core treats a storage delete
+    /// as fatal almost everywhere (OpenMLS aborts Welcome processing and every
+    /// commit merge on one), and there is no retry anywhere to fall back on. So
+    /// a failed legacy removal is recorded instead: a tombstone makes
+    /// read-through treat that key as absent, which is the guarantee `delete`
+    /// actually owes its caller. The corpse in the legacy store is inert.
+    ///
+    /// Tombstones live only in the namespaced store, are never promoted, and
+    /// are never reported as key material.
+    static let tombstoneKeyType = "__offline_protocol_tombstone__"
+
+    /// The tombstone entry naming one legacy key.
+    ///
+    /// Joined exactly like the stores' own account keys, so it inherits their
+    /// existing (accepted) ambiguity between `("a", "b:c")` and `("a:b", "c")`
+    /// rather than introducing a new one. A collision would over-suppress a
+    /// legacy read — degraded, never a resurrection.
+    static func tombstoneKeyId(keyType: String, keyId: String) -> String {
+        "\(keyType):\(keyId)"
+    }
+
     enum Decision: Equatable {
         /// Legacy store is unclaimed: claim it and read through.
         case adopt
@@ -157,5 +184,16 @@ enum LegacyStoreAdoption {
     /// new store or reported by `listKeys`.
     static func isClaimEntry(keyType: String) -> Bool {
         keyType == claimKeyType
+    }
+
+    /// True for either reserved entry — the legacy store's claim and the
+    /// namespaced store's tombstones.
+    ///
+    /// Both are the provider's own bookkeeping rather than key material, so
+    /// neither may reach a caller: read-through skips them, `load` reports them
+    /// absent, and `listKeys` never names them. The provider reads its own
+    /// tombstones through the private primitives, which are not gated.
+    static func isReservedEntry(keyType: String) -> Bool {
+        keyType == claimKeyType || keyType == tombstoneKeyType
     }
 }
