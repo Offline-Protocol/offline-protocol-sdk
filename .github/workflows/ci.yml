@@ -44,6 +44,61 @@ jobs:
       - name: License consistency check
         run: ./scripts/check-license-consistency.sh
 
+  # The License Consistency job catches the three THIRD-PARTY-NOTICES.md copies
+  # drifting from each other, but a dependency bump leaves all three identical
+  # and uniformly stale — regenerating after Cargo.lock changes was manual
+  # discipline with nothing to catch a miss. Mirror the python-bindings job's
+  # regenerate-and-diff pattern: rerun cargo-about and fail on any diff.
+  #
+  # cargo-about consults clearlydefined.io for license texts, so in rare cases
+  # an upstream data change can surface here as drift with no Cargo.lock change;
+  # the fix is the same either way — regenerate and commit.
+  notices:
+    name: Third-Party Notices Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The cargo-about version is pinned in the regeneration script (output
+      # formatting changes across releases would read as false drift); read it
+      # from there so this job can never disagree with local regeneration.
+      - name: Read pinned cargo-about version
+        id: pin
+        run: |
+          version="$(sed -n 's/^CARGO_ABOUT_VERSION="\(.*\)"$/\1/p' scripts/generate-third-party-notices.sh)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo-about binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-about
+          key: cargo-about-${{ steps.pin.outputs.version }}-${{ runner.os }}
+
+      # `--features cli` is required: without it the install exits 0 but ships
+      # no binary.
+      - name: Install cargo-about
+        run: |
+          if ! cargo about --version 2>/dev/null | grep -qFx "cargo-about ${{ steps.pin.outputs.version }}"; then
+            cargo install cargo-about --version "${{ steps.pin.outputs.version }}" --features cli --locked --force
+          fi
+
+      - name: Regenerate third-party notices
+        run: ./scripts/generate-third-party-notices.sh
+
+      - name: Fail on stale THIRD-PARTY-NOTICES.md
+        run: |
+          if ! git diff --exit-code -- \
+            THIRD-PARTY-NOTICES.md \
+            bindings/react-native/THIRD-PARTY-NOTICES.md \
+            bindings/python/THIRD-PARTY-NOTICES.md; then
+            echo "::error::THIRD-PARTY-NOTICES.md is stale — the shipped-binary dependency graph changed without regenerating attribution."
+            echo "Run scripts/generate-third-party-notices.sh and commit the result."
+            exit 1
+          fi
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
