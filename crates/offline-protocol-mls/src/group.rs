@@ -370,10 +370,11 @@ impl GroupManager {
     ///   reporting, too thin to fork a group over.
     ///
     /// Only a *positive* contradiction rejects: we hold a non-empty admin set
-    /// and a sender is not in it. The check covers the committer (already
-    /// authenticated against the wire sender by SEC-M1 above) and every
-    /// proposal sender, since MLS lets a member commit a proposal another
-    /// member made.
+    /// and a principal is not in it. The principals are the committer (already
+    /// authenticated against the wire sender by SEC-M1 above) and the sender of
+    /// each Add/Remove proposal, since MLS lets a member commit a proposal
+    /// another member made. Update and PSK proposals are deliberately excluded
+    /// — they change no membership.
     ///
     /// It cannot detect *divergent* admin views, only absent ones — which is
     /// why enforcement stays opt-in.
