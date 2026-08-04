@@ -341,6 +341,29 @@ do not assume a sealed category can notice something going missing.
 The full discussion lives in
 [MLS Integration → Protocol-State Confidentiality](mls-integration.md#protocol-state-confidentiality).
 
+### 1.9 `initialize_mls` failure modes moved in both directions
+
+Handle a failed `initialize_mls` explicitly. It got **more** forgiving about
+individual bad records and **less** forgiving about one specific thing.
+
+| Situation | Before | Now |
+|---|---|---|
+| One record in `session_states` or `welcome_lifecycles` won't read or won't decode | **failed init**, on every launch, forever — and with `require_encryption` on by default that install could send nothing, with no in-app recovery | record dropped, restore continues; a session whose confirmation can't be read is re-bootstrapped as `Pending`, never `Confirmed` |
+| A store reports a record `Corrupted` | left in place, re-read on every boot, never settled | dropped **and settled** |
+| A transient persistence failure on the restore path (Welcome-lifecycle repair, missing-session bootstrap) | failed init | logged, continues; the repair holds in memory for the run |
+| **A `blocked_users` listing failure** | swallowed — came up with an **empty block list** and told no one | **fails init and rolls back** |
+
+That last row is the intentional new hard failure. A listing error is
+indistinguishable from an empty store, so swallowing it means every blocked peer
+silently unblocked from a transient error. Blocking is a safety control, so it
+fails closed.
+
+**What to do:** if `initialize_mls` (or RN's
+`initializeMlsWithSecureStorage()` / the automatic init inside `start()`) fails,
+do not proceed as if the SDK is usable and do not present the user as unblocked.
+Surface it and retry — initialization is transactional, so a rolled-back attempt
+leaves no partial state and a retry is safe.
+
 ### 1.10 The inbound plaintext gate no longer reads `session_states`
 
 Only affects `encryption.enabled = true` **with** `requireEncryption: false` —
@@ -372,6 +395,17 @@ What changes in practice:
   `resetTofuForPeer` is the supported way to accept them as a new identity.
 - Peers that have never shown any MLS signal are unaffected, so plaintext-only
   interop keeps working.
+- Capability is learned from unauthenticated signals as well as authenticated
+  ones: a well-formed `__MLS_WELCOME__` marks its sender even if the join fails,
+  deliberately, so a peer whose handshake is breaking does not keep the gate
+  open. The trade-off is that an injected frame naming a plaintext-only peer can
+  mark that peer capable and suppress their cleartext for the rest of the run.
+  It does not persist — a restart clears it, since restore seeds only from
+  sessions and pins — and `resetTofuForPeer` clears it immediately. **If a
+  legacy peer goes unreadable with `PLAINTEXT_RECEIVE_REJECTED` and you hold no
+  session or pin for them, that is the case you are looking at.** The set is
+  also capped; past the cap new peers fall back to the old session-state check
+  rather than displacing anyone already in it.
 
 ### 1.11 Key packages are checked against the pinned signing key
 
@@ -390,29 +424,6 @@ checked against the peer's TOFU-pinned signature key.
   bindings regeneration is needed.
 - `inviteToGroup` now also verifies the invitee's key package identity, which
   that path previously did not check at all.
-
-### 1.9 `initialize_mls` failure modes moved in both directions
-
-Handle a failed `initialize_mls` explicitly. It got **more** forgiving about
-individual bad records and **less** forgiving about one specific thing.
-
-| Situation | Before | Now |
-|---|---|---|
-| One record in `session_states` or `welcome_lifecycles` won't read or won't decode | **failed init**, on every launch, forever — and with `require_encryption` on by default that install could send nothing, with no in-app recovery | record dropped, restore continues; a session whose confirmation can't be read is re-bootstrapped as `Pending`, never `Confirmed` |
-| A store reports a record `Corrupted` | left in place, re-read on every boot, never settled | dropped **and settled** |
-| A transient persistence failure on the restore path (Welcome-lifecycle repair, missing-session bootstrap) | failed init | logged, continues; the repair holds in memory for the run |
-| **A `blocked_users` listing failure** | swallowed — came up with an **empty block list** and told no one | **fails init and rolls back** |
-
-That last row is the intentional new hard failure. A listing error is
-indistinguishable from an empty store, so swallowing it means every blocked peer
-silently unblocked from a transient error. Blocking is a safety control, so it
-fails closed.
-
-**What to do:** if `initialize_mls` (or RN's
-`initializeMlsWithSecureStorage()` / the automatic init inside `start()`) fails,
-do not proceed as if the SDK is usable and do not present the user as unblocked.
-Surface it and retry — initialization is transactional, so a rolled-back attempt
-leaves no partial state and a retry is safe.
 
 ---
 
