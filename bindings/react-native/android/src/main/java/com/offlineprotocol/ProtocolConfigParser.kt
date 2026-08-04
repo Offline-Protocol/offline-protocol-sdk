@@ -108,6 +108,14 @@ internal object ProtocolConfigParser {
             "relay_broadcast_enabled"
         ) ?: json.optBooleanCompat("groupRelayBroadcastEnabled", "group_relay_broadcast_enabled")
             ?: true
+        // Default false — see GroupConfig::enforce_admin_commits. Enabling it
+        // makes this device refuse membership commits it cannot authorize,
+        // which forks it from every member that accepted them.
+        val groupEnforceAdminCommits = groupJson?.optBooleanCompat(
+            "enforceAdminCommits",
+            "enforce_admin_commits"
+        ) ?: json.optBooleanCompat("groupEnforceAdminCommits", "group_enforce_admin_commits")
+            ?: false
 
         val config = ProtocolConfig(
             appId = json.safeOptString("appId", json.safeOptString("app_id")),
@@ -134,6 +142,7 @@ internal object ProtocolConfigParser {
             maxGroupMembers = maxGroupMembers.coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt(),
             groupRelayEnabled = groupRelayEnabled,
             groupRelayBroadcastEnabled = groupRelayBroadcastEnabled,
+            groupEnforceAdminCommits = groupEnforceAdminCommits,
             binaryWireEnabled = binaryWireEnabled,
             compactEnvelopeEnabled = compactEnvelopeEnabled,
             richPayloadEnabled = richPayloadEnabled,

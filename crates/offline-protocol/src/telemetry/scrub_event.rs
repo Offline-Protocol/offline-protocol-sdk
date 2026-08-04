@@ -485,6 +485,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             added,
             removed,
             reason: _,
+            enforced: _,
         } => {
             hash_string(group_id, scrubber);
             hash_string(committer, scrubber);

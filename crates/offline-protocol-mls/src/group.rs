@@ -5,7 +5,7 @@
 use crate::error::{MlsError, Result};
 use crate::provider::MlsProvider;
 use crate::storage::{MlsStorage, StorageError};
-use crate::types::{GroupId, GroupInfo, StorageKeyType};
+use crate::types::{GroupId, GroupInfo, GroupMetadata, GroupRole, StorageKeyType};
 
 use openmls::prelude::*;
 use openmls_traits::signatures::Signer;
@@ -52,12 +52,41 @@ pub struct GroupManager {
 
     /// OpenMLS crypto provider.
     provider: MlsProvider,
+
+    /// Whether membership commits are checked against the local admin
+    /// overlay before merging. Default `false`; see
+    /// [`Self::set_enforce_admin_commits`].
+    enforce_admin_commits: bool,
 }
 
 impl GroupManager {
     /// Creates a new group manager.
     pub fn new(storage: Arc<dyn MlsStorage>, provider: MlsProvider) -> Self {
-        Self { storage, provider }
+        Self {
+            storage,
+            provider,
+            enforce_admin_commits: false,
+        }
+    }
+
+    /// Enables or disables receive-side authorization of membership commits.
+    ///
+    /// **Off by default, and changing that is a group-partitioning decision,
+    /// not a hardening toggle.** Refusing a commit means not merging it: our
+    /// epoch stays behind every member who did merge, which MLS cannot heal —
+    /// the app has to re-invite us. Enforcement is therefore safe only if
+    /// every member reaches the *same* verdict, and the admin overlay is
+    /// replicated best-effort (role changes ride unreconciled mesh
+    /// notifications; joiners get a point-in-time snapshot). Members whose
+    /// role maps merely disagree will partition each other with no attacker
+    /// involved.
+    ///
+    /// [`Self::authorize_membership_commit`] fails open on *absent* knowledge
+    /// to keep the common lag case harmless, but it cannot detect *divergent*
+    /// knowledge. Enable this only for a closed deployment that controls role
+    /// distribution.
+    pub fn set_enforce_admin_commits(&mut self, enforce: bool) {
+        self.enforce_admin_commits = enforce;
     }
 
     /// Returns a reference to the crypto provider.
@@ -252,6 +281,7 @@ impl GroupManager {
     pub fn decrypt_message(
         &self,
         group: &mut MlsGroup,
+        group_id: &GroupId,
         message: MlsMessageIn,
         claimed_sender: &str,
     ) -> Result<Option<Vec<u8>>> {
@@ -298,6 +328,14 @@ impl GroupManager {
             }
             ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
                 debug!("Received commit message, merging");
+                // Authorize before merging — this is the only point at which
+                // a commit can still be refused. `merge_staged_commit`
+                // advances our epoch irreversibly, and every group decrypt
+                // path in the SDK funnels through here (commit frames,
+                // commits riding the application channel, `__MLS_ENC__`
+                // envelopes naming a group id), so a check anywhere further
+                // up would be bypassable by reframing the same ciphertext.
+                self.authorize_membership_commit(group, group_id, &staged_commit, claimed_sender)?;
                 group
                     .merge_staged_commit(&self.provider, *staged_commit)
                     .map_err(|e| MlsError::Decryption(format!("Failed to merge commit: {}", e)))?;
@@ -307,6 +345,171 @@ impl GroupManager {
                 warn!("Received external join proposal (not supported)");
                 Ok(None)
             }
+        }
+    }
+
+    /// Refuses a staged membership commit whose committer or proposal senders
+    /// the local admin overlay does not authorize.
+    ///
+    /// Runs only when [`Self::set_enforce_admin_commits`] is on. **Every
+    /// unknown is resolved in favour of merging**, because the cost of a
+    /// wrong rejection (a permanent epoch fork needing an app-level
+    /// re-invite) far exceeds the cost of a wrong acceptance (an insider
+    /// membership change, which the protocol layer still reports):
+    ///
+    /// - Not a membership commit (no Add/Remove proposals) → merge. A pure
+    ///   KeyUpdate changes no membership and needs no admin; the fork
+    ///   resolver's deterministic leader issues these and is often not one.
+    /// - A `session:` group → merge. 1:1 sessions have no admin overlay.
+    /// - Metadata unreadable or absent, or no admin role stored at all →
+    ///   merge. This is "we do not know who the admins are", the exact state
+    ///   a lagging replica is in, and rejecting on it would partition a
+    ///   healthy group with no attacker involved. Note this deliberately does
+    ///   *not* consult `created_by`: the creator fallback is a single
+    ///   unauthenticated claim, fine for gating our own sends and for
+    ///   reporting, too thin to fork a group over.
+    ///
+    /// Only a *positive* contradiction rejects: we hold a non-empty admin set
+    /// and a sender is not in it. The check covers the committer (already
+    /// authenticated against the wire sender by SEC-M1 above) and every
+    /// proposal sender, since MLS lets a member commit a proposal another
+    /// member made.
+    ///
+    /// It cannot detect *divergent* admin views, only absent ones — which is
+    /// why enforcement stays opt-in.
+    fn authorize_membership_commit(
+        &self,
+        group: &MlsGroup,
+        group_id: &GroupId,
+        staged_commit: &StagedCommit,
+        committer: &str,
+    ) -> Result<()> {
+        if !self.enforce_admin_commits || group_id.as_str().starts_with("session:") {
+            return Ok(());
+        }
+
+        // Resolve the membership delta from the proposals rather than the
+        // post-merge roster, which does not exist yet. Leaf indices resolve
+        // against the *pre-merge* tree, which is the roster the removes name.
+        let mut added: Vec<String> = staged_commit
+            .add_proposals()
+            .filter_map(|p| {
+                String::from_utf8(
+                    p.add_proposal()
+                        .key_package()
+                        .leaf_node()
+                        .credential()
+                        .serialized_content()
+                        .to_vec(),
+                )
+                .ok()
+            })
+            .collect();
+        let removed_indices: Vec<LeafNodeIndex> = staged_commit
+            .remove_proposals()
+            .map(|p| p.remove_proposal().removed())
+            .collect();
+
+        if added.is_empty() && removed_indices.is_empty() {
+            return Ok(());
+        }
+
+        let roster: Vec<(LeafNodeIndex, String)> = group
+            .members()
+            .filter_map(|m| {
+                String::from_utf8(m.credential.serialized_content().to_vec())
+                    .ok()
+                    .map(|id| (m.index, id))
+            })
+            .collect();
+        let resolve = |index: LeafNodeIndex| -> Option<String> {
+            roster
+                .iter()
+                .find(|(i, _)| *i == index)
+                .map(|(_, id)| id.clone())
+        };
+
+        let mut removed: Vec<String> = removed_indices
+            .iter()
+            .copied()
+            .filter_map(resolve)
+            .collect();
+
+        let metadata = match self.load_group_metadata(group_id) {
+            Ok(Some(metadata)) => metadata,
+            Ok(None) => {
+                warn!(
+                    group_id = %group_id,
+                    "Commit enforcement: no group metadata — merging (unknown admin set fails open)"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    group_id = %group_id,
+                    error = ?e,
+                    "Commit enforcement: could not read group metadata — merging (unknown admin set fails open)"
+                );
+                return Ok(());
+            }
+        };
+        if !metadata.has_any_admin() {
+            warn!(
+                group_id = %group_id,
+                "Commit enforcement: no admin role stored — merging (unknown admin set fails open)"
+            );
+            return Ok(());
+        }
+
+        // Every principal behind the change must be an admin: the committer,
+        // plus each proposal's own sender. A non-member proposal sender
+        // (external, new-member) can never be an admin of this group.
+        let mut unauthorized = metadata.get_role(committer) != GroupRole::Admin;
+        if !unauthorized {
+            unauthorized = staged_commit.queued_proposals().any(|p| match p.sender() {
+                Sender::Member(index) => resolve(*index)
+                    .map(|id| metadata.get_role(&id) != GroupRole::Admin)
+                    .unwrap_or(true),
+                _ => true,
+            });
+        }
+
+        if unauthorized {
+            added.sort();
+            removed.sort();
+            warn!(
+                group_id = %group_id,
+                committer = %committer,
+                added = ?added,
+                removed = ?removed,
+                "Commit enforcement: refusing an unauthorized membership commit before merge"
+            );
+            return Err(MlsError::CommitNotAuthorized {
+                committer: committer.to_string(),
+                added,
+                removed,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Loads a group's metadata overlay (roles, creator) for the admin check.
+    ///
+    /// Deliberately duplicated from `MlsManager` rather than reached through
+    /// it: the manager holds this `GroupManager`, so calling back up would
+    /// invert ownership, and the protocol layer holds the manager behind an
+    /// `RwLock` that is already locked while decryption runs.
+    fn load_group_metadata(&self, group_id: &GroupId) -> Result<Option<GroupMetadata>> {
+        let key_type = StorageKeyType::GroupMetadata.as_str();
+        match self.storage.load(key_type, group_id.as_str())? {
+            Some(data) => {
+                let mut metadata: GroupMetadata = serde_json::from_slice(&data)
+                    .map_err(|e| MlsError::Deserialization(e.to_string()))?;
+                metadata.migrate_legacy_roles();
+                Ok(Some(metadata))
+            }
+            None => Ok(None),
         }
     }
 

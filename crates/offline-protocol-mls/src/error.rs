@@ -88,6 +88,25 @@ pub enum MlsError {
     #[error("Session not found for user: {0}")]
     SessionNotFound(String),
 
+    /// A membership commit was refused before merging because the local
+    /// admin policy did not authorize its committer or proposal senders.
+    ///
+    /// Only produced when commit enforcement is explicitly enabled
+    /// (`GroupConfig::enforce_admin_commits`, default off) — see
+    /// `GroupManager::authorize_membership_commit` for the fail-open rules
+    /// that keep an incomplete local admin view from rejecting a legitimate
+    /// commit and forking the group. Permanent: the same commit can never
+    /// become authorized, so callers must not buffer and retry it.
+    #[error("Commit not authorized: {committer} is not an admin of this group")]
+    CommitNotAuthorized {
+        /// The MLS-authenticated committer whose commit was refused.
+        committer: String,
+        /// User ids the refused commit would have added, sorted.
+        added: Vec<String>,
+        /// User ids the refused commit would have removed, sorted.
+        removed: Vec<String>,
+    },
+
     /// Invalid message format.
     #[error("Invalid message format: {0}")]
     InvalidMessage(String),

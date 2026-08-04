@@ -529,6 +529,19 @@ dictionary ProtocolConfig {
     // Set false to force per-member fan-out even against a v2 relay.
     // See GroupConfig::relay_broadcast_enabled for the full rationale.
     boolean group_relay_broadcast_enabled = true;
+    // Whether an incoming MLS membership commit is REFUSED when the local
+    // admin overlay does not authorize its committer. Off by default, and
+    // enabling it is a decision about partition risk: refusing a commit means
+    // declining the MLS merge, so this device's epoch stays behind every
+    // member that accepted it and MLS cannot heal that — the app has to
+    // re-invite. The check fails open on absent knowledge (no metadata, no
+    // admin role stored) but cannot detect DIVERGENT admin views, so only
+    // enable it for a closed deployment that controls role distribution, and
+    // never on part of a fleet. With it off, unauthorized changes are still
+    // applied and reported via group_unauthorized_membership_change.
+    // See GroupConfig::enforce_admin_commits for the full rationale.
+    // Defaulted so existing callers keep compiling.
+    boolean group_enforce_admin_commits = false;
     boolean require_transport_identity = false;
     // Kill switch for the compact binary wire codec (default on). Negotiated
     // per-peer, so a mixed fleet stays on JSON automatically; decoding of

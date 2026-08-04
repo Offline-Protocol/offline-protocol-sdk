@@ -4455,6 +4455,7 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var maxGroupMembers: UInt32
     public var groupRelayEnabled: Bool
     public var groupRelayBroadcastEnabled: Bool
+    public var groupEnforceAdminCommits: Bool
     public var requireTransportIdentity: Bool
     public var binaryWireEnabled: Bool
     public var compactEnvelopeEnabled: Bool
@@ -4463,7 +4464,7 @@ public struct ProtocolConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -4484,6 +4485,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.maxGroupMembers = maxGroupMembers
         self.groupRelayEnabled = groupRelayEnabled
         self.groupRelayBroadcastEnabled = groupRelayBroadcastEnabled
+        self.groupEnforceAdminCommits = groupEnforceAdminCommits
         self.requireTransportIdentity = requireTransportIdentity
         self.binaryWireEnabled = binaryWireEnabled
         self.compactEnvelopeEnabled = compactEnvelopeEnabled
@@ -4525,6 +4527,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 maxGroupMembers: FfiConverterUInt32.read(from: &buf), 
                 groupRelayEnabled: FfiConverterBool.read(from: &buf), 
                 groupRelayBroadcastEnabled: FfiConverterBool.read(from: &buf), 
+                groupEnforceAdminCommits: FfiConverterBool.read(from: &buf), 
                 requireTransportIdentity: FfiConverterBool.read(from: &buf), 
                 binaryWireEnabled: FfiConverterBool.read(from: &buf), 
                 compactEnvelopeEnabled: FfiConverterBool.read(from: &buf), 
@@ -4554,6 +4557,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.maxGroupMembers, into: &buf)
         FfiConverterBool.write(value.groupRelayEnabled, into: &buf)
         FfiConverterBool.write(value.groupRelayBroadcastEnabled, into: &buf)
+        FfiConverterBool.write(value.groupEnforceAdminCommits, into: &buf)
         FfiConverterBool.write(value.requireTransportIdentity, into: &buf)
         FfiConverterBool.write(value.binaryWireEnabled, into: &buf)
         FfiConverterBool.write(value.compactEnvelopeEnabled, into: &buf)

@@ -258,6 +258,14 @@ class OfflineProtocolModule: RCTEventEmitter {
             ?? raw["groupRelayBroadcastEnabled"] as? Bool
             ?? raw["group_relay_broadcast_enabled"] as? Bool
             ?? true
+        // Default false — see GroupConfig::enforce_admin_commits. Enabling it
+        // makes this device refuse membership commits it cannot authorize,
+        // which forks it from every member that accepted them.
+        let groupEnforceAdminCommits = groupRaw?["enforceAdminCommits"] as? Bool
+            ?? groupRaw?["enforce_admin_commits"] as? Bool
+            ?? raw["groupEnforceAdminCommits"] as? Bool
+            ?? raw["group_enforce_admin_commits"] as? Bool
+            ?? false
 
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
@@ -282,6 +290,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             maxGroupMembers: UInt32(clamping: maxGroupMembers),
             groupRelayEnabled: groupRelayEnabled,
             groupRelayBroadcastEnabled: groupRelayBroadcastEnabled,
+            groupEnforceAdminCommits: groupEnforceAdminCommits,
             binaryWireEnabled: binaryWireEnabled,
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
             richPayloadEnabled: encryption.richPayloadEnabled,

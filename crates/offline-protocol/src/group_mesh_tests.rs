@@ -12533,3 +12533,436 @@ fn test_welcome_without_created_by_leaves_metadata_unchanged() {
         "the role snapshot still resolves admin without the fallback"
     );
 }
+
+// ============================================================================
+// COMMIT ENFORCEMENT (Stage 3 — opt-in, fail-open, pre-merge)
+// ============================================================================
+
+/// Builds an alice/bob/charlie group where the given members enforce commits.
+///
+/// Mirrors `setup_alice_bob_charlie_group` but lets the test opt either peer
+/// into `enforce_admin_commits` before any MLS state exists, since the flag is
+/// installed on the MLS manager at initialization and cannot be flipped after.
+fn setup_enforcing_group(
+    group_name: &str,
+    alice_enforces: bool,
+    bob_enforces: bool,
+) -> (OfflineProtocol, OfflineProtocol, String) {
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.group.enforce_admin_commits = alice_enforces;
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.group.enforce_admin_commits = bob_enforces;
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    let group_info = alice.create_group(group_name).unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+
+    // Add bob, then charlie, driving MLS directly so setup emits no events.
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    let welcome = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let (welcome, _commit) = alice_mls
+            .add_group_member(&gid, &bob_kp.key_package_data)
+            .unwrap();
+        welcome
+    };
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.join_group(&welcome).unwrap();
+    }
+
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
+    charlie.initialize_mls_for_test(storage_c).unwrap();
+    let charlie_kp = {
+        let charlie_mls = charlie.mls_manager_for_testing().read().unwrap();
+        charlie_mls.generate_key_package().unwrap()
+    };
+    let commit = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let (_welcome, commit) = alice_mls
+            .add_group_member(&gid, &charlie_kp.key_package_data)
+            .unwrap();
+        commit
+    };
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.decrypt_from_group(&commit, "alice").unwrap();
+    }
+    alice.refresh_group_members(&group_id).unwrap();
+
+    // Alice created the group, so she is admin; give bob and charlie explicit
+    // member roles so `has_any_admin()` is true and the admin set is *known* —
+    // the state in which enforcement is allowed to reject.
+    {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        alice_mls
+            .set_member_role(&gid, "bob", GroupRole::Member)
+            .unwrap();
+        alice_mls
+            .set_member_role(&gid, "charlie", GroupRole::Member)
+            .unwrap();
+    }
+
+    (alice, bob, group_id)
+}
+
+/// Returns `(committer, added, removed, reason, enforced)` of the first
+/// unauthorized membership-change event, if any.
+fn unauthorized_change_enforced(
+    events: &Arc<Mutex<Vec<Event>>>,
+) -> Option<(String, Vec<String>, Vec<String>, String, bool)> {
+    events.lock().unwrap().iter().find_map(|e| match e {
+        Event::GroupUnauthorizedMembershipChange {
+            committer,
+            added,
+            removed,
+            reason,
+            enforced,
+            ..
+        } => Some((
+            committer.clone(),
+            added.clone(),
+            removed.clone(),
+            reason.clone(),
+            *enforced,
+        )),
+        _ => None,
+    })
+}
+
+#[test]
+fn test_enforcement_disabled_by_default_applies_commit() {
+    // The default must stay report-don't-reject: rejecting forks the group,
+    // and nothing about the default configuration should risk that.
+    let (mut alice, bob, group_id) = setup_enforcing_group("Default Off", false, false);
+    assert!(
+        !alice.config.group.enforce_admin_commits,
+        "enforcement must be off by default"
+    );
+    let events = collect_events(&mut alice);
+    let epoch_before = group_epoch_of(&alice, &group_id);
+
+    let commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
+    alice.handle_group_mls_commit("default-off-1", "bob", &frame);
+
+    assert_eq!(
+        group_epoch_of(&alice, &group_id),
+        epoch_before + 1,
+        "with enforcement off the commit must still merge"
+    );
+    let (_, _, _, _, enforced) =
+        unauthorized_change_enforced(&events).expect("the change must still be reported");
+    assert!(!enforced, "an applied change must report enforced = false");
+}
+
+#[test]
+fn test_enforced_non_admin_remove_commit_is_rejected_without_merge() {
+    let (mut alice, bob, group_id) = setup_enforcing_group("Enforced Remove", true, false);
+    let events = collect_events(&mut alice);
+    let epoch_before = group_epoch_of(&alice, &group_id);
+
+    // Bob is a plain member issuing a genuine, decryptable MLS Remove.
+    let commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
+    alice.handle_group_mls_commit("enforced-remove-1", "bob", &frame);
+
+    assert_eq!(
+        group_epoch_of(&alice, &group_id),
+        epoch_before,
+        "a refused commit must not advance the local epoch"
+    );
+    let members = alice.refresh_group_members(&group_id).unwrap();
+    assert!(
+        members.iter().any(|m| m == "charlie"),
+        "the refused removal must not have changed the roster"
+    );
+
+    let (committer, added, removed, reason, enforced) =
+        unauthorized_change_enforced(&events).expect("a refused commit must be reported");
+    assert_eq!(committer, "bob");
+    assert!(added.is_empty());
+    assert_eq!(removed, vec!["charlie".to_string()]);
+    assert_eq!(reason, "sender_not_admin");
+    assert!(enforced, "a refused change must report enforced = true");
+
+    // No roster event: nothing changed, so claiming one would desync the app.
+    assert!(
+        !events.lock().unwrap().iter().any(|e| matches!(
+            e,
+            Event::GroupMemberAdded { .. } | Event::GroupMemberRemoved { .. }
+        )),
+        "a refused commit must emit no roster event"
+    );
+    // Permanent, so it must not be buffered for retry.
+    assert!(
+        !alice.group_mesh.pending_commits.contains_key(&group_id),
+        "a refused commit must not be buffered and retried"
+    );
+}
+
+#[test]
+fn test_enforced_non_admin_add_commit_is_rejected_without_merge() {
+    // The Add half is the one that matters most: merging splices a reader
+    // into every subsequent group ciphertext.
+    let (mut alice, bob, group_id) = setup_enforcing_group("Enforced Add", true, false);
+    let events = collect_events(&mut alice);
+    let epoch_before = group_epoch_of(&alice, &group_id);
+
+    let storage_d = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut dave = OfflineProtocol::new(create_test_config_for_user("dave")).unwrap();
+    dave.initialize_mls_for_test(storage_d).unwrap();
+    let dave_kp = {
+        let dave_mls = dave.mls_manager_for_testing().read().unwrap();
+        dave_mls.generate_key_package().unwrap()
+    };
+    let commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        let (_welcome, commit) = bob_mls
+            .add_group_member(&gid, &dave_kp.key_package_data)
+            .unwrap();
+        commit
+    };
+    let frame = group_commit_frame(&commit, &group_id, "add", Some("dave"));
+    alice.handle_group_mls_commit("enforced-add-1", "bob", &frame);
+
+    assert_eq!(
+        group_epoch_of(&alice, &group_id),
+        epoch_before,
+        "a refused Add must not advance the local epoch"
+    );
+    let members = alice.refresh_group_members(&group_id).unwrap();
+    assert!(
+        !members.iter().any(|m| m == "dave"),
+        "the refused Add must not have spliced dave into the roster"
+    );
+    let (committer, added, _, _, enforced) =
+        unauthorized_change_enforced(&events).expect("a refused Add must be reported");
+    assert_eq!(committer, "bob");
+    assert_eq!(added, vec!["dave".to_string()]);
+    assert!(enforced);
+}
+
+#[test]
+fn test_enforced_admin_remove_commit_is_applied() {
+    // Enforcement must not break the legitimate path: an admin's commit
+    // merges exactly as before.
+    // Bob is the enforcer here, receiving alice's (admin) commit.
+    let (alice, mut bob, group_id) = setup_enforcing_group("Enforced Admin OK", false, true);
+    assert!(
+        bob.config.group.enforce_admin_commits,
+        "precondition: the receiving peer must actually be enforcing, or this \
+         test passes for the wrong reason"
+    );
+
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+    {
+        // Bob knows alice is the admin.
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls
+            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .unwrap();
+        bob_mls
+            .set_member_role(&gid, "charlie", GroupRole::Member)
+            .unwrap();
+    }
+    let events = collect_events(&mut bob);
+    let epoch_before = group_epoch_of(&bob, &group_id);
+
+    let commit = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        alice_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
+    bob.handle_group_mls_commit("enforced-admin-1", "alice", &frame);
+
+    assert_eq!(
+        group_epoch_of(&bob, &group_id),
+        epoch_before + 1,
+        "an admin's commit must merge under enforcement"
+    );
+    assert!(
+        unauthorized_change_enforced(&events).is_none(),
+        "an authorized commit must not be reported"
+    );
+}
+
+#[test]
+fn test_enforcement_fails_open_when_admin_set_unknown() {
+    // THE anti-fork test. A member whose role map has no admin in it does not
+    // know who the admins are — the exact state a lagging replica is in. It
+    // must merge, because rejecting here partitions a healthy group with no
+    // attacker involved. This is the invariant that makes enforcement safe
+    // enough to ship at all.
+    let (mut alice, bob, group_id) = setup_enforcing_group("Fail Open", true, false);
+    let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+
+    // Erase every admin role, leaving "we do not know who the admins are".
+    {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        alice_mls
+            .set_member_role(&gid, "alice", GroupRole::Member)
+            .unwrap();
+        let metadata = alice_mls.get_group_metadata(&gid).unwrap().unwrap();
+        assert!(
+            !metadata.has_any_admin(),
+            "precondition: no admin role is stored"
+        );
+        assert!(
+            metadata.created_by.is_some(),
+            "precondition: a creator IS on record — enforcement must still fail \
+             open, because one unauthenticated claim is too thin to fork over"
+        );
+    }
+    let epoch_before = group_epoch_of(&alice, &group_id);
+
+    let commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
+    alice.handle_group_mls_commit("fail-open-1", "bob", &frame);
+
+    assert_eq!(
+        group_epoch_of(&alice, &group_id),
+        epoch_before + 1,
+        "an unknown admin set must fail OPEN — rejecting here forks the group"
+    );
+}
+
+#[test]
+fn test_enforced_keyupdate_commit_applies() {
+    // KeyUpdate commits carry no membership proposals and need no admin —
+    // the fork resolver's deterministic leader issues them and is often not
+    // one. Gating them would break fork resolution under enforcement.
+    let (mut alice, bob, group_id) = setup_enforcing_group("Enforced KeyUpdate", true, false);
+    let events = collect_events(&mut alice);
+    let epoch_before = group_epoch_of(&alice, &group_id);
+
+    let commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls.update_keys(&gid).unwrap()
+    };
+    let frame = group_commit_frame(&commit, &group_id, "keyupdate", None);
+    alice.handle_group_mls_commit("enforced-keyupdate-1", "bob", &frame);
+
+    assert_eq!(
+        group_epoch_of(&alice, &group_id),
+        epoch_before + 1,
+        "a KeyUpdate carries no membership change and must merge from any member"
+    );
+    assert!(
+        unauthorized_change_enforced(&events).is_none(),
+        "a KeyUpdate must not be reported as an unauthorized membership change"
+    );
+}
+
+#[test]
+fn test_app_channel_commit_is_also_policy_gated() {
+    // The bypass regression. `merge_staged_commit` is reachable from the
+    // application channel too: a commit ciphertext wrapped in an ordinary
+    // __GRP_MLS_MSG__ frame lands in decrypt_group_application, which treats
+    // a consumed commit as benign reordering. Enforcement placed on the
+    // commit-framed path only would let an insider reframe the same
+    // ciphertext and merge it anyway.
+    let (mut alice, bob, group_id) = setup_enforcing_group("App Channel Bypass", true, false);
+    let events = collect_events(&mut alice);
+    let epoch_before = group_epoch_of(&alice, &group_id);
+
+    let commit = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
+        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+    };
+    // Same ciphertext, reframed as an application message.
+    let reframed = serde_json::json!({
+        "group_id": group_id,
+        "ciphertext": base64_encode(&commit.ciphertext),
+        "epoch": commit.epoch,
+    })
+    .to_string();
+    let wire = make_message("bob", "alice", "unused-envelope");
+    let result = alice.handle_group_mls_msg(&wire, "bob", &reframed);
+
+    assert_eq!(
+        group_epoch_of(&alice, &group_id),
+        epoch_before,
+        "a commit reframed onto the application channel must be refused too"
+    );
+    assert!(
+        matches!(result, InternalMessageResult::Consumed),
+        "the refusal is permanent, so the frame must be consumed, not deferred"
+    );
+    let (committer, _, removed, _, enforced) = unauthorized_change_enforced(&events)
+        .expect("a reframed commit must be reported like the commit-channel one");
+    assert_eq!(committer, "bob");
+    assert_eq!(removed, vec!["charlie".to_string()]);
+    assert!(enforced);
+}
+
+#[test]
+fn test_session_paths_unaffected_by_enforcement() {
+    // 1:1 sessions have no admin overlay. They must decrypt normally with
+    // enforcement on — both because the session manager owns a separate
+    // group manager and because the check exempts the `session:` namespace.
+    let mut config_a = create_test_config_for_user("alice");
+    config_a.group.enforce_admin_commits = true;
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice = OfflineProtocol::new(config_a).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    alice.initialize_mls_for_test(storage_a).unwrap();
+    bob.initialize_mls_for_test(storage_b).unwrap();
+
+    let alice_kp = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        alice_mls.generate_key_package().unwrap()
+    };
+    let welcome = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls
+            .import_key_package("alice", &alice_kp.key_package_data)
+            .unwrap();
+        bob_mls.create_session("alice").unwrap()
+    };
+    {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        alice_mls.join_session(&welcome).unwrap();
+    }
+
+    let encrypted = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.encrypt_for_user("alice", b"hello session").unwrap()
+    };
+    let plaintext = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        alice_mls.decrypt(&encrypted, "bob").unwrap()
+    };
+    assert_eq!(
+        plaintext,
+        Some(b"hello session".to_vec()),
+        "1:1 sessions must be unaffected by group commit enforcement"
+    );
+}

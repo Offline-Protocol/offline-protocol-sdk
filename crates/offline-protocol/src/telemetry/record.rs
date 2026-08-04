@@ -655,6 +655,7 @@ mod tests {
                 added: Vec::new(),
                 removed: Vec::new(),
                 reason: String::new(),
+                enforced: false,
             },
             Event::GroupEpochForkDetected {
                 group_id: String::new(),

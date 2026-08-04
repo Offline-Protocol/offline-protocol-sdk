@@ -628,10 +628,12 @@ impl OfflineProtocol {
             return Ok(());
         }
 
-        let manager = Arc::new(RwLock::new(MlsManager::new(
-            &self.config.user_id,
-            secure_storage.clone(),
-        )?));
+        let mut manager = MlsManager::new(&self.config.user_id, secure_storage.clone())?;
+        // Installed before the manager becomes shared: the enforcement flag is
+        // read on every group decrypt, and this is the one point where the
+        // manager is still uniquely owned.
+        manager.set_enforce_admin_commits(self.config.group.enforce_admin_commits);
+        let manager = Arc::new(RwLock::new(manager));
 
         // Keep initialization transactional so a restore failure cannot leave
         // partially-initialized MLS state visible and then permanently block retries.

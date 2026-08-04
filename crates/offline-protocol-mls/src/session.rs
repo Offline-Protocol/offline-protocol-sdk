@@ -230,9 +230,12 @@ impl SessionManager {
         let mls_message = MlsMessageIn::tls_deserialize_exact(&encrypted.ciphertext)
             .map_err(|e| MlsError::Deserialization(e.to_string()))?;
 
-        let result = self
-            .group_manager
-            .decrypt_message(&mut group, mls_message, claimed_sender)?;
+        let result = self.group_manager.decrypt_message(
+            &mut group,
+            &encrypted.group_id,
+            mls_message,
+            claimed_sender,
+        )?;
 
         self.group_manager.save_group(&encrypted.group_id, &group)?;
 

@@ -420,6 +420,25 @@ export interface ProtocolConfig {
      * false to force per-member fan-out even against a capable relay.
      */
     relayBroadcastEnabled?: boolean;
+    /**
+     * Whether an incoming MLS membership commit is REFUSED when the local
+     * admin overlay does not authorize its committer (default: false).
+     *
+     * Leaving this off does not mean unauthorized changes go unnoticed —
+     * they are applied and reported via
+     * `group_unauthorized_membership_change`, and the roster events carry
+     * `authorized: false`. This flag only decides whether the commit is
+     * *also* refused.
+     *
+     * Turning it on is a decision about partition risk, not a hardening
+     * tweak. Refusing a commit means declining the MLS merge, so this
+     * device's epoch stays behind every member that accepted it and MLS
+     * cannot heal that — the app has to re-invite. The check fails open on
+     * absent knowledge (no roles stored yet) but cannot detect *divergent*
+     * admin views, so enable it only for a closed deployment that controls
+     * role distribution, and never on part of a fleet.
+     */
+    enforceAdminCommits?: boolean;
   };
   /** DORS configuration (optional) */
   dors?: {

@@ -314,6 +314,26 @@ enum GroupDecryptOutcome {
     /// relay-only group message whose plaintext happens to be valid
     /// base64, which must be emitted raw rather than buffered and lost.
     NotMlsCiphertext,
+    /// A commit riding the application channel was refused before merging by
+    /// `GroupConfig::enforce_admin_commits`.
+    ///
+    /// This variant is why enforcement lives in the MLS layer rather than in
+    /// the commit handler: a commit ciphertext wrapped in an ordinary
+    /// `__GRP_MLS_MSG__` frame reaches `merge_staged_commit` through *this*
+    /// path, which otherwise treats it as benign reordering
+    /// ([`Self::NonApplication`]). Enforcing only on the commit-framed path
+    /// would leave that reframing as a bypass.
+    ///
+    /// Permanent, like the commit-path rejection: the same ciphertext can
+    /// never become authorized, so it must not be buffered and retried.
+    PolicyRejected {
+        /// The MLS-authenticated committer whose commit was refused.
+        committer: String,
+        /// User ids the refused commit would have added, sorted.
+        added: Vec<String>,
+        /// User ids the refused commit would have removed, sorted.
+        removed: Vec<String>,
+    },
     /// Permanently failed; not worth retrying.
     Failed,
 }
@@ -1045,6 +1065,25 @@ impl OfflineProtocol {
                 self.drain_pending_group_messages(&payload.group_id);
                 InternalMessageResult::Consumed
             }
+            GroupDecryptOutcome::PolicyRejected {
+                committer,
+                added,
+                removed,
+            } => {
+                // A commit reframed onto the application channel, refused by
+                // enforcement before merging. Consume it: the rejection is
+                // permanent, so buffering would retry a ciphertext that can
+                // never be authorized.
+                self.report_unauthorized_membership_change(
+                    &payload.group_id,
+                    &committer,
+                    &added,
+                    &removed,
+                    "sender_not_admin",
+                    true,
+                );
+                InternalMessageResult::Consumed
+            }
             // The mesh channel carries MLS ciphertext by protocol, so a
             // payload that is not MLS framing is garbage, not legacy content.
             GroupDecryptOutcome::NotMlsCiphertext | GroupDecryptOutcome::Failed => {
@@ -1111,6 +1150,15 @@ impl OfflineProtocol {
                 );
                 GroupDecryptOutcome::SecurityRejected
             }
+            Err(offline_protocol_mls::MlsError::CommitNotAuthorized {
+                committer,
+                added,
+                removed,
+            }) => GroupDecryptOutcome::PolicyRejected {
+                committer,
+                added,
+                removed,
+            },
             Err(e @ offline_protocol_mls::MlsError::GroupNotFound(_)) => {
                 // No local group state yet. Only buffer what is actually MLS
                 // wire framing — a racing ciphertext parses, legacy relay
@@ -1495,6 +1543,31 @@ impl OfflineProtocol {
                     return CommitOutcome::Rejected;
                 }
 
+                // Enforcement refused this commit before merging (only
+                // possible with `GroupConfig::enforce_admin_commits` on).
+                // Report it on the same signal the applied case uses, marked
+                // `enforced` so the app can tell "this happened, undo it"
+                // from "this was blocked and we are now behind the group's
+                // epoch". Nothing merged, so no roster event accompanies it.
+                if let offline_protocol_mls::MlsError::CommitNotAuthorized {
+                    committer,
+                    added,
+                    removed,
+                } = e
+                {
+                    let (committer, added, removed) =
+                        (committer.clone(), added.clone(), removed.clone());
+                    self.report_unauthorized_membership_change(
+                        &payload.group_id,
+                        &committer,
+                        &added,
+                        &removed,
+                        "sender_not_admin",
+                        true,
+                    );
+                    return CommitOutcome::Rejected;
+                }
+
                 // Classify MLS errors: permanent failures should not be retried,
                 // only failures caused by lagging local group state are worth
                 // buffering. GroupNotFound is NOT permanent — a commit can
@@ -1717,9 +1790,11 @@ impl OfflineProtocol {
     /// and reported truthfully.
     ///
     /// Unlike the commit-metadata gate in `process_commit_core`, this covers
-    /// removals too. If receive-side enforcement is ever added (Stage 3),
-    /// this judgment is the seam it replaces — after admin-set replication
-    /// (Stage 2) makes the verdict trustworthy enough to act on.
+    /// removals too. When receive-side enforcement is enabled
+    /// (`GroupConfig::enforce_admin_commits`) the *rejection* happens earlier,
+    /// pre-merge in the MLS layer, and never reaches this function — but it
+    /// reports through the same [`Self::report_unauthorized_membership_change`]
+    /// so both outcomes surface on one signal.
     pub(crate) fn judge_membership_change(
         &mut self,
         group_id: &str,
@@ -1740,70 +1815,105 @@ impl OfflineProtocol {
             } else {
                 "sender_not_admin"
             };
-            let key = (group_id.to_string(), sender.to_string());
-            let now = Instant::now();
-            let suppressed = self
-                .group_mesh
-                .unauthorized_change_reports
-                .get(&key)
-                .is_some_and(|last| {
-                    now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
-                });
-            if suppressed {
-                debug!(
-                    group_id = %group_id,
-                    sender = %sender,
-                    reason,
-                    "Suppressing repeated unauthorized-membership-change report within the rate-limit window"
-                );
-            } else {
-                // Bound the tracking map: drop lapsed windows first, then the
-                // oldest live entry if still at cap.
-                if self.group_mesh.unauthorized_change_reports.len()
-                    >= MAX_UNAUTHORIZED_REPORT_ENTRIES
-                {
-                    self.group_mesh
-                        .unauthorized_change_reports
-                        .retain(|_, last| {
-                            now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
-                        });
-                }
-                if self.group_mesh.unauthorized_change_reports.len()
-                    >= MAX_UNAUTHORIZED_REPORT_ENTRIES
-                {
-                    if let Some(oldest) = self
-                        .group_mesh
-                        .unauthorized_change_reports
-                        .iter()
-                        .min_by_key(|(_, t)| **t)
-                        .map(|(k, _)| k.clone())
-                    {
-                        self.group_mesh.unauthorized_change_reports.remove(&oldest);
-                    }
-                }
-                self.group_mesh.unauthorized_change_reports.insert(key, now);
-                warn!(
-                    group_id = %group_id,
-                    sender = %sender,
-                    reason,
-                    added = ?added,
-                    removed = ?removed,
-                    "SECURITY: Unauthorized group membership change applied — MLS accepted the commit, but the SDK's admin policy did not authorize it"
-                );
-                self.emit_event(Event::group_unauthorized_membership_change(
-                    group_id.to_string(),
-                    sender.to_string(),
-                    added.to_vec(),
-                    removed.to_vec(),
-                    reason.to_string(),
-                ));
-            }
+            self.report_unauthorized_membership_change(
+                group_id, sender, added, removed, reason, false,
+            );
         }
 
         MembershipJudgment {
             sender_is_admin,
             authorized,
         }
+    }
+
+    /// Emits the rate-limited unauthorized-membership-change report.
+    ///
+    /// Shared by both outcomes so apps see one signal regardless of
+    /// configuration: `enforced == false` means the change was applied and is
+    /// reported after the fact (the default), `enforced == true` means the
+    /// commit was refused before merging and no membership change occurred.
+    ///
+    /// Rate-limited per `(group, committer)` because divergent role metadata
+    /// would otherwise re-fire on every commit from the same peer. The
+    /// tracking map is bounded: lapsed windows are dropped first, then the
+    /// oldest live entry.
+    fn report_unauthorized_membership_change(
+        &mut self,
+        group_id: &str,
+        committer: &str,
+        added: &[String],
+        removed: &[String],
+        reason: &str,
+        enforced: bool,
+    ) {
+        let key = (group_id.to_string(), committer.to_string());
+        let now = Instant::now();
+        let suppressed = self
+            .group_mesh
+            .unauthorized_change_reports
+            .get(&key)
+            .is_some_and(|last| {
+                now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
+            });
+        if suppressed {
+            debug!(
+                group_id = %group_id,
+                sender = %committer,
+                reason,
+                enforced,
+                "Suppressing repeated unauthorized-membership-change report within the rate-limit window"
+            );
+            return;
+        }
+
+        // Bound the tracking map: drop lapsed windows first, then the
+        // oldest live entry if still at cap.
+        if self.group_mesh.unauthorized_change_reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
+            self.group_mesh
+                .unauthorized_change_reports
+                .retain(|_, last| {
+                    now.duration_since(*last).as_secs() < UNAUTHORIZED_REPORT_SUPPRESS_SECS
+                });
+        }
+        if self.group_mesh.unauthorized_change_reports.len() >= MAX_UNAUTHORIZED_REPORT_ENTRIES {
+            if let Some(oldest) = self
+                .group_mesh
+                .unauthorized_change_reports
+                .iter()
+                .min_by_key(|(_, t)| **t)
+                .map(|(k, _)| k.clone())
+            {
+                self.group_mesh.unauthorized_change_reports.remove(&oldest);
+            }
+        }
+        self.group_mesh.unauthorized_change_reports.insert(key, now);
+        if enforced {
+            warn!(
+                group_id = %group_id,
+                sender = %committer,
+                reason,
+                added = ?added,
+                removed = ?removed,
+                "SECURITY: Unauthorized group membership change refused — the commit was not merged, so our epoch now trails members that accepted it"
+            );
+        } else {
+            warn!(
+                group_id = %group_id,
+                sender = %committer,
+                reason,
+                added = ?added,
+                removed = ?removed,
+                "SECURITY: Unauthorized group membership change applied — MLS accepted the commit, but the SDK's admin policy did not authorize it"
+            );
+        }
+        self.emit_event(Event::group_unauthorized_membership_change(
+            group_id.to_string(),
+            committer.to_string(),
+            added.to_vec(),
+            removed.to_vec(),
+            reason.to_string(),
+            enforced,
+        ));
     }
 
     /// Releases every replay-protection record for a buffered entry dropped
@@ -2263,6 +2373,23 @@ impl OfflineProtocol {
                     }
                     GroupDecryptOutcome::NonApplication => {
                         state_advanced = true;
+                    }
+                    GroupDecryptOutcome::PolicyRejected {
+                        committer,
+                        added,
+                        removed,
+                    } => {
+                        // Dropped, not re-buffered: the refusal is permanent,
+                        // so re-queueing would retry it until the entry ages
+                        // out and then misreport the expiry as an epoch fork.
+                        self.report_unauthorized_membership_change(
+                            group_id,
+                            &committer,
+                            &added,
+                            &removed,
+                            "sender_not_admin",
+                            true,
+                        );
                     }
                     GroupDecryptOutcome::SecurityRejected
                     | GroupDecryptOutcome::NotMlsCiphertext
@@ -5236,6 +5363,22 @@ impl OfflineProtocol {
                 // riding the message channel — group state may have advanced.
                 self.drain_pending_commits(group_id);
                 self.drain_pending_group_messages(group_id);
+            }
+            GroupDecryptOutcome::PolicyRejected {
+                committer,
+                added,
+                removed,
+            } => {
+                // Same as the mesh path: a commit reframed onto the message
+                // channel, refused before merging. Dropped, never buffered.
+                self.report_unauthorized_membership_change(
+                    group_id,
+                    &committer,
+                    &added,
+                    &removed,
+                    "sender_not_admin",
+                    true,
+                );
             }
             GroupDecryptOutcome::NotMlsCiphertext => {
                 // Valid base64 that is not MLS framing, for a group without
