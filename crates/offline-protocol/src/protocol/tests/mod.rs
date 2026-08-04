@@ -30776,6 +30776,56 @@ fn test_legacy_plaintext_peer_is_still_accepted_in_mixed_mode() {
     );
 }
 
+#[test]
+fn test_encryption_capability_set_is_bounded_without_evicting() {
+    // The set is fed from paths reachable without authentication — a
+    // well-formed `__MLS_WELCOME__` marks its sender even when the join fails,
+    // and `tofu_check_or_pin` marks before its own store-full branch — so the
+    // keys are wire-claimed ids and it needs a cap like every other map fed
+    // that way.
+    //
+    // The cap must be a *refusal*. Evicting would un-mark a peer that really is
+    // encryption-capable, which is the fail-open direction this set exists to
+    // prevent, and would let a flood unprotect a chosen victim. So the assertion
+    // that matters is not just that the set stays bounded, but that a peer
+    // already in it survives a flood that runs well past capacity.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
+    establish_session_and_pin(&mut alice, "bob");
+    assert!(alice.is_encryption_capable("bob"), "precondition");
+
+    for i in 0..(MAX_ENCRYPTION_CAPABLE_PEERS + 50) {
+        alice.mark_encryption_capable(&format!("flood-{i}"));
+    }
+
+    assert!(
+        alice.encryption_capable_peers.len() <= MAX_ENCRYPTION_CAPABLE_PEERS,
+        "the capability set must stay bounded, got {}",
+        alice.encryption_capable_peers.len()
+    );
+    assert!(
+        alice.is_encryption_capable("bob"),
+        "a flood must not displace a peer already known to run MLS"
+    );
+
+    // And the protection that entry buys is still in force.
+    handle.queue_message(plaintext_text_message("bob", "alice", "post-flood"));
+    assert!(
+        alice.receive_message().is_none(),
+        "cleartext from the established peer must still be rejected after the flood"
+    );
+
+    // A peer refused at capacity is not marked — it simply falls through to the
+    // `is_session_confirmed` check, which is what shipped before this set
+    // existed. Declining to add knowledge is the safe direction; the unsafe one
+    // would have been dropping knowledge already held.
+    assert!(
+        !alice.is_encryption_capable(&format!("flood-{}", MAX_ENCRYPTION_CAPABLE_PEERS + 49)),
+        "peers arriving past the cap are refused, not admitted by eviction"
+    );
+}
+
 // ============================================================================
 // KEY PACKAGE / TOFU PIN BINDING
 // ============================================================================
@@ -30819,7 +30869,7 @@ fn test_key_package_records_are_sealed_at_rest() {
     // opens, so a container write cannot swap in another key package.
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
-    let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
+    let (alice, _handle) = mixed_mode_node("alice", &secure, &state);
 
     let bob = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
     let bob_kp = bob.get_or_create_key_package().unwrap();

@@ -215,6 +215,10 @@ pub struct OfflineProtocol {
     /// The one legitimate way out is [`Self::reset_tofu_for_peer`], an explicit
     /// operator action meaning "treat this peer as new", which is exactly when
     /// forgetting is correct.
+    ///
+    /// Bounded by [`MAX_ENCRYPTION_CAPABLE_PEERS`], enforced as a refusal rather
+    /// than an eviction so the monotonicity above survives the cap — see
+    /// [`Self::mark_encryption_capable`].
     encryption_capable_peers: std::collections::HashSet<String>,
 
     /// Peers whose key package advertised the compact MLS envelope
@@ -892,12 +896,55 @@ impl OfflineProtocol {
     /// session with them, or pinning their signing key. Calling it redundantly
     /// is free and calling it too often is safe; the failure that matters is
     /// *not* calling it, which leaves the plaintext gate open for that peer.
+    ///
+    /// # Bounded by refusal, never by eviction
+    ///
+    /// Some marking paths are reachable without authentication: an unsigned
+    /// `__MLS_WELCOME__` from a never-pinned sender marks it (deliberately —
+    /// see `handle_welcome_message` — so a failing handshake does not leave the
+    /// gate open), and `tofu_check_or_pin` marks before its own store-full
+    /// branch. The keys are therefore wire-claimed ids and need their own cap,
+    /// like every other map keyed that way.
+    ///
+    /// It has to be a refusal. Evicting would un-mark a peer that really is
+    /// encryption-capable — the fail-open direction this field exists to
+    /// prevent — and would hand an attacker a way to unprotect a *chosen*
+    /// victim by flooding. Refusing only declines to add knowledge: that peer
+    /// falls through to the `is_session_confirmed` check in
+    /// [`Self::accept_plaintext_content`], which is exactly what shipped before
+    /// this set existed. So a flood costs later peers the improvement and never
+    /// costs anyone the protection they already had.
+    ///
+    /// Legitimate peers are also first in line by construction: restore seeds
+    /// the set from the session list and the TOFU pins during `initialize_mls`,
+    /// before `start()` admits any traffic.
     pub(crate) fn mark_encryption_capable(&mut self, peer_id: &str) {
         if peer_id.is_empty() || peer_id == self.config.user_id {
             return;
         }
-        if self.encryption_capable_peers.insert(peer_id.to_string()) {
-            debug!(peer_id = %peer_id, "Peer marked encryption-capable");
+        if self.encryption_capable_peers.contains(peer_id) {
+            return;
+        }
+        if self.encryption_capable_peers.len() >= MAX_ENCRYPTION_CAPABLE_PEERS {
+            debug!(
+                peer_id = %peer_id,
+                cap = MAX_ENCRYPTION_CAPABLE_PEERS,
+                "Encryption-capability set at capacity; peer falls back to the session-state check"
+            );
+            return;
+        }
+        self.encryption_capable_peers.insert(peer_id.to_string());
+        debug!(peer_id = %peer_id, "Peer marked encryption-capable");
+        if self.encryption_capable_peers.len() == MAX_ENCRYPTION_CAPABLE_PEERS {
+            // Emitted on the transition into full, so it cannot become a
+            // per-frame flood: the set only grows, so this line is reachable
+            // once per fill and a refill needs an intervening
+            // `reset_tofu_for_peer`.
+            warn!(
+                cap = MAX_ENCRYPTION_CAPABLE_PEERS,
+                "Encryption-capability set reached capacity; further peers fall back to the \
+                 session-state check. Expected only under a forged-sender flood."
+            );
         }
     }
 
