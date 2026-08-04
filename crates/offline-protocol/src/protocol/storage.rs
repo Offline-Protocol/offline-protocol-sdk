@@ -4,7 +4,7 @@ use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECOR
 use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingMessage, PendingMessageRecord, ReceivedKeyPackage, SessionState,
-    WelcomeDeliveryState, WelcomeLifecycleRecord, MAX_KEY_PACKAGE_SENT_TO,
+    WelcomeDeliveryState, WelcomeLifecycleRecord, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
     MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL,
     MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
     MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
@@ -3969,19 +3969,46 @@ impl OfflineProtocol {
         let user_ids = Self::list_state_keys(storage.as_ref(), storage_keys::BLOCKED_USERS)
             .map_err(|e| Error::Other(format!("Failed to list blocked users: {}", e)))?;
         let listed = user_ids.len();
-        for user_id in user_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
+        for user_id in user_ids.iter() {
             if offline_protocol_core::UserId::new(user_id).is_err() {
                 warn!(user_id = %user_id, "Skipping blocked user entry with invalid user ID");
                 continue;
             }
+            // The live path refuses to block your own id; restore has to refuse
+            // it too, or a planted record blocks the local user — which
+            // `block_user` would never have produced.
+            if user_id.as_str() == self.config.user_id {
+                warn!("Skipping blocked user entry naming the local user");
+                continue;
+            }
+            // Bounded by the *live* cap, not the restore-walk cap.
+            //
+            // These are two different numbers for two different jobs, and using
+            // the walk bound here let them disagree by 6384 entries.
+            // `MAX_RESTORE_KEYS_PER_CATEGORY` bounds work — how many keys one
+            // pass may look at. `MAX_BLOCKED_USERS` bounds the block list
+            // itself, and `block_user` enforces it on every insert. Restoring
+            // past it left the set in a state the live path cannot reach, where
+            // every subsequent `block_user` fails with "limit reached" until the
+            // user manually unblocks. Since this category is never consumed by
+            // restore, planted records persist across every launch — so an
+            // attacker who can write the container could permanently disable
+            // blocking by adding markers, without unblocking anyone.
+            //
+            // Stopping at the cap keeps the blocks already restored, which is
+            // the fail-closed direction: an over-full store still blocks the
+            // first MAX_BLOCKED_USERS peers it names.
+            if self.blocked_users.len() >= MAX_BLOCKED_USERS {
+                warn!(
+                    listed,
+                    cap = MAX_BLOCKED_USERS,
+                    "Blocked-user store holds more entries than the live cap admits; \
+                     restoring the first {} and ignoring the rest",
+                    MAX_BLOCKED_USERS
+                );
+                break;
+            }
             self.blocked_users.insert(user_id.clone());
-        }
-        if listed > MAX_RESTORE_KEYS_PER_CATEGORY {
-            warn!(
-                listed,
-                cap = MAX_RESTORE_KEYS_PER_CATEGORY,
-                "Blocked-user store listed more entries than any legitimate run can produce; ignoring the tail"
-            );
         }
         if !self.blocked_users.is_empty() {
             info!(

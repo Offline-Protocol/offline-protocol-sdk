@@ -30883,3 +30883,72 @@ fn test_legacy_unsealed_key_package_record_is_dropped_not_fatal() {
     // And a relaunch over that store still comes up.
     let (_restarted, _h) = mixed_mode_node("alice", &secure, &state);
 }
+
+#[test]
+fn test_blocked_users_restore_is_bounded_by_the_live_cap() {
+    // Restore used to bound this walk by MAX_RESTORE_KEYS_PER_CATEGORY (16384)
+    // while `block_user` enforces MAX_BLOCKED_USERS (10000). The gap left the
+    // set in a state the live path cannot reach, where every subsequent
+    // `block_user` fails with "limit reached". Because restore never consumes
+    // this category, planted records persist across every launch — so writing
+    // markers into the container permanently disabled blocking, without
+    // unblocking anyone.
+    use crate::protocol::types::MAX_BLOCKED_USERS;
+
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    for i in 0..(MAX_BLOCKED_USERS + 500) {
+        state
+            .store(storage_keys::BLOCKED_USERS, &format!("spam-{}", i), &[])
+            .unwrap();
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert_eq!(
+        protocol.get_blocked_users().len(),
+        MAX_BLOCKED_USERS,
+        "restore must stop at the live cap, not the restore-walk cap"
+    );
+    // The control still works: at the cap, blocking an already-blocked peer is
+    // idempotent rather than an error, and the set is in a state the live path
+    // can actually reach.
+    let already = protocol.get_blocked_users()[0].clone();
+    assert!(
+        protocol.block_user(&already).is_ok(),
+        "re-blocking an existing entry stays idempotent at the cap"
+    );
+}
+
+#[test]
+fn test_blocked_users_restore_skips_a_record_naming_the_local_user() {
+    // `block_user` refuses to block your own id, so no legitimate run produces
+    // this record. Restoring it would block the local user.
+    let secure = Arc::new(InMemoryStorage::new());
+    let state = Arc::new(InMemoryStorage::new());
+    state
+        .store(storage_keys::BLOCKED_USERS, "alice", &[])
+        .unwrap();
+    state
+        .store(storage_keys::BLOCKED_USERS, "bob", &[])
+        .unwrap();
+
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let (secure_handle, state_handle) = split_storage(&secure, &state);
+    protocol
+        .initialize_mls(secure_handle, state_handle)
+        .unwrap();
+
+    assert!(
+        !protocol.is_user_blocked("alice"),
+        "a planted self-block record must be ignored"
+    );
+    assert!(
+        protocol.is_user_blocked("bob"),
+        "and genuine entries still restore"
+    );
+}
