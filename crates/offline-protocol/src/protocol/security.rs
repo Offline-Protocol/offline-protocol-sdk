@@ -10,6 +10,7 @@ use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
 use chrono::Utc;
 use offline_protocol_core::{Message, UserId};
+use offline_protocol_mls::KeyPackageTrust;
 use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {
@@ -145,6 +146,25 @@ impl OfflineProtocol {
 
         // TOFU: check/pin the public key for this sender
         self.tofu_check_or_pin(message.sender.as_str(), public_key)
+    }
+
+    /// The Authentication Service verdict for `peer_id`, for handing to code
+    /// that consumes a key package.
+    ///
+    /// [`KeyPackageTrust::FirstUse`] when no key is pinned. That is a truthful
+    /// "nothing to compare against", not a waiver: it is reached for a genuinely
+    /// new peer, and — because `security_gate_control_message` accepts an
+    /// unsigned control message from a peer that has never been pinned — for one
+    /// whose key package arrived unsigned. The pin lands on their first signed
+    /// message and every later use of their key package is checked against it.
+    ///
+    /// `pub(crate)` rather than `pub(super)` because `group_mesh` is a sibling
+    /// module of `protocol`, and the group invite path needs this too.
+    pub(crate) fn key_package_trust(&self, peer_id: &str) -> KeyPackageTrust<'_> {
+        match self.known_peer_public_keys.get(peer_id) {
+            Some(entry) => KeyPackageTrust::Pinned(&entry.public_key),
+            None => KeyPackageTrust::FirstUse,
+        }
     }
 
     /// Checks a verified public key against the TOFU store, or pins it on

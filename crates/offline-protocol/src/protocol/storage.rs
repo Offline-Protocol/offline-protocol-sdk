@@ -101,19 +101,35 @@ impl StateCategory {
     ///   forward path.
     /// - [`storage_keys::MEDIA_DESCRIPTORS`]: file names and recipients of
     ///   in-flight transfers.
+    /// - [`storage_keys::PEER_KEY_PACKAGES`]: the odd one out, sealed for
+    ///   **integrity** rather than confidentiality. The bytes are public wire
+    ///   material and hiding them buys nothing; what matters is that a seal is
+    ///   an AEAD, so a record that has been edited or moved between peers no
+    ///   longer opens. Substituting a cached key package is otherwise enough to
+    ///   make this node build its session around the attacker's leaf — the
+    ///   embedded credential is a *basic* credential, i.e. a self-asserted
+    ///   identity string that anyone can write. `KeyPackageTrust` is the real
+    ///   fix and covers the paths storage cannot see; this shortens the reach of
+    ///   a container write as well. Failing closed is cheap here: an unsealable
+    ///   key package costs one re-exchange.
     ///
-    /// Everything else is public wire material (key packages, advertised
-    /// capability versions), a small state enum, a logical clock, or a
-    /// value-less marker whose only information is the key id — which sealing
-    /// cannot hide anyway, because the store addresses records by it.
+    /// Everything else is advertised capability versions, a small state enum, a
+    /// logical clock, or a value-less marker whose only information is the key
+    /// id — which sealing cannot hide anyway, because the store addresses
+    /// records by it.
+    ///
+    /// Note what sealing does **not** provide, for any category: it authenticates
+    /// bytes that are present, so it cannot detect a record that was deleted or
+    /// rolled back to an earlier version. Controls that must survive a deletion
+    /// cannot be built on it — see `encryption_capable_peers`.
     fn requires_sealing(self) -> bool {
         match self {
             Self::PendingMessages
             | Self::PendingMessageEntries
             | Self::Outbox
-            | Self::MediaDescriptors => true,
-            Self::PeerKeyPackages
-            | Self::PeerCapabilities
+            | Self::MediaDescriptors
+            | Self::PeerKeyPackages => true,
+            Self::PeerCapabilities
             | Self::SessionStates
             | Self::WelcomeLifecycles
             | Self::BlockedUsers

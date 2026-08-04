@@ -1682,10 +1682,11 @@ impl OfflineProtocol {
                 self.delete_peer_key_package_from_storage(peer_id);
             } else {
                 {
+                    let trust = self.key_package_trust(peer_id);
                     let manager = mls
                         .read()
                         .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                    manager.import_key_package(peer_id, &received_pkg.key_package_data)?;
+                    manager.import_key_package(peer_id, &received_pkg.key_package_data, trust)?;
                 }
 
                 // Create session and get welcome message
@@ -1793,6 +1794,32 @@ impl OfflineProtocol {
             );
         }
         Ok(welcome)
+    }
+
+    /// Imports a contact's key package, applying this node's TOFU verdict.
+    ///
+    /// The entry point for bindings that expose low-level MLS APIs. It exists
+    /// because the FFI wrapper used to reach straight for the `MlsManager`,
+    /// which cannot see the TOFU store — so an app could import a key package
+    /// under any peer id with no correlation to the pinned key for that peer,
+    /// bypassing the check `establish_secure_session` performs. Routing through
+    /// the protocol object closes that, and leaves the FFI signature untouched.
+    pub fn manual_mls_import_key_package(
+        &mut self,
+        peer_id: &str,
+        key_package_data: &[u8],
+    ) -> Result<()> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        {
+            let trust = self.key_package_trust(peer_id);
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.import_key_package(peer_id, key_package_data, trust)?;
+        }
+        // A key package we accepted for this peer is proof they run MLS.
+        self.mark_encryption_capable(peer_id);
+        Ok(())
     }
 
     /// Deletes a 1:1 session and clears protocol-level lifecycle state.

@@ -153,6 +153,26 @@ pub enum MlsError {
         found: String,
     },
 
+    /// A key package's leaf signature key is not the key already pinned for
+    /// the peer it claims to belong to.
+    ///
+    /// Distinct from [`MlsError::CredentialIdentityMismatch`], and it has to
+    /// be: credentials here are MLS *basic* credentials, whose content is a
+    /// bare self-asserted identity string. Anyone can generate a signature
+    /// keypair and stamp `bob` on it, so the identity check catches only a
+    /// careless substitution. This one compares the *key*, against a pin
+    /// established when the peer's signature was verified, and so catches a
+    /// deliberate one.
+    ///
+    /// RFC 9420 leaves credential validation to the application's
+    /// Authentication Service; for this SDK that service is TOFU, and this is
+    /// where its verdict is enforced at key-package use time.
+    #[error("Key package signature key does not match the pinned key for '{peer_id}'")]
+    KeyPackagePinMismatch {
+        /// The peer the key package was claimed to belong to.
+        peer_id: String,
+    },
+
     /// The MLS-authenticated sender of a decrypted message does not match
     /// the sender the transport layer attributed the message to.
     #[error(

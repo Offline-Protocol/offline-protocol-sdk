@@ -1319,7 +1319,11 @@ mod tests {
             let mls = bob.mls_manager.as_ref().unwrap();
             let manager = mls.read().unwrap();
             manager
-                .import_key_package("alice", &alice_key_pkg.key_package_data)
+                .import_key_package(
+                    "alice",
+                    &alice_key_pkg.key_package_data,
+                    offline_protocol_mls::KeyPackageTrust::FirstUse,
+                )
                 .unwrap();
             let welcome = manager.create_session("alice").unwrap();
             // Alice joins via welcome
@@ -1431,7 +1435,11 @@ mod tests {
             let mls = alice.mls_manager.as_ref().unwrap();
             let manager = mls.read().unwrap();
             manager
-                .import_key_package("bob", &bob_key_pkg.key_package_data)
+                .import_key_package(
+                    "bob",
+                    &bob_key_pkg.key_package_data,
+                    offline_protocol_mls::KeyPackageTrust::FirstUse,
+                )
                 .unwrap();
             manager.create_session("bob").unwrap();
             assert!(manager.has_session("bob").unwrap());
@@ -1510,7 +1518,11 @@ mod tests {
             let mls = alice.mls_manager.as_ref().unwrap();
             let manager = mls.read().unwrap();
             manager
-                .import_key_package("bob", &bob_key_pkg.key_package_data)
+                .import_key_package(
+                    "bob",
+                    &bob_key_pkg.key_package_data,
+                    offline_protocol_mls::KeyPackageTrust::FirstUse,
+                )
                 .unwrap();
             manager.create_session("bob").unwrap();
             assert!(manager.has_session("bob").unwrap());
