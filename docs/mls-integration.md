@@ -705,7 +705,16 @@ protocol.on('group_unauthorized_membership_change', (event) => {
 
 The corresponding `group_member_added` / `group_member_removed` events still
 fire (your roster must not diverge from MLS state) and carry an `authorized`
-boolean so a single handler can render the distinction inline.
+field so a single handler can render the distinction inline. The field is
+tri-state: `true` (passed the local admin check), `false` (judged
+unauthorized), or **absent** when authorization was not evaluated on that
+path — your own join from a Welcome, relay reconciliation frames, or an
+older core. Only a present value is a positive statement either way.
+
+Reports are rate-limited per `(group, committer)`: a repeat within a short
+window does not re-emit `group_unauthorized_membership_change` (divergent
+role metadata would otherwise re-fire it on every commit), but every
+affected roster event still carries `authorized: false`.
 
 **The signal can false-positive.** "Unauthorized" is judged against the
 receiving member's *local replica* of role state — the same best-effort
