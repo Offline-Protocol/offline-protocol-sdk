@@ -716,6 +716,19 @@ window does not re-emit `group_unauthorized_membership_change` (divergent
 role metadata would otherwise re-fire it on every commit), but every
 affected roster event still carries `authorized: false`.
 
+**How the local replica is built.** A member's view of who is an admin comes
+from two sources, in order: the per-member roles it has stored, and — only when
+it has *no* admin role stored at all — the group creator, who is always an
+admin. A joiner receives both in its Welcome: a point-in-time snapshot of the
+inviter's roles, and the inviter's record of the group creator. The creator
+field is what keeps an incomplete snapshot from collapsing to
+deny-everyone: without it, a joiner whose snapshot arrived empty would judge
+*every* member — including the real admin — unauthorized. It is adopted only
+when the joiner has no creator on record already (first write wins), so a later
+invite cannot rewrite an established admin fallback, and it is absent from
+Welcomes sent by SDKs older than this field, where absence means "no
+information" rather than "no creator".
+
 **The signal can false-positive.** "Unauthorized" is judged against the
 receiving member's *local replica* of role state — the same best-effort
 metadata that makes receive-side enforcement unsafe. A member whose role map
