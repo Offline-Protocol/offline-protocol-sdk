@@ -121,9 +121,25 @@ The platform managers pull relay URLs and reconnect parameters from the JSON con
 | Connection timeout | 30 s | Default time to wait for relay connection |
 | Pending confirmation timeout | 30 s | Time before treating an unconfirmed publish as failed |
 | Max signing retries | 3 | Per-message signing-failure budget before permanent fail |
+| Max event size | 64 KiB | Measured on the whole `["EVENT", …]` message. Over-cap events are dropped permanently (no retry) — see below |
+| Initial query limit | 500 | `limit` on the REQ filter, bounding stored-event replay per (re)connect |
 | DORS tie-break priority | 4 (lowest) | Internet (0) > WiFi Direct (1) > BLE (2) > Reticulum (3) > Nostr (4) |
 | Bandwidth max | 1 MB/s | Practical upper bound for relay-bounded throughput |
 | Energy baseline | 55 | Same radio class as Internet |
+
+The event-size cap applies to the complete relay message, because that is what a
+relay accepts or rejects — it is larger than the protocol message inside it by
+the base64 overhead. An oversized event is dropped on the first attempt rather
+than retried (no number of attempts shrinks it) and is counted as a transport
+failure so DORS steers away from Nostr.
+
+This bites media in particular. `binary_content` serializes as a JSON array of
+decimal numbers (~3.6×) before the event's base64 (~1.33×), so a chunk at the
+engine's 32 KiB `DEFAULT_CHUNK_SIZE` is ~156 KB on the wire — over this cap and
+over the 64–128 KB relays typically accept. Such chunks were never deliverable;
+they now fail at the transport instead of being dropped at the relay. A 4 KiB
+chunk still fits, so apps sending media over Nostr should lower `chunkSize`
+accordingly.
 
 ## Platform Bridge Lifecycle
 

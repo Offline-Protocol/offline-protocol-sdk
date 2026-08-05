@@ -26,6 +26,7 @@
 //! derivable, so only it retains the deterministic derivation (unchanged on
 //! the wire for interoperability with older peers).
 
+use crate::constants::NOSTR_INITIAL_QUERY_LIMIT;
 use crate::{Error, Result};
 use hkdf::Hkdf;
 use k256::schnorr::SigningKey;
@@ -249,11 +250,18 @@ impl NostrEvent {
 /// Creates a NIP-01 REQ subscription message for kind-4 DMs addressed to `pubkey_hex`
 /// (this device's own routing tag, from [`routing_tag_for_device_id`]).
 ///
-/// Returns `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4]}]`.
+/// Returns `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4], "limit": N}]`.
+///
+/// The `limit` bounds the stored-event replay each (re)connect pulls down.
+/// Without it a relay is free to return its entire retention window every time
+/// the subscription is re-sent, and NIP-11 no longer advertises retention, so
+/// there is no way to learn how far back that reaches. See
+/// [`NOSTR_INITIAL_QUERY_LIMIT`] for why it is only advisory.
 pub fn create_subscription_message(pubkey_hex: &str, subscription_id: &str) -> Result<String> {
     let filter = serde_json::json!({
         "#p": [pubkey_hex],
-        "kinds": [4]
+        "kinds": [4],
+        "limit": NOSTR_INITIAL_QUERY_LIMIT
     });
     let msg = serde_json::json!(["REQ", subscription_id, filter]);
     serde_json::to_string(&msg).map_err(|e| Error::SerializationError(e.to_string()))
@@ -416,5 +424,23 @@ mod tests {
         assert!(msg.starts_with("[\"REQ\",\"sub123\",{"));
         assert!(msg.contains(&format!("\"#p\":[\"{}\"]", pubkey)));
         assert!(msg.contains("\"kinds\":[4]"));
+    }
+
+    #[test]
+    fn test_subscription_filter_bounds_stored_event_replay() {
+        // Without a `limit` the filter is unbounded, so every relay
+        // (re)connect replays the relay's whole retention window — which
+        // NIP-11 no longer advertises, so it cannot even be reasoned about.
+        let pubkey = routing_tag_for_device_id("alice").unwrap();
+        let msg = create_subscription_message(&pubkey, "sub123").unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        let filter = &parsed[2];
+        assert_eq!(
+            filter["limit"].as_u64(),
+            Some(NOSTR_INITIAL_QUERY_LIMIT as u64),
+            "REQ filter must carry a limit: {}",
+            msg
+        );
     }
 }
