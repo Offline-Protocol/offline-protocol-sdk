@@ -31625,3 +31625,473 @@ fn test_blocked_users_restore_skips_a_record_naming_the_local_user() {
         "and genuine entries still restore"
     );
 }
+
+// ============================================================================
+// Published key packages (stage 5: cold contact over Nostr)
+// ============================================================================
+
+/// The tick must stand up a full set of slots, and each must carry a *distinct*
+/// key package — an MLS init key is consumed by its first user, so two slots
+/// sharing one package means a single Welcome silently empties both.
+#[test]
+fn nostr_publication_fills_every_slot_with_a_distinct_key_package() {
+    use offline_protocol_transport::constants::NOSTR_KEY_PACKAGE_SLOTS;
+
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.refresh_nostr_key_package_slots();
+
+    let slots = protocol.nostr_publication_slots_for_test();
+    assert_eq!(slots.len(), NOSTR_KEY_PACKAGE_SLOTS);
+
+    let unique_packages: std::collections::HashSet<_> =
+        slots.iter().map(|s| s.package_id.clone()).collect();
+    assert_eq!(
+        unique_packages.len(),
+        NOSTR_KEY_PACKAGE_SLOTS,
+        "two slots share a key package; one Welcome would consume both"
+    );
+
+    let unique_slot_ids: std::collections::HashSet<_> =
+        slots.iter().map(|s| s.slot_id.clone()).collect();
+    assert_eq!(unique_slot_ids.len(), NOSTR_KEY_PACKAGE_SLOTS);
+
+    let handle = nostr_transport_of(&protocol);
+    assert!(as_nostr(&handle).has_pending_publications());
+}
+
+/// Once published, a healthy slot must not be republished on every tick — that
+/// would be one relay write per slot per tick forever.
+#[test]
+fn nostr_publication_is_idempotent_across_ticks() {
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.refresh_nostr_key_package_slots();
+
+    let handle = nostr_transport_of(&protocol);
+    let nostr = as_nostr(&handle);
+    while nostr.get_next_signed_event().unwrap().is_some() {}
+
+    let before = protocol.nostr_publication_slots_for_test();
+    protocol.reset_nostr_slot_throttle_for_test();
+    protocol.refresh_nostr_key_package_slots();
+    let after = protocol.nostr_publication_slots_for_test();
+
+    assert_eq!(
+        before.iter().map(|s| &s.package_id).collect::<Vec<_>>(),
+        after.iter().map(|s| &s.package_id).collect::<Vec<_>>(),
+        "a healthy slot was needlessly re-minted"
+    );
+    assert!(
+        !nostr.has_pending_publications(),
+        "a healthy slot was needlessly republished"
+    );
+}
+
+/// The consumption signal: a slot whose key package has left provider storage
+/// must be refilled and republished. Without this a stale record stands on the
+/// relays and every stranger who fetches it builds an unprocessable Welcome.
+#[test]
+fn nostr_publication_refills_a_slot_whose_package_was_consumed() {
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.refresh_nostr_key_package_slots();
+
+    let handle = nostr_transport_of(&protocol);
+    let nostr = as_nostr(&handle);
+    while nostr.get_next_signed_event().unwrap().is_some() {}
+
+    // Stand in for "a Welcome consumed it": the slot map names a package the
+    // MLS layer no longer holds, which is exactly what the loader reports
+    // after the private init key is gone.
+    let stale = protocol.force_nostr_slot_package_for_test(0, "consumed-package");
+
+    protocol.reset_nostr_slot_throttle_for_test();
+    protocol.refresh_nostr_key_package_slots();
+
+    let slots = protocol.nostr_publication_slots_for_test();
+    assert_ne!(
+        slots[0].package_id, "consumed-package",
+        "the consumed slot was left standing"
+    );
+    assert_eq!(
+        slots[0].slot_id, stale,
+        "the refill must reuse the slot id, or the old record is never replaced"
+    );
+    assert!(
+        nostr.has_pending_publications(),
+        "the refilled slot must be republished"
+    );
+}
+
+/// A slot is marked published when its record is *queued* — the only point the
+/// engine hears about — so a record that then failed on the wire must be
+/// reported back, or the slot stands stale for the life of the process while
+/// the engine believes it is healthy. That is the silent failure the whole
+/// publication design exists to avoid, one layer down.
+#[test]
+fn nostr_publication_that_never_reached_a_relay_is_republished() {
+    use offline_protocol_transport::nostr::NOSTR_PUBLICATION_ID_PREFIX;
+
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.refresh_nostr_key_package_slots();
+
+    let handle = nostr_transport_of(&protocol);
+    let nostr = as_nostr(&handle);
+    while nostr.get_next_signed_event().unwrap().is_some() {}
+
+    let before = protocol.nostr_publication_slots_for_test();
+    let slot_id = before[0].slot_id.clone();
+
+    // Every relay rejected it, or the socket dropped before the OK.
+    nostr.report_send_failure(&format!("{}{}", NOSTR_PUBLICATION_ID_PREFIX, slot_id));
+
+    protocol.reset_nostr_slot_throttle_for_test();
+    protocol.refresh_nostr_key_package_slots();
+
+    let after = protocol.nostr_publication_slots_for_test();
+    assert_eq!(
+        after[0].slot_id, slot_id,
+        "republication must reuse the slot id, or the stale record is never replaced"
+    );
+    assert_eq!(
+        after[0].package_id, before[0].package_id,
+        "the package was never consumed, only its publication failed; \
+         republishing must not burn a fresh one"
+    );
+
+    let republished = nostr
+        .get_next_signed_event()
+        .unwrap()
+        .expect("the failed slot must be republished");
+    assert_eq!(
+        republished.message_id,
+        format!("{}{}", NOSTR_PUBLICATION_ID_PREFIX, slot_id)
+    );
+    assert!(
+        nostr.get_next_signed_event().unwrap().is_none(),
+        "only the failed slot republishes; the healthy ones are left alone"
+    );
+}
+
+/// Every published record is openable by anyone who knows the username — that
+/// is the design — so a squatter can unseal one of a peer's *spent* records,
+/// re-seal the untouched (genuinely signed) payload under their own author key,
+/// and stand it back up at the peer's tag. A resolver cannot tell that from the
+/// live record: the inner signature is real and nothing binds a record to a
+/// live slot.
+///
+/// So the heal must not depend on telling them apart. Importing any resolved
+/// key package pushes ours back under `auto_key_exchange`, and the peer then
+/// establishes from their side against a package that is actually live — which
+/// is what keeps the replay a delivery delay rather than a stranded pair.
+#[test]
+fn nostr_resolution_arms_the_reverse_exchange_that_heals_a_replayed_record() {
+    let mut alice = protocol_with_nostr("alice");
+    alice.refresh_nostr_key_package_slots();
+
+    let alice_handle = nostr_transport_of(&alice);
+    let alice_nostr = as_nostr(&alice_handle);
+    let published = alice_nostr.get_next_signed_event().unwrap().unwrap();
+    let event: serde_json::Value = {
+        let outer: serde_json::Value = serde_json::from_str(&published.event_json).unwrap();
+        outer[1].clone()
+    };
+    let event_json = serde_json::to_string(&event).unwrap();
+
+    let mut bob = protocol_with_nostr("bob");
+    let bob_handle = nostr_transport_of(&bob);
+    let bob_nostr = as_nostr(&bob_handle);
+
+    bob_nostr.request_peer_key_packages("alice");
+    let query = bob_nostr.next_query().unwrap().unwrap();
+    let (_author, plaintext) = bob_nostr
+        .open_query_event(&query.query_id, &event_json)
+        .unwrap()
+        .expect("the record opens with alice's derivable key");
+
+    assert!(
+        !bob.key_package_sent_to.contains("alice"),
+        "precondition: bob has not pushed his package to alice yet"
+    );
+
+    bob.handle_resolved_key_package(&plaintext).unwrap();
+
+    assert!(
+        bob.key_package_sent_to.contains("alice"),
+        "resolving must push our own key package back — that reverse exchange \
+         is the only thing that heals a resolved-but-consumed package, and \
+         nothing at resolution time can tell a spent record from a live one"
+    );
+}
+
+#[test]
+fn nostr_publication_does_nothing_when_cold_contact_is_disabled() {
+    let mut protocol = protocol_with_nostr("alice");
+    let handle = nostr_transport_of(&protocol);
+    as_nostr(&handle).set_cold_contact_enabled(false);
+
+    protocol.refresh_nostr_key_package_slots();
+
+    assert!(protocol.nostr_publication_slots_for_test().is_empty());
+    assert!(!as_nostr(&handle).has_pending_publications());
+}
+
+/// A published record is signed, self-addressed, and un-ACKed. The signature
+/// covers the recipient, so the address cannot be rewritten by a fetcher —
+/// which is why the resolution path bypasses the receive loop rather than
+/// re-aiming the message.
+#[test]
+fn nostr_published_record_is_signed_self_addressed_and_unacked() {
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.refresh_nostr_key_package_slots();
+
+    let handle = nostr_transport_of(&protocol);
+    let nostr = as_nostr(&handle);
+    let signed = nostr.get_next_signed_event().unwrap().unwrap();
+
+    let event: serde_json::Value = {
+        let outer: serde_json::Value = serde_json::from_str(&signed.event_json).unwrap();
+        outer[1].clone()
+    };
+    let sealed = crate::protocol::base64_decode(event["content"].as_str().unwrap()).unwrap();
+    // The record is sealed to our own derivable key, so our own transport opens
+    // it on the bootstrap fallback path.
+    let plaintext = nostr.unseal_event_payload(event["pubkey"].as_str().unwrap(), &sealed);
+
+    let message = nostr.deserialize_message(&plaintext).unwrap();
+    assert_eq!(message.sender.as_str(), "alice");
+    assert_eq!(
+        message.recipient.as_str(),
+        "alice",
+        "a published record has no recipient in advance; it is self-addressed"
+    );
+    assert!(
+        !message.requires_ack,
+        "nothing ACKs a record left to be found; an ACK ladder would retransmit \
+         against a peer that does not exist"
+    );
+    assert!(
+        message.metadata.contains_key(CTRL_SIG_META_KEY),
+        "the payload must be signed, or a fetcher cannot use nostr_pubkey as an address"
+    );
+    assert!(message
+        .content
+        .starts_with(crate::protocol::internal_prefixes::KEY_PACKAGE));
+}
+
+/// End to end: Alice publishes, Bob resolves, and Bob ends up holding Alice's
+/// per-install Nostr key — the whole point of the exercise, since that is what
+/// takes their next frame off the bootstrap leg.
+#[test]
+fn nostr_resolution_registers_the_publishers_key_end_to_end() {
+    let mut alice = protocol_with_nostr("alice");
+    alice.refresh_nostr_key_package_slots();
+
+    let alice_handle = nostr_transport_of(&alice);
+    let alice_nostr = as_nostr(&alice_handle);
+    let alice_pubkey = alice_nostr.public_key_hex();
+    let published = alice_nostr.get_next_signed_event().unwrap().unwrap();
+    let event: serde_json::Value = {
+        let outer: serde_json::Value = serde_json::from_str(&published.event_json).unwrap();
+        outer[1].clone()
+    };
+    let event_json = serde_json::to_string(&event).unwrap();
+
+    let mut bob = protocol_with_nostr("bob");
+    let bob_handle = nostr_transport_of(&bob);
+    let bob_nostr = as_nostr(&bob_handle);
+
+    bob_nostr.request_peer_key_packages("alice");
+    let query = bob_nostr.next_query().unwrap().unwrap();
+    let (_author, plaintext) = bob_nostr
+        .open_query_event(&query.query_id, &event_json)
+        .unwrap()
+        .expect("alice's published record opens with her derivable key");
+
+    bob.handle_resolved_key_package(&plaintext).unwrap();
+
+    let caps = bob
+        .load_peer_capabilities_record("alice")
+        .expect("alice's capabilities recorded");
+    assert_eq!(
+        caps.nostr_pubkey.as_deref(),
+        Some(alice_pubkey.as_str()),
+        "resolution must leave Bob holding Alice's per-install key"
+    );
+}
+
+/// The resolution channel answers exactly one question. A record squatting the
+/// queried peer's public routing tag must not be able to deliver any other
+/// internal control frame through a path that skipped the receive loop's dedup
+/// and block checks.
+#[test]
+fn nostr_resolution_drops_anything_that_is_not_a_key_package() {
+    let mut bob = protocol_with_nostr("bob");
+
+    let mut planted = Message::new(
+        UserId::new("mallory").unwrap(),
+        UserId::new("mallory").unwrap(),
+        AppId::new("test").unwrap(),
+        format!("{}{{}}", crate::protocol::internal_prefixes::WELCOME),
+    );
+    planted.requires_ack = false;
+    let handle = nostr_transport_of(&bob);
+    let bytes = as_nostr(&handle).serialize_message(&planted).unwrap();
+
+    // Must not error — junk at a public tag is ordinary — but must not act on
+    // it either.
+    bob.handle_resolved_key_package(&bytes).unwrap();
+    assert!(
+        bob.load_peer_capabilities_record("mallory").is_none(),
+        "a non-key-package record was acted on"
+    );
+}
+
+/// `start()` is the one place every caller — FFI, RN, and a pure-Rust embedder
+/// that installed its own transport — passes through with the config in hand,
+/// so it is the only thing that makes these switches real. Both had exactly one
+/// call site and no test: a regression in the plumbing would have failed
+/// nothing, while every sealing-off test drove the transport setter directly
+/// and so could not have noticed.
+#[test]
+fn nostr_kill_switches_reach_the_transport_on_start() {
+    for (sealing, cold_contact) in [(false, true), (true, false), (false, false)] {
+        let mut config = create_test_config();
+        config.user_id = "alice".to_string();
+        config.transport.nostr_enabled = true;
+        config.transport.nostr_sealing_enabled = sealing;
+        config.transport.nostr_cold_contact_enabled = cold_contact;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let nostr = NostrTransport::new("alice").unwrap();
+        nostr.on_status_changed(TransportStatus::Available);
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Nostr, Box::new(nostr));
+
+        protocol.start().unwrap();
+
+        let handle = nostr_transport_of(&protocol);
+        assert_eq!(
+            as_nostr(&handle).sealing_enabled(),
+            sealing,
+            "nostr_sealing_enabled did not reach the transport"
+        );
+        assert_eq!(
+            as_nostr(&handle).cold_contact_enabled(),
+            cold_contact,
+            "nostr_cold_contact_enabled did not reach the transport"
+        );
+    }
+}
+
+/// The throttle must actually throttle. Without this, the scan's five MLS
+/// storage reads — each a load plus a TLS deserialize, validate, and provider
+/// lookup — run on every raw tick, which on mobile is a steady trickle of
+/// Keychain/Keystore traffic answering a question whose answer only changes
+/// when a Welcome arrives.
+#[test]
+fn nostr_publication_scan_is_throttled_between_ticks() {
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.refresh_nostr_key_package_slots();
+
+    let handle = nostr_transport_of(&protocol);
+    let nostr = as_nostr(&handle);
+    while nostr.get_next_signed_event().unwrap().is_some() {}
+
+    // Consumed, but the throttle has not lapsed: this tick must not re-scan.
+    protocol.force_nostr_slot_package_for_test(0, "consumed-package");
+    protocol.refresh_nostr_key_package_slots();
+    assert_eq!(
+        protocol.nostr_publication_slots_for_test()[0].package_id,
+        "consumed-package",
+        "the scan ran despite the throttle"
+    );
+
+    protocol.reset_nostr_slot_throttle_for_test();
+    protocol.refresh_nostr_key_package_slots();
+    assert_ne!(
+        protocol.nostr_publication_slots_for_test()[0].package_id,
+        "consumed-package",
+        "the scan never ran even once the throttle lapsed"
+    );
+}
+
+/// A relay that rejects the kind outright — or rate-limits a fresh pubkey
+/// bursting the whole slot set at once — must not be retried once per slot per
+/// refresh forever. Every other retry ladder in this engine is bounded; this
+/// one was not, and it is the loop that feeds the transport's failure path.
+#[test]
+fn nostr_repeated_publication_failure_backs_off() {
+    use offline_protocol_transport::nostr::NOSTR_PUBLICATION_ID_PREFIX;
+
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.refresh_nostr_key_package_slots();
+
+    let handle = nostr_transport_of(&protocol);
+    let nostr = as_nostr(&handle);
+    while nostr.get_next_signed_event().unwrap().is_some() {}
+
+    let slot_id = protocol.nostr_publication_slots_for_test()[0]
+        .slot_id
+        .clone();
+    let publication_id = format!("{}{}", NOSTR_PUBLICATION_ID_PREFIX, slot_id);
+
+    // A first failure still retries promptly: a relay hiccup, or a socket that
+    // dropped mid-flight, must not cost a refresh window.
+    nostr.report_send_failure(&publication_id);
+    protocol.reset_nostr_slot_throttle_for_test();
+    protocol.refresh_nostr_key_package_slots();
+    let republished = nostr
+        .get_next_signed_event()
+        .unwrap()
+        .expect("the first failure must retry on the next refresh");
+    assert_eq!(republished.message_id, publication_id);
+
+    // The second consecutive failure starts the ladder, so the next refresh
+    // must leave the slot alone rather than mint another rejected relay write
+    // a minute later, and again a minute after that, forever.
+    nostr.report_send_failure(&publication_id);
+    protocol.reset_nostr_slot_throttle_for_test();
+    protocol.refresh_nostr_key_package_slots();
+    assert!(
+        nostr.get_next_signed_event().unwrap().is_none(),
+        "a slot whose publication keeps failing was republished with no backoff"
+    );
+
+    // The backoff is per slot: the healthy ones are untouched by it.
+    assert_eq!(
+        protocol.nostr_publication_slots_for_test().len(),
+        offline_protocol_transport::constants::NOSTR_KEY_PACKAGE_SLOTS
+    );
+}
+
+/// The condition this warning reports (an MLS or storage error refilling a
+/// slot) persists by nature, and it is evaluated once per slot per refresh.
+/// Unsuppressed that is five security-warning events a minute, indefinitely,
+/// for one stuck cause — enough to bury the signal in its own repetition.
+#[test]
+fn nostr_slot_exhaustion_warning_is_suppressed_between_passes() {
+    let mut protocol = protocol_with_nostr("alice");
+    let warnings: Arc<Mutex<Vec<SecurityWarningCode>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&warnings);
+        protocol.on_event(move |e| {
+            if let Event::SecurityWarning { reason_code, .. } = e {
+                h.lock().unwrap().push(reason_code);
+            }
+        });
+    }
+
+    for _ in 0..10 {
+        protocol.report_nostr_slot_refresh_failure_for_test(5);
+    }
+
+    let seen = warnings.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "ten failing passes emitted {} warnings; the cause persists, so the \
+         report must not repeat per slot per refresh",
+        seen.len()
+    );
+    assert_eq!(seen[0], SecurityWarningCode::NostrKeyPackageSlotExhausted);
+}

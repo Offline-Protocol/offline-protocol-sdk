@@ -58,6 +58,10 @@ pub(crate) enum StateCategory {
     /// — deliberately absent from [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`],
     /// which has no pre-split data to inherit for it.
     NostrWatermark,
+    /// The Nostr key-package publication slot map. Post-split only, like
+    /// [`Self::NostrWatermark`], and absent from
+    /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] for the same reason.
+    NostrKeyPackageSlots,
     /// The value-less marker recording that the pre-split adoption sweep
     /// completed. Post-split only, so it is deliberately absent from
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] — but it *is* written to
@@ -83,6 +87,7 @@ impl StateCategory {
             storage_keys::BOTH_CREATE_AWAITING_DECRYPT => Self::BothCreateAwaitingDecrypt,
             storage_keys::LAMPORT_CLOCK => Self::LamportClock,
             storage_keys::NOSTR_WATERMARK => Self::NostrWatermark,
+            storage_keys::NOSTR_KEY_PACKAGE_SLOTS => Self::NostrKeyPackageSlots,
             storage_keys::STATE_ADOPTION => Self::StateAdoption,
             _ => return None,
         })
@@ -117,6 +122,18 @@ impl StateCategory {
     ///   fix and covers the paths storage cannot see; this shortens the reach of
     ///   a container write as well. Failing closed is cheap here: an unsealable
     ///   key package costs one re-exchange.
+    /// - [`storage_keys::NOSTR_KEY_PACKAGE_SLOTS`]: the second integrity case,
+    ///   for the same reason and not for confidentiality — slot ids and package
+    ///   ids are already public in the published record itself. What sealing
+    ///   buys is that the *silent* failure becomes unreachable. Deleting this
+    ///   map self-heals (the next tick mints fresh slots), and pointing it at a
+    ///   package id that does not exist self-heals too (a missing package reads
+    ///   as consumed and is refilled). The one damaging edit is repointing a
+    ///   slot at some *other* live package, which leaves a stale record standing
+    ///   on the relays while this node believes the slot is healthy — and every
+    ///   stranger who fetches it builds a Welcome that can never be processed.
+    ///   An AEAD makes that edit unopenable, and unopenable lands on the
+    ///   self-healing path.
     ///
     /// Everything else is advertised capability versions, a small state enum, a
     /// logical clock, a coarse wall-clock mark, or a value-less marker whose
@@ -141,7 +158,8 @@ impl StateCategory {
             | Self::PendingMessageEntries
             | Self::Outbox
             | Self::MediaDescriptors
-            | Self::PeerKeyPackages => true,
+            | Self::PeerKeyPackages
+            | Self::NostrKeyPackageSlots => true,
             Self::PeerCapabilities
             | Self::SessionStates
             | Self::WelcomeLifecycles

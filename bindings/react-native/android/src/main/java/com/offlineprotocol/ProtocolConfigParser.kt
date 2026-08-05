@@ -66,6 +66,12 @@ internal object ProtocolConfigParser {
             "sealingEnabled",
             "sealing_enabled"
         ) ?: json.optBooleanCompat("nostrSealingEnabled", "nostr_sealing_enabled") ?: true
+        // Nostr cold contact (key-package publication + peer resolution, kill
+        // switch, default on). Same nested-then-flat shape as sealing above.
+        val nostrColdContactEnabled = nostrJson?.optBooleanCompat(
+            "coldContactEnabled",
+            "cold_contact_enabled"
+        ) ?: json.optBooleanCompat("nostrColdContactEnabled", "nostr_cold_contact_enabled") ?: true
         val compactEnvelopeEnabled = encryptionJson?.optBooleanCompat(
             "compactEnvelopeEnabled",
             "compact_envelope_enabled"
@@ -155,6 +161,7 @@ internal object ProtocolConfigParser {
             groupEnforceAdminCommits = groupEnforceAdminCommits,
             binaryWireEnabled = binaryWireEnabled,
             nostrSealingEnabled = nostrSealingEnabled,
+            nostrColdContactEnabled = nostrColdContactEnabled,
             compactEnvelopeEnabled = compactEnvelopeEnabled,
             richPayloadEnabled = richPayloadEnabled,
             cryptoRecoveryEnabled = cryptoRecoveryEnabled

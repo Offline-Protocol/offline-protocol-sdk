@@ -292,6 +292,31 @@ pub struct TransportConfig {
     /// kind 1059.
     pub nostr_sealing_enabled: bool,
 
+    /// Whether this install publishes MLS key packages to the relays and
+    /// resolves peers' published packages.
+    ///
+    /// Defaults to `true`, and takes effect only when `nostr_enabled` is on —
+    /// which is itself off by default, so nothing is published unless an app
+    /// deliberately turns Nostr on.
+    ///
+    /// Buys **cold first contact**: a peer known only by username becomes
+    /// reachable over Nostr with no prior key-package exchange over some other
+    /// transport, which is otherwise impossible. It also bounds the sealing
+    /// downgrade that follows a peer-key eviction, since a forgotten key is
+    /// re-resolved on the next send instead of waiting for a fresh exchange.
+    ///
+    /// **What it costs is worth stating plainly.** Publication is the first
+    /// thing this SDK emits to a relay unprompted: a small set of addressable
+    /// records sits at this install's routing tag and is refreshed as slots are
+    /// consumed, whether or not any message is ever sent. Their *content* is
+    /// sealed — a scraper filtering on the kind alone reads nothing, which
+    /// matters because an MLS key package carries its owner's username in the
+    /// leaf credential and cannot be stripped of it — but the existence of a
+    /// record at a given tag, and the timing of its refreshes, are visible to
+    /// every relay published to. Turn this off to keep the transport silent
+    /// until it has traffic, at the price of cold contact.
+    pub nostr_cold_contact_enabled: bool,
+
     /// Whether to negotiate and emit the compact binary wire codec.
     ///
     /// Defaults to `true`. It only takes effect between two peers that both
@@ -310,6 +335,7 @@ impl Default for TransportConfig {
             reticulum_enabled: false,
             nostr_enabled: false,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             binary_wire_enabled: true,
         }
     }
@@ -770,6 +796,13 @@ impl ProtocolConfigBuilder {
     /// Enables or disables sealing of outgoing Nostr frames (default on).
     pub fn nostr_sealing_enabled(mut self, enabled: bool) -> Self {
         self.config.transport.nostr_sealing_enabled = enabled;
+        self
+    }
+
+    /// Enables or disables Nostr key-package publication and peer resolution
+    /// (default on; see [`TransportConfig::nostr_cold_contact_enabled`]).
+    pub fn nostr_cold_contact_enabled(mut self, enabled: bool) -> Self {
+        self.config.transport.nostr_cold_contact_enabled = enabled;
         self
     }
 

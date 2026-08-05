@@ -1074,6 +1074,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nost
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter(
@@ -1081,6 +1083,10 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nost
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed(
 ): Short
@@ -1484,6 +1490,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_conf
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_query(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1491,6 +1499,10 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`createdAt`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed(`ptr`: Long,`queryId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received(`ptr`: Long,`queryId`: RustBuffer.ByValue,`eventJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -2043,6 +2055,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 15697.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query() != 45315.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 55139.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2053,6 +2068,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 56173.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed() != 2867.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received() != 9552.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 14770.toShort()) {
@@ -3365,6 +3386,8 @@ public interface OfflineProtocolInterface {
     
     fun `nostrGetNextMessage`(): NostrMessage?
     
+    fun `nostrGetNextQuery`(): NostrQuery?
+    
     fun `nostrGetPublicKey`(): kotlin.String?
     
     fun `nostrGetSubscriptionFilter`(`subscriptionId`: kotlin.String): kotlin.String?
@@ -3372,6 +3395,10 @@ public interface OfflineProtocolInterface {
     fun `nostrMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
     
     fun `nostrMessageReceivedAt`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>, `createdAt`: kotlin.Long)
+    
+    fun `nostrQueryCompleted`(`queryId`: kotlin.String)
+    
+    fun `nostrQueryEventReceived`(`queryId`: kotlin.String, `eventJson`: kotlin.String)
     
     fun `nostrSendFailed`(`messageId`: kotlin.String)
     
@@ -4809,6 +4836,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `nostrGetNextQuery`(): NostrQuery? {
+            return FfiConverterOptionalTypeNostrQuery.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_query(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
     override fun `nostrGetPublicKey`(): kotlin.String? {
             return FfiConverterOptionalString.lift(
     callWithHandle {
@@ -4856,6 +4896,31 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at(
         it,
         FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),FfiConverterLong.lower(`createdAt`),_status)
+}
+    }
+    
+    
+
+    override fun `nostrQueryCompleted`(`queryId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed(
+        it,
+        FfiConverterString.lower(`queryId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `nostrQueryEventReceived`(`queryId`: kotlin.String, `eventJson`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received(
+        it,
+        FfiConverterString.lower(`queryId`),FfiConverterString.lower(`eventJson`),_status)
 }
     }
     
@@ -7083,6 +7148,42 @@ public object FfiConverterTypeNostrMessage: FfiConverterRustBuffer<NostrMessage>
 
 
 
+data class NostrQuery (
+    var `queryId`: kotlin.String
+    , 
+    var `reqJson`: kotlin.String
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNostrQuery: FfiConverterRustBuffer<NostrQuery> {
+    override fun read(buf: ByteBuffer): NostrQuery {
+        return NostrQuery(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NostrQuery) = (
+            FfiConverterString.allocationSize(value.`queryId`) +
+            FfiConverterString.allocationSize(value.`reqJson`)
+    )
+
+    override fun write(value: NostrQuery, buf: ByteBuffer) {
+            FfiConverterString.write(value.`queryId`, buf)
+            FfiConverterString.write(value.`reqJson`, buf)
+    }
+}
+
+
+
 data class PathConfig (
     var `forwardToTopK`: kotlin.UInt
     , 
@@ -7255,6 +7356,8 @@ data class ProtocolConfig (
     , 
     var `nostrSealingEnabled`: kotlin.Boolean = true 
     , 
+    var `nostrColdContactEnabled`: kotlin.Boolean = true 
+    , 
     var `compactEnvelopeEnabled`: kotlin.Boolean = true 
     , 
     var `richPayloadEnabled`: kotlin.Boolean = true 
@@ -7301,6 +7404,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -7329,6 +7433,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`requireTransportIdentity`) +
             FfiConverterBoolean.allocationSize(value.`binaryWireEnabled`) +
             FfiConverterBoolean.allocationSize(value.`nostrSealingEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`nostrColdContactEnabled`) +
             FfiConverterBoolean.allocationSize(value.`compactEnvelopeEnabled`) +
             FfiConverterBoolean.allocationSize(value.`richPayloadEnabled`) +
             FfiConverterBoolean.allocationSize(value.`cryptoRecoveryEnabled`)
@@ -7359,6 +7464,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`requireTransportIdentity`, buf)
             FfiConverterBoolean.write(value.`binaryWireEnabled`, buf)
             FfiConverterBoolean.write(value.`nostrSealingEnabled`, buf)
+            FfiConverterBoolean.write(value.`nostrColdContactEnabled`, buf)
             FfiConverterBoolean.write(value.`compactEnvelopeEnabled`, buf)
             FfiConverterBoolean.write(value.`richPayloadEnabled`, buf)
             FfiConverterBoolean.write(value.`cryptoRecoveryEnabled`, buf)
@@ -8067,6 +8173,8 @@ data class TransportConfig (
     var `nostrEnabled`: kotlin.Boolean
     , 
     var `nostrSealingEnabled`: kotlin.Boolean = true 
+    , 
+    var `nostrColdContactEnabled`: kotlin.Boolean = true 
     
 ){
     
@@ -8087,6 +8195,7 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8096,7 +8205,8 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.allocationSize(value.`internetEnabled`) +
             FfiConverterBoolean.allocationSize(value.`reticulumEnabled`) +
             FfiConverterBoolean.allocationSize(value.`nostrEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`nostrSealingEnabled`)
+            FfiConverterBoolean.allocationSize(value.`nostrSealingEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`nostrColdContactEnabled`)
     )
 
     override fun write(value: TransportConfig, buf: ByteBuffer) {
@@ -8106,6 +8216,7 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.write(value.`reticulumEnabled`, buf)
             FfiConverterBoolean.write(value.`nostrEnabled`, buf)
             FfiConverterBoolean.write(value.`nostrSealingEnabled`, buf)
+            FfiConverterBoolean.write(value.`nostrColdContactEnabled`, buf)
     }
 }
 
@@ -10320,6 +10431,38 @@ public object FfiConverterOptionalTypeNostrMessage: FfiConverterRustBuffer<Nostr
         } else {
             buf.put(1)
             FfiConverterTypeNostrMessage.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNostrQuery: FfiConverterRustBuffer<NostrQuery?> {
+    override fun read(buf: ByteBuffer): NostrQuery? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNostrQuery.read(buf)
+    }
+
+    override fun allocationSize(value: NostrQuery?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNostrQuery.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NostrQuery?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNostrQuery.write(value, buf)
         }
     }
 }

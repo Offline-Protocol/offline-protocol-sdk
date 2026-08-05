@@ -138,6 +138,17 @@ pub enum SecurityWarningCode {
     /// so a sustained rate of these for one peer indicates injected frames
     /// rather than a real fork.
     SessionRekeyTriggered,
+    /// A Nostr key-package publication slot could not be refilled, so cold
+    /// first contact over Nostr is degraded or unavailable until it succeeds.
+    ///
+    /// Slots are consumed locally — an init key leaves provider storage only
+    /// when *this* node processes a Welcome built against it — so consumption
+    /// itself is normal traffic, and a stranger can drive it only by actually
+    /// establishing sessions with us. What this warns about is the refill
+    /// failing (MLS or storage error), which is the failure the publication
+    /// design must never absorb silently: a stale published record makes every
+    /// stranger who fetches it build a Welcome that can never be processed.
+    NostrKeyPackageSlotExhausted,
 }
 
 impl SecurityWarningCode {
@@ -155,6 +166,7 @@ impl SecurityWarningCode {
             Self::PlaintextReceiveRejected => "PLAINTEXT_RECEIVE_REJECTED",
             Self::SessionSenderGroupMismatch => "SESSION_SENDER_GROUP_MISMATCH",
             Self::SessionRekeyTriggered => "SESSION_REKEY_TRIGGERED",
+            Self::NostrKeyPackageSlotExhausted => "NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED",
         }
     }
 }
@@ -3474,6 +3486,7 @@ mod tests {
             SecurityWarningCode::PlaintextReceiveRejected,
             SecurityWarningCode::SessionSenderGroupMismatch,
             SecurityWarningCode::SessionRekeyTriggered,
+            SecurityWarningCode::NostrKeyPackageSlotExhausted,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -3497,7 +3510,8 @@ mod tests {
                 | SecurityWarningCode::PlaintextSend
                 | SecurityWarningCode::PlaintextReceiveRejected
                 | SecurityWarningCode::SessionSenderGroupMismatch
-                | SecurityWarningCode::SessionRekeyTriggered => {}
+                | SecurityWarningCode::SessionRekeyTriggered
+                | SecurityWarningCode::NostrKeyPackageSlotExhausted => {}
             }
         }
     }

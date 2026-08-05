@@ -204,6 +204,26 @@ export interface NostrTransportConfig {
    * it off to reach one, or for a relay that rejects kind 1059.
    */
   sealingEnabled?: boolean;
+  /**
+   * Publish MLS key packages to the relays, and resolve peers' published
+   * packages (default: true).
+   *
+   * Buys **cold first contact**: a peer known only by username becomes
+   * reachable over Nostr with no prior key-package exchange over some other
+   * transport, which is otherwise impossible.
+   *
+   * The cost is that this is the first thing the transport emits unprompted.
+   * A small set of addressable records sits at this install's routing tag and
+   * is refreshed as key packages are consumed, whether or not you ever send a
+   * message. Their *content* is sealed — necessary, because an MLS key package
+   * carries its owner's username in the leaf credential and cannot be stripped
+   * of it — so a relay scraping by event kind reads nothing. But the existence
+   * of a record at a given tag, and the timing of its refreshes, are visible to
+   * every relay you publish to.
+   *
+   * Turn it off to keep the transport silent until it has traffic.
+   */
+  coldContactEnabled?: boolean;
 }
 
 /**

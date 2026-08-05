@@ -705,6 +705,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 34137:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query() != 2487:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 27701:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() != 63513:
@@ -712,6 +714,10 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46003:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 64166:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed() != 8316:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received() != 18677:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 57598:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1893,6 +1899,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_ne
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_query.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_query.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -1919,6 +1930,19 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_messag
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2630,6 +2654,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key.restype = ctypes.c_uint16
@@ -2642,6 +2669,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed.restype = ctypes.c_uint16
@@ -5399,6 +5432,42 @@ class _UniffiFfiConverterTypeNostrMessage(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.event_json, buf)
 
 @dataclass
+class NostrQuery:
+    def __init__(self, *, query_id:str, req_json:str):
+        self.query_id = query_id
+        self.req_json = req_json
+        
+        
+
+    
+    def __str__(self):
+        return "NostrQuery(query_id={}, req_json={})".format(self.query_id, self.req_json)
+    def __eq__(self, other):
+        if self.query_id != other.query_id:
+            return False
+        if self.req_json != other.req_json:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeNostrQuery(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return NostrQuery(
+            query_id=_UniffiFfiConverterString.read(buf),
+            req_json=_UniffiFfiConverterString.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterString.check_lower(value.query_id)
+        _UniffiFfiConverterString.check_lower(value.req_json)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterString.write(value.query_id, buf)
+        _UniffiFfiConverterString.write(value.req_json, buf)
+
+@dataclass
 class PathConfig:
     def __init__(self, *, forward_to_top_k:int, max_congestion_level:int):
         self.forward_to_top_k = forward_to_top_k
@@ -5478,7 +5547,7 @@ class _UniffiFfiConverterTypePeerDevice(_UniffiConverterRustBuffer):
 
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, user_id:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True):
+    def __init__(self, *, app_id:str, user_id:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True):
         self.app_id = app_id
         self.user_id = user_id
         self.ble_enabled = ble_enabled
@@ -5503,6 +5572,7 @@ class ProtocolConfig:
         self.require_transport_identity = require_transport_identity
         self.binary_wire_enabled = binary_wire_enabled
         self.nostr_sealing_enabled = nostr_sealing_enabled
+        self.nostr_cold_contact_enabled = nostr_cold_contact_enabled
         self.compact_envelope_enabled = compact_envelope_enabled
         self.rich_payload_enabled = rich_payload_enabled
         self.crypto_recovery_enabled = crypto_recovery_enabled
@@ -5511,7 +5581,7 @@ class ProtocolConfig:
 
     
     def __str__(self):
-        return "ProtocolConfig(app_id={}, user_id={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={})".format(self.app_id, self.user_id, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled)
+        return "ProtocolConfig(app_id={}, user_id={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={})".format(self.app_id, self.user_id, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled)
     def __eq__(self, other):
         if self.app_id != other.app_id:
             return False
@@ -5561,6 +5631,8 @@ class ProtocolConfig:
             return False
         if self.nostr_sealing_enabled != other.nostr_sealing_enabled:
             return False
+        if self.nostr_cold_contact_enabled != other.nostr_cold_contact_enabled:
+            return False
         if self.compact_envelope_enabled != other.compact_envelope_enabled:
             return False
         if self.rich_payload_enabled != other.rich_payload_enabled:
@@ -5597,6 +5669,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
             require_transport_identity=_UniffiFfiConverterBoolean.read(buf),
             binary_wire_enabled=_UniffiFfiConverterBoolean.read(buf),
             nostr_sealing_enabled=_UniffiFfiConverterBoolean.read(buf),
+            nostr_cold_contact_enabled=_UniffiFfiConverterBoolean.read(buf),
             compact_envelope_enabled=_UniffiFfiConverterBoolean.read(buf),
             rich_payload_enabled=_UniffiFfiConverterBoolean.read(buf),
             crypto_recovery_enabled=_UniffiFfiConverterBoolean.read(buf),
@@ -5628,6 +5701,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.check_lower(value.require_transport_identity)
         _UniffiFfiConverterBoolean.check_lower(value.binary_wire_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.nostr_sealing_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.nostr_cold_contact_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.compact_envelope_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.rich_payload_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.crypto_recovery_enabled)
@@ -5658,25 +5732,27 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.require_transport_identity, buf)
         _UniffiFfiConverterBoolean.write(value.binary_wire_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.nostr_sealing_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.nostr_cold_contact_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.compact_envelope_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.rich_payload_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.crypto_recovery_enabled, buf)
 
 @dataclass
 class TransportConfig:
-    def __init__(self, *, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, nostr_sealing_enabled:bool = True):
+    def __init__(self, *, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True):
         self.ble_enabled = ble_enabled
         self.wifi_direct_enabled = wifi_direct_enabled
         self.internet_enabled = internet_enabled
         self.reticulum_enabled = reticulum_enabled
         self.nostr_enabled = nostr_enabled
         self.nostr_sealing_enabled = nostr_sealing_enabled
+        self.nostr_cold_contact_enabled = nostr_cold_contact_enabled
         
         
 
     
     def __str__(self):
-        return "TransportConfig(ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, nostr_sealing_enabled={})".format(self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.nostr_sealing_enabled)
+        return "TransportConfig(ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={})".format(self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled)
     def __eq__(self, other):
         if self.ble_enabled != other.ble_enabled:
             return False
@@ -5690,6 +5766,8 @@ class TransportConfig:
             return False
         if self.nostr_sealing_enabled != other.nostr_sealing_enabled:
             return False
+        if self.nostr_cold_contact_enabled != other.nostr_cold_contact_enabled:
+            return False
         return True
 
 class _UniffiFfiConverterTypeTransportConfig(_UniffiConverterRustBuffer):
@@ -5702,6 +5780,7 @@ class _UniffiFfiConverterTypeTransportConfig(_UniffiConverterRustBuffer):
             reticulum_enabled=_UniffiFfiConverterBoolean.read(buf),
             nostr_enabled=_UniffiFfiConverterBoolean.read(buf),
             nostr_sealing_enabled=_UniffiFfiConverterBoolean.read(buf),
+            nostr_cold_contact_enabled=_UniffiFfiConverterBoolean.read(buf),
         )
 
     @staticmethod
@@ -5712,6 +5791,7 @@ class _UniffiFfiConverterTypeTransportConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.check_lower(value.reticulum_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.nostr_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.nostr_sealing_enabled)
+        _UniffiFfiConverterBoolean.check_lower(value.nostr_cold_contact_enabled)
 
     @staticmethod
     def write(value, buf):
@@ -5721,6 +5801,7 @@ class _UniffiFfiConverterTypeTransportConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.reticulum_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.nostr_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.nostr_sealing_enabled, buf)
+        _UniffiFfiConverterBoolean.write(value.nostr_cold_contact_enabled, buf)
 
 
 
@@ -8599,6 +8680,31 @@ class _UniffiFfiConverterOptionalTypeNostrMessage(_UniffiConverterRustBuffer):
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
+class _UniffiFfiConverterOptionalTypeNostrQuery(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeNostrQuery.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeNostrQuery.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeNostrQuery.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 class _UniffiFfiConverterOptionalTypeReticulumMessage(_UniffiConverterRustBuffer):
     @classmethod
     def check_lower(cls, value):
@@ -9085,6 +9191,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def nostr_get_next_message(self, ) -> typing.Optional[NostrMessage]:
         raise NotImplementedError
+    def nostr_get_next_query(self, ) -> typing.Optional[NostrQuery]:
+        raise NotImplementedError
     def nostr_get_public_key(self, ) -> typing.Optional[str]:
         raise NotImplementedError
     def nostr_get_subscription_filter(self, subscription_id: str) -> typing.Optional[str]:
@@ -9092,6 +9200,10 @@ class OfflineProtocolProtocol(typing.Protocol):
     def nostr_message_received(self, sender_id: str,data: typing.List[int]) -> None:
         raise NotImplementedError
     def nostr_message_received_at(self, sender_id: str,data: typing.List[int],created_at: int) -> None:
+        raise NotImplementedError
+    def nostr_query_completed(self, query_id: str) -> None:
+        raise NotImplementedError
+    def nostr_query_event_received(self, query_id: str,event_json: str) -> None:
         raise NotImplementedError
     def nostr_send_failed(self, message_id: str) -> None:
         raise NotImplementedError
@@ -10592,6 +10704,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def nostr_get_next_query(self, ) -> typing.Optional[NostrQuery]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalTypeNostrQuery.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_query,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def nostr_get_public_key(self, ) -> typing.Optional[str]:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10655,6 +10779,39 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def nostr_query_completed(self, query_id: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(query_id)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(query_id),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def nostr_query_event_received(self, query_id: str,event_json: str) -> None:
+        
+        _UniffiFfiConverterString.check_lower(query_id)
+        
+        _UniffiFfiConverterString.check_lower(event_json)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(query_id),
+            _UniffiFfiConverterString.lower(event_json),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -11787,6 +11944,7 @@ __all__ = [
     "NetworkNode",
     "NetworkTopology",
     "NostrMessage",
+    "NostrQuery",
     "PathConfig",
     "PeerDevice",
     "ProtocolConfig",

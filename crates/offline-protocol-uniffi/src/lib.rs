@@ -1932,6 +1932,8 @@ pub struct TransportConfig {
     pub nostr_enabled: bool,
     /// See [`ProtocolConfig::nostr_sealing_enabled`].
     pub nostr_sealing_enabled: bool,
+    /// See [`ProtocolConfig::nostr_cold_contact_enabled`].
+    pub nostr_cold_contact_enabled: bool,
 }
 
 /// Encryption configuration for automatic MLS handling
@@ -2032,6 +2034,11 @@ pub struct ProtocolConfig {
     /// `TransportConfig::nostr_sealing_enabled` — unlike the negotiated
     /// switches, this one is safe to flip on a single device.
     pub nostr_sealing_enabled: bool,
+    /// Kill switch for Nostr key-package publication and peer resolution
+    /// (default on). See the UDL dictionary and
+    /// `TransportConfig::nostr_cold_contact_enabled` for what it buys and what
+    /// it costs.
+    pub nostr_cold_contact_enabled: bool,
     /// Kill switch for the compact MLS envelope (default on). See the UDL
     /// dictionary and `EncryptionConfig::compact_envelope_enabled` for
     /// semantics.
@@ -2067,6 +2074,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.transport.reticulum_enabled = config.reticulum_enabled;
         core_config.transport.nostr_enabled = config.nostr_enabled;
         core_config.transport.nostr_sealing_enabled = config.nostr_sealing_enabled;
+        core_config.transport.nostr_cold_contact_enabled = config.nostr_cold_contact_enabled;
         core_config.transport.binary_wire_enabled = config.binary_wire_enabled;
         core_config.encryption.compact_envelope_enabled = config.compact_envelope_enabled;
         core_config.encryption.rich_payload_enabled = config.rich_payload_enabled;
@@ -2218,6 +2226,21 @@ pub struct NostrMessage {
     /// Complete signed Nostr event JSON: `["EVENT", {...}]`.
     /// The platform should send this string directly over the WebSocket.
     pub event_json: String,
+}
+
+/// A relay query the platform should issue to fetch a peer's published
+/// key-package records.
+///
+/// `query_id` is both the correlation id and the NIP-01 subscription id: send
+/// `req_json` verbatim, route matching `["EVENT", query_id, {...}]` events back
+/// via `nostr_query_event_received`, and on `["EOSE", query_id]` send
+/// `["CLOSE", query_id]` and call `nostr_query_completed`.
+#[derive(Debug, Clone)]
+pub struct NostrQuery {
+    /// Correlation id, and the NIP-01 subscription id to use verbatim.
+    pub query_id: String,
+    /// Complete `["REQ", ...]` JSON to send to the relays.
+    pub req_json: String,
 }
 
 /// Internal state for BLE operations
@@ -4214,6 +4237,60 @@ impl OfflineProtocol {
         });
     }
 
+    /// Returns the next pending key-package resolution query, if any.
+    ///
+    /// Unlike `nostr_get_next_message` this is *not* gated on the transport
+    /// reporting itself connected: the platform only calls it while it has a
+    /// relay to send on, and gating here would silently swallow a query minted
+    /// during a brief status flap, leaving the peer on the bootstrap leg until
+    /// the rate limit lapses.
+    pub fn nostr_get_next_query(&self) -> Option<NostrQuery> {
+        self.with_nostr_transport(|nostr| match nostr.next_query() {
+            Ok(Some(query)) => Some(NostrQuery {
+                query_id: query.query_id,
+                req_json: query.req_json,
+            }),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to build a Nostr resolution query");
+                None
+            }
+        })
+        .flatten()
+    }
+
+    /// Delivers one event received on a resolution query's subscription.
+    ///
+    /// Events that do not open — a foreign publisher squatting the queried
+    /// peer's routing tag, a wrong kind, a corrupt payload — are dropped
+    /// silently rather than reported as errors. A public tag returns whatever
+    /// the relay holds there, so those are ordinary, not exceptional.
+    pub fn nostr_query_event_received(
+        &self,
+        query_id: String,
+        event_json: String,
+    ) -> Result<(), ProtocolError> {
+        let opened = self
+            .with_nostr_transport(|nostr| nostr.open_query_event(&query_id, &event_json))
+            .transpose()
+            .map_err(|e| ProtocolError::TransportError(e.to_string()))?
+            .flatten();
+
+        let Some((_author_pubkey, plaintext)) = opened else {
+            return Ok(());
+        };
+
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .handle_resolved_key_package(&plaintext)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Releases a resolution query after the relay's end-of-stored-events.
+    pub fn nostr_query_completed(&self, query_id: String) {
+        self.with_nostr_transport(|nostr| nostr.complete_query(&query_id));
+    }
+
     /// Called by the platform when publishing a Nostr event fails.
     pub fn nostr_send_failed(&self, message_id: String) {
         self.nostr_send_failed_with_reason(
@@ -5971,6 +6048,7 @@ mod tests {
         ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6003,6 +6081,7 @@ mod tests {
         ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6355,6 +6434,7 @@ mod tests {
         ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6680,6 +6760,7 @@ mod tests {
         let sender_config = ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6709,6 +6790,7 @@ mod tests {
         let receiver_config = ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6739,6 +6821,7 @@ mod tests {
         let sender_config = ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6768,6 +6851,7 @@ mod tests {
         let receiver_config = ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6805,6 +6889,7 @@ mod tests {
         let config = ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6858,6 +6943,7 @@ mod tests {
         let sender = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6946,6 +7032,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6976,6 +7063,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7005,6 +7093,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7038,6 +7127,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7086,6 +7176,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7195,6 +7286,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7276,6 +7368,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7303,6 +7396,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7463,6 +7557,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7497,6 +7592,7 @@ mod tests {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7549,6 +7645,7 @@ mod tests {
         let owner = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7569,6 +7666,7 @@ mod tests {
         let peer = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
+            nostr_cold_contact_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,

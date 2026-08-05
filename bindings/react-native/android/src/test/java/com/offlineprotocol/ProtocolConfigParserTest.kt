@@ -62,6 +62,39 @@ class ProtocolConfigParserTest {
     }
 
     @Test
+    fun nostrColdContactDefaultsOnWhenOmitted() {
+        assertTrue(parse("""{"appId":"app","userId":"alice"}""").nostrColdContactEnabled)
+    }
+
+    @Test
+    fun nostrColdContactReadsBothShapes() {
+        // Same nested-home-plus-flat-fallback contract as sealing: the JS
+        // wrapper flattens the nested key, so both must parse or an app that
+        // deliberately turned publication off keeps publishing.
+        assertFalse(
+            parse(
+                """{"appId":"app","userId":"alice","transports":{"nostr":{"coldContactEnabled":false}}}"""
+            ).nostrColdContactEnabled
+        )
+        assertFalse(
+            parse("""{"appId":"app","userId":"alice","nostrColdContactEnabled":false}""")
+                .nostrColdContactEnabled
+        )
+        assertFalse(
+            parse("""{"appId":"app","userId":"alice","nostr_cold_contact_enabled":false}""")
+                .nostrColdContactEnabled
+        )
+    }
+
+    @Test
+    fun nestedNostrColdContactWinsOverTopLevel() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","nostrColdContactEnabled":false,"transports":{"nostr":{"coldContactEnabled":true}}}"""
+        )
+        assertTrue(config.nostrColdContactEnabled)
+    }
+
+    @Test
     fun nestedNostrSealingWinsOverTopLevel() {
         val config = parse(
             """{"appId":"app","userId":"alice","nostrSealingEnabled":false,"transports":{"nostr":{"sealingEnabled":true}}}"""

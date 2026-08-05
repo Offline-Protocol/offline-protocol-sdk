@@ -229,8 +229,22 @@ impl MlsManager {
     // KEY PACKAGE MANAGEMENT
     // ========================================================================
 
-    /// Generates a new key package for distribution.
+    /// Generates a new key package for distribution over the push path.
     pub fn generate_key_package(&self) -> Result<KeyPackageBundle> {
+        self.generate_key_package_inner(false)
+    }
+
+    /// Generates a key package reserved for a publication slot.
+    ///
+    /// Distinct from [`Self::generate_key_package`] only in that the result is
+    /// withheld from [`Self::get_or_create_key_package`] — see
+    /// [`KeyPackageBundle::reserved_for_publication`] for why sharing one
+    /// package between a published record and a pushed exchange corrupts both.
+    pub fn generate_publication_key_package(&self) -> Result<KeyPackageBundle> {
+        self.generate_key_package_inner(true)
+    }
+
+    fn generate_key_package_inner(&self, reserved: bool) -> Result<KeyPackageBundle> {
         let credential = self.get_credential()?;
         let signature_keys = self.get_signer()?;
 
@@ -251,12 +265,13 @@ impl MlsManager {
         let package_id = Uuid::new_v4().to_string();
 
         let key_type = StorageKeyType::KeyPackage.as_str();
-        let bundle = KeyPackageBundle::new(
+        let mut bundle = KeyPackageBundle::new(
             package_id,
             self.user_id.clone(),
             key_package_data,
             DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
         );
+        bundle.reserved_for_publication = reserved;
         let serialized =
             serde_json::to_vec(&bundle).map_err(|e| MlsError::Serialization(e.to_string()))?;
         self.storage
@@ -266,18 +281,51 @@ impl MlsManager {
         Ok(bundle)
     }
 
-    /// Gets an existing key package or generates a new one.
+    /// Gets an existing key package or generates a new one, for the push path.
+    ///
+    /// Skips packages reserved for publication slots: handing one out here
+    /// would let a pushed-to peer and a stranger who fetched the published
+    /// record race for the same single-use init key, and the loser's Welcome
+    /// is unprocessable.
     pub fn get_or_create_key_package(&self) -> Result<KeyPackageBundle> {
         let key_type = StorageKeyType::KeyPackage.as_str();
         let packages = self.storage.list_keys(key_type)?;
 
         for package_id in packages {
             if let Some(bundle) = self.load_stored_key_package(&package_id)? {
+                if bundle.reserved_for_publication {
+                    continue;
+                }
                 return Ok(bundle);
             }
         }
 
         self.generate_key_package()
+    }
+
+    /// Loads a specific key package this device owns, or `None` if it is gone.
+    ///
+    /// `None` is the *consumption signal* the publication slots run on: the
+    /// load prunes and reports missing any package whose private init key has
+    /// left the OpenMLS provider, which is exactly what processing a Welcome
+    /// built against it does. A slot whose package reads back `None` has been
+    /// used by somebody and needs replacing.
+    pub fn key_package_by_id(&self, package_id: &str) -> Result<Option<KeyPackageBundle>> {
+        self.load_stored_key_package(package_id)
+    }
+
+    /// Deletes a key package this device owns.
+    ///
+    /// Exists to reclaim a *publication* package that was minted but whose
+    /// record was never built or queued. Such a package is reserved, so
+    /// [`Self::get_or_create_key_package`] will never hand it out, and no slot
+    /// references it — nothing else would remove it before its lifetime runs
+    /// out, so a repeatedly failing publish would otherwise strand fresh
+    /// provider key material every refresh.
+    pub fn delete_key_package(&self, package_id: &str) -> Result<()> {
+        self.storage
+            .delete(StorageKeyType::KeyPackage.as_str(), package_id)?;
+        Ok(())
     }
 
     /// Imports a contact's key package for later use.
@@ -1353,6 +1401,58 @@ mod tests {
         assert_eq!(package.user_id, "alice");
         assert!(!package.key_package_data.is_empty());
         assert!(!package.is_expired());
+    }
+
+    /// The push path must never hand out a package standing in a published
+    /// slot. If it did, the pushed-to peer and a stranger who fetched the
+    /// record would race for the same single-use init key, and the loser's
+    /// Welcome is unprocessable.
+    #[test]
+    fn test_get_or_create_never_returns_a_publication_package() {
+        let manager = create_test_manager("alice");
+        let reserved = manager.generate_publication_key_package().unwrap();
+        assert!(reserved.reserved_for_publication);
+
+        let pushed = manager.get_or_create_key_package().unwrap();
+        assert_ne!(
+            pushed.package_id, reserved.package_id,
+            "the push path took the package a published record is standing on"
+        );
+        assert!(!pushed.reserved_for_publication);
+
+        // And it stays stable across calls — the reserved one is skipped every
+        // time, not just minted around once.
+        let pushed_again = manager.get_or_create_key_package().unwrap();
+        assert_eq!(pushed.package_id, pushed_again.package_id);
+    }
+
+    /// `key_package_by_id` returning `None` is the consumption signal the
+    /// publication slots run on, so it must distinguish a package this device
+    /// still holds from one it does not.
+    #[test]
+    fn test_key_package_by_id_reports_presence() {
+        let manager = create_test_manager("alice");
+        let bundle = manager.generate_publication_key_package().unwrap();
+
+        let found = manager.key_package_by_id(&bundle.package_id).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().package_id, bundle.package_id);
+
+        assert!(manager
+            .key_package_by_id("no-such-package")
+            .unwrap()
+            .is_none());
+    }
+
+    /// Publication slots are independent: two slots must never end up holding
+    /// the same package, or one Welcome consumes both.
+    #[test]
+    fn test_publication_packages_are_distinct_per_slot() {
+        let manager = create_test_manager("alice");
+        let a = manager.generate_publication_key_package().unwrap();
+        let b = manager.generate_publication_key_package().unwrap();
+        assert_ne!(a.package_id, b.package_id);
+        assert_ne!(a.key_package_data, b.key_package_data);
     }
 
     #[test]

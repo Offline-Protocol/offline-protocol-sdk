@@ -70,6 +70,12 @@ public class NostrManager: NSObject, TransportManager {
     // Guarded by stateLock.
     private var _pendingEventConfirmations: [String: String] = [:]
 
+    // Subscription ids belonging to in-flight key-package resolution queries,
+    // as opposed to the standing message subscription. Events arriving under
+    // one of these are records fetched on the transport's behalf, not inbound
+    // messages, and go to a different entry point. Guarded by stateLock.
+    private var _activeQueryIds: Set<String> = []
+
     private func reconnectAttempts(for relay: String) -> Int {
         stateLock.lock(); defer { stateLock.unlock() }
         return _reconnectAttempts[relay] ?? 0
@@ -416,6 +422,7 @@ public class NostrManager: NSObject, TransportManager {
                 guard let self = self else { return }
                 self.stopMessagePolling()
                 self.stopPingTimer()
+                self.releaseActiveQueries()
                 try? self.protocolInstance.nostrStatusChanged(isConnected: false)
                 if !self.autoReconnect {
                     self.updateState(.stopped)
@@ -514,6 +521,15 @@ public class NostrManager: NSObject, TransportManager {
                 return
             }
 
+            // Route key-package resolution answers away from the message path
+            // *before* anything else looks at them. They are not messages: the
+            // content is sealed to a different key, and the self-event filter
+            // below would be meaningless for a record we deliberately fetched.
+            if let subId = json[1] as? String, isActiveQuery(subId) {
+                handleQueryEvent(subscriptionId: subId, event: event)
+                return
+            }
+
             // Skip events we published ourselves.
             //
             // This only ever catches the LEGACY unsealed form. Sealed frames
@@ -606,8 +622,15 @@ public class NostrManager: NSObject, TransportManager {
             }
 
         case "EOSE":
-            // End of stored events — subscription is now live
-            emitDiagnostic("debug", "End of stored events received")
+            // End of stored events. For the standing message subscription this
+            // just means "live from here"; for a resolution query it means the
+            // relay has given us everything it holds, so the query is done and
+            // its subscription should not stay open.
+            if json.count >= 2, let subId = json[1] as? String, isActiveQuery(subId) {
+                finishQuery(subscriptionId: subId)
+            } else {
+                emitDiagnostic("debug", "End of stored events received")
+            }
 
         case "NOTICE":
             if json.count >= 2, let message = json[1] as? String {
@@ -616,6 +639,151 @@ public class NostrManager: NSObject, TransportManager {
 
         default:
             emitDiagnostic("debug", "Unknown Nostr message type", context: ["type": messageType])
+        }
+    }
+
+    // MARK: - Key-Package Resolution Queries
+
+    private func isActiveQuery(_ subscriptionId: String) -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _activeQueryIds.contains(subscriptionId)
+    }
+
+    /// Drains queries the transport wants issued and sends each REQ to every
+    /// connected relay.
+    ///
+    /// Broadcast rather than primary-only, unlike an outgoing event: a peer's
+    /// published records may sit on relays we share with them but not with the
+    /// first one in our list, and there is no acknowledgement that would tell
+    /// us we asked the wrong one. Duplicate answers are free — the transport
+    /// opens each independently and the engine deduplicates the key package.
+    private func pollAndSendQueries() {
+        guard isConnected else { return }
+
+        var issued = 0
+        let maxBatchSize = 5
+
+        while issued < maxBatchSize {
+            guard let query = protocolInstance.nostrGetNextQuery() else { break }
+            issued += 1
+
+            let relays: [String] = connectionQueue.sync {
+                relayConnections.compactMap { (url, _) in
+                    relayConnected[url] == true ? url : nil
+                }
+            }
+
+            guard !relays.isEmpty else {
+                // Nothing to ask. Release it rather than leaving the transport
+                // holding an entry no answer will ever arrive for; the next
+                // send to that peer re-queues it once the rate limit lapses.
+                protocolInstance.nostrQueryCompleted(queryId: query.queryId)
+                break
+            }
+
+            stateLock.lock()
+            _activeQueryIds.insert(query.queryId)
+            stateLock.unlock()
+
+            for relayUrl in relays {
+                sendToRelay(relayUrl, message: query.reqJson)
+            }
+
+            emitDiagnostic("debug", "Issued Nostr key-package query", context: [
+                "queryId": query.queryId,
+                "relays": relays.count
+            ])
+        }
+    }
+
+    private func handleQueryEvent(subscriptionId: String, event: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: event),
+              let eventJson = String(data: data, encoding: .utf8) else {
+            return
+        }
+
+        messageQueue.async { [weak self] in
+            guard let self = self else { return }
+            do {
+                try self.protocolInstance.nostrQueryEventReceived(
+                    queryId: subscriptionId,
+                    eventJson: eventJson
+                )
+            } catch {
+                self.emitDiagnostic("error", "Error processing Nostr key-package record", context: [
+                    "error": error.localizedDescription
+                ])
+            }
+        }
+    }
+
+    /// Closes a finished query on every relay and releases it in the transport.
+    ///
+    /// A query is broadcast, so more than one relay answers it and each sends
+    /// its own EOSE. The first one closes it: leaving the subscription open for
+    /// the stragglers would keep a live filter on a peer's routing tag for the
+    /// life of the connection, which is precisely the standing signal this
+    /// design avoids elsewhere. A later relay's records are simply missed, and
+    /// the next send to that peer re-queues the lookup.
+    ///
+    /// Releasing the query in the transport is deferred onto `messageQueue`,
+    /// and that is load-bearing rather than tidiness. A relay sends its stored
+    /// events immediately before EOSE, and `handleQueryEvent` hands each to
+    /// `messageQueue` asynchronously — so releasing here, synchronously on the
+    /// WebSocket receive path, can drop the `activeQueries` entry while this
+    /// query's own records are still queued behind it. Those records then find
+    /// an unknown query id and are discarded: cold contact silently fails to
+    /// upgrade, and the peer waits out the resolution rate limit before another
+    /// attempt. `messageQueue` is serial, so hopping onto it puts the release
+    /// strictly after every event already enqueued. The `_activeQueryIds`
+    /// removal and the CLOSE stay synchronous — they must beat the *next*
+    /// relay's EOSE, and they touch nothing the engine owns.
+    /// Releases every in-flight resolution query after the relays drop.
+    ///
+    /// A query whose relays went away before EOSE never finishes: nothing will
+    /// ever answer it, so without this the bridge holds its subscription id for
+    /// the life of the process and the transport holds the entry until its own
+    /// cap evicts something — possibly a live query. Letting them go costs
+    /// nothing, since the next send to those peers re-queues the lookup once
+    /// the resolution rate limit lapses.
+    ///
+    /// Called on `messageQueue` like the rest of the release path, so it lands
+    /// after any events already enqueued for these queries.
+    private func releaseActiveQueries() {
+        stateLock.lock()
+        let queryIds = _activeQueryIds
+        _activeQueryIds.removeAll()
+        stateLock.unlock()
+
+        guard !queryIds.isEmpty else { return }
+
+        for queryId in queryIds {
+            protocolInstance.nostrQueryCompleted(queryId: queryId)
+        }
+
+        emitDiagnostic("debug", "Released in-flight Nostr key-package queries", context: [
+            "count": queryIds.count
+        ])
+    }
+
+    private func finishQuery(subscriptionId: String) {
+        stateLock.lock()
+        let wasActive = _activeQueryIds.remove(subscriptionId) != nil
+        stateLock.unlock()
+        guard wasActive else { return }
+
+        let closeMessage = "[\"CLOSE\",\"\(subscriptionId)\"]"
+        let relays: [String] = connectionQueue.sync {
+            relayConnections.compactMap { (url, _) in
+                relayConnected[url] == true ? url : nil
+            }
+        }
+        for relayUrl in relays {
+            sendToRelay(relayUrl, message: closeMessage)
+        }
+
+        messageQueue.async { [weak self] in
+            self?.protocolInstance.nostrQueryCompleted(queryId: subscriptionId)
         }
     }
 
@@ -673,6 +841,7 @@ public class NostrManager: NSObject, TransportManager {
         timer.schedule(deadline: .now(), repeating: MESSAGE_POLL_INTERVAL)
         timer.setEventHandler { [weak self] in
             self?.pollAndSendMessages()
+            self?.pollAndSendQueries()
         }
         timer.resume()
         messageTimer = timer

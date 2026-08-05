@@ -70,6 +70,7 @@ class NostrManager(
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendMessages()
+            pollAndSendQueries()
             if (state == TransportState.RUNNING && isConnected.get()) {
                 ioHandler?.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
             }
@@ -100,6 +101,12 @@ class NostrManager(
     // Pending relay confirmations: Nostr event_id → protocol message_id.
     // Populated when a WebSocket send succeeds; removed on relay ["OK", ...].
     private val pendingEventConfirmations = mutableMapOf<String, String>()
+
+    // Subscription ids belonging to in-flight key-package resolution queries,
+    // as opposed to the standing message subscription. Events arriving under
+    // one of these are records fetched on the transport's behalf, not inbound
+    // messages, and go to a different entry point.
+    private val activeQueryIds = mutableSetOf<String>()
     private val pendingEventLock = Object()
 
     // Failure tracking for DORS
@@ -426,6 +433,7 @@ class NostrManager(
             // Lost all connections
             mainHandler.post {
                 stopMessagePolling()
+                releaseActiveQueries()
                 try {
                     protocol.nostrStatusChanged(false)
                 } catch (e: Exception) {
@@ -516,6 +524,17 @@ class NostrManager(
                 val content = event.optString("content", "")
 
                 if (senderPubkey.isEmpty() || content.isEmpty()) return
+
+                // Route key-package resolution answers away from the message
+                // path *before* anything else looks at them. They are not
+                // messages: the content is sealed to a different key, and the
+                // self-event filter below would be meaningless for a record we
+                // deliberately fetched.
+                val eventSubId = json.optString(1, "")
+                if (eventSubId.isNotEmpty() && isActiveQuery(eventSubId)) {
+                    handleQueryEvent(eventSubId, event)
+                    return
+                }
 
                 // Skip events we published ourselves.
                 //
@@ -608,7 +627,16 @@ class NostrManager(
             }
 
             "EOSE" -> {
-                emitDiagnostic("debug", "End of stored events received")
+                // End of stored events. For the standing message subscription
+                // this just means "live from here"; for a resolution query it
+                // means the relay has given us everything it holds, so the
+                // query is done and its subscription should not stay open.
+                val eoseSubId = if (json.length() >= 2) json.optString(1, "") else ""
+                if (eoseSubId.isNotEmpty() && isActiveQuery(eoseSubId)) {
+                    finishQuery(eoseSubId)
+                } else {
+                    emitDiagnostic("debug", "End of stored events received")
+                }
             }
 
             "NOTICE" -> {
@@ -661,6 +689,133 @@ class NostrManager(
             emitDiagnostic("error", "Error polling Nostr messages", mapOf(
                 "error" to (e.message ?: "unknown")
             ))
+        }
+    }
+
+    // MARK: - Key-Package Resolution Queries
+
+    private fun isActiveQuery(subscriptionId: String): Boolean =
+        synchronized(relayLock) { activeQueryIds.contains(subscriptionId) }
+
+    /**
+     * Drains queries the transport wants issued and sends each REQ to every
+     * connected relay.
+     *
+     * Broadcast rather than primary-only, unlike an outgoing event: a peer's
+     * published records may sit on relays we share with them but not with the
+     * first one in our list, and there is no acknowledgement that would tell us
+     * we asked the wrong one. Duplicate answers are free — the transport opens
+     * each independently and the engine deduplicates the key package.
+     */
+    private fun pollAndSendQueries() {
+        if (!isConnected.get()) return
+
+        try {
+            var issued = 0
+            val maxBatchSize = 5
+
+            while (issued < maxBatchSize) {
+                val query = protocol.nostrGetNextQuery() ?: break
+                issued++
+
+                val connectedRelays = synchronized(relayLock) {
+                    relayWebSockets.filter { relayConnected[it.key] == true }
+                }
+
+                if (connectedRelays.isEmpty()) {
+                    // Nothing to ask. Release it rather than leaving the
+                    // transport holding an entry no answer will ever arrive
+                    // for; the next send to that peer re-queues it once the
+                    // rate limit lapses.
+                    protocol.nostrQueryCompleted(query.queryId)
+                    break
+                }
+
+                synchronized(relayLock) { activeQueryIds.add(query.queryId) }
+
+                for ((_, socket) in connectedRelays) {
+                    socket.send(query.reqJson)
+                }
+
+                emitDiagnostic("debug", "Issued Nostr key-package query", mapOf(
+                    "queryId" to query.queryId,
+                    "relays" to connectedRelays.size
+                ))
+            }
+        } catch (e: Exception) {
+            emitDiagnostic("error", "Error polling Nostr key-package queries", mapOf(
+                "error" to (e.message ?: "unknown")
+            ))
+        }
+    }
+
+    private fun handleQueryEvent(subscriptionId: String, event: JSONObject) {
+        try {
+            protocol.nostrQueryEventReceived(subscriptionId, event.toString())
+        } catch (e: Exception) {
+            emitDiagnostic("error", "Error processing Nostr key-package record", mapOf(
+                "error" to (e.message ?: "unknown")
+            ))
+        }
+    }
+
+    /**
+     * Closes a finished query on every relay and releases it in the transport.
+     *
+     * A query is broadcast, so more than one relay answers it and each sends
+     * its own EOSE. The first one closes it: leaving the subscription open for
+     * the stragglers would keep a live filter on a peer's routing tag for the
+     * life of the connection, which is precisely the standing signal this
+     * design avoids elsewhere. A later relay's records are simply missed, and
+     * the next send to that peer re-queues the lookup.
+     */
+    /**
+     * Releases every in-flight resolution query after the relays drop.
+     *
+     * A query whose relays went away before EOSE never finishes: nothing will
+     * ever answer it, so without this the bridge holds its subscription id for
+     * the life of the process and the transport holds the entry until its own
+     * cap evicts something — possibly a live query. Letting them go costs
+     * nothing, since the next send to those peers re-queues the lookup once the
+     * resolution rate limit lapses.
+     */
+    private fun releaseActiveQueries() {
+        val queryIds = synchronized(relayLock) {
+            val ids = activeQueryIds.toList()
+            activeQueryIds.clear()
+            ids
+        }
+        if (queryIds.isEmpty()) return
+
+        for (queryId in queryIds) {
+            try {
+                protocol.nostrQueryCompleted(queryId)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to release Nostr query $queryId", e)
+            }
+        }
+
+        emitDiagnostic("debug", "Released in-flight Nostr key-package queries", mapOf(
+            "count" to queryIds.size
+        ))
+    }
+
+    private fun finishQuery(subscriptionId: String) {
+        val wasActive = synchronized(relayLock) { activeQueryIds.remove(subscriptionId) }
+        if (!wasActive) return
+
+        val closeMessage = JSONArray().put("CLOSE").put(subscriptionId).toString()
+        val connectedRelays = synchronized(relayLock) {
+            relayWebSockets.filter { relayConnected[it.key] == true }
+        }
+        for ((_, socket) in connectedRelays) {
+            socket.send(closeMessage)
+        }
+
+        try {
+            protocol.nostrQueryCompleted(subscriptionId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to release Nostr query $subscriptionId", e)
         }
     }
 
