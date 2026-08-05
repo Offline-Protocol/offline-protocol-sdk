@@ -237,6 +237,18 @@ class OfflineProtocolModule: RCTEventEmitter {
         let binaryWireEnabled = raw["binaryWireEnabled"] as? Bool
             ?? raw["binary_wire_enabled"] as? Bool ?? true
 
+        // Nostr sealing (kill switch, default on). Nested home under
+        // `transports.nostr.sealingEnabled` — where the rest of the Nostr
+        // transport settings live — then the flat key, both cases. Same
+        // nested-wins-over-flat rule as `encryption` and `group`; mirrors
+        // ProtocolConfigParser.kt, keep in sync.
+        let nostrRaw = (raw["transports"] as? [String: Any])?["nostr"] as? [String: Any]
+        let nostrSealingEnabled = nostrRaw?["sealingEnabled"] as? Bool
+            ?? nostrRaw?["sealing_enabled"] as? Bool
+            ?? raw["nostrSealingEnabled"] as? Bool
+            ?? raw["nostr_sealing_enabled"] as? Bool
+            ?? true
+
         // Group section (nested home under `group`, then top level, both
         // cases — same shape rules as `encryption`; mirrors
         // ProtocolConfigParser.kt, keep in sync). These were UniFFI-only
@@ -292,6 +304,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             groupRelayBroadcastEnabled: groupRelayBroadcastEnabled,
             groupEnforceAdminCommits: groupEnforceAdminCommits,
             binaryWireEnabled: binaryWireEnabled,
+            nostrSealingEnabled: nostrSealingEnabled,
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
             richPayloadEnabled: encryption.richPayloadEnabled,
             cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled

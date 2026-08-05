@@ -10,7 +10,8 @@ use crate::telemetry::{
 use chrono::Duration as ChronoDuration;
 use offline_protocol_core::{AppId, ContentType, MessagePriority, ServiceDescriptor, UserId};
 use offline_protocol_transport::{
-    mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType,
+    mock::MockTransport, nostr::NostrTransport, nostr_crypto::routing_tag_for_device_id, Transport,
+    TransportMetrics, TransportStatus, TransportType,
 };
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
@@ -1828,6 +1829,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         wire_versions,
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -1910,6 +1912,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         wire_versions: Vec::new(),
         env_versions,
         rich_versions: Vec::new(),
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -2083,6 +2086,7 @@ pub(crate) fn feed_key_package_with_rich(
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions,
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -2204,6 +2208,7 @@ fn feed_key_package_with_caps(
         wire_versions: Vec::new(),
         env_versions,
         rich_versions,
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -2228,6 +2233,65 @@ fn protocol_with_mls_storage(storage: Arc<InMemoryStorage>) -> OfflineProtocol {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls_for_test(storage).unwrap();
     protocol
+}
+
+/// A protocol instance with a live `NostrTransport` installed, as the bindings
+/// layer builds it when `nostr_enabled` is set.
+#[cfg(test)]
+fn protocol_with_nostr(user_id: &str) -> OfflineProtocol {
+    let mut config = create_test_config();
+    config.user_id = user_id.to_string();
+    config.encryption.enabled = true;
+    config.transport.nostr_enabled = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let nostr = NostrTransport::new(user_id).unwrap();
+    nostr.on_status_changed(TransportStatus::Available);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Nostr, Box::new(nostr));
+    protocol
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    protocol
+}
+
+/// Borrows the installed `NostrTransport`.
+#[cfg(test)]
+fn nostr_transport_of(protocol: &OfflineProtocol) -> Arc<dyn Transport> {
+    protocol
+        .transport_manager
+        .get_transport(TransportType::Nostr)
+        .expect("Nostr transport installed")
+}
+
+/// Downcasts the shared handle from [`nostr_transport_of`].
+#[cfg(test)]
+fn as_nostr(transport: &Arc<dyn Transport>) -> &NostrTransport {
+    transport
+        .as_any()
+        .downcast_ref::<NostrTransport>()
+        .expect("Nostr transport")
+}
+
+/// Queues one message to `recipient`, drains the signed event, and returns
+/// `(base64-decoded content, wrapper pubkey)` — the two inputs a recipient's
+/// receive path gets from the relay.
+#[cfg(test)]
+fn seal_one_message(nostr: &NostrTransport, recipient: &str) -> (Vec<u8>, String) {
+    use base64::Engine;
+    let message = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new(recipient).unwrap(),
+        AppId::new("test-app").unwrap(),
+        "hello",
+    );
+    nostr.send(&message).unwrap();
+    let signed = nostr.get_next_signed_event().unwrap().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&signed.event_json).unwrap();
+    let content = base64::engine::general_purpose::STANDARD
+        .decode(parsed[1]["content"].as_str().unwrap())
+        .unwrap();
+    (content, parsed[1]["pubkey"].as_str().unwrap().to_string())
 }
 
 #[test]
@@ -2255,6 +2319,283 @@ fn peer_capabilities_persist_across_restart() {
         "rich payload capability must survive a restart"
     );
     assert!(restarted.peer_supports_rich_payload("peer"));
+}
+
+/// Feeds a key package advertising a Nostr public key, as a peer with the
+/// Nostr transport enabled would.
+#[cfg(test)]
+fn key_package_message_with_nostr_pubkey(
+    sender: &str,
+    recipient: &str,
+    nostr_pubkey: Option<&str>,
+) -> Message {
+    let payload = KeyPackagePayload {
+        user_id: sender.to_string(),
+        key_package_data: vec![1, 2, 3, 4],
+        remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+        timestamp_ms: 0,
+        session_reset: false,
+        wire_versions: Vec::new(),
+        env_versions: Vec::new(),
+        rich_versions: Vec::new(),
+        nostr_pubkey: nostr_pubkey.map(str::to_string),
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::KEY_PACKAGE,
+        serde_json::to_string(&payload).unwrap()
+    );
+    Message::new(
+        UserId::new(sender).unwrap(),
+        UserId::new(recipient).unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    )
+}
+
+/// Feeds a key package that is **signed** by `sender`, as a real peer's is.
+///
+/// The signature is what makes `nostr_pubkey` usable: the handler consumes it
+/// as a sealing destination rather than a feature hint, so it is taken only
+/// from a frame the security gate actually verified. Signing here therefore
+/// exercises the real path; see
+/// `unsigned_key_package_cannot_set_or_clear_the_sealing_key` for the other
+/// half.
+#[cfg(test)]
+fn feed_key_package_with_nostr_pubkey(
+    protocol: &mut OfflineProtocol,
+    sender: &str,
+    nostr_pubkey: Option<&str>,
+) {
+    // A separate instance owning `sender`'s MLS identity, so the signature is
+    // produced the same way `send_key_package_to` produces it.
+    let mut peer = OfflineProtocol::new(create_test_config_for_user(sender)).unwrap();
+    peer.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let mut message = key_package_message_with_nostr_pubkey(sender, "user123", nostr_pubkey);
+    peer.sign_control_message(&mut message).unwrap();
+    assert!(
+        message.metadata.contains_key(CTRL_SIG_META_KEY),
+        "test premise: the key package must be signed"
+    );
+    protocol.process_internal_message(&message);
+}
+
+#[test]
+fn peer_nostr_pubkey_persists_across_restart() {
+    // Without the durable record, every restart would silently downgrade a
+    // known peer back to bootstrap-key sealing: the cached key package is
+    // deleted once a session exists, so nothing else would carry the key until
+    // the next live exchange — and the symptom is invisible, since delivery
+    // still works.
+    let storage = Arc::new(InMemoryStorage::new());
+    let pubkey = "ab".repeat(32);
+
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    feed_key_package_with_nostr_pubkey(&mut protocol, "peer", Some(&pubkey));
+
+    let restarted = protocol_with_mls_storage(storage);
+    let restored = restarted.load_peer_capabilities_record("peer").unwrap();
+    assert_eq!(restored.nostr_pubkey.as_deref(), Some(pubkey.as_str()));
+}
+
+#[test]
+fn peer_nostr_pubkey_reaches_the_nostr_transport() {
+    // The record is only useful if it lands where sealing reads it.
+    let mut protocol = protocol_with_nostr("user123");
+    let bob = NostrTransport::new("bob").unwrap();
+    bob.install_signing_secret(&[64u8; 32]).unwrap();
+    let bob_pubkey = bob.public_key_hex();
+
+    feed_key_package_with_nostr_pubkey(&mut protocol, "bob", Some(&bob_pubkey));
+
+    let handle = nostr_transport_of(&protocol);
+    let (sealed, wrapper_pubkey) = seal_one_message(as_nostr(&handle), "bob");
+
+    // Bob's install key opens it — which is only possible if the advertised
+    // key travelled from the key package to the transport's sealing map.
+    let plaintext = bob.unseal_event_payload(&wrapper_pubkey, &sealed);
+    assert_ne!(
+        plaintext.as_ref(),
+        sealed.as_slice(),
+        "frame was not sealed to Bob's install key"
+    );
+    assert_eq!(
+        bob.deserialize_message(&plaintext)
+            .unwrap()
+            .recipient
+            .as_str(),
+        "bob"
+    );
+
+    // And a *different* install of Bob's user id cannot: that is the whole
+    // difference between the steady state and the bootstrap leg.
+    let impostor = NostrTransport::new("bob").unwrap();
+    impostor.install_signing_secret(&[65u8; 32]).unwrap();
+    assert_eq!(
+        impostor
+            .unseal_event_payload(&wrapper_pubkey, &sealed)
+            .as_ref(),
+        sealed.as_slice()
+    );
+}
+
+#[test]
+fn unblock_clears_the_cached_peer_nostr_key() {
+    // The unblock clean slate declares everything learned about a peer stale.
+    // The Nostr sealing key lives in the transport rather than in one of the
+    // capability sets, so it needs its own clear — otherwise the durable
+    // record is deleted while sends keep sealing to the forgotten key.
+    let mut protocol = protocol_with_nostr("user123");
+    let bob = NostrTransport::new("bob").unwrap();
+    bob.install_signing_secret(&[70u8; 32]).unwrap();
+    feed_key_package_with_nostr_pubkey(&mut protocol, "bob", Some(&bob.public_key_hex()));
+
+    protocol.block_user("bob").unwrap();
+    protocol.unblock_user("bob").unwrap();
+
+    // Reverted to the bootstrap key, not to "unsealed" and not to a dead key:
+    // still a gift wrap, and readable by whatever install Bob is on now.
+    let handle = nostr_transport_of(&protocol);
+    let (sealed, wrapper_pubkey) = seal_one_message(as_nostr(&handle), "bob");
+    let fresh_install = NostrTransport::new("bob").unwrap();
+    fresh_install.install_signing_secret(&[71u8; 32]).unwrap();
+    let plaintext = fresh_install.unseal_event_payload(&wrapper_pubkey, &sealed);
+    assert_eq!(
+        fresh_install
+            .deserialize_message(&plaintext)
+            .unwrap()
+            .recipient
+            .as_str(),
+        "bob"
+    );
+}
+
+#[test]
+fn malformed_peer_nostr_pubkey_is_not_persisted() {
+    // The field is signature-bound, so this is shape validation rather than an
+    // authenticity check — but a malformed value must not reach a durable
+    // record or become a sealing destination.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+
+    for bad in ["", "zz", &"gg".repeat(32), &"ab".repeat(40)] {
+        feed_key_package_with_nostr_pubkey(&mut protocol, "peer", Some(bad));
+        assert!(
+            protocol
+                .load_peer_capabilities_record("peer")
+                .and_then(|c| c.nostr_pubkey)
+                .is_none(),
+            "malformed pubkey {bad:?} must not persist"
+        );
+    }
+}
+
+#[test]
+fn peer_nostr_pubkey_is_case_normalized() {
+    // `#p` values are lowercase hex by spec. Persisting a mixed-case duplicate
+    // would seal to a string the peer never advertised.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage);
+    feed_key_package_with_nostr_pubkey(&mut protocol, "peer", Some(&"AB".repeat(32)));
+
+    assert_eq!(
+        protocol
+            .load_peer_capabilities_record("peer")
+            .and_then(|c| c.nostr_pubkey)
+            .as_deref(),
+        Some("ab".repeat(32).as_str())
+    );
+}
+
+#[test]
+fn unsigned_key_package_cannot_set_or_clear_the_sealing_key() {
+    // The security gate accepts an *unsigned* control message from a peer it
+    // has never pinned (the TOFU first-contact window), so arriving in a key
+    // package is not on its own evidence of who sent it. That is tolerable for
+    // the capability lists — a wrong value costs a fallback — but not for
+    // `nostr_pubkey`: it is a public key we then seal envelope metadata *to*,
+    // so honouring an unsigned one would hand that metadata to whoever injected
+    // it, readable off a public relay, passively, for as long as the value
+    // stands. Requiring a signature costs nothing: a key package can only exist
+    // once MLS is initialized, and the send path signs unconditionally in that
+    // state.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage);
+    let attacker_key = "cd".repeat(32);
+
+    // 1. Unsigned, before anything is known: must not be adopted.
+    let unsigned = key_package_message_with_nostr_pubkey("peer", "user123", Some(&attacker_key));
+    assert!(
+        !unsigned.metadata.contains_key(CTRL_SIG_META_KEY),
+        "test premise: this frame is unsigned"
+    );
+    protocol.process_internal_message(&unsigned);
+    assert!(
+        protocol
+            .load_peer_capabilities_record("peer")
+            .and_then(|c| c.nostr_pubkey)
+            .is_none(),
+        "an unsigned key package must not set the sealing key"
+    );
+
+    // 2. The peer's real, signed package establishes the key.
+    let real_key = "ab".repeat(32);
+    feed_key_package_with_nostr_pubkey(&mut protocol, "peer", Some(&real_key));
+    assert_eq!(
+        protocol
+            .load_peer_capabilities_record("peer")
+            .and_then(|c| c.nostr_pubkey)
+            .as_deref(),
+        Some(real_key.as_str())
+    );
+
+    // 3. An unsigned package must not *clear* it either — a downgrade to the
+    //    publicly computable bootstrap key on demand is still an attack, so the
+    //    stored value is carried forward rather than overwritten. (Reaching
+    //    this at all takes an unpinned peer: once TOFU has pinned them, the
+    //    gate rejects unsigned frames outright as a signature downgrade.)
+    assert!(protocol.reset_tofu_for_peer("peer"));
+    let unsigned_clear = key_package_message_with_nostr_pubkey("peer", "user123", None);
+    protocol.process_internal_message(&unsigned_clear);
+    assert_eq!(
+        protocol
+            .load_peer_capabilities_record("peer")
+            .and_then(|c| c.nostr_pubkey)
+            .as_deref(),
+        Some(real_key.as_str()),
+        "an unsigned key package must not clear the sealing key"
+    );
+}
+
+#[test]
+fn outgoing_key_package_advertises_our_nostr_pubkey_only_when_nostr_is_on() {
+    // A peer that never learns our key seals to our publicly computable one
+    // forever, so this advertisement is what upgrades the conversation past
+    // the bootstrap leg.
+    let without = protocol_with_mls_storage(Arc::new(InMemoryStorage::new()));
+    assert!(
+        without
+            .outgoing_key_package_nostr_pubkey_for_test()
+            .is_none(),
+        "no Nostr transport means nothing to advertise"
+    );
+
+    let with = protocol_with_nostr("alice");
+    let advertised = with.outgoing_key_package_nostr_pubkey_for_test();
+    let handle = nostr_transport_of(&with);
+    assert_eq!(
+        advertised.as_deref(),
+        Some(as_nostr(&handle).public_key_hex().as_str())
+    );
+    // Never the routing tag: that is the publicly computable value every peer
+    // can already derive, so advertising it would be a no-op that looked like
+    // an upgrade.
+    assert_ne!(
+        advertised.as_deref(),
+        Some(routing_tag_for_device_id("alice").unwrap().as_str())
+    );
 }
 
 #[test]
@@ -2324,6 +2665,7 @@ fn peer_capability_restore_prunes_overflow() {
         attested_rich_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
+        nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
     for i in 0..MAX_KEY_PACKAGE_SENT_TO + 7 {
@@ -2451,6 +2793,7 @@ fn peer_capability_restore_prefers_session_peers() {
         attested_rich_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: vec![RICH_PAYLOAD_V1],
+        nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
     for i in 0..MAX_KEY_PACKAGE_SENT_TO + 40 {
@@ -3089,6 +3432,7 @@ fn test_process_internal_message_key_package() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -12678,6 +13022,7 @@ fn feed_session_reset_key_package(
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -15800,6 +16145,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -16028,6 +16374,7 @@ fn test_key_package_remaining_lifetime_ms() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -16110,6 +16457,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
+            nostr_pubkey: None,
         };
         let content = format!(
             "{}{}",
@@ -16200,6 +16548,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -16253,6 +16602,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
+        nostr_pubkey: None,
     };
     let content = format!(
         "{}{}",
@@ -17787,6 +18137,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
+            nostr_pubkey: None,
         };
         let content = format!(
             "{}{}",
@@ -19449,7 +19800,7 @@ fn test_data_plane_prefixes_bypass_security_gate() {
 
     let result = protocol.security_gate_control_message(&msg);
     assert!(
-        result.is_none(),
+        matches!(result, ControlGateOutcome::Proceed { .. }),
         "Security gate must NOT block __MLS_ENC__ messages — MLS provides its own authentication"
     );
 
@@ -19465,7 +19816,7 @@ fn test_data_plane_prefixes_bypass_security_gate() {
     );
     let result = protocol.security_gate_control_message(&msg);
     assert!(
-        result.is_none(),
+        matches!(result, ControlGateOutcome::Proceed { .. }),
         "Security gate must NOT block __GROUP_MSG__ fan-out — MLS authenticates it after the gate"
     );
 }
@@ -19679,7 +20030,10 @@ fn test_signature_downgrade_detection_for_tofu_pinned_peer() {
     // The security gate should reject this as a signature downgrade.
     let gate_result = protocol.security_gate_control_message(&unsigned_msg);
     assert!(
-        matches!(gate_result, Some(InternalMessageResult::SecurityRejected)),
+        matches!(
+            gate_result,
+            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+        ),
         "Unsigned message from TOFU-pinned peer should be rejected as signature downgrade"
     );
 }
@@ -19707,7 +20061,7 @@ fn test_second_signed_message_from_tofu_pinned_peer_passes_gate() {
 
     let gate1 = protocol.security_gate_control_message(&msg1);
     assert!(
-        gate1.is_none(),
+        matches!(gate1, ControlGateOutcome::Proceed { signed: true }),
         "First signed message should pass the security gate"
     );
     assert!(protocol.known_peer_public_keys.contains_key("alice"));
@@ -19723,7 +20077,7 @@ fn test_second_signed_message_from_tofu_pinned_peer_passes_gate() {
 
     let gate2 = protocol.security_gate_control_message(&msg2);
     assert!(
-        gate2.is_none(),
+        matches!(gate2, ControlGateOutcome::Proceed { signed: true }),
         "Second signed message from same TOFU-pinned peer should pass the security gate"
     );
 }
@@ -20201,7 +20555,10 @@ fn test_security_gate_rejects_missing_transport_id_when_required() {
 
     let result = protocol.security_gate_control_message(&msg);
     assert!(
-        matches!(result, Some(InternalMessageResult::SecurityRejected)),
+        matches!(
+            result,
+            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+        ),
         "Control message without transport identity should be rejected \
          when require_transport_identity=true"
     );
@@ -20230,7 +20587,7 @@ fn test_security_gate_passes_with_matching_transport_id_when_required() {
 
     let result = protocol.security_gate_control_message(&msg);
     assert!(
-        result.is_none(),
+        matches!(result, ControlGateOutcome::Proceed { signed: true }),
         "Signed control message with matching transport identity should pass"
     );
 }
@@ -20258,7 +20615,10 @@ fn test_relayed_unsigned_control_rejected_when_identity_required() {
 
     let result = protocol.security_gate_control_message(&msg);
     assert!(
-        matches!(result, Some(InternalMessageResult::SecurityRejected)),
+        matches!(
+            result,
+            ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected)
+        ),
         "unsigned relayed control frame must be rejected under \
          require_transport_identity"
     );
@@ -20292,7 +20652,7 @@ fn test_relayed_signed_control_passes_when_identity_required() {
 
     let result = protocol.security_gate_control_message(&msg);
     assert!(
-        result.is_none(),
+        matches!(result, ControlGateOutcome::Proceed { signed: true }),
         "signed mesh-relayed control frame must pass the strict gate"
     );
 }

@@ -514,7 +514,21 @@ public class NostrManager: NSObject, TransportManager {
                 return
             }
 
-            // Skip events from self
+            // Skip events we published ourselves.
+            //
+            // This only ever catches the LEGACY unsealed form. Sealed frames
+            // (NIP-59 gift wraps, kind 1059) are signed by a fresh single-use
+            // key per event — that unlinkability is the point — so `pubkey`
+            // never equals ours and this guard cannot fire for them. Do not
+            // "fix" that by comparing something else: there is nothing on a
+            // gift wrap that identifies its author, by design.
+            //
+            // Nothing is lost. The subscription filters on `#p` = our own
+            // routing tag, so our outbound events (addressed to a *peer's*
+            // tag) are not delivered here in the first place; the only way to
+            // receive our own gift wrap is to message ourselves, and the
+            // engine's message-id deduplication and self-suppression handle
+            // that case on the Rust side.
             guard senderPubkey != publicKeyHex else { return }
 
             // NIP-01 requires `created_at`; a missing or malformed one reaches

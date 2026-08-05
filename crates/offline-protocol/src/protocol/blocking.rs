@@ -121,6 +121,14 @@ impl OfflineProtocol {
         self.peer_compact_envelope.remove(user_id);
         self.peer_rich_payload.remove(user_id);
         self.peer_rich_attested.remove(user_id);
+        // The Nostr sealing key lives in the transport, not in one of the sets
+        // above, so it needs its own clear — the durable record is deleted by
+        // `delete_peer_capabilities_from_storage` below, and leaving the
+        // in-memory copy behind would keep sealing to a key the clean slate
+        // just declared unknown. Reverting to the peer's publicly computable
+        // key is the correct fallback: still sealed, and readable by them
+        // whatever install they are now on.
+        self.transport_manager.clear_peer_nostr_pubkey(user_id);
         self.delete_peer_capabilities_from_storage(user_id);
 
         // 3. Drop queued outbound messages that were waiting for session
@@ -1380,13 +1388,14 @@ mod tests {
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
+            nostr_pubkey: None,
         };
         let content = serde_json::to_string(&reset_payload).unwrap();
 
         // Bob handles the key package with session_reset=true.
         // This deletes the stale session and auto-establishes a fresh one
         // using Alice's new key package.
-        bob.handle_key_package_message("alice", &content);
+        bob.handle_key_package_message("alice", &content, true);
 
         // Bob should have a session (the NEW one, auto-established from
         // Alice's fresh key package — NOT the stale orphaned session).

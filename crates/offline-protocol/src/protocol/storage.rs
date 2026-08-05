@@ -2661,6 +2661,28 @@ impl OfflineProtocol {
         }
     }
 
+    /// Reads the durable capability record for a peer, as an accessor over the
+    /// module-private [`Self::load_peer_capabilities`].
+    ///
+    /// Collapses "never written" and "could not be read this session" into the
+    /// same `None`, which the one production caller
+    /// (`handle_key_package_message`, carrying a stored `nostr_pubkey` forward
+    /// past an unsigned package) can afford: losing the value there degrades
+    /// that peer to bootstrap-key sealing, which still delivers. A caller that
+    /// needs to distinguish them — because writing a default would *destroy* a
+    /// record that is merely unreadable — must use `load_peer_capabilities`
+    /// directly and honour its `Err`, as the attested-capability merge does.
+    pub(crate) fn load_peer_capabilities_record(&self, peer_id: &str) -> Option<PeerCapabilities> {
+        self.load_peer_capabilities(peer_id).ok().flatten()
+    }
+
+    /// The Nostr public key an outgoing key package would advertise.
+    /// Test-only accessor for the value `send_key_package_to` embeds.
+    #[cfg(test)]
+    pub(crate) fn outgoing_key_package_nostr_pubkey_for_test(&self) -> Option<String> {
+        self.transport_manager.nostr_public_key()
+    }
+
     /// Records an inviter-attested rich-payload capability for a peer we
     /// never directly exchanged key packages with (a group member added by
     /// someone else). In-memory recording mirrors the direct path in
@@ -2828,6 +2850,16 @@ impl OfflineProtocol {
                 && caps.attested_rich_versions.contains(&RICH_PAYLOAD_V1)
             {
                 self.peer_rich_attested.insert(peer_id.clone());
+            }
+            // Not gated on the sealing kill switch: this is a destination
+            // address, and the transport decides whether to seal at all. A
+            // restore that skipped it would leave the peer addressed by the
+            // publicly computable bootstrap key until the next live key-package
+            // exchange — a silent privacy regression across every restart,
+            // which is the exact failure this whole record exists to prevent.
+            if let Some(pubkey) = caps.nostr_pubkey.as_deref() {
+                self.transport_manager
+                    .mark_peer_nostr_pubkey(&peer_id, Some(pubkey));
             }
             kept += 1;
         }

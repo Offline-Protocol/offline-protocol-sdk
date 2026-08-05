@@ -184,6 +184,26 @@ export interface NostrTransportConfig {
   reconnectDelay?: number;
   /** Maximum reconnect attempts per relay, 0 = infinite (default: 0) */
   maxReconnectAttempts?: number;
+  /**
+   * Seal outgoing Nostr frames into NIP-59 gift wraps (default: true).
+   *
+   * With sealing on, a relay sees only an opaque routing tag, an ephemeral
+   * per-event key, and ciphertext. With it off, the transport publishes the
+   * legacy kind-4 event whose content is the entire protocol envelope in
+   * cleartext — both usernames, the app id, the metadata map, the content type
+   * and a millisecond timestamp, readable by every relay, permanently.
+   *
+   * Send-side only: inbound gift wraps are always unsealed and inbound legacy
+   * frames always parsed, so nothing a peer sends you becomes unreadable
+   * whatever this is set to.
+   *
+   * It does affect outbound reachability against builds that predate sealing.
+   * Those subscribe to kind 4 only, so they are never handed a kind-1059 event
+   * and cannot unseal one — leaving this on makes such a peer unreachable over
+   * Nostr (visibly: no ACK, so the send fails through the retry ladder). Turn
+   * it off to reach one, or for a relay that rejects kind 1059.
+   */
+  sealingEnabled?: boolean;
 }
 
 /**

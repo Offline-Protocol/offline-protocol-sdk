@@ -470,6 +470,39 @@ pub(crate) struct KeyPackagePayload {
     /// delivery outright). A feature negotiation, never a security control.
     #[serde(default)]
     pub(crate) rich_versions: Vec<u8>,
+
+    /// This install's Nostr public key (x-only, 64-char lowercase hex), so a
+    /// peer can seal Nostr gift wraps to a key only this install holds.
+    ///
+    /// `None` on legacy nodes and on installs with Nostr disabled. A peer
+    /// without it seals to our *publicly computable* key instead — deliverable
+    /// either way, but readable by anyone who guesses our user id, so the
+    /// difference is real privacy rather than a mere optimization.
+    ///
+    /// Trust boundary — **unlike the three capability lists above, this one is
+    /// only honoured from a signed key package.** All four ride in the same
+    /// plaintext envelope, but this field is consumed as a *destination key*,
+    /// not as a feature hint, so the distinction matters: a wrong capability
+    /// costs a fallback, whereas a wrong key here means envelope metadata is
+    /// sealed *to whoever supplied it* and is then readable off a public relay,
+    /// passively, for as long as the value stands.
+    ///
+    /// `build_canonical_payload` covers the whole `__MLS_KEY_PKG__` body under
+    /// the sender's Ed25519 signature and TOFU pin — but the security gate
+    /// deliberately accepts an *unsigned* control message from a peer it has
+    /// never pinned (`security_gate_control_message`, the TOFU first-contact
+    /// window), so arriving in a key package is not by itself evidence of who
+    /// sent it. `handle_key_package_message` therefore consumes this field only
+    /// when the gate reports the frame was actually signed, which costs nothing:
+    /// a key package exists only once MLS is initialized, and `send_key_package_to`
+    /// signs unconditionally in that state, so every genuine package carrying
+    /// this field is signed.
+    ///
+    /// Stripping it is still possible for a network attacker and downgrades us
+    /// to the bootstrap key — which is a privacy downgrade, not a disclosure to
+    /// the attacker, and one they could equally achieve by dropping the packet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) nostr_pubkey: Option<String>,
 }
 
 /// Compact MLS envelope version advertised in
@@ -894,6 +927,33 @@ pub(crate) struct PeerCapabilities {
     /// selection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) attested_rich_versions: Vec<u8>,
+
+    /// The peer's Nostr public key, from [`KeyPackagePayload::nostr_pubkey`].
+    ///
+    /// Persisted for the same reason as the capability lists: the cached key
+    /// package is deleted once a session is established, and a peer met before
+    /// a restart would otherwise silently fall back to bootstrap-key sealing —
+    /// a privacy regression with no symptom — until the next live exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) nostr_pubkey: Option<String>,
+}
+
+/// Length of an x-only secp256k1 public key in lowercase hex.
+pub(crate) const NOSTR_PUBKEY_HEX_LEN: usize = 64;
+
+/// Validates a wire-supplied Nostr public key before it is persisted or used
+/// as a sealing destination.
+///
+/// Shape only — the value is signature-bound to the sender, so this is not an
+/// authenticity check. It exists so a malformed or oversized string cannot
+/// enter a durable record, and it normalizes case so the same key never
+/// persists under two spellings.
+pub(crate) fn normalize_nostr_pubkey(candidate: &str) -> Option<String> {
+    if candidate.len() != NOSTR_PUBKEY_HEX_LEN || !candidate.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(candidate.to_ascii_lowercase())
 }
 
 /// Cap on how many advertised version entries persist per capability list
@@ -907,7 +967,11 @@ pub(crate) const MAX_PERSISTED_CAPABILITY_VERSIONS: usize = 8;
 impl PeerCapabilities {
     /// Builds a record from the wire-advertised version lists, truncating
     /// each to [`MAX_PERSISTED_CAPABILITY_VERSIONS`].
-    pub(crate) fn from_advertised(env_versions: &[u8], rich_versions: &[u8]) -> Self {
+    pub(crate) fn from_advertised(
+        env_versions: &[u8],
+        rich_versions: &[u8],
+        nostr_pubkey: Option<&str>,
+    ) -> Self {
         Self {
             env_versions: env_versions
                 .iter()
@@ -920,6 +984,7 @@ impl PeerCapabilities {
                 .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
                 .collect(),
             attested_rich_versions: Vec::new(),
+            nostr_pubkey: nostr_pubkey.and_then(normalize_nostr_pubkey),
         }
     }
 
@@ -929,7 +994,33 @@ impl PeerCapabilities {
         !self.env_versions.is_empty()
             || !self.rich_versions.is_empty()
             || !self.attested_rich_versions.is_empty()
+            || self.nostr_pubkey.is_some()
     }
+}
+
+/// Outcome of [`OfflineProtocol::security_gate_control_message`].
+///
+/// [`OfflineProtocol`]: crate::OfflineProtocol
+/// [`OfflineProtocol::security_gate_control_message`]: crate::OfflineProtocol
+#[derive(Debug)]
+pub(crate) enum ControlGateOutcome {
+    /// The message may proceed to dispatch.
+    ///
+    /// `signed` is `true` **only** when an Ed25519 signature was present and
+    /// verified against the sender's TOFU-pinned (or newly pinned) key. It is
+    /// deliberately `false` for both of the other ways a message reaches
+    /// dispatch — an unsigned legacy frame from a not-yet-pinned peer, and a
+    /// prefix the gate does not cover at all — so a handler that keys on it
+    /// fails closed without having to know which case it is in.
+    ///
+    /// Note the bit means "this frame carried a valid signature", not "this
+    /// peer is pinned": a valid signature that could not be pinned because the
+    /// TOFU store was full still counts, because the authenticity it proves is
+    /// exactly the same.
+    Proceed { signed: bool },
+    /// The gate rejected the message; the caller must return this result
+    /// without dispatching.
+    Rejected(InternalMessageResult),
 }
 
 /// Result of processing an internal protocol message.

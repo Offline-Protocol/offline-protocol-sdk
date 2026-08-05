@@ -1135,6 +1135,14 @@ impl OfflineProtocol {
         drop(state);
         self.transport_manager.start()?;
 
+        // Apply the Nostr sealing kill switch here rather than at transport
+        // construction: the transport is built by the bindings layer, so this
+        // is the one place every caller — FFI, RN, and a pure-Rust embedder
+        // that installed its own `NostrTransport` — passes through with the
+        // config in hand. A no-op when Nostr is not installed.
+        self.transport_manager
+            .set_nostr_sealing_enabled(self.config.transport.nostr_sealing_enabled);
+
         // Wire DORS event callback so app receives dors_score_updated, dors_transport_selected,
         let shared = self.shared_state.clone();
         self.transport_manager
@@ -2056,17 +2064,19 @@ impl OfflineProtocol {
         let content = &message.content;
 
         // Run the security gate for control messages (transport identity +
-        // signature verification). Returns `Some(Consumed)` to drop the
-        // message, or `None` to proceed.
-        if let Some(result) = self.security_gate_control_message(message) {
-            return Some(result);
-        }
+        // signature verification). `Rejected` drops the message; `Proceed`
+        // carries whether the frame was actually signed, for the one handler
+        // that consumes a payload field as authenticated data.
+        let signed = match self.security_gate_control_message(message) {
+            ControlGateOutcome::Rejected(result) => return Some(result),
+            ControlGateOutcome::Proceed { signed } => signed,
+        };
 
         let sender = message.sender.as_str();
 
         // Handle key package messages
         if let Some(data) = content.strip_prefix(internal_prefixes::KEY_PACKAGE) {
-            self.handle_key_package_message(sender, data);
+            self.handle_key_package_message(sender, data, signed);
             return Some(InternalMessageResult::Consumed);
         }
 

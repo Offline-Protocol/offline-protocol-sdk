@@ -31,6 +31,9 @@ tracing = { workspace = true }
 k256 = { workspace = true }
 sha2 = { workspace = true }
 hkdf = { workspace = true }
+chacha20 = { workspace = true }
+hmac = { workspace = true }
+subtle = { workspace = true }
 rand_core = { workspace = true }
 zeroize = { workspace = true }
 hex = { workspace = true }

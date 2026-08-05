@@ -4213,6 +4213,12 @@ impl OfflineProtocol {
             } else {
                 Vec::new()
             },
+            // Present only when the Nostr transport is installed. Advertised
+            // regardless of the sealing kill switch, which gates what *we*
+            // publish, not what a peer may seal to us: withholding it would
+            // downgrade the peer's traffic to the bootstrap key as a side
+            // effect of a local setting.
+            nostr_pubkey: self.transport_manager.nostr_public_key(),
         };
 
         let serialized =

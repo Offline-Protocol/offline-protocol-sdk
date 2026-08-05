@@ -184,6 +184,17 @@ pub const NOSTR_FIRST_RUN_BACKFILL_SECS: i64 = 86_400;
 /// about how far our receive progress has actually reached.
 pub const NOSTR_FUTURE_DATED_TOLERANCE_SECS: i64 = 900;
 
+/// Maximum number of peers whose per-install Nostr public key the transport
+/// remembers for sealing.
+///
+/// The map is fed from key packages, whose sender id is wire-claimed, so it is
+/// bounded like every other wire-keyed map in the engine. It resets at capacity
+/// rather than evicting selectively: the only consequence of forgetting a peer
+/// is that the next frame to them is sealed to their publicly computable key
+/// (the bootstrap leg) until their key package is seen again — a privacy
+/// degradation for one frame, never a delivery failure.
+pub const NOSTR_MAX_TRACKED_PEER_KEYS: usize = 1000;
+
 // Transport-wide Constants
 /// Default maximum message size in bytes (1 MB).
 /// Applied at the transport layer before JSON deserialization to prevent
