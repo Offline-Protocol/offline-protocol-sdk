@@ -71,7 +71,7 @@ class MeshForegroundService : Service() {
 
         /**
          * Callback invoked when the user taps "Stop" on the service
-         * notification. The host module must set this and run the same
+         * notification. The host module must register one and run the same
          * teardown as its JS-facing `stop()`: this service is only a
          * keep-alive, so dropping it alone would leave BLE/WiFi-Direct/Nostr
          * and the process scheduler running with no foreground protection and
@@ -79,11 +79,46 @@ class MeshForegroundService : Service() {
          * radios keep draining until the OS reaps the process.
          *
          * Held in a companion field, so a host that captures itself here must
-         * null it out on teardown or it pins that host for the process
-         * lifetime.
+         * drop it on teardown or it pins that host for the process lifetime.
+         * Mutated only through [registerStopRequestCallback] and
+         * [clearStopRequestCallback] — see the latter for why a host may not
+         * simply null it.
          */
         @Volatile
         var onStopRequestedByUser: (() -> Unit)? = null
+            private set
+
+        /**
+         * Serializes register against clear so the compare-and-clear in
+         * [clearStopRequestCallback] cannot lose a registration that lands
+         * between its read and its write.
+         */
+        private val stopCallbackLock = Any()
+
+        /** Installs [callback] as the host to hand a user-initiated stop to. */
+        fun registerStopRequestCallback(callback: () -> Unit) {
+            synchronized(stopCallbackLock) {
+                onStopRequestedByUser = callback
+            }
+        }
+
+        /**
+         * Drops [callback], but only while it is still the registered one.
+         *
+         * The slot is process-global while hosts are per-ReactContext, and the
+         * two overlap: during a React reload a new module can register before
+         * the old one tears down. An unconditional null there would disarm the
+         * *new* host's Stop action, and the button would then drop the
+         * keep-alive while the mesh it belongs to keeps running — the exact
+         * failure [onStopRequestedByUser] exists to prevent.
+         */
+        fun clearStopRequestCallback(callback: () -> Unit) {
+            synchronized(stopCallbackLock) {
+                if (onStopRequestedByUser === callback) {
+                    onStopRequestedByUser = null
+                }
+            }
+        }
 
         fun start(context: Context) {
             startRequested = true
