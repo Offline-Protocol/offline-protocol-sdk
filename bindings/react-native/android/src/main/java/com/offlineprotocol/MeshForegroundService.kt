@@ -20,7 +20,9 @@ import androidx.core.app.NotificationCompat
  * Lifecycle:
  *   - Started when protocol.start() is called and BLE/WiFi/Internet transports are active.
  *   - Stopped when protocol.stop() is called or the user explicitly disables mesh.
- *   - Uses START_STICKY so the system restarts the service after a process kill.
+ *   - Uses START_STICKY so the system hands the service back after a process
+ *     kill, but that restart only survives if a host has a mesh running again
+ *     by the time it lands — see [handleStickyRestart].
  *
  * The service itself does NOT own the protocol or transport instances.
  * It exists solely to prevent the OS from killing the process while mesh
@@ -62,9 +64,16 @@ class MeshForegroundService : Service() {
         private var startRequested: Boolean = false
 
         /**
-         * Callback invoked when the service is restarted after a process kill
-         * (START_STICKY re-delivery). The host module should set this so it can
-         * re-initialize the protocol.
+         * Optional hook, invoked on a START_STICKY restart *only* when a host is
+         * registered in [onStopRequestedByUser]. A restart into a hostless
+         * process stops the service instead of announcing itself to nobody —
+         * see [handleStickyRestart].
+         *
+         * Nothing in production assigns this yet, and a host that does still
+         * cannot rebuild the protocol from here: that needs the ProtocolConfig,
+         * which only JS has. Issue #291 tracks the two designs that could supply
+         * it (persist the config natively, or wake JS); this is the seam either
+         * would attach to.
          */
         @Volatile
         var onServiceRestarted: (() -> Unit)? = null
@@ -141,8 +150,10 @@ class MeshForegroundService : Service() {
             //
             // Both flags are needed: startRequested covers a stop racing a
             // service that is still coming up (isRunning not yet set), and
-            // isRunning covers an instance we never requested — a START_STICKY
-            // restart after process death, which resets the statics.
+            // isRunning covers an instance we never requested. Process death
+            // resets the statics, so a sticky restart that found a host and a
+            // tap on a stale notification re-creating us both leave a running
+            // service that no start() in this process accounts for.
             if (!startRequested && !isRunning) return
             startRequested = false
             val intent = Intent(context, MeshForegroundService::class.java).apply {
@@ -191,14 +202,53 @@ class MeshForegroundService : Service() {
                 Log.i(TAG, "Starting mesh foreground service")
                 promoteToForeground()
             }
-            null -> {
-                // Service restarted by the system after process kill (START_STICKY).
-                // Re-enter foreground immediately to prevent ANR, then notify host.
-                Log.i(TAG, "Service restarted after process kill")
-                promoteToForeground()
-                onServiceRestarted?.invoke()
-            }
+            null -> return handleStickyRestart()
         }
+        return START_STICKY
+    }
+
+    /**
+     * Handle a null-intent re-delivery — the system restarting us under
+     * START_STICKY after the process was killed.
+     *
+     * The old process took the protocol, every transport and the host module
+     * with it, so this instance is only worth keeping if a host in the *new*
+     * process has since brought a mesh back up. [onStopRequestedByUser] is
+     * exactly that signal: the module registers it immediately before starting
+     * this service and clears it by identity on every teardown path, so a
+     * non-null slot means a live host that believes mesh is running. That
+     * ordering does happen — an app that boots React Native from
+     * Application.onCreate can have re-started the mesh before this
+     * re-delivered intent lands.
+     *
+     * With no host, staying up is strictly worse than dying. The notification
+     * claims "Mesh Active" over a protocol nothing can rebuild, and survives
+     * until the user taps Stop or the OS reaps us. Worse where the promotion is
+     * refused outright: on targetSdk 31+ entering the foreground from the
+     * background is only allowed under a fixed set of exemptions, and a sticky
+     * restart is not one of them, so [promoteToForeground] swallows a
+     * ForegroundServiceStartNotAllowedException and what is left is an empty
+     * process squatting with no notification at all. Stopping is the honest
+     * outcome for both, and START_NOT_STICKY keeps the system from handing the
+     * same restart straight back — an exit, not a loop.
+     *
+     * Stopping without a successful promotion is legal here: the five-second
+     * startForeground() obligation attaches to Context.startForegroundService()
+     * calls, which a system restart is not.
+     *
+     * Re-initializing the protocol instead would need the ProtocolConfig, which
+     * only JS has. See issue #291 for the two designs that could supply it;
+     * whichever lands attaches here, through [onServiceRestarted].
+     */
+    private fun handleStickyRestart(): Int {
+        if (onStopRequestedByUser == null) {
+            Log.i(TAG, "Service restarted after process kill with no mesh host; stopping")
+            stopForegroundAndSelf()
+            return START_NOT_STICKY
+        }
+        Log.i(TAG, "Service restarted after process kill; host present")
+        promoteToForeground()
+        onServiceRestarted?.invoke()
         return START_STICKY
     }
 
