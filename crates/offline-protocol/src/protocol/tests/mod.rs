@@ -32014,3 +32014,84 @@ fn nostr_publication_scan_is_throttled_between_ticks() {
         "the scan never ran even once the throttle lapsed"
     );
 }
+
+/// A relay that rejects the kind outright — or rate-limits a fresh pubkey
+/// bursting the whole slot set at once — must not be retried once per slot per
+/// refresh forever. Every other retry ladder in this engine is bounded; this
+/// one was not, and it is the loop that feeds the transport's failure path.
+#[test]
+fn nostr_repeated_publication_failure_backs_off() {
+    use offline_protocol_transport::nostr::NOSTR_PUBLICATION_ID_PREFIX;
+
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.refresh_nostr_key_package_slots();
+
+    let handle = nostr_transport_of(&protocol);
+    let nostr = as_nostr(&handle);
+    while nostr.get_next_signed_event().unwrap().is_some() {}
+
+    let slot_id = protocol.nostr_publication_slots_for_test()[0]
+        .slot_id
+        .clone();
+    let publication_id = format!("{}{}", NOSTR_PUBLICATION_ID_PREFIX, slot_id);
+
+    // A first failure still retries promptly: a relay hiccup, or a socket that
+    // dropped mid-flight, must not cost a refresh window.
+    nostr.report_send_failure(&publication_id);
+    protocol.reset_nostr_slot_throttle_for_test();
+    protocol.refresh_nostr_key_package_slots();
+    let republished = nostr
+        .get_next_signed_event()
+        .unwrap()
+        .expect("the first failure must retry on the next refresh");
+    assert_eq!(republished.message_id, publication_id);
+
+    // The second consecutive failure starts the ladder, so the next refresh
+    // must leave the slot alone rather than mint another rejected relay write
+    // a minute later, and again a minute after that, forever.
+    nostr.report_send_failure(&publication_id);
+    protocol.reset_nostr_slot_throttle_for_test();
+    protocol.refresh_nostr_key_package_slots();
+    assert!(
+        nostr.get_next_signed_event().unwrap().is_none(),
+        "a slot whose publication keeps failing was republished with no backoff"
+    );
+
+    // The backoff is per slot: the healthy ones are untouched by it.
+    assert_eq!(
+        protocol.nostr_publication_slots_for_test().len(),
+        offline_protocol_transport::constants::NOSTR_KEY_PACKAGE_SLOTS
+    );
+}
+
+/// The condition this warning reports (an MLS or storage error refilling a
+/// slot) persists by nature, and it is evaluated once per slot per refresh.
+/// Unsuppressed that is five security-warning events a minute, indefinitely,
+/// for one stuck cause — enough to bury the signal in its own repetition.
+#[test]
+fn nostr_slot_exhaustion_warning_is_suppressed_between_passes() {
+    let mut protocol = protocol_with_nostr("alice");
+    let warnings: Arc<Mutex<Vec<SecurityWarningCode>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&warnings);
+        protocol.on_event(move |e| {
+            if let Event::SecurityWarning { reason_code, .. } = e {
+                h.lock().unwrap().push(reason_code);
+            }
+        });
+    }
+
+    for _ in 0..10 {
+        protocol.report_nostr_slot_refresh_failure_for_test(5);
+    }
+
+    let seen = warnings.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "ten failing passes emitted {} warnings; the cause persists, so the \
+         report must not repeat per slot per refresh",
+        seen.len()
+    );
+    assert_eq!(seen[0], SecurityWarningCode::NostrKeyPackageSlotExhausted);
+}

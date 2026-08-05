@@ -314,6 +314,20 @@ impl MlsManager {
         self.load_stored_key_package(package_id)
     }
 
+    /// Deletes a key package this device owns.
+    ///
+    /// Exists to reclaim a *publication* package that was minted but whose
+    /// record was never built or queued. Such a package is reserved, so
+    /// [`Self::get_or_create_key_package`] will never hand it out, and no slot
+    /// references it — nothing else would remove it before its lifetime runs
+    /// out, so a repeatedly failing publish would otherwise strand fresh
+    /// provider key material every refresh.
+    pub fn delete_key_package(&self, package_id: &str) -> Result<()> {
+        self.storage
+            .delete(StorageKeyType::KeyPackage.as_str(), package_id)?;
+        Ok(())
+    }
+
     /// Imports a contact's key package for later use.
     ///
     /// Security (SEC-M5): the caller-supplied `user_id` becomes both the

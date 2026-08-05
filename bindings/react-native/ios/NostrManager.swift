@@ -422,6 +422,7 @@ public class NostrManager: NSObject, TransportManager {
                 guard let self = self else { return }
                 self.stopMessagePolling()
                 self.stopPingTimer()
+                self.releaseActiveQueries()
                 try? self.protocolInstance.nostrStatusChanged(isConnected: false)
                 if !self.autoReconnect {
                     self.updateState(.stopped)
@@ -737,6 +738,34 @@ public class NostrManager: NSObject, TransportManager {
     /// strictly after every event already enqueued. The `_activeQueryIds`
     /// removal and the CLOSE stay synchronous — they must beat the *next*
     /// relay's EOSE, and they touch nothing the engine owns.
+    /// Releases every in-flight resolution query after the relays drop.
+    ///
+    /// A query whose relays went away before EOSE never finishes: nothing will
+    /// ever answer it, so without this the bridge holds its subscription id for
+    /// the life of the process and the transport holds the entry until its own
+    /// cap evicts something — possibly a live query. Letting them go costs
+    /// nothing, since the next send to those peers re-queues the lookup once
+    /// the resolution rate limit lapses.
+    ///
+    /// Called on `messageQueue` like the rest of the release path, so it lands
+    /// after any events already enqueued for these queries.
+    private func releaseActiveQueries() {
+        stateLock.lock()
+        let queryIds = _activeQueryIds
+        _activeQueryIds.removeAll()
+        stateLock.unlock()
+
+        guard !queryIds.isEmpty else { return }
+
+        for queryId in queryIds {
+            protocolInstance.nostrQueryCompleted(queryId: queryId)
+        }
+
+        emitDiagnostic("debug", "Released in-flight Nostr key-package queries", context: [
+            "count": queryIds.count
+        ])
+    }
+
     private func finishQuery(subscriptionId: String) {
         stateLock.lock()
         let wasActive = _activeQueryIds.remove(subscriptionId) != nil

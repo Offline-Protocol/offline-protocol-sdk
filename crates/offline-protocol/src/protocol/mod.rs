@@ -508,6 +508,14 @@ pub struct OfflineProtocol {
     /// When the publication slots were last re-scanned, throttling the MLS
     /// storage reads that scan costs. See `nostr_slot_refresh_due`.
     last_nostr_slot_refresh: Option<Instant>,
+
+    /// Per-slot republish backoff after publications that never reached a
+    /// relay. Memory-only, and pruned to the live slot ids each refresh.
+    nostr_publication_backoff: HashMap<String, nostr_publication::PublicationBackoff>,
+
+    /// When the slot-exhaustion security warning was last emitted, suppressing
+    /// repeats for a cause that by nature persists.
+    last_nostr_slot_warning: Option<Instant>,
 }
 
 impl Drop for OfflineProtocol {
@@ -677,6 +685,8 @@ impl OfflineProtocol {
             nostr_publication_slots: Vec::new(),
             nostr_published_slots: HashSet::new(),
             last_nostr_slot_refresh: None,
+            nostr_publication_backoff: HashMap::new(),
+            last_nostr_slot_warning: None,
             config,
         })
     }

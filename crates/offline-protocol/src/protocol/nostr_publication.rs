@@ -30,12 +30,33 @@ use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_transport::constants::NOSTR_KEY_PACKAGE_SLOTS;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 /// How often the publication slots are re-scanned. See
 /// [`OfflineProtocol::nostr_slot_refresh_due`] for what the interval trades.
 const NOSTR_SLOT_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Ceiling on the republish backoff after consecutive publication failures,
+/// and the quiet period after which a slot's failure streak resets.
+///
+/// Republication is otherwise unconditional on every refresh, so a relay that
+/// rejects the kind outright — or rate-limits a fresh pubkey bursting the whole
+/// slot set at once — would be retried once per slot per refresh forever, never
+/// converging and never backing off. Every other retry ladder in this engine is
+/// bounded; this one was not.
+const NOSTR_PUBLICATION_MAX_BACKOFF: Duration = Duration::from_secs(1800);
+
+/// Minimum gap between [`SecurityWarningCode::NostrKeyPackageSlotExhausted`]
+/// emissions.
+///
+/// The condition it reports (an MLS or storage error refilling a slot) is
+/// exactly the kind that persists, and without suppression it would emit once
+/// per failing slot per refresh — five events a minute, indefinitely, for a
+/// single stuck cause. Matches the suppression the unauthorized-membership
+/// report uses for the same reason.
+const NOSTR_SLOT_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
 
 /// One publication slot's persisted state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +67,20 @@ pub(crate) struct NostrPublicationSlot {
     pub(crate) slot_id: String,
     /// The MLS key package currently standing in this slot.
     pub(crate) package_id: String,
+}
+
+/// A slot's publication-failure state, driving the republish backoff.
+///
+/// Memory-only: it exists to stop hammering a relay within one process, and a
+/// launch that starts over costs one prompt retry per slot.
+#[derive(Debug, Clone)]
+pub(crate) struct PublicationBackoff {
+    /// Consecutive failures, which set the delay.
+    failures: u32,
+    /// When the most recent failure was reported.
+    last_failure: Instant,
+    /// Earliest this slot may be republished.
+    retry_at: Instant,
 }
 
 impl OfflineProtocol {
@@ -74,6 +109,8 @@ impl OfflineProtocol {
             return;
         }
 
+        let now = Instant::now();
+
         // A slot is marked published when its record is *queued*, which is the
         // only point this layer hears about — so a record that then failed to
         // reach a relay would leave the slot looking healthy forever while the
@@ -82,37 +119,127 @@ impl OfflineProtocol {
         // throttled tick that dropped the reports would lose them outright.
         for slot_id in self.transport_manager.take_failed_nostr_publications() {
             self.nostr_published_slots.remove(&slot_id);
+            self.note_publication_failure(&slot_id, now);
         }
 
         let mut changed = false;
+        let mut failed_slots = 0usize;
         for index in 0..NOSTR_KEY_PACKAGE_SLOTS {
-            match self.refresh_one_slot(index) {
+            match self.refresh_one_slot(index, now) {
                 Ok(true) => changed = true,
                 Ok(false) => {}
                 Err(e) => {
-                    // The one failure the publication design must not absorb
-                    // quietly: a slot left standing with a consumed package
-                    // makes every stranger who fetches it build an
-                    // unprocessable Welcome, and nothing else in the system
-                    // would ever say so.
                     warn!(
                         slot_index = index,
                         error = %e,
                         "Failed to refresh a Nostr key-package publication slot"
                     );
-                    self.emit_security_warning(
-                        &self.config.user_id.clone(),
-                        SecurityWarningCode::NostrKeyPackageSlotExhausted,
-                        "could not refill a Nostr key-package publication slot; \
-                         cold contact over Nostr is degraded until it succeeds",
-                    );
+                    failed_slots += 1;
                 }
             }
         }
 
+        // The one failure the publication design must not absorb quietly: a
+        // slot left standing with a consumed package makes every stranger who
+        // fetches it build an unprocessable Welcome, and nothing else in the
+        // system would ever say so. Reported once for the pass rather than once
+        // per slot, and suppressed between passes — the causes here (MLS or
+        // storage errors) persist, and five events a minute forever would bury
+        // the signal in its own repetition.
+        if failed_slots > 0 {
+            self.report_nostr_slot_refresh_failure(failed_slots, now);
+        }
+
+        self.prune_nostr_publication_backoff();
+
         if changed {
             self.persist_nostr_publication_slots();
         }
+    }
+
+    /// Emits the slot-exhaustion warning, at most once per suppression window.
+    fn report_nostr_slot_refresh_failure(&mut self, failed_slots: usize, now: Instant) {
+        if let Some(last) = self.last_nostr_slot_warning {
+            if now.duration_since(last) < NOSTR_SLOT_WARNING_SUPPRESS_INTERVAL {
+                return;
+            }
+        }
+        self.last_nostr_slot_warning = Some(now);
+        self.emit_security_warning(
+            &self.config.user_id.clone(),
+            SecurityWarningCode::NostrKeyPackageSlotExhausted,
+            format!(
+                "could not refill {} Nostr key-package publication slot(s); \
+                 cold contact over Nostr is degraded until it succeeds",
+                failed_slots
+            ),
+        );
+    }
+
+    /// Records a failed publication and pushes the slot's next attempt out.
+    ///
+    /// The delay doubles from [`NOSTR_SLOT_REFRESH_INTERVAL`] with each
+    /// consecutive failure and stops at [`NOSTR_PUBLICATION_MAX_BACKOFF`], so a
+    /// relay that rejects the kind is retried on a schedule that converges
+    /// instead of once per slot per minute forever. A slot quiet for longer
+    /// than the ceiling starts its streak over, so a genuine one-off failure
+    /// long after a bad patch still retries promptly.
+    fn note_publication_failure(&mut self, slot_id: &str, now: Instant) {
+        let entry = self
+            .nostr_publication_backoff
+            .entry(slot_id.to_string())
+            .or_insert(PublicationBackoff {
+                failures: 0,
+                last_failure: now,
+                retry_at: now,
+            });
+
+        if now.duration_since(entry.last_failure) > NOSTR_PUBLICATION_MAX_BACKOFF {
+            entry.failures = 1;
+        } else {
+            entry.failures = entry.failures.saturating_add(1);
+        }
+        entry.last_failure = now;
+
+        // The *first* failure retries on the next refresh: a relay hiccup or a
+        // socket dropped mid-flight should not cost a window. Only a slot that
+        // keeps failing climbs the ladder. Shift capped well below `u32`'s
+        // width; the ceiling clamps the result long before it matters.
+        let delay = if entry.failures <= 1 {
+            Duration::ZERO
+        } else {
+            let shift = (entry.failures - 2).min(16);
+            NOSTR_SLOT_REFRESH_INTERVAL
+                .saturating_mul(1u32 << shift)
+                .min(NOSTR_PUBLICATION_MAX_BACKOFF)
+        };
+        entry.retry_at = now + delay;
+    }
+
+    /// Whether `slot_id` is still waiting out a publication backoff.
+    fn publication_backoff_active(&self, slot_id: &str, now: Instant) -> bool {
+        self.nostr_publication_backoff
+            .get(slot_id)
+            .is_some_and(|backoff| now < backoff.retry_at)
+    }
+
+    /// Drops backoff state for slots that no longer exist.
+    ///
+    /// The keys are our own slot ids, of which there are at most
+    /// `NOSTR_KEY_PACKAGE_SLOTS` — but a lost slot map mints fresh ones, and
+    /// the abandoned entries would otherwise linger for the life of the
+    /// process.
+    fn prune_nostr_publication_backoff(&mut self) {
+        if self.nostr_publication_backoff.is_empty() {
+            return;
+        }
+        let live: HashSet<String> = self
+            .nostr_publication_slots
+            .iter()
+            .map(|slot| slot.slot_id.clone())
+            .collect();
+        self.nostr_publication_backoff
+            .retain(|slot_id, _| live.contains(slot_id));
     }
 
     /// Whether enough time has passed to re-scan the slots.
@@ -140,8 +267,25 @@ impl OfflineProtocol {
     }
 
     /// Refreshes slot `index`, returning whether the persisted map changed.
-    fn refresh_one_slot(&mut self, index: usize) -> Result<bool> {
+    fn refresh_one_slot(&mut self, index: usize, now: Instant) -> Result<bool> {
+        // The map is dense: position `i` always holds slot `i`. An earlier slot
+        // that failed this pass leaves a gap, and filling it out of order would
+        // put this slot's record at the wrong position — harmless today, since
+        // slots are identified by `slot_id` and never by index, but it makes the
+        // index mean two different things. Leave the gap for the next pass.
+        if index > self.nostr_publication_slots.len() {
+            return Ok(false);
+        }
+
         let existing = self.nostr_publication_slots.get(index).cloned();
+
+        // Checked before the MLS read and before any mint: a slot whose
+        // publication keeps failing should cost nothing at all while it waits.
+        if let Some(slot) = existing.as_ref() {
+            if self.publication_backoff_active(&slot.slot_id, now) {
+                return Ok(false);
+            }
+        }
 
         let live_package = match existing.as_ref() {
             Some(slot) => self.load_publication_package(&slot.package_id)?,
@@ -161,8 +305,10 @@ impl OfflineProtocol {
             None => new_slot_id(),
         };
 
+        // `live_package` is `Some` only when `existing` is, so a live package
+        // never adds a slot to the map — it is the republish-this-process case.
         let (bundle, map_changed) = match live_package {
-            Some(bundle) => (bundle, existing.is_none()),
+            Some(bundle) => (bundle, false),
             None => {
                 let bundle = {
                     let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
@@ -175,9 +321,25 @@ impl OfflineProtocol {
             }
         };
 
-        let message = self.build_published_key_package_message(&bundle)?;
-        self.transport_manager
-            .publish_nostr_key_package(&slot_id, &message)?;
+        let queued = match self.build_published_key_package_message(&bundle) {
+            Ok(message) => self
+                .transport_manager
+                .publish_nostr_key_package(&slot_id, &message),
+            Err(e) => Err(e),
+        };
+
+        if let Err(e) = queued {
+            // A package minted for a record that was never built or queued is
+            // reserved, so the push path will never hand it out, and no slot
+            // references it — nothing would reclaim it before its lifetime runs
+            // out. Left alone, a persistently failing build would strand fresh
+            // provider key material on every refresh.
+            if map_changed {
+                self.delete_publication_package(&bundle.package_id);
+            }
+            return Err(e);
+        }
+
         self.nostr_published_slots.insert(slot_id.clone());
 
         if map_changed {
@@ -208,6 +370,23 @@ impl OfflineProtocol {
             .read()
             .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
         Ok(manager.key_package_by_id(package_id)?)
+    }
+
+    /// Drops a publication package that never made it into a queued record.
+    fn delete_publication_package(&self, package_id: &str) {
+        let Some(mls) = self.mls_manager.as_ref() else {
+            return;
+        };
+        let Ok(manager) = mls.read() else {
+            return;
+        };
+        if let Err(e) = manager.delete_key_package(package_id) {
+            warn!(
+                package_id = %package_id,
+                error = %e,
+                "Failed to reclaim an unpublished Nostr key package"
+            );
+        }
     }
 
     /// Builds the signed protocol message a published record carries.
@@ -285,6 +464,13 @@ impl OfflineProtocol {
     /// The current publication slot map.
     pub(crate) fn nostr_publication_slots_for_test(&self) -> Vec<NostrPublicationSlot> {
         self.nostr_publication_slots.clone()
+    }
+
+    /// Drives the slot-exhaustion report directly, standing in for a refresh
+    /// pass whose slots failed — which needs a broken MLS or storage layer to
+    /// reach naturally.
+    pub(crate) fn report_nostr_slot_refresh_failure_for_test(&mut self, failed_slots: usize) {
+        self.report_nostr_slot_refresh_failure(failed_slots, Instant::now());
     }
 
     /// Lets the next tick actually re-scan.

@@ -433,6 +433,7 @@ class NostrManager(
             // Lost all connections
             mainHandler.post {
                 stopMessagePolling()
+                releaseActiveQueries()
                 try {
                     protocol.nostrStatusChanged(false)
                 } catch (e: Exception) {
@@ -768,6 +769,37 @@ class NostrManager(
      * design avoids elsewhere. A later relay's records are simply missed, and
      * the next send to that peer re-queues the lookup.
      */
+    /**
+     * Releases every in-flight resolution query after the relays drop.
+     *
+     * A query whose relays went away before EOSE never finishes: nothing will
+     * ever answer it, so without this the bridge holds its subscription id for
+     * the life of the process and the transport holds the entry until its own
+     * cap evicts something — possibly a live query. Letting them go costs
+     * nothing, since the next send to those peers re-queues the lookup once the
+     * resolution rate limit lapses.
+     */
+    private fun releaseActiveQueries() {
+        val queryIds = synchronized(relayLock) {
+            val ids = activeQueryIds.toList()
+            activeQueryIds.clear()
+            ids
+        }
+        if (queryIds.isEmpty()) return
+
+        for (queryId in queryIds) {
+            try {
+                protocol.nostrQueryCompleted(queryId)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to release Nostr query $queryId", e)
+            }
+        }
+
+        emitDiagnostic("debug", "Released in-flight Nostr key-package queries", mapOf(
+            "count" to queryIds.size
+        ))
+    }
+
     private fun finishQuery(subscriptionId: String) {
         val wasActive = synchronized(relayLock) { activeQueryIds.remove(subscriptionId) }
         if (!wasActive) return

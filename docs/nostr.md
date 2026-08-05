@@ -132,8 +132,10 @@ The platform managers pull relay URLs and reconnect parameters from the JSON con
 | `created_at` jitter | 1 h | Gift-wrap timestamps are randomized uniformly into the *past* by up to this much. Must stay ≤ the `since` overlap above, or a jittered event falls outside the very query meant to fetch it |
 | Max tracked peer keys | 1000 | Peers whose advertised Nostr key is remembered for sealing; at capacity the map resets. A peer who publishes key packages is re-resolved on the next send; one who does not stays on the bootstrap leg until re-exchange or restart |
 | Key-package slots | 5 | Single-use key packages published for cold contact, one per addressable slot |
-| Resolution retry interval | 5 min | Minimum gap between resolution attempts for the same peer |
+| Resolution retry interval | 5 min | Minimum gap between resolution attempts for the same peer. Not consumed by a request the queue refuses for capacity |
 | Max pending resolutions | 64 | Queued and in-flight peer lookups |
+| Max events per query | 64 | Records one resolution query will accept, opened or not — a relay may ignore the REQ's `limit`. Duplicates of a record already taken are additionally dropped by event id |
+| Publication backoff | 60 s → 30 min | Delay before republishing a slot after *consecutive* publication failures; the first failure retries on the next refresh |
 | Future-dated tolerance | 15 min | How far ahead of local time an event's `created_at` may sit and still advance the watermark |
 | DORS tie-break priority | 4 (lowest) | Internet (0) > WiFi Direct (1) > BLE (2) > Reticulum (3) > Nostr (4) |
 | Bandwidth max | 1 MB/s | Practical upper bound for relay-bounded throughput |
@@ -194,6 +196,12 @@ nostrQueryCompleted(queryId)                  // after the relay's EOSE
 5. If no relay is connected when a query is drained, call
    `nostrQueryCompleted(queryId)` immediately rather than dropping it — the
    transport otherwise holds an entry no answer will arrive for.
+6. When *all* relays drop, release every in-flight query the same way. A query
+   issued just before a disconnect never sees an EOSE, so without this the
+   bridge holds its subscription id for the life of the process and the
+   transport holds the entry until its own cap evicts something — possibly a
+   live query. Nothing is lost: the next send to those peers re-queues the
+   lookup once the resolution rate limit lapses.
 
 Both bundled bridges implement this. A bridge that does not is unaffected apart
 from losing cold contact: publication still works (records ride the ordinary
@@ -351,7 +359,11 @@ This is what makes **cold first contact** possible at all: a peer known only by 
 
 **Why slots, and not one record.** An MLS key package's init key is consumed by the first peer who uses it. One replaceable record would mean a stranger who fetches it after it was spent builds a Welcome that can never be processed. Consumption is *local* — an init key leaves provider storage only when this node processes a Welcome built against it — so a stranger can drive it only by actually establishing sessions, and each burnt slot is refilled on the next tick. The slot count covers the *sequential* gap between refreshes; it does not absorb concurrent cold contacts, since nothing distributes simultaneous fetchers across slots (two at once generally race for one init key, and the loser recovers through the reverse key-package exchange).
 
-**Two failure modes, neither silent.** A refill that cannot proceed — an MLS or storage error — emits the `NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED` security warning rather than leaving a stale record standing. A record that was built but never reached a relay — rejected, timed out, or in flight when the connection dropped — is reported back by the transport, and the next tick republishes it under the same slot id with the same (still unconsumed) package. Without that report the slot would stay marked published for the life of the process while the relays held nothing.
+**Two failure modes, neither silent.** A refill that cannot proceed — an MLS or storage error — emits the `NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED` security warning rather than leaving a stale record standing (once per refresh pass, suppressed for 5 minutes: these causes persist, and one event per slot per refresh would bury the signal in its own repetition). A record that was built but never reached a relay — rejected, timed out, or in flight when the connection dropped — is reported back by the transport, and the next tick republishes it under the same slot id with the same (still unconsumed) package. Without that report the slot would stay marked published for the life of the process while the relays held nothing.
+
+The first such failure retries promptly, since a relay hiccup should not cost a window; *consecutive* failures back off, doubling from the refresh interval to a 30-minute ceiling, so a relay that rejects the kind outright converges instead of being retried once per slot per minute indefinitely. A slot quiet for longer than the ceiling starts its streak over.
+
+**Publication outcomes never touch the transport's delivery metrics.** DORS scores reliability on `success / (success + failure)` over lifetime counters that never decay, and an idle install publishes far more than it sends — so counting publications would score the transport on something other than its ability to carry messages. A relay rejecting kind `30443` would otherwise drive the ratio toward zero and make DORS deprioritise Nostr for traffic that delivers perfectly well, while publications that succeed would equally mask real message failures.
 
 #### Why the published record is sealed, though it is public by intent
 

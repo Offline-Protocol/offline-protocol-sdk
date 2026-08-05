@@ -52,6 +52,18 @@ pub const NOSTR_PUBLICATION_ID_PREFIX: &str = "__nostr_kp__:";
 
 /// Recovers the slot id from a publication's synthetic message id, or `None`
 /// for an ordinary message id.
+///
+/// Every message-path side effect must consult this, not just the failure
+/// reporting that motivated it. In particular a publication's outcome is
+/// deliberately kept out of [`TransportMetrics`]: DORS scores this transport's
+/// reliability on `success_count / (success_count + failure_count)`, those
+/// counters are lifetime totals with no decay, and an idle install publishes
+/// far more than it sends — so counting publications would score the transport
+/// on something other than its ability to carry messages. A relay that rejects
+/// kind 30443 would drive the ratio toward zero and make DORS deprioritise
+/// Nostr for traffic that delivers fine; publications that succeed would
+/// equally mask real message failures. See
+/// `test_publication_outcomes_stay_out_of_the_delivery_metrics`.
 fn publication_slot_id(message_id: &str) -> Option<String> {
     message_id
         .strip_prefix(NOSTR_PUBLICATION_ID_PREFIX)
@@ -75,6 +87,33 @@ const MAX_PENDING_RESOLUTIONS: usize = 64;
 /// those sends meanwhile, so the only cost of waiting is that the metadata
 /// upgrade lands later.
 const RESOLUTION_RETRY_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Maximum events one resolution query will accept, opened or not.
+///
+/// The REQ asks each relay for [`NOSTR_KEY_PACKAGE_SLOTS`] records, but a relay
+/// is free to ignore `limit` and stream indefinitely, and the query is
+/// broadcast so every connected relay answers under the same subscription id.
+/// Each record that opens costs the key-package handler two durable
+/// secure-storage writes, so the ceiling has to be ours rather than the
+/// relay's. Sized for a generous fan-out — well above `slots × relays` for any
+/// real configuration — since exceeding it only costs the metadata upgrade,
+/// which falls back to the bootstrap leg.
+const MAX_QUERY_EVENTS: usize = 64;
+
+/// A resolution query the platform is currently running.
+#[derive(Debug)]
+struct ActiveQuery {
+    /// The peer being resolved. An inbound event is meaningless without it:
+    /// this is whose derivable key opens the record.
+    user_id: String,
+    /// Event ids already taken for this query. The query is broadcast, so the
+    /// same record arrives once per relay, and opening it more than once
+    /// re-runs the key-package handler's durable writes for no gain. Bounded
+    /// by `delivered` below, which is checked before anything is inserted.
+    seen_events: HashSet<String>,
+    /// Events delivered for this query so far, whether or not they opened.
+    delivered: usize,
+}
 
 /// A key-package record waiting to be published to the relays.
 #[derive(Debug, Clone)]
@@ -240,9 +279,10 @@ pub struct NostrTransport {
     failed_publications: Mutex<HashSet<String>>,
     /// Peer user ids whose published key packages we want fetched.
     resolve_queue: Mutex<VecDeque<String>>,
-    /// Query id → the peer user id it is resolving. An inbound event is
-    /// meaningless without this: the id tells us whose derivable key opens it.
-    active_queries: Mutex<HashMap<String, String>>,
+    /// Query id → the query's state. An inbound event is meaningless without
+    /// this: the id tells us whose derivable key opens it, and carries the
+    /// per-query dedup and delivery ceiling with it.
+    active_queries: Mutex<HashMap<String, ActiveQuery>>,
     /// Peer user id → last resolution attempt, rate-limiting repeats for a
     /// peer who has published nothing.
     resolve_attempts: Mutex<HashMap<String, Instant>>,
@@ -537,30 +577,39 @@ impl NostrTransport {
             return false;
         }
 
+        // Read the rate limit without stamping it. Stamping here would burn the
+        // whole interval on a request the queue then refuses, so a peer dropped
+        // at capacity would wait out `RESOLUTION_RETRY_INTERVAL` despite never
+        // having been looked up — the opposite of what the overflow policy
+        // promises.
         {
-            let mut attempts = self.resolve_attempts.lock_or_recover();
+            let attempts = self.resolve_attempts.lock_or_recover();
             if let Some(last) = attempts.get(user_id) {
                 if last.elapsed() < RESOLUTION_RETRY_INTERVAL {
                     return false;
                 }
             }
-            // Bounded like the peer-key map, and for the same reason: the key
-            // is a wire-influenced recipient id. Clearing costs at most one
-            // premature retry per forgotten peer.
-            if attempts.len() >= NOSTR_MAX_TRACKED_PEER_KEYS {
-                attempts.clear();
-            }
-            attempts.insert(user_id.to_string(), Instant::now());
         }
 
-        let mut queue = self.resolve_queue.lock_or_recover();
-        if queue.iter().any(|q| q == user_id) {
-            return false;
+        {
+            let mut queue = self.resolve_queue.lock_or_recover();
+            if queue.iter().any(|q| q == user_id) {
+                return false;
+            }
+            if queue.len() >= MAX_PENDING_RESOLUTIONS {
+                return false;
+            }
+            queue.push_back(user_id.to_string());
         }
-        if queue.len() >= MAX_PENDING_RESOLUTIONS {
-            return false;
+
+        // Only now is an attempt real. Bounded like the peer-key map, and for
+        // the same reason: the key is a wire-influenced recipient id. Clearing
+        // costs at most one premature retry per forgotten peer.
+        let mut attempts = self.resolve_attempts.lock_or_recover();
+        if attempts.len() >= NOSTR_MAX_TRACKED_PEER_KEYS {
+            attempts.clear();
         }
-        queue.push_back(user_id.to_string());
+        attempts.insert(user_id.to_string(), Instant::now());
         true
     }
 
@@ -591,7 +640,14 @@ impl NostrTransport {
                     active.remove(&stale);
                 }
             }
-            active.insert(query_id.clone(), user_id);
+            active.insert(
+                query_id.clone(),
+                ActiveQuery {
+                    user_id,
+                    seen_events: HashSet::new(),
+                    delivered: 0,
+                },
+            );
         }
 
         Ok(Some(NostrQuery { query_id, req_json }))
@@ -645,14 +701,6 @@ impl NostrTransport {
         query_id: &str,
         event_json: &str,
     ) -> Result<Option<(String, Vec<u8>)>> {
-        let user_id = match self.active_queries.lock_or_recover().get(query_id) {
-            Some(u) => u.clone(),
-            None => {
-                tracing::debug!(query_id = %query_id, "Nostr query event for an unknown query");
-                return Ok(None);
-            }
-        };
-
         if event_json.len() > NOSTR_MAX_PAYLOAD_SIZE {
             tracing::warn!(
                 len = event_json.len(),
@@ -660,6 +708,26 @@ impl NostrTransport {
             );
             return Ok(None);
         }
+
+        let user_id = {
+            let mut active = self.active_queries.lock_or_recover();
+            let Some(query) = active.get_mut(query_id) else {
+                tracing::debug!(query_id = %query_id, "Nostr query event for an unknown query");
+                return Ok(None);
+            };
+            // The relay decides how many events arrive here, so the ceiling has
+            // to be ours. See [`MAX_QUERY_EVENTS`].
+            if query.delivered >= MAX_QUERY_EVENTS {
+                tracing::warn!(
+                    query_id = %query_id,
+                    cap = MAX_QUERY_EVENTS,
+                    "Nostr resolution query exceeded its event ceiling; ignoring the rest"
+                );
+                return Ok(None);
+            }
+            query.delivered += 1;
+            query.user_id.clone()
+        };
 
         let event: serde_json::Value = match serde_json::from_str(event_json) {
             Ok(v) => v,
@@ -681,6 +749,26 @@ impl NostrTransport {
         ) else {
             return Ok(None);
         };
+
+        // The query is broadcast, so every connected relay answers it and the
+        // same record arrives once per relay. Take each event id once: behind
+        // this call the key-package handler performs two durable
+        // secure-storage writes per record, and re-importing a package we
+        // already hold buys nothing. Marked before opening rather than after,
+        // so a record that repeatedly fails to open is absorbed too.
+        if let Some(event_id) = event.get("id").and_then(|i| i.as_str()) {
+            let mut active = self.active_queries.lock_or_recover();
+            let Some(query) = active.get_mut(query_id) else {
+                return Ok(None);
+            };
+            if !query.seen_events.insert(event_id.to_string()) {
+                tracing::debug!(
+                    query_id = %query_id,
+                    "Duplicate Nostr key-package record for this query; already taken"
+                );
+                return Ok(None);
+            }
+        }
 
         let sealed = match base64::engine::general_purpose::STANDARD.decode(content) {
             Ok(bytes) => bytes,
@@ -1174,11 +1262,14 @@ impl NostrTransport {
     fn fail_all_pending(&self) {
         let (pending, publications) = {
             let mut map = self.pending_confirmation.lock_or_recover();
-            let count = map.len();
             let publications: Vec<String> = map
                 .keys()
                 .filter_map(|id| publication_slot_id(id))
                 .collect();
+            // Only the messages count as failures — the publications among
+            // them are reported to the engine instead. See
+            // [`publication_slot_id`].
+            let count = map.len().saturating_sub(publications.len());
             map.clear();
             (count, publications)
         };
@@ -1201,9 +1292,12 @@ impl NostrTransport {
             let mut pending = self.pending_confirmation.lock_or_recover();
             pending.retain(|message_id, enqueued_at| {
                 if now.duration_since(*enqueued_at) > timeout {
-                    expired_count += 1;
-                    if let Some(slot_id) = publication_slot_id(message_id) {
-                        expired_publications.push(slot_id);
+                    // A timed-out publication is reported to the engine, not
+                    // counted as a delivery failure. See
+                    // [`publication_slot_id`].
+                    match publication_slot_id(message_id) {
+                        Some(slot_id) => expired_publications.push(slot_id),
+                        None => expired_count += 1,
                     }
                     false
                 } else {
@@ -1404,7 +1498,10 @@ impl Transport for NostrTransport {
             .lock_or_recover()
             .remove(message_id);
 
-        if removed.is_some() {
+        // A publication is not a message and never moves the delivery metrics
+        // — see [`publication_slot_id`] for why counting it would misreport
+        // this transport's reliability to DORS.
+        if removed.is_some() && publication_slot_id(message_id).is_none() {
             let mut metrics = self.metrics.lock_or_recover();
             metrics.success_count = metrics.success_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
@@ -1418,7 +1515,9 @@ impl Transport for NostrTransport {
             .lock_or_recover()
             .remove(message_id);
 
-        if removed.is_some() {
+        // Same rule as `confirm_sent`: a publication's outcome is reported to
+        // the engine below, never to the delivery metrics DORS scores on.
+        if removed.is_some() && publication_slot_id(message_id).is_none() {
             let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
@@ -2768,5 +2867,217 @@ mod tests {
             .open_query_event(&query.query_id, "not json at all")
             .unwrap()
             .is_none());
+    }
+
+    /// A publication is not a message, and DORS does not get to hear about it.
+    ///
+    /// The reliability score is `success / (success + failure)` over lifetime
+    /// counters that never decay, and an idle install publishes far more than
+    /// it sends — so counting publications would score this transport on
+    /// something other than its ability to carry messages. A relay that
+    /// rejects kind 30443 would drive the ratio toward zero and make DORS
+    /// deprioritise Nostr for traffic that delivers perfectly well.
+    #[test]
+    fn test_publication_failures_stay_out_of_the_delivery_metrics() {
+        let transport = NostrTransport::new("alice").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        // One real message, delivered.
+        transport.send(&create_test_message()).unwrap();
+        let msg = transport.get_next_signed_event().unwrap().unwrap();
+        transport.confirm_sent(&msg.message_id);
+
+        // A full slot set the relay rejects outright.
+        for i in 0..crate::constants::NOSTR_KEY_PACKAGE_SLOTS {
+            transport.publish_key_package(&format!("slot-{}", i), b"kp".to_vec());
+        }
+        for _ in 0..crate::constants::NOSTR_KEY_PACKAGE_SLOTS {
+            let published = transport.get_next_signed_event().unwrap().unwrap();
+            assert!(published
+                .message_id
+                .starts_with(NOSTR_PUBLICATION_ID_PREFIX));
+            transport.report_send_failure(&published.message_id);
+        }
+
+        let metrics = transport.metrics();
+        assert_eq!(metrics.success_count, 1);
+        assert_eq!(
+            metrics.failure_count, 0,
+            "publication rejections were counted as message delivery failures"
+        );
+        assert_eq!(
+            metrics.delivery_ratio,
+            Some(1.0),
+            "the only message sent was delivered; the ratio DORS reads must say so"
+        );
+
+        // ...and the slots are still reported back for republication.
+        assert_eq!(
+            transport.take_failed_publications().len(),
+            crate::constants::NOSTR_KEY_PACKAGE_SLOTS,
+            "keeping publications out of the metrics must not lose the reports"
+        );
+    }
+
+    /// The same rule in the other direction: a successful publication must not
+    /// inflate the ratio and mask real message failures.
+    #[test]
+    fn test_publication_successes_do_not_mask_message_failures() {
+        let transport = NostrTransport::new("alice").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        transport.send(&create_test_message()).unwrap();
+        let msg = transport.get_next_signed_event().unwrap().unwrap();
+        transport.report_send_failure(&msg.message_id);
+
+        for i in 0..crate::constants::NOSTR_KEY_PACKAGE_SLOTS {
+            transport.publish_key_package(&format!("slot-{}", i), b"kp".to_vec());
+        }
+        for _ in 0..crate::constants::NOSTR_KEY_PACKAGE_SLOTS {
+            let published = transport.get_next_signed_event().unwrap().unwrap();
+            transport.confirm_sent(&published.message_id);
+        }
+
+        let metrics = transport.metrics();
+        assert_eq!(metrics.success_count, 0);
+        assert_eq!(metrics.failure_count, 1);
+        assert_eq!(
+            metrics.delivery_ratio,
+            Some(0.0),
+            "publications that reached a relay masked a message that did not"
+        );
+    }
+
+    /// A resolution query is broadcast to every connected relay, so the same
+    /// record comes back once per relay. Opening it more than once re-runs the
+    /// key-package handler — two durable secure-storage writes a time — to
+    /// import a package we already hold.
+    #[test]
+    fn test_duplicate_records_from_several_relays_open_once() {
+        let alice = NostrTransport::new("alice").unwrap();
+        let bob = NostrTransport::new("bob").unwrap();
+        bob.install_signing_secret(&[9u8; 32]).unwrap();
+        bob.start().unwrap();
+        bob.on_status_changed(TransportStatus::Available);
+
+        bob.publish_key_package("slot-a", b"bob's key package".to_vec());
+        let published = bob.get_next_signed_event().unwrap().unwrap();
+        let event_json = serde_json::to_string(&event_object(&published)).unwrap();
+
+        alice.request_peer_key_packages("bob");
+        let query = alice.next_query().unwrap().unwrap();
+
+        assert!(
+            alice
+                .open_query_event(&query.query_id, &event_json)
+                .unwrap()
+                .is_some(),
+            "the first relay's copy must open"
+        );
+        for _ in 0..4 {
+            assert!(
+                alice
+                    .open_query_event(&query.query_id, &event_json)
+                    .unwrap()
+                    .is_none(),
+                "the same record must be taken once per query, not once per relay"
+            );
+        }
+    }
+
+    /// A relay is free to ignore the REQ's `limit` and stream whatever it
+    /// likes, and every record that opens costs durable writes behind this
+    /// call — so the ceiling has to be ours, not the relay's.
+    #[test]
+    fn test_a_query_stops_accepting_events_at_its_ceiling() {
+        let alice = NostrTransport::new("alice").unwrap();
+        let bob = NostrTransport::new("bob").unwrap();
+        bob.install_signing_secret(&[9u8; 32]).unwrap();
+        bob.start().unwrap();
+        bob.on_status_changed(TransportStatus::Available);
+        bob.publish_key_package("slot-a", b"bob's key package".to_vec());
+        let published = bob.get_next_signed_event().unwrap().unwrap();
+        let genuine = serde_json::to_string(&event_object(&published)).unwrap();
+
+        alice.request_peer_key_packages("bob");
+        let query = alice.next_query().unwrap().unwrap();
+
+        // Distinct ids, so it is the ceiling that stops this and not the dedup.
+        for i in 0..MAX_QUERY_EVENTS {
+            let junk = format!(
+                r#"{{"id":"{:064x}","kind":30443,"pubkey":"aa","content":"AQID"}}"#,
+                i
+            );
+            assert!(alice
+                .open_query_event(&query.query_id, &junk)
+                .unwrap()
+                .is_none());
+        }
+
+        assert!(
+            alice
+                .open_query_event(&query.query_id, &genuine)
+                .unwrap()
+                .is_none(),
+            "the query kept accepting events past its ceiling"
+        );
+
+        // The record itself is fine, and the ceiling is per query: a fresh one
+        // opens it.
+        let alice2 = NostrTransport::new("alice").unwrap();
+        alice2.request_peer_key_packages("bob");
+        let fresh = alice2.next_query().unwrap().unwrap();
+        assert!(alice2
+            .open_query_event(&fresh.query_id, &genuine)
+            .unwrap()
+            .is_some());
+    }
+
+    /// The same malformed key, by the route that was already shipping.
+    ///
+    /// `unseal_event_payload` takes the event's `pubkey` field verbatim off a
+    /// public relay and hands it to the NIP-44 derive, which used to reach a
+    /// fixed-size decoder that aborts the process on a wrong-length key. One
+    /// hostile event was enough; it must be an unopenable frame instead.
+    #[test]
+    fn test_malformed_event_pubkey_does_not_abort_the_receive_path() {
+        let transport = NostrTransport::new("alice").unwrap();
+        let sealed = vec![0x02u8; 160];
+
+        for pubkey in ["", "aa", "abcd", &"ab".repeat(64)] {
+            let out = transport.unseal_event_payload(pubkey, &sealed);
+            assert_eq!(
+                &*out,
+                &sealed[..],
+                "a malformed pubkey must leave the frame untouched, not abort"
+            );
+        }
+    }
+
+    /// A request the queue refuses for capacity was never looked up, so it must
+    /// not burn the retry interval — otherwise the overflow policy's promise
+    /// that a dropped peer "is retried on the next send to them" is false, and
+    /// the peer instead waits out `RESOLUTION_RETRY_INTERVAL`.
+    #[test]
+    fn test_a_resolution_refused_at_capacity_does_not_burn_the_rate_limit() {
+        let transport = NostrTransport::new("alice").unwrap();
+
+        for i in 0..MAX_PENDING_RESOLUTIONS {
+            assert!(transport.request_peer_key_packages(&format!("peer-{}", i)));
+        }
+
+        assert!(
+            !transport.request_peer_key_packages("bob"),
+            "the queue is full, so this request is refused"
+        );
+
+        // Draining one makes room; bob must be admitted straight away.
+        transport.next_query().unwrap().unwrap();
+        assert!(
+            transport.request_peer_key_packages("bob"),
+            "a request dropped at capacity burned the retry interval"
+        );
     }
 }
