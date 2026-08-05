@@ -2969,6 +2969,28 @@ fn apply_decrypted_content_refuses_sealed_file_chunk_content_type() {
 }
 
 #[test]
+fn apply_decrypted_content_unknown_sealed_content_type_degrades_to_file() {
+    // A sealed body from a newer sender carrying a content type this build
+    // doesn't know must still parse — text and extras restored, the type
+    // degraded to File (ContentType's tolerant decode) — never the raw
+    // `__RICH_V1__{...}` blob surfacing as message text.
+    let future = format!(
+        "{}{}",
+        internal_prefixes::RICH_V1,
+        r#"{"text":"vote now","content_type":"some_future_type"}"#
+    );
+    let mut message = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "cipher-placeholder",
+    );
+    OfflineProtocol::apply_decrypted_content(&mut message, future);
+    assert_eq!(message.content, "vote now");
+    assert_eq!(message.content_type, ContentType::File);
+}
+
+#[test]
 fn send_message_rejects_rich_prefix_content() {
     // `__RICH_V1__` joined INTERNAL_PREFIXES: user content can never
     // impersonate a sealed rich body through the public send APIs.
