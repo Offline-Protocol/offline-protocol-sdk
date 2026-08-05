@@ -98,15 +98,6 @@ class LeAdvertiser(
         // earn itself ADVERTISE_FAILED_ALREADY_STARTED.
         if (startInFlight) return
 
-        // Nothing to start against: getBluetoothLeAdvertiser() returns null
-        // while the adapter is off, and the facade's adapter-reset path
-        // re-attaches whatever it reads — so this is null exactly when the user
-        // has Bluetooth switched off. Bail before raising the gate below: the
-        // start call itself is a no-op on a null advertiser, so no callback
-        // would ever arrive to lower it again, and every later start() would
-        // return at the guard above with advertising wedged off for good.
-        if (advertiser == null) return
-
         if (!host.isGattServerReady()) {
             pendingAdvertiseReason = reason
             if (host.shouldLog("advert_waiting_gatt", 5000L)) {
@@ -119,6 +110,21 @@ class LeAdvertiser(
             }
             return
         }
+
+        // Nothing to start against: getBluetoothLeAdvertiser() returns null
+        // while the adapter is off, and the facade's adapter-reset path
+        // re-attaches whatever it reads — so this is null exactly when the user
+        // has Bluetooth switched off. Bail before raising the gate below: the
+        // start call itself is a no-op on a null advertiser, so no callback
+        // would ever arrive to lower it again, and every later start() would
+        // return at the in-flight guard above with advertising wedged off for
+        // good.
+        //
+        // Deliberately below the GATT-readiness check rather than above it. A
+        // null advertiser must still latch [pendingAdvertiseReason], so an
+        // attach that lands while the service registration is in flight is
+        // picked up by [onGattServerReady] instead of being dropped silently.
+        if (advertiser == null) return
 
         startInFlight = true
         try {

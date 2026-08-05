@@ -246,8 +246,17 @@ class BleTransportFacade(
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
-        /** Retry cadence for re-arming BLE after the adapter was found off (ms) */
-        private const val BLE_RECOVERY_RETRY_MS = 10000L
+        /**
+         * Retry cadence for re-arming BLE after a start could not get a scan
+         * going. Doubles per consecutive failure and caps, so leaving Bluetooth
+         * off overnight settles at a wakeup a minute rather than 8,600 of them,
+         * while the first few retries stay fast enough that a quick toggle is
+         * barely noticed. The cap is deliberately low: nothing else re-arms the
+         * scan, so it is also the worst-case time this device stays deaf after
+         * the user switches Bluetooth back on.
+         */
+        private const val BLE_RECOVERY_RETRY_MIN_MS = 10000L
+        private const val BLE_RECOVERY_RETRY_MAX_MS = 30000L
         private const val MAX_CONNECTIONS_PER_DEVICE = 4
         /** Min interval between connection-monitor reconnect attempts per
          *  device. Reconnect backoff on disconnect is owned by
@@ -322,10 +331,12 @@ class BleTransportFacade(
     // Scanner components
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var scanCallback: ScanCallback? = null
-    // @Volatile because onScanFailed (binder thread) clears it while the
-    // scan watchdog and stopScanning read it on the main thread. Without
-    // this, a JMM visibility gap can leave the watchdog polling against a
-    // dead scanner.
+    // Main-thread only today: every reader and writer runs on mainHandler,
+    // onScanFailed included — it reposts before touching this. @Volatile is
+    // kept deliberately rather than as a live requirement; this flag has been
+    // written from a binder thread before, and a volatile read on a field
+    // touched a few times a minute costs nothing next to re-deriving the
+    // threading argument the next time a callback path grows.
     @Volatile
     private var isScanning = false
     
@@ -776,6 +787,10 @@ class BleTransportFacade(
         }
     }
 
+    // Current rung of the recovery backoff ladder. Main-thread only, like the
+    // handler it schedules against.
+    private var bleRecoveryDelayMs: Long = BLE_RECOVERY_RETRY_MIN_MS
+
     /**
      * The one path back to a live BLE session after a start was refused because
      * the adapter was off.
@@ -792,6 +807,13 @@ class BleTransportFacade(
      * Rescheduled from [startScanning] for as long as the adapter stays off, and
      * cancelled by [stopScanning] so a paused or stopped transport cannot bring
      * scanning back behind the app's back.
+     *
+     * Known limit: this heals advertising only as a passenger on a scan
+     * recovery. A device whose scan is healthy while advertising alone is dead
+     * — an adapter reset that re-attached a null advertiser, or a terminal
+     * `onStartFailure` — returns at the [isScanning] guard below and stays
+     * discoverable-to-nobody. Closing that needs its own advertising-side
+     * retry; it is not covered here.
      */
     private val bleRecoveryRunnable = object : Runnable {
         override fun run() {
@@ -807,12 +829,19 @@ class BleTransportFacade(
             // Same for the advertiser, which the adapter-reset path re-attaches
             // from the same nullable read and so can have left detached.
             bluetoothAdapter?.bluetoothLeAdvertiser?.let { leAdvertiser.attachAdvertiser(it) }
-            // Best-effort: advertising dies with the adapter too, and start()
-            // is gated on its own in-flight flag and on GATT-service readiness,
-            // so this is a no-op when advertising is already healthy or the
-            // service has not come back yet.
-            startAdvertising("adapter_recovery")
+            // Scan first. startScanning is what re-arms this runnable when the
+            // adapter is still off, so nothing that can throw may sit upstream
+            // of it: run() is a bare handler post, and an escape here would
+            // leave nothing pending — the exact terminal state this runnable
+            // exists to prevent.
             startScanning("adapter_recovery")
+            // Best-effort, and explicitly non-fatal: LeAdvertiser.start
+            // rethrows SecurityException by design so the synchronous start()
+            // path can surface it to its caller, but there is no caller on a
+            // handler post. start() is also gated on its own in-flight flag and
+            // on GATT-service readiness, so this is a no-op when advertising is
+            // already healthy or the service has not come back yet.
+            runCatching { startAdvertising("adapter_recovery") }
         }
     }
 
@@ -1423,6 +1452,9 @@ class BleTransportFacade(
                 }
 
                 override fun onScanFailed(errorCode: Int) {
+                    // Bind the callback identity explicitly rather than leaning
+                    // on `this` resolving through the posted lambda below.
+                    val self = this
                     val errorMsg = when(errorCode) {
                         SCAN_FAILED_ALREADY_STARTED -> "Scan already started"
                         SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "Application registration failed"
@@ -1433,17 +1465,39 @@ class BleTransportFacade(
                     Log.e(TAG, "BLE scan failed: $errorMsg (code=$errorCode)")
                     // Repost to main so the state mutation and the runnable
                     // teardown match the threading contract the rest of the
-                    // facade follows. Without cancelling the watchdog and
-                    // connection monitor here, they keep firing against a
-                    // dead scanner.
+                    // facade follows.
                     mainHandler.post {
-                        isScanning = false
-                        cancelScanWatchdog()
-                        cancelConnectionMonitor()
                         emitDiagnostic("error", "BLE scan failed", mapOf(
                             "errorCode" to errorCode,
                             "errorMessage" to errorMsg
                         ))
+                        // Ignore a failure belonging to a callback we have
+                        // already replaced or torn down — the scan we would
+                        // stop is a newer, possibly healthy one, and a
+                        // deliberate stop/pause must not be undone. Same
+                        // identity check LeAdvertiser.onStartFailure uses.
+                        if (scanCallback !== self) return@post
+                        // Route through stopScanning instead of clearing the
+                        // flags inline. Reaching this callback means startScan
+                        // returned normally — the refusal is asynchronous — so
+                        // isScanning is still true and the framework may yet
+                        // hold a scanner registration for this callback
+                        // (SCAN_FAILED_ALREADY_STARTED is precisely that case).
+                        // stopScanning releases it and runs the one shared
+                        // teardown; leaving it registered and re-entering
+                        // startScanning with a fresh callback would strand one
+                        // registration per attempt against a per-app cap of 5.
+                        stopScanning("scan_failed")
+                        // Arm recovery after the teardown, since stopScanning
+                        // cancels a pending one by design. Without this an
+                        // async scan failure lands in exactly the state
+                        // [bleRecoveryRunnable] exists to prevent: RUNNING, not
+                        // scanning, nothing left on the handler. Reached by the
+                        // ordinary transient failures (internal error,
+                        // registration failed) and — on builds that report an
+                        // adapter caught mid-transition here rather than by
+                        // throwing — by the adapter-off case itself.
+                        scheduleBleRecovery()
                     }
                 }
             }
@@ -1468,6 +1522,11 @@ class BleTransportFacade(
                 return
             }
             isScanning = true
+            // A live scan ends the recovery episode. stopScanning already
+            // resets the ladder on the paths that go through it, but the
+            // recovery runnable reaches a successful start without one, so
+            // reset here too or the next adapter-off inherits a stale rung.
+            bleRecoveryDelayMs = BLE_RECOVERY_RETRY_MIN_MS
             val now = System.currentTimeMillis()
             lastDiscoveryAt = now
             lastProactiveScanRefresh = now
@@ -1539,10 +1598,15 @@ class BleTransportFacade(
         }
 
         // Teardown runs on every outcome, which is why it sits outside the try.
-        // A stopScan that threw leaves the framework-side scan just as dead as
-        // one that returned, so local state has to come down either way: a
-        // lingering isScanning short-circuits the next startScanning at its
-        // guard, and the watchdog and connection monitor would keep firing
+        // For the adapter-off throw the framework-side scan is already dead and
+        // local state simply has to follow. For a SecurityException it is not:
+        // the call was refused, so the scan may well still be registered, and
+        // dropping scanCallback below discards the only reference that could
+        // ever stop it. That is accepted rather than equivalent — Android kills
+        // the process on a runtime permission revocation, so the stranded
+        // registration dies with it — and the alternative is worse in both
+        // cases: a lingering isScanning short-circuits the next startScanning
+        // at its guard, and the watchdog and connection monitor keep firing
         // against a scanner that is gone.
         scanCallback = null
         isScanning = false
@@ -1572,12 +1636,18 @@ class BleTransportFacade(
     }
 
     private fun scheduleBleRecovery() {
-        cancelBleRecovery()
-        mainHandler.postDelayed(bleRecoveryRunnable, BLE_RECOVERY_RETRY_MS)
+        // Deliberately not cancelBleRecovery(): that resets the ladder, and a
+        // re-arm from a failed retry is a continuation of the same episode.
+        mainHandler.removeCallbacks(bleRecoveryRunnable)
+        mainHandler.postDelayed(bleRecoveryRunnable, bleRecoveryDelayMs)
+        bleRecoveryDelayMs = (bleRecoveryDelayMs * 2).coerceAtMost(BLE_RECOVERY_RETRY_MAX_MS)
     }
 
     private fun cancelBleRecovery() {
         mainHandler.removeCallbacks(bleRecoveryRunnable)
+        // Reset the ladder with the cancellation: whatever arms recovery next
+        // is a fresh episode, not a resumption of the one being dropped here.
+        bleRecoveryDelayMs = BLE_RECOVERY_RETRY_MIN_MS
     }
     
     /**
