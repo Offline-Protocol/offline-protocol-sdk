@@ -19,7 +19,9 @@
 //! per-install secret key that starts out ephemeral and is upgraded to a
 //! persisted identity via [`NostrTransport::install_signing_secret`].
 
-use crate::constants::{NOSTR_CONNECTION_TIMEOUT_SECS, NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS};
+use crate::constants::{
+    NOSTR_CONNECTION_TIMEOUT_SECS, NOSTR_MAX_PAYLOAD_SIZE, NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS,
+};
 use crate::nostr_crypto::{self, NostrKeypair};
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use base64::Engine;
@@ -281,6 +283,12 @@ impl NostrTransport {
     /// The `relay_event_json` is a complete `["EVENT", {...}]` string ready to
     /// send over a WebSocket connection. The platform no longer needs to do
     /// any signing or event creation.
+    ///
+    /// Events larger than [`NOSTR_MAX_PAYLOAD_SIZE`] are dropped here rather
+    /// than handed to the platform, since relays would reject them on arrival.
+    /// That drop is permanent — unlike a signing failure, an oversized event is
+    /// oversized on every attempt, so retrying it would only head-of-line-block
+    /// the queue behind a message no relay will accept.
     pub fn get_next_signed_event(&self) -> Result<Option<SignedNostrEvent>> {
         self.drain_expired_pending();
 
@@ -306,6 +314,12 @@ impl NostrTransport {
             drop(keypair);
             let event_id = event.id.clone();
             let event_json = event.to_relay_message()?;
+            if event_json.len() > NOSTR_MAX_PAYLOAD_SIZE {
+                return Err(crate::Error::MessageTooLarge(
+                    event_json.len(),
+                    NOSTR_MAX_PAYLOAD_SIZE,
+                ));
+            }
             Ok((event_id, event_json))
         })();
 
@@ -323,40 +337,63 @@ impl NostrTransport {
                 }))
             }
             Err(e) => {
-                let retry_count = {
-                    let mut counts = self.sign_retry_counts.lock_or_recover();
-                    let count = counts.entry(message_id.clone()).or_insert(0);
-                    *count += 1;
-                    *count
+                let retriable = match &e {
+                    // No number of attempts shrinks an oversized event.
+                    crate::Error::MessageTooLarge(_, _) => false,
+                    _ => self.record_sign_attempt(&message_id) < MAX_SIGN_RETRIES,
                 };
 
-                if retry_count < MAX_SIGN_RETRIES {
+                if retriable {
                     // Re-enqueue for another attempt.
                     self.send_queue.lock_or_recover().push_front(message);
                 } else {
-                    // Permanent failure — report it so metrics are updated and
-                    // the queue is not blocked by an undeliverable message.
-                    self.sign_retry_counts.lock_or_recover().remove(&message_id);
-                    self.report_send_failure(&message_id);
-                    tracing::error!(
-                        message_id = %message_id,
-                        attempts = retry_count,
-                        error = %e,
-                        "Nostr event signing failed permanently after max retries"
-                    );
+                    self.fail_permanently(&message_id, &e);
                 }
                 Err(e)
             }
         }
     }
 
+    /// Records a signing attempt for `message_id` and returns the running count.
+    fn record_sign_attempt(&self, message_id: &str) -> u8 {
+        let mut counts = self.sign_retry_counts.lock_or_recover();
+        let count = counts.entry(message_id.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
+        *count
+    }
+
+    /// Drops a message that cannot be published and records the failure.
+    ///
+    /// The message has already been popped off the send queue and was never
+    /// entered into `pending_confirmation` — that happens only once an event
+    /// reaches the platform — so the failure is counted directly here.
+    /// [`Transport::report_send_failure`] is keyed on a pending entry and would
+    /// be a no-op, leaving the failure invisible to DORS.
+    fn fail_permanently(&self, message_id: &str, error: &crate::Error) {
+        self.sign_retry_counts.lock_or_recover().remove(message_id);
+
+        let mut metrics = self.metrics.lock_or_recover();
+        metrics.failure_count = metrics.failure_count.saturating_add(1);
+        recalculate_delivery_ratios(&mut metrics);
+        drop(metrics);
+
+        tracing::error!(
+            message_id = %message_id,
+            error_code = error.code(),
+            error = %error,
+            "Nostr event dropped permanently; it will not be published"
+        );
+    }
+
     /// Returns a NIP-01 subscription filter JSON for this device's routing tag.
     ///
     /// The platform should send this to each relay after connecting:
-    /// `["REQ", "<sub_id>", {"#p": ["<routing_tag>"], "kinds": [4]}]`
+    /// `["REQ", "<sub_id>", {"#p": ["<routing_tag>"], "kinds": [4], "limit": N}]`
     ///
     /// The filter is on the routing tag — not the signing pubkey — so it is
-    /// stable across signing-key changes and derivable by peers.
+    /// stable across signing-key changes and derivable by peers. The `limit`
+    /// caps the stored-event replay a (re)connect pulls down; it does not cap
+    /// live delivery.
     pub fn create_subscription(&self, subscription_id: &str) -> Result<String> {
         nostr_crypto::create_subscription_message(&self.routing_tag, subscription_id)
     }
@@ -1044,6 +1081,109 @@ mod tests {
             transport_a.routing_tag(),
             nostr_crypto::routing_tag_for_device_id("device1").unwrap()
         );
+    }
+
+    #[test]
+    fn test_oversized_event_is_dropped_permanently_and_does_not_block_queue() {
+        let transport = NostrTransport::new("device1").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        let oversized = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "x".repeat(NOSTR_MAX_PAYLOAD_SIZE),
+        );
+        transport.send(&oversized).unwrap();
+        let queued_behind = create_test_message();
+        transport.send(&queued_behind).unwrap();
+
+        let err = transport.get_next_signed_event().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::MessageTooLarge(actual, limit)
+                    if actual > NOSTR_MAX_PAYLOAD_SIZE && limit == NOSTR_MAX_PAYLOAD_SIZE
+            ),
+            "expected MessageTooLarge, got {err:?}"
+        );
+
+        // Dropped on the first attempt rather than re-queued at the front for
+        // MAX_SIGN_RETRIES rounds, so the message behind it is served now.
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        assert_eq!(signed.message_id, queued_behind.id.to_string());
+
+        assert!(
+            transport.sign_retry_counts.lock().unwrap().is_empty(),
+            "an unshrinkable message must not accumulate retry state"
+        );
+        assert_eq!(
+            transport.metrics().failure_count,
+            1,
+            "the drop must reach metrics, or DORS never learns Nostr failed"
+        );
+    }
+
+    #[test]
+    fn test_size_cap_measures_the_relay_message_not_the_inner_payload() {
+        let transport = NostrTransport::new("device1").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        // The serialized message fits under the cap; base64 inflation (4/3)
+        // pushes the event a relay actually sees over it. Capping the inner
+        // payload instead would let this onto the wire to be rejected there.
+        let msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "x".repeat(50_000),
+        );
+        assert!(
+            transport.serialize_message(&msg).unwrap().len() < NOSTR_MAX_PAYLOAD_SIZE,
+            "test premise: the inner payload is under the cap"
+        );
+
+        transport.send(&msg).unwrap();
+        assert!(matches!(
+            transport.get_next_signed_event().unwrap_err(),
+            crate::Error::MessageTooLarge(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_default_size_media_chunk_exceeds_the_relay_cap() {
+        // Ground truth for why the cap matters, and why it is not a
+        // regression: DORS gives Nostr a media_bonus of 30.0, so media routes
+        // here — but `Message::binary_content` has no base64 serde adapter, so
+        // a chunk becomes a JSON array of decimal numbers (~3.6x) before the
+        // event's own base64 (~1.33x) is applied on top. At the engine's
+        // 32 KiB DEFAULT_CHUNK_SIZE that is ~156 KB on the wire, well past
+        // both this cap and the 64-128 KB relays typically accept. Such events
+        // were never deliverable; they now fail here instead of at the relay.
+        let transport = NostrTransport::new("device1").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        let mut chunk_message = create_test_message();
+        chunk_message.content = String::new();
+        chunk_message.binary_content = Some(vec![0xABu8; 32 * 1024]);
+
+        transport.send(&chunk_message).unwrap();
+        assert!(matches!(
+            transport.get_next_signed_event().unwrap_err(),
+            crate::Error::MessageTooLarge(_, _)
+        ));
+
+        // A BLE-sized 4 KiB chunk still fits, so the cap does not forbid
+        // media over Nostr outright — only the default chunking for it.
+        let mut small_chunk = create_test_message();
+        small_chunk.content = String::new();
+        small_chunk.binary_content = Some(vec![0xABu8; 4 * 1024]);
+
+        transport.send(&small_chunk).unwrap();
+        assert!(transport.get_next_signed_event().unwrap().is_some());
     }
 
     #[test]

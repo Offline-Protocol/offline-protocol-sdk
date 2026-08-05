@@ -108,7 +108,23 @@ pub const NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 30;
 
 /// Default maximum payload size for Nostr events (bytes).
 /// Nostr relays typically accept events up to 64KB–128KB.
+///
+/// Measured against the complete `["EVENT", {...}]` relay message, since that
+/// is what a relay accepts or rejects — not the protocol message inside it,
+/// which is smaller by the base64 (and, once the envelope is sealed, the
+/// encryption) overhead.
 pub const NOSTR_MAX_PAYLOAD_SIZE: usize = 65536;
+
+/// Cap on the stored events a relay returns for the initial Nostr subscription.
+///
+/// NIP-01 scopes `limit` to the initial query — relays MUST ignore it once
+/// they start streaming live events — so it bounds how much history each
+/// (re)connect replays without capping ongoing delivery.
+///
+/// Treat it as advisory in both directions: `limit` is a SHOULD, and NIP-11
+/// `max_limit` lets a relay clamp it silently, so a short result set is not
+/// evidence that the relay had nothing more to send.
+pub const NOSTR_INITIAL_QUERY_LIMIT: usize = 500;
 
 // Transport-wide Constants
 /// Default maximum message size in bytes (1 MB).
