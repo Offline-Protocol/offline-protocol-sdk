@@ -29,7 +29,7 @@ use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus
 use base64::Engine;
 use offline_protocol_core::{Message, MutexExt, RwLockExt};
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -49,6 +49,14 @@ const MAX_SIGN_RETRIES: u8 = 3;
 /// welcome lifecycle for, so a publication's confirm is a no-op by
 /// construction rather than by a check that could be forgotten.
 pub const NOSTR_PUBLICATION_ID_PREFIX: &str = "__nostr_kp__:";
+
+/// Recovers the slot id from a publication's synthetic message id, or `None`
+/// for an ordinary message id.
+fn publication_slot_id(message_id: &str) -> Option<String> {
+    message_id
+        .strip_prefix(NOSTR_PUBLICATION_ID_PREFIX)
+        .map(str::to_string)
+}
 
 /// Maximum peers queued for key-package resolution at once.
 ///
@@ -163,10 +171,12 @@ impl Default for NostrConfig {
 /// 5. `receive_queue`
 /// 6. `reconnect_attempts` / `platform_handle`
 ///
-/// `keypair`, `receive_watermark`, `peer_nostr_pubkeys` and `sealing_enabled`
-/// are leaf locks: they are only ever held in a narrow scope with no other lock
-/// acquisition inside. In particular the sealing path releases each before
-/// calling into the crypto layer, so a slow ECDH never blocks the send queue.
+/// `keypair`, `receive_watermark`, `peer_nostr_pubkeys`, `sealing_enabled` and
+/// `failed_publications` are leaf locks: they are only ever held in a narrow
+/// scope with no other lock acquisition inside. In particular the sealing path
+/// releases each before calling into the crypto layer, so a slow ECDH never
+/// blocks the send queue, and the publication-failure paths collect their slot
+/// ids under `pending_confirmation` and record them only after releasing it.
 pub struct NostrTransport {
     device_id: String,
     /// Per-install signing keypair. Ephemeral (random per process) until the
@@ -212,6 +222,22 @@ pub struct NostrTransport {
     /// queue so a fresh slot replaces a consumed one before the traffic that
     /// depends on it.
     publication_queue: Mutex<VecDeque<PendingPublication>>,
+    /// Slot ids whose publication left this queue but never reached a relay,
+    /// waiting for the engine to drain them via
+    /// [`Self::take_failed_publications`].
+    ///
+    /// The engine marks a slot published when it *queues* the record, because
+    /// that is the only point it hears about. Without this channel every
+    /// failure after that point — a build error, a relay rejection, a
+    /// confirmation timeout, a disconnect — would leave the slot marked
+    /// published for the life of the process, so the relays hold nothing (or
+    /// last process's stale record) while the engine believes the slot is
+    /// healthy. That is precisely the silently-stale record the publication
+    /// design exists to prevent.
+    ///
+    /// Bounded by construction: the keys are our own slot ids, of which the
+    /// engine keeps at most `NOSTR_KEY_PACKAGE_SLOTS`.
+    failed_publications: Mutex<HashSet<String>>,
     /// Peer user ids whose published key packages we want fetched.
     resolve_queue: Mutex<VecDeque<String>>,
     /// Query id → the peer user id it is resolving. An inbound event is
@@ -261,6 +287,7 @@ impl NostrTransport {
             sealing_enabled: Mutex::new(true),
             cold_contact_enabled: Mutex::new(true),
             publication_queue: Mutex::new(VecDeque::new()),
+            failed_publications: Mutex::new(HashSet::new()),
             resolve_queue: Mutex::new(VecDeque::new()),
             active_queries: Mutex::new(HashMap::new()),
             resolve_attempts: Mutex::new(HashMap::new()),
@@ -455,6 +482,35 @@ impl NostrTransport {
         !self.publication_queue.lock_or_recover().is_empty()
     }
 
+    /// Records that a slot's publication never reached a relay.
+    ///
+    /// A `warn!` rather than a security warning: with the engine re-publishing
+    /// on its next tick this is transient and self-healing, unlike an engine
+    /// side refill failure (which leaves a genuinely stale record standing and
+    /// does emit `NostrKeyPackageSlotExhausted`). A relay that rejects the kind
+    /// outright makes this repeat once per refresh interval per slot — loud in
+    /// the log and visible in the transport's failure metrics, but never
+    /// escalating and never head-of-line blocking anything.
+    fn mark_publications_failed(&self, slot_ids: Vec<String>) {
+        if slot_ids.is_empty() {
+            return;
+        }
+        let mut failed = self.failed_publications.lock_or_recover();
+        for slot_id in slot_ids {
+            tracing::warn!(
+                slot_id = %slot_id,
+                "Nostr key-package publication did not reach a relay; the slot will be republished"
+            );
+            failed.insert(slot_id);
+        }
+    }
+
+    /// Drains the slot ids whose publication never reached a relay, so the
+    /// engine can clear them from its published set and republish.
+    pub fn take_failed_publications(&self) -> Vec<String> {
+        self.failed_publications.lock_or_recover().drain().collect()
+    }
+
     /// Requests resolution of `user_id`'s published key packages.
     ///
     /// Returns whether a request was newly queued; a `false` means the peer was
@@ -527,7 +583,9 @@ impl NostrTransport {
             let mut active = self.active_queries.lock_or_recover();
             // A query the platform never completes would otherwise leak an
             // entry per attempt. The rate limit bounds the rate, this bounds
-            // the total; dropping the oldest costs one unresolvable answer.
+            // the total; the victim is whichever entry the map yields first
+            // (arbitrary, not oldest — the order carries no meaning here) and
+            // costs one unresolvable answer.
             if active.len() >= MAX_PENDING_RESOLUTIONS {
                 if let Some(stale) = active.keys().next().cloned() {
                     active.remove(&stale);
@@ -552,10 +610,36 @@ impl NostrTransport {
     /// receive path as any inbound frame, so the Ed25519 control gate and TOFU
     /// decide whose key package it is — and a record placed at this peer's tag
     /// by somebody else therefore registers under *that* signer's identity, not
-    /// under the peer we asked about. The one thing an impostor gains by
-    /// squatting a tag is crowding real records out of the query's `limit`,
-    /// which costs the metadata upgrade and nothing else: the send falls back
-    /// to the bootstrap leg exactly as it did before this existed.
+    /// under the peer we asked about.
+    ///
+    /// # What squatting a tag does buy
+    ///
+    /// Two things, both bounded, neither a loss:
+    ///
+    /// 1. **Crowding.** Foreign records displace real ones from the query's
+    ///    `limit`, costing the metadata upgrade and nothing else: the send
+    ///    falls back to the bootstrap leg exactly as it did before this
+    ///    existed.
+    /// 2. **Replaying a consumed record.** Every published record is openable
+    ///    by anyone who knows the username — that is the design — so a squatter
+    ///    can unseal one of the peer's *spent* records, re-seal the untouched
+    ///    (and genuinely Ed25519-signed) message inside it under their own
+    ///    author key, and stand it back up with a fresh `created_at`. Nothing
+    ///    here detects it: the inner signature is real, and no freshness
+    ///    binding ties a record to the live slot. A resolver then imports a
+    ///    genuine-but-consumed key package and builds a Welcome the peer can
+    ///    never process — worse than crowding, because it commits to a dead
+    ///    session rather than staying on the working bootstrap leg.
+    ///
+    ///    It self-heals rather than stranding the pair: importing the package
+    ///    runs the ordinary key-package handler, which pushes *our* package
+    ///    back under `auto_key_exchange`, and the peer then establishes from
+    ///    their side against a package that is actually live. So the cost is
+    ///    delivery delayed by one exchange — the same bounded class as the
+    ///    already-accepted `key_package_data` substitution vector, and not
+    ///    something a squatter can escalate. Closing it outright needs the
+    ///    record to carry slot-bound freshness (its slot id plus a signed issue
+    ///    time) so a replay is distinguishable from the current record.
     pub fn open_query_event(
         &self,
         query_id: &str,
@@ -802,10 +886,13 @@ impl NostrTransport {
     ///
     /// Publications are drained ahead of messages so a slot refreshed after
     /// consumption reaches the relay before the traffic that made it stale.
-    /// A failure here drops the record rather than re-queueing it: the engine
-    /// republishes unpublished slots on its next tick, so retrying in place
-    /// would only risk head-of-line blocking the message queue behind a record
-    /// that a later tick is going to re-mint anyway.
+    /// A failure here drops the record rather than re-queueing it — retrying in
+    /// place would head-of-line block the message queue behind a record that
+    /// keeps failing — and instead reports the slot through
+    /// [`Self::mark_publications_failed`], which is what makes the engine
+    /// republish it on a later tick. Reporting it is not optional: the engine
+    /// marked the slot published when it queued the record, so a silent drop
+    /// here strands the slot until the process restarts.
     fn next_publication_event(&self) -> Result<Option<SignedNostrEvent>> {
         let pending = {
             let mut queue = self.publication_queue.lock_or_recover();
@@ -855,6 +942,7 @@ impl NostrTransport {
                     error = %e,
                     "Failed to build a Nostr key-package publication; slot left unpublished"
                 );
+                self.mark_publications_failed(vec![pending.slot_id]);
                 Err(e)
             }
         }
@@ -1084,12 +1172,17 @@ impl NostrTransport {
 
     /// Fails all pending confirmations and records them as failures.
     fn fail_all_pending(&self) {
-        let pending = {
+        let (pending, publications) = {
             let mut map = self.pending_confirmation.lock_or_recover();
             let count = map.len();
+            let publications: Vec<String> = map
+                .keys()
+                .filter_map(|id| publication_slot_id(id))
+                .collect();
             map.clear();
-            count
+            (count, publications)
         };
+        self.mark_publications_failed(publications);
         if pending > 0 {
             let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(pending as u32);
@@ -1102,18 +1195,24 @@ impl NostrTransport {
         let timeout = Duration::from_secs(NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS);
         let now = Instant::now();
         let mut expired_count = 0u32;
+        let mut expired_publications = Vec::new();
 
         {
             let mut pending = self.pending_confirmation.lock_or_recover();
-            pending.retain(|_, enqueued_at| {
+            pending.retain(|message_id, enqueued_at| {
                 if now.duration_since(*enqueued_at) > timeout {
                     expired_count += 1;
+                    if let Some(slot_id) = publication_slot_id(message_id) {
+                        expired_publications.push(slot_id);
+                    }
                     false
                 } else {
                     true
                 }
             });
         }
+
+        self.mark_publications_failed(expired_publications);
 
         if expired_count > 0 {
             let mut metrics = self.metrics.lock_or_recover();
@@ -1323,6 +1422,14 @@ impl Transport for NostrTransport {
             let mut metrics = self.metrics.lock_or_recover();
             metrics.failure_count = metrics.failure_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
+        }
+
+        // Unconditional, unlike the metrics above: a report that races the
+        // confirmation timeout finds no pending entry, and missing a real
+        // failure strands the slot until restart while a redundant republish
+        // costs one idempotent relay write.
+        if let Some(slot_id) = publication_slot_id(message_id) {
+            self.mark_publications_failed(vec![slot_id]);
         }
     }
 }
@@ -2474,6 +2581,71 @@ mod tests {
              depends on it, got {}",
             first.message_id
         );
+    }
+
+    /// A publication that leaves the queue but never reaches a relay must be
+    /// reported back, or the engine — which marked the slot published when it
+    /// queued the record — leaves it looking healthy for the life of the
+    /// process while the relays hold nothing.
+    #[test]
+    fn test_rejected_publication_is_reported_back_for_republication() {
+        let transport = NostrTransport::new("alice").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        transport.publish_key_package("slot-a", b"kp".to_vec());
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        assert!(
+            transport.take_failed_publications().is_empty(),
+            "a publication in flight is not yet a failure"
+        );
+
+        transport.report_send_failure(&signed.message_id);
+
+        assert_eq!(
+            transport.take_failed_publications(),
+            vec!["slot-a".to_string()],
+            "a relay rejection must surface the slot for republication"
+        );
+        assert!(
+            transport.take_failed_publications().is_empty(),
+            "draining must consume the report"
+        );
+    }
+
+    /// The same, for the disconnect path: dropping the relay fails every
+    /// in-flight event, and a publication among them is no exception.
+    #[test]
+    fn test_disconnect_reports_in_flight_publications_for_republication() {
+        let transport = NostrTransport::new("alice").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        transport.publish_key_package("slot-a", b"kp".to_vec());
+        transport.get_next_signed_event().unwrap().unwrap();
+
+        transport.on_status_changed(TransportStatus::Disconnected);
+
+        assert_eq!(
+            transport.take_failed_publications(),
+            vec!["slot-a".to_string()],
+            "a publication in flight when the relay dropped must be republished"
+        );
+    }
+
+    /// A message failing must not be mistaken for a publication failing — the
+    /// slot set is keyed on the synthetic publication id and nothing else.
+    #[test]
+    fn test_message_failure_reports_no_publication_slot() {
+        let transport = NostrTransport::new("alice").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        transport.send(&create_test_message()).unwrap();
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        transport.report_send_failure(&signed.message_id);
+
+        assert!(transport.take_failed_publications().is_empty());
     }
 
     #[test]

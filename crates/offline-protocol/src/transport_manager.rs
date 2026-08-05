@@ -295,6 +295,16 @@ impl TransportManager {
         Ok(())
     }
 
+    /// Drains the slot ids whose publication never reached a relay.
+    ///
+    /// Empty when Nostr is not installed, which keeps the caller's tick free of
+    /// a transport check it would otherwise need.
+    pub fn take_failed_nostr_publications(&self) -> Vec<String> {
+        self.nostr_transport()
+            .map(|nostr| nostr.take_failed_publications())
+            .unwrap_or_default()
+    }
+
     /// Whether the Nostr transport is installed and publishing records.
     pub fn nostr_cold_contact_active(&self) -> bool {
         self.nostr_transport()

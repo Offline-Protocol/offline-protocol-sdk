@@ -74,6 +74,16 @@ impl OfflineProtocol {
             return;
         }
 
+        // A slot is marked published when its record is *queued*, which is the
+        // only point this layer hears about — so a record that then failed to
+        // reach a relay would leave the slot looking healthy forever while the
+        // relays hold nothing. The transport reports those back here. Drained
+        // after the throttle check on purpose: draining is destructive, and a
+        // throttled tick that dropped the reports would lose them outright.
+        for slot_id in self.transport_manager.take_failed_nostr_publications() {
+            self.nostr_published_slots.remove(&slot_id);
+        }
+
         let mut changed = false;
         for index in 0..NOSTR_KEY_PACKAGE_SLOTS {
             match self.refresh_one_slot(index) {

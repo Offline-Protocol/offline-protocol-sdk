@@ -349,7 +349,9 @@ To make the fallback rare rather than routine, each install **publishes MLS key 
 
 This is what makes **cold first contact** possible at all: a peer known only by username becomes reachable over Nostr with no prior key-package exchange over some other transport.
 
-**Why slots, and not one record.** An MLS key package's init key is consumed by the first peer who uses it. One replaceable record would mean the second stranger to fetch it builds a Welcome that can never be processed. Consumption is *local* — an init key leaves provider storage only when this node processes a Welcome built against it — so a stranger can drive it only by actually establishing sessions, and each burnt slot is refilled on the next tick. A refill that fails emits the `NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED` security warning rather than leaving a stale record standing silently.
+**Why slots, and not one record.** An MLS key package's init key is consumed by the first peer who uses it. One replaceable record would mean a stranger who fetches it after it was spent builds a Welcome that can never be processed. Consumption is *local* — an init key leaves provider storage only when this node processes a Welcome built against it — so a stranger can drive it only by actually establishing sessions, and each burnt slot is refilled on the next tick. The slot count covers the *sequential* gap between refreshes; it does not absorb concurrent cold contacts, since nothing distributes simultaneous fetchers across slots (two at once generally race for one init key, and the loser recovers through the reverse key-package exchange).
+
+**Two failure modes, neither silent.** A refill that cannot proceed — an MLS or storage error — emits the `NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED` security warning rather than leaving a stale record standing. A record that was built but never reached a relay — rejected, timed out, or in flight when the connection dropped — is reported back by the transport, and the next tick republishes it under the same slot id with the same (still unconsumed) package. Without that report the slot would stay marked published for the life of the process while the relays held nothing.
 
 #### Why the published record is sealed, though it is public by intent
 
@@ -364,6 +366,15 @@ So the computable keypair keeps exactly one encryption use: a self-published rec
 This is the first thing the transport emits **unprompted**. A small set of records sits at this install's routing tag and is refreshed as slots are consumed, whether or not a message is ever sent. Their content is sealed, but *the existence of a record at a given tag, and the timing of its refreshes*, are visible to every relay published to — a liveness signal the transport otherwise does not emit.
 
 `transports.nostr.coldContactEnabled` (RN) / `nostr_cold_contact_enabled` (UniFFI, core `TransportConfig`), default on, turns both halves off and keeps the transport silent until it has traffic. The price is that cold contact stops working: peers become reachable over Nostr only after a key-package exchange over some other transport.
+
+#### Residual: a squatter can replay a spent record
+
+The routing tag is public, so anyone may publish to it and a query returns whatever the relay holds there. Two things that buys, both bounded:
+
+- **Crowding.** Foreign records displace real ones from the query's `limit`, costing the metadata upgrade and nothing else — the send falls back to the bootstrap leg exactly as before.
+- **Replaying a spent record.** Every published record is openable by anyone who knows the username (that is the design), so a squatter can unseal one of a peer's *consumed* records, re-seal the untouched and genuinely Ed25519-signed payload under their own author key, and stand it back up with a fresh `created_at`. Nothing detects this: the inner signature is real, and no freshness binding ties a record to the live slot. The resolver imports a genuine-but-consumed key package and builds a Welcome the peer can never process — worse than crowding, because it commits to a dead session rather than staying on the working bootstrap leg.
+
+  It does not strand the pair. Importing any key package pushes ours back under `auto_key_exchange`, and the peer then establishes from their side against a package that is actually live, so the cost is delivery delayed by one exchange — the same bounded class as the already-accepted `key_package_data` substitution vector. Closing it outright needs the record to carry slot-bound freshness (its slot id plus a signed issue time), which is future work.
 
 #### Residual: a cached key can still go stale
 

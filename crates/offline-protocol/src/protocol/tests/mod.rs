@@ -31721,6 +31721,107 @@ fn nostr_publication_refills_a_slot_whose_package_was_consumed() {
     );
 }
 
+/// A slot is marked published when its record is *queued* — the only point the
+/// engine hears about — so a record that then failed on the wire must be
+/// reported back, or the slot stands stale for the life of the process while
+/// the engine believes it is healthy. That is the silent failure the whole
+/// publication design exists to avoid, one layer down.
+#[test]
+fn nostr_publication_that_never_reached_a_relay_is_republished() {
+    use offline_protocol_transport::nostr::NOSTR_PUBLICATION_ID_PREFIX;
+
+    let mut protocol = protocol_with_nostr("alice");
+    protocol.refresh_nostr_key_package_slots();
+
+    let handle = nostr_transport_of(&protocol);
+    let nostr = as_nostr(&handle);
+    while nostr.get_next_signed_event().unwrap().is_some() {}
+
+    let before = protocol.nostr_publication_slots_for_test();
+    let slot_id = before[0].slot_id.clone();
+
+    // Every relay rejected it, or the socket dropped before the OK.
+    nostr.report_send_failure(&format!("{}{}", NOSTR_PUBLICATION_ID_PREFIX, slot_id));
+
+    protocol.reset_nostr_slot_throttle_for_test();
+    protocol.refresh_nostr_key_package_slots();
+
+    let after = protocol.nostr_publication_slots_for_test();
+    assert_eq!(
+        after[0].slot_id, slot_id,
+        "republication must reuse the slot id, or the stale record is never replaced"
+    );
+    assert_eq!(
+        after[0].package_id, before[0].package_id,
+        "the package was never consumed, only its publication failed; \
+         republishing must not burn a fresh one"
+    );
+
+    let republished = nostr
+        .get_next_signed_event()
+        .unwrap()
+        .expect("the failed slot must be republished");
+    assert_eq!(
+        republished.message_id,
+        format!("{}{}", NOSTR_PUBLICATION_ID_PREFIX, slot_id)
+    );
+    assert!(
+        nostr.get_next_signed_event().unwrap().is_none(),
+        "only the failed slot republishes; the healthy ones are left alone"
+    );
+}
+
+/// Every published record is openable by anyone who knows the username — that
+/// is the design — so a squatter can unseal one of a peer's *spent* records,
+/// re-seal the untouched (genuinely signed) payload under their own author key,
+/// and stand it back up at the peer's tag. A resolver cannot tell that from the
+/// live record: the inner signature is real and nothing binds a record to a
+/// live slot.
+///
+/// So the heal must not depend on telling them apart. Importing any resolved
+/// key package pushes ours back under `auto_key_exchange`, and the peer then
+/// establishes from their side against a package that is actually live — which
+/// is what keeps the replay a delivery delay rather than a stranded pair.
+#[test]
+fn nostr_resolution_arms_the_reverse_exchange_that_heals_a_replayed_record() {
+    let mut alice = protocol_with_nostr("alice");
+    alice.refresh_nostr_key_package_slots();
+
+    let alice_handle = nostr_transport_of(&alice);
+    let alice_nostr = as_nostr(&alice_handle);
+    let published = alice_nostr.get_next_signed_event().unwrap().unwrap();
+    let event: serde_json::Value = {
+        let outer: serde_json::Value = serde_json::from_str(&published.event_json).unwrap();
+        outer[1].clone()
+    };
+    let event_json = serde_json::to_string(&event).unwrap();
+
+    let mut bob = protocol_with_nostr("bob");
+    let bob_handle = nostr_transport_of(&bob);
+    let bob_nostr = as_nostr(&bob_handle);
+
+    bob_nostr.request_peer_key_packages("alice");
+    let query = bob_nostr.next_query().unwrap().unwrap();
+    let (_author, plaintext) = bob_nostr
+        .open_query_event(&query.query_id, &event_json)
+        .unwrap()
+        .expect("the record opens with alice's derivable key");
+
+    assert!(
+        !bob.key_package_sent_to.contains("alice"),
+        "precondition: bob has not pushed his package to alice yet"
+    );
+
+    bob.handle_resolved_key_package(&plaintext).unwrap();
+
+    assert!(
+        bob.key_package_sent_to.contains("alice"),
+        "resolving must push our own key package back — that reverse exchange \
+         is the only thing that heals a resolved-but-consumed package, and \
+         nothing at resolution time can tell a spent record from a live one"
+    );
+}
+
 #[test]
 fn nostr_publication_does_nothing_when_cold_contact_is_disabled() {
     let mut protocol = protocol_with_nostr("alice");
@@ -31751,12 +31852,9 @@ fn nostr_published_record_is_signed_self_addressed_and_unacked() {
         outer[1].clone()
     };
     let sealed = crate::protocol::base64_decode(event["content"].as_str().unwrap()).unwrap();
-    let derivable =
-        offline_protocol_transport::NostrKeypair::derivable_for_device_id("alice").unwrap();
+    // The record is sealed to our own derivable key, so our own transport opens
+    // it on the bootstrap fallback path.
     let plaintext = nostr.unseal_event_payload(event["pubkey"].as_str().unwrap(), &sealed);
-    // The record is sealed to our own derivable key, so our own transport
-    // opens it on the bootstrap fallback path.
-    let _ = derivable;
 
     let message = nostr.deserialize_message(&plaintext).unwrap();
     assert_eq!(message.sender.as_str(), "alice");

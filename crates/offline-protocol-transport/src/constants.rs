@@ -207,14 +207,21 @@ pub const NOSTR_MAX_TRACKED_PEER_KEYS: usize = 1000;
 ///
 /// Each occupies its own addressable slot (a distinct `d` tag), because an MLS
 /// key package's init key is consumed by the first peer who uses it: one
-/// replaceable record would mean the second stranger to fetch it builds a
-/// Welcome that can never be processed. Five is sized for concurrent cold
-/// contacts arriving faster than a refresh can republish — the refresh runs on
-/// the process tick, so the buffer only has to cover one tick's worth.
+/// replaceable record would mean a stranger who fetches it after it was spent
+/// builds a Welcome that can never be processed.
+///
+/// What the count buys is coverage of the *sequential* gap — packages consumed
+/// between one refresh and the next, which runs on the process tick. It does
+/// **not** absorb concurrent cold contacts: nothing distributes simultaneous
+/// fetchers across slots, so two strangers arriving at once generally race for
+/// the same init key and the loser recovers through the reverse key-package
+/// exchange, not through slot multiplicity. Do not raise this expecting
+/// concurrency headroom it does not provide.
 ///
 /// Raising it costs one published event and one key package held in provider
-/// storage per slot; lowering it narrows the burst that can be absorbed before
-/// exhaustion, which fails closed and loudly rather than silently reusing.
+/// storage per slot; lowering it shortens the window a burst of sequential
+/// contacts can consume before every slot is stale, which degrades cold contact
+/// until the next tick refills rather than silently reusing a spent package.
 pub const NOSTR_KEY_PACKAGE_SLOTS: usize = 5;
 
 // Transport-wide Constants
