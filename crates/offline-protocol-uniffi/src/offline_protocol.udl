@@ -254,6 +254,7 @@ enum ContentType {
     "VideoNote",
     "File",
     "FileChunk",
+    "Poll",
 };
 
 // Media metadata for attachments.

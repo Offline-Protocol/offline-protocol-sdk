@@ -2094,6 +2094,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             "video_note" -> ContentType.VIDEO_NOTE
             "file" -> ContentType.FILE
             "file_chunk" -> ContentType.FILE_CHUNK
+            "poll" -> ContentType.POLL
             else -> ContentType.FILE
         }
     }

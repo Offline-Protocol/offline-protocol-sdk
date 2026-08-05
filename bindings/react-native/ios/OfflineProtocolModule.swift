@@ -1995,6 +1995,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         case "video_note": return .videoNote
         case "file": return .file
         case "file_chunk": return .fileChunk
+        case "poll": return .poll
         default: return .file
         }
     }

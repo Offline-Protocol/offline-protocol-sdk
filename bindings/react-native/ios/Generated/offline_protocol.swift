@@ -5790,6 +5790,7 @@ public enum ContentType: Equatable, Hashable {
     case videoNote
     case file
     case fileChunk
+    case poll
 
 
 
@@ -5824,6 +5825,8 @@ public struct FfiConverterTypeContentType: FfiConverterRustBuffer {
         case 7: return .file
         
         case 8: return .fileChunk
+        
+        case 9: return .poll
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -5863,6 +5866,10 @@ public struct FfiConverterTypeContentType: FfiConverterRustBuffer {
         
         case .fileChunk:
             writeInt(&buf, Int32(8))
+        
+        
+        case .poll:
+            writeInt(&buf, Int32(9))
         
         }
     }

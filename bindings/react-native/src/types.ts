@@ -198,6 +198,7 @@ export enum ContentType {
   VideoNote = 'video_note',
   File = 'file',
   FileChunk = 'file_chunk',
+  Poll = 'poll',
 }
 
 /**
