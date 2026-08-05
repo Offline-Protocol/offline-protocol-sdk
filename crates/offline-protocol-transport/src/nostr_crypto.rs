@@ -138,6 +138,18 @@ impl NostrKeypair {
     }
 }
 
+/// Current wall-clock time as unix seconds — the unit every Nostr timestamp
+/// (`created_at`, filter `since`/`until`) is expressed in.
+///
+/// Saturates to 0 rather than panicking if the system clock is set before the
+/// epoch; a zero here only widens a subscription window.
+pub(crate) fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Computes the public routing tag for a device/user ID.
 ///
 /// Derivation: `SHA-256(device_id)` → scalar → x-only secp256k1 public key
@@ -187,10 +199,7 @@ impl NostrEvent {
         recipient_pubkey_hex: &str,
         content_base64: &str,
     ) -> Result<Self> {
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let created_at = now_unix_secs();
         let kind: u32 = 4;
         let tags = vec![vec!["p".to_string(), recipient_pubkey_hex.to_string()]];
         let pubkey = keypair.public_key_hex().to_string();
@@ -250,17 +259,47 @@ impl NostrEvent {
 /// Creates a NIP-01 REQ subscription message for kind-4 DMs addressed to `pubkey_hex`
 /// (this device's own routing tag, from [`routing_tag_for_device_id`]).
 ///
-/// Returns `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4], "limit": N}]`.
+/// Returns
+/// `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4], "since": T, "limit": N}]`.
 ///
-/// The `limit` bounds the stored-event replay each (re)connect pulls down.
-/// Without it a relay is free to return its entire retention window every time
-/// the subscription is re-sent, and NIP-11 no longer advertises retention, so
-/// there is no way to learn how far back that reaches. See
-/// [`NOSTR_INITIAL_QUERY_LIMIT`] for why it is only advisory.
-pub fn create_subscription_message(pubkey_hex: &str, subscription_id: &str) -> Result<String> {
+/// The two bounds do different jobs and neither replaces the other:
+///
+/// - `since` (unix seconds, **inclusive** per NIP-01) is the real bound on
+///   replay: it says how far back history may reach at all. The caller derives
+///   it from the persisted receive watermark — see
+///   [`NostrTransport::create_subscription`](crate::nostr::NostrTransport::create_subscription).
+/// - [`NOSTR_INITIAL_QUERY_LIMIT`] caps how much of that window one initial
+///   query may return. It is advisory in both directions (`limit` is a SHOULD,
+///   and NIP-11 `max_limit` lets a relay clamp it silently), so it bounds the
+///   worst case without being something to reason from.
+///
+/// Because `since` is inclusive, the event that set the watermark is returned
+/// again on the next connect. That duplicate is expected; the alternative
+/// (`since + 1`) would drop any event sharing that exact second.
+///
+/// **How much of the replayed overlap dedup actually absorbs is bounded, and
+/// the bound is smaller than the overlap.** The engine's deduplicator retains
+/// ids for `DeduplicatorConfig::retention_time_secs` (1 h by default) and at
+/// most `max_tracked_messages` of them, while `since` reaches
+/// `NOSTR_CREATED_AT_JITTER_SECS + NOSTR_CLOCK_SKEW_MARGIN_SECS` (1 h 5 min)
+/// below the mark. A reconnect after longer than the retention window — the
+/// ordinary case for a mobile app reopened the next day — therefore re-processes
+/// the overlap rather than deduplicating it. That is a cost, not a loss: a
+/// replayed ciphertext whose ratchet generation is spent fails closed as
+/// `Decryption` and is dropped, a past-epoch one triggers at most one
+/// rate-limited re-key, and a group copy TTLs out of the pending buffer. The
+/// engine pins this relationship in
+/// `nostr_replay_overlap_exceeds_dedup_retention` so the two constants cannot
+/// drift apart from this note.
+pub fn create_subscription_message(
+    pubkey_hex: &str,
+    subscription_id: &str,
+    since: i64,
+) -> Result<String> {
     let filter = serde_json::json!({
         "#p": [pubkey_hex],
         "kinds": [4],
+        "since": since.max(0),
         "limit": NOSTR_INITIAL_QUERY_LIMIT
     });
     let msg = serde_json::json!(["REQ", subscription_id, filter]);
@@ -419,7 +458,7 @@ mod tests {
     #[test]
     fn test_create_subscription_message() {
         let pubkey = routing_tag_for_device_id("alice").unwrap();
-        let msg = create_subscription_message(&pubkey, "sub123").unwrap();
+        let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         assert!(msg.starts_with("[\"REQ\",\"sub123\",{"));
         assert!(msg.contains(&format!("\"#p\":[\"{}\"]", pubkey)));
@@ -432,7 +471,7 @@ mod tests {
         // (re)connect replays the relay's whole retention window — which
         // NIP-11 no longer advertises, so it cannot even be reasoned about.
         let pubkey = routing_tag_for_device_id("alice").unwrap();
-        let msg = create_subscription_message(&pubkey, "sub123").unwrap();
+        let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
         let filter = &parsed[2];
@@ -442,5 +481,31 @@ mod tests {
             "REQ filter must carry a limit: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_subscription_filter_carries_since() {
+        let pubkey = routing_tag_for_device_id("alice").unwrap();
+        let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(
+            parsed[2]["since"].as_i64(),
+            Some(1_700_000_000),
+            "REQ filter must carry the caller's since: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_subscription_since_is_never_negative() {
+        // A negative `since` is not a valid NIP-01 filter value; relays may
+        // reject the whole REQ, which would take the subscription down rather
+        // than merely widening it.
+        let pubkey = routing_tag_for_device_id("alice").unwrap();
+        let msg = create_subscription_message(&pubkey, "sub123", -42).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(parsed[2]["since"].as_i64(), Some(0));
     }
 }

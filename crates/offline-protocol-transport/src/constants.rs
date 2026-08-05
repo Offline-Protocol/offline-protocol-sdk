@@ -126,6 +126,64 @@ pub const NOSTR_MAX_PAYLOAD_SIZE: usize = 65536;
 /// evidence that the relay had nothing more to send.
 pub const NOSTR_INITIAL_QUERY_LIMIT: usize = 500;
 
+/// Backwards window the outgoing gift wrap's `created_at` is jittered into,
+/// and therefore the amount the subscription's `since` must reach back past
+/// the receive watermark.
+///
+/// **These two uses must stay the same number.** NIP-59 has the sender draw
+/// `created_at` uniformly from `[now − window, now]`, past-only — so an event
+/// published now can carry a timestamp up to a window old, and a `since`
+/// computed from "the newest `created_at` we have seen" would sit *above* it
+/// and skip it. Subtracting the window on the way out is what makes the
+/// watermark safe against that; if the wrap ever jitters further back than
+/// this, messages go missing silently.
+///
+/// The value is a straight trade: NIP-59's reference is 2 days, which buys
+/// unlinkability against timing correlation, but every hour of jitter is an
+/// hour of replay overlap on every reconnect. One hour keeps the overlap
+/// small; the anonymity difference against a relay that already sees arrival
+/// time is marginal.
+///
+/// Applied by the `since` computation since the watermark landed; the wrap
+/// side arrives with the sealed envelope.
+pub const NOSTR_CREATED_AT_JITTER_SECS: i64 = 3600;
+
+/// Extra slack subtracted from the subscription's `since`, on top of
+/// [`NOSTR_CREATED_AT_JITTER_SECS`], to absorb clock disagreement between the
+/// sending peer, the relay, and this device.
+///
+/// `created_at` is written by the *sender*, so a peer whose clock runs behind
+/// ours stamps events below where our watermark thinks "now" is. Without this
+/// margin those events fall under `since` and are never fetched.
+pub const NOSTR_CLOCK_SKEW_MARGIN_SECS: i64 = 300;
+
+/// How far back the first subscription reaches when no receive watermark
+/// exists yet — a fresh install, a `wipePersistedState` logout, or any
+/// subscription created before protocol-state storage has been restored.
+///
+/// It is deliberately *not* zero. A zero (or absent) `since` is exactly the
+/// unbounded filter this watermark exists to remove, and the no-watermark case
+/// is common rather than exotic: the bridges subscribe on every relay connect,
+/// which can happen before `initialize_mls` has restored anything.
+///
+/// A day of backfill is enough for the case that matters — the same user id
+/// reinstalling or signing back in, whose peers have been publishing to a
+/// routing tag nobody was listening on — and `NOSTR_INITIAL_QUERY_LIMIT`
+/// bounds what that window can actually pull down.
+pub const NOSTR_FIRST_RUN_BACKFILL_SECS: i64 = 86_400;
+
+/// How far ahead of local time an event's `created_at` may sit and still
+/// advance the receive watermark.
+///
+/// The routing tag is publicly derivable, so **anyone** can publish an event
+/// addressed to us, and `created_at` is attacker-chosen: a single event dated
+/// years ahead would otherwise pin the watermark to that value and every
+/// subsequent subscription would ask for events `since` the far future —
+/// silently receiving nothing, forever. Values beyond this tolerance are
+/// ignored outright rather than clamped: an absurd timestamp says nothing
+/// about how far our receive progress has actually reached.
+pub const NOSTR_FUTURE_DATED_TOLERANCE_SECS: i64 = 900;
+
 // Transport-wide Constants
 /// Default maximum message size in bytes (1 MB).
 /// Applied at the transport layer before JSON deserialization to prevent

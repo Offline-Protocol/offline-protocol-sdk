@@ -122,7 +122,10 @@ The platform managers pull relay URLs and reconnect parameters from the JSON con
 | Pending confirmation timeout | 30 s | Time before treating an unconfirmed publish as failed |
 | Max signing retries | 3 | Per-message signing-failure budget before permanent fail |
 | Max event size | 64 KiB | Measured on the whole `["EVENT", …]` message. Over-cap events are dropped permanently (no retry) — see below |
-| Initial query limit | 500 | `limit` on the REQ filter, bounding stored-event replay per (re)connect |
+| Initial query limit | 500 | `limit` on the REQ filter, capping stored-event replay per (re)connect |
+| First-run backfill | 24 h | How far back `since` reaches when no receive watermark exists yet |
+| `since` overlap | 1 h + 5 min | Jitter window plus clock-skew margin subtracted from the watermark |
+| Future-dated tolerance | 15 min | How far ahead of local time an event's `created_at` may sit and still advance the watermark |
 | DORS tie-break priority | 4 (lowest) | Internet (0) > WiFi Direct (1) > BLE (2) > Reticulum (3) > Nostr (4) |
 | Bandwidth max | 1 MB/s | Practical upper bound for relay-bounded throughput |
 | Energy baseline | 55 | Same radio class as Internet |
@@ -150,13 +153,28 @@ The platform bridge interacts with `NostrTransport` through these UniFFI calls:
 3. **Drain outgoing messages** event-driven via the `NostrTransportCallback.on_messages_available()` hook (with `nostrGetNextMessage()` as the polling fallback).
 4. **Publish** the `event_json` to every connected relay.
 5. **Confirm** via `nostrConfirmSent(messageId)` when ≥1 relay returns `["OK", event_id, true, ...]`, or `nostrSendFailedWithReason(messageId, reason)` if every relay rejects.
-6. **Receive** subscribed events and pass to `nostrMessageReceived(senderId, data)`.
+6. **Receive** subscribed events and pass to `nostrMessageReceivedAt(senderId, data, createdAt)`, with `createdAt` taken verbatim from the event's `created_at` field.
 7. **Report disconnection** via `nostrStatusChanged(false)` if all relays drop.
 8. **Reconnect** automatically per `autoReconnect`/`reconnectDelay` config.
 
 ### Subscription Filters
 
 The Rust core builds NIP-01 filters scoped to the local routing tag (events addressed to this device); the tag is derived from the `userId`, so senders can compute it without a key exchange. Use `nostrGetSubscriptionFilter(subscriptionId)` to fetch the JSON filter to send via `["REQ", subscriptionId, filter]`. Use `nostrGetPublicKey()` to retrieve the install's hex-encoded signing public key (for diagnostics and self-event filtering); read it after MLS initialization, since that is when the persisted signing key is installed.
+
+The filter carries two independent bounds on how much history a (re)connect pulls down, and they do different jobs:
+
+- **`since`** is the real bound. It is derived from a **persisted receive watermark** — the newest `created_at` this install has accepted — so a device that reconnects a hundred times only re-fetches what it has not already seen. The watermark advances only for frames that decode into a protocol message, is clamped so a future-dated event cannot push the window past real messages, and only ever moves forward. `since` sits an hour and five minutes *below* the mark (a jitter window plus a clock-skew margin), so events legitimately stamped in the recent past are not skipped; NIP-01's `since` is inclusive, so the boundary event is re-delivered.
+- **`limit`** (500) caps what one initial query may return out of that window. It is advisory in both directions — `limit` is a SHOULD, and NIP-11 `max_limit` lets a relay clamp it silently.
+
+With no watermark yet — a fresh install, a `wipePersistedState` logout, or a subscription built before protocol-state storage has been restored — `since` falls back to 24 hours ago. It is never zero or absent: that is the unbounded filter the watermark exists to remove.
+
+Bridges that still call the timestamp-less `nostrMessageReceived(senderId, data)` keep working, but never advance the watermark, so every reconnect re-fetches a full backfill window.
+
+**Two residuals worth knowing, neither of which loses messages:**
+
+*The replayed overlap is not fully deduplicated.* Message-id dedup retains ids for an hour by default (`reliability.dedup.retention_time_secs`, and at most `max_tracked_messages` of them), while `since` reaches back an hour and five minutes. A reconnect sooner than the retention window has its overlap absorbed; a reconnect after longer — an app reopened the next day, the common case — re-processes it instead. That costs work, not correctness: a replayed ciphertext whose ratchet generation is spent fails closed and is dropped, a past-epoch one triggers at most one rate-limited re-key, and a replayed group copy TTLs out of the pending buffer.
+
+*Junk can crowd out stored history.* The routing tag is `SHA-256(userId)`, so anyone who knows a username can publish events to it, and only the *decodability* of a frame gates the watermark — parsing a `Message` needs no signature. An attacker who floods more than `limit` decodable events can therefore both push real messages out of a truncated initial query and advance the mark past them, leaving those below the next `since`. What makes this recoverable rather than terminal is that it is not the only delivery path: ACK-gated messages stay in the sender's outbox for 7 days and are retransmitted with a fresh `created_at`, which lands above any watermark. The exposure is delay on a Nostr-only route, and it needs a sustained flood rather than a single event.
 
 ### Send Confirmation Loop
 
@@ -210,8 +228,8 @@ class NostrBridge(
         else protocol.nostrSendFailedWithReason(messageId, reason ?: "rejected")
     }
 
-    fun onIncomingEvent(senderHex: String, payload: ByteArray) {
-        protocol.nostrMessageReceived(senderHex, payload.toList())
+    fun onIncomingEvent(senderHex: String, payload: ByteArray, createdAt: Long) {
+        protocol.nostrMessageReceivedAt(senderHex, payload.toList(), createdAt)
     }
 }
 ```

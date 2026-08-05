@@ -1073,6 +1073,12 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     void nostr_message_received(string sender_id, sequence<u8> data);
 
+    // Preferred over nostr_message_received: `created_at` is the relay event's
+    // unix-seconds timestamp, which advances the persisted receive watermark
+    // that bounds how far back the next subscription's `since` reaches.
+    [Throws=ProtocolError]
+    void nostr_message_received_at(string sender_id, sequence<u8> data, i64 created_at);
+
     NostrMessage? nostr_get_next_message();
 
     void nostr_confirm_sent(string message_id);

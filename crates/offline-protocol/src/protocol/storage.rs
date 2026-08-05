@@ -54,6 +54,10 @@ pub(crate) enum StateCategory {
     BlockedUsers,
     BothCreateAwaitingDecrypt,
     LamportClock,
+    /// The Nostr receive watermark. Post-split only, like [`Self::StateAdoption`]
+    /// — deliberately absent from [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`],
+    /// which has no pre-split data to inherit for it.
+    NostrWatermark,
     /// The value-less marker recording that the pre-split adoption sweep
     /// completed. Post-split only, so it is deliberately absent from
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] — but it *is* written to
@@ -78,6 +82,7 @@ impl StateCategory {
             storage_keys::BLOCKED_USERS => Self::BlockedUsers,
             storage_keys::BOTH_CREATE_AWAITING_DECRYPT => Self::BothCreateAwaitingDecrypt,
             storage_keys::LAMPORT_CLOCK => Self::LamportClock,
+            storage_keys::NOSTR_WATERMARK => Self::NostrWatermark,
             storage_keys::STATE_ADOPTION => Self::StateAdoption,
             _ => return None,
         })
@@ -114,9 +119,17 @@ impl StateCategory {
     ///   key package costs one re-exchange.
     ///
     /// Everything else is advertised capability versions, a small state enum, a
-    /// logical clock, or a value-less marker whose only information is the key
-    /// id — which sealing cannot hide anyway, because the store addresses
-    /// records by it.
+    /// logical clock, a coarse wall-clock mark, or a value-less marker whose
+    /// only information is the key id — which sealing cannot hide anyway,
+    /// because the store addresses records by it.
+    ///
+    /// [`storage_keys::NOSTR_WATERMARK`] is in that second group: it is one
+    /// unix-seconds timestamp saying roughly when this install last received a
+    /// relay event. That is strictly less than the key id already tells a
+    /// reader with container access, and the record's *integrity* buys nothing
+    /// either — the value is clamped to "not in the future" on the way back in,
+    /// and moving it backwards only widens a replay window that
+    /// `NOSTR_INITIAL_QUERY_LIMIT` already bounds.
     ///
     /// Note what sealing does **not** provide, for any category: it authenticates
     /// bytes that are present, so it cannot detect a record that was deleted or
@@ -135,6 +148,7 @@ impl StateCategory {
             | Self::BlockedUsers
             | Self::BothCreateAwaitingDecrypt
             | Self::LamportClock
+            | Self::NostrWatermark
             | Self::StateAdoption => false,
         }
     }
@@ -4289,6 +4303,179 @@ impl OfflineProtocol {
             self.nostr_unpersisted_secret = Some(secret);
         }
         self.nostr_secret_persisted = installed && persisted;
+    }
+
+    // ========================================================================
+    // NOSTR RECEIVE-WATERMARK PERSISTENCE
+    // ========================================================================
+
+    /// Runs `f` against the registered Nostr transport, or returns `None` if
+    /// Nostr is not enabled for this instance.
+    fn with_nostr_transport<R>(&self, f: impl FnOnce(&NostrTransport) -> R) -> Option<R> {
+        let arc = self.transport_manager.get_transport(TransportType::Nostr)?;
+        let nostr = arc.as_any().downcast_ref::<NostrTransport>()?;
+        Some(f(nostr))
+    }
+
+    /// Records that a Nostr relay event dated `created_at_secs` (unix seconds)
+    /// was received and decoded, advancing the receive watermark and persisting
+    /// it if it has moved far enough.
+    ///
+    /// Call this only for frames that deserialized into a `Message` — see
+    /// [`NostrTransport::advance_receive_watermark`] for why an undecodable
+    /// frame must not move the mark.
+    pub fn note_nostr_event_received(&mut self, created_at_secs: i64) {
+        let advanced = self
+            .with_nostr_transport(|nostr| nostr.advance_receive_watermark(created_at_secs))
+            .unwrap_or(false);
+        if advanced {
+            self.persist_nostr_watermark();
+        }
+    }
+
+    /// Debounced Nostr receive-watermark persistence. Writes only once the
+    /// live mark has advanced past the last persisted one by
+    /// [`NOSTR_WATERMARK_PERSIST_INTERVAL_SECS`](super::NOSTR_WATERMARK_PERSIST_INTERVAL_SECS),
+    /// so a busy relay connection does not cost one storage write per inbound
+    /// event.
+    pub(crate) fn persist_nostr_watermark(&mut self) {
+        let Some(current) = self.with_nostr_transport(NostrTransport::receive_watermark_secs)
+        else {
+            return;
+        };
+        let Some(current) = current else {
+            return;
+        };
+        let due = match self.last_persisted_nostr_watermark {
+            Some(last) => {
+                current.saturating_sub(last) >= super::NOSTR_WATERMARK_PERSIST_INTERVAL_SECS
+            }
+            // Nothing written yet this session: get a mark on disk promptly, so
+            // a first launch that receives one message and is killed does not
+            // start the next launch from a full backfill window.
+            None => true,
+        };
+        if due {
+            self.write_nostr_watermark_to_storage(current);
+        }
+    }
+
+    /// Forces the Nostr receive watermark to storage regardless of debounce
+    /// state. Called on shutdown so the un-flushed tail is not lost.
+    pub(crate) fn flush_nostr_watermark(&mut self) {
+        let Some(Some(current)) = self.with_nostr_transport(NostrTransport::receive_watermark_secs)
+        else {
+            return;
+        };
+        if self.last_persisted_nostr_watermark != Some(current) {
+            self.write_nostr_watermark_to_storage(current);
+        }
+    }
+
+    fn write_nostr_watermark_to_storage(&mut self, value: i64) {
+        let Some(storage) = self.protocol_state_storage.clone() else {
+            return;
+        };
+        let bytes = value.to_le_bytes();
+        if let Err(e) = self.write_state_record(
+            storage.as_ref(),
+            storage_keys::NOSTR_WATERMARK,
+            storage_keys::NOSTR_WATERMARK_ID,
+            &bytes,
+        ) {
+            warn!(error = %e, "Failed to persist Nostr receive watermark");
+            return;
+        }
+        self.last_persisted_nostr_watermark = Some(value);
+    }
+
+    /// Restores the Nostr receive watermark from storage into the transport.
+    ///
+    /// Installs through the transport's own `advance_receive_watermark`, so the
+    /// restore inherits both of its rules: it can only move the mark *forward*
+    /// (an instance that already received an event this session keeps the newer
+    /// value), and a record dated in the future — written by an older build
+    /// without that check, or edited in the container — is ignored rather than
+    /// allowed to stall every subsequent subscription.
+    ///
+    /// A missing record is the normal first-run case and is not an error: the
+    /// transport falls back to its bounded first-run backfill window.
+    pub(crate) fn restore_nostr_watermark(&mut self) {
+        let Some(storage) = self.protocol_state_storage.clone() else {
+            return;
+        };
+        if self
+            .transport_manager
+            .get_transport(TransportType::Nostr)
+            .is_none()
+        {
+            // Nostr not enabled — nothing to install into.
+            return;
+        }
+
+        // A *missing* record is the ordinary first run; a read *error* is a
+        // storage problem, and collapsing the two would hide it behind the
+        // most common path in the function.
+        let data = match self.read_state_record(
+            storage.as_ref(),
+            storage_keys::NOSTR_WATERMARK,
+            storage_keys::NOSTR_WATERMARK_ID,
+        ) {
+            Ok(Some(data)) => data,
+            Ok(None) => return,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to read the Nostr receive watermark; \
+                     this launch falls back to the first-run backfill window"
+                );
+                return;
+            }
+        };
+
+        let Ok(bytes) = <[u8; 8]>::try_from(data.as_slice()) else {
+            warn!(
+                len = data.len(),
+                "Corrupted Nostr receive watermark in storage (expected 8 bytes), starting fresh"
+            );
+            return;
+        };
+        let restored = i64::from_le_bytes(bytes);
+        self.with_nostr_transport(|nostr| nostr.advance_receive_watermark(restored));
+        let live = self
+            .with_nostr_transport(NostrTransport::receive_watermark_secs)
+            .flatten();
+
+        // The debounce baseline is "what is on disk", but only when disk holds
+        // a value we would ever have written. A record at or below the live
+        // mark qualifies — whether it was just installed, or superseded by a
+        // newer in-memory one. A record *above* the live mark is one the
+        // transport refused as future-dated: adopting it as the baseline would
+        // make every later `current - baseline` negative, so nothing would be
+        // due and the bad record would survive until the next flush. Treat that
+        // as no baseline, so the next accepted event overwrites it promptly.
+        // One predicate, used for both the debounce baseline and the log, so
+        // the two can never disagree about whether the record was adopted.
+        let adopted = matches!(live, Some(live) if live >= restored);
+        self.last_persisted_nostr_watermark = adopted.then_some(restored);
+
+        if adopted {
+            debug!(
+                watermark = restored,
+                live, "Restored Nostr receive watermark from storage"
+            );
+        } else {
+            // Say which outcome this is. A refused record installs nothing, so
+            // logging "restored" here would mislead exactly when someone is
+            // debugging the failure this path exists to contain — a
+            // subscription stalled by a future-dated mark.
+            warn!(
+                watermark = restored,
+                live,
+                "Refused a future-dated Nostr receive watermark from storage; \
+                 keeping the live mark and rewriting on the next accepted event"
+            );
+        }
     }
 
     /// Installs `secret` as the telemetry fallback secret and rebuilds the

@@ -520,6 +520,11 @@ class NostrManager(
                 // Skip events from self
                 if (senderPubkey == publicKeyHex) return
 
+                // NIP-01 requires `created_at`; a missing or malformed one
+                // defaults to 0, which Rust ignores for the watermark rather
+                // than treating as receive progress.
+                val createdAt = event.optLong("created_at", 0L)
+
                 messagesReceived.incrementAndGet()
 
                 try {
@@ -530,10 +535,15 @@ class NostrManager(
                     }
 
                     // Pass the Nostr pubkey as sender_id — Rust extracts
-                    // the real protocol-level sender from Message.sender
-                    protocol.nostrMessageReceived(
+                    // the real protocol-level sender from Message.sender.
+                    // `createdAt` advances the persisted receive watermark,
+                    // which becomes the `since` on the next subscription — the
+                    // bound that stops a relay replaying its whole retention
+                    // window on every reconnect.
+                    protocol.nostrMessageReceivedAt(
                         senderPubkey,
-                        messageBytes.map { it.toUByte() }
+                        messageBytes.map { it.toUByte() },
+                        createdAt
                     )
 
                     emitDiagnostic("debug", "Message received from Nostr", mapOf(

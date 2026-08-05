@@ -517,6 +517,11 @@ public class NostrManager: NSObject, TransportManager {
             // Skip events from self
             guard senderPubkey != publicKeyHex else { return }
 
+            // NIP-01 requires `created_at`; a missing or malformed one reaches
+            // Rust as 0, which is ignored for the watermark rather than
+            // treated as receive progress.
+            let createdAt = (event["created_at"] as? NSNumber)?.int64Value ?? 0
+
             messagesReceived += 1
 
             messageQueue.async { [weak self] in
@@ -534,9 +539,17 @@ public class NostrManager: NSObject, TransportManager {
                     }
 
                     // Pass the Nostr pubkey as sender_id — Rust extracts
-                    // the real protocol-level sender from Message.sender
+                    // the real protocol-level sender from Message.sender.
+                    // `createdAt` advances the persisted receive watermark,
+                    // which becomes the `since` on the next subscription — the
+                    // bound that stops a relay replaying its whole retention
+                    // window on every reconnect.
                     let bytes = [UInt8](messageData)
-                    try self.protocolInstance.nostrMessageReceived(senderId: senderPubkey, data: bytes)
+                    try self.protocolInstance.nostrMessageReceivedAt(
+                        senderId: senderPubkey,
+                        data: bytes,
+                        createdAt: createdAt
+                    )
 
                     self.emitDiagnostic("debug", "Message received from Nostr", context: [
                         "senderPubkey": String(senderPubkey.prefix(16)) + "...",
