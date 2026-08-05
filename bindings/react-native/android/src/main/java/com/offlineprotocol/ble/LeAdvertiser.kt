@@ -138,7 +138,17 @@ class LeAdvertiser(
         // null advertiser must still latch [pendingAdvertiseReason], so an
         // attach that lands while the service registration is in flight is
         // picked up by [onGattServerReady] instead of being dropped silently.
-        if (advertiser == null) return
+        if (advertiser == null) {
+            if (host.shouldLog("advertiser_unavailable", 60_000L)) {
+                Log.i(TAG, "Deferring advertising — BLE advertiser unavailable (reason: $reason)")
+                diagnosticEmitter(
+                    "info",
+                    "Deferring BLE advertising — advertiser unavailable",
+                    mapOf("reason" to reason),
+                )
+            }
+            return
+        }
 
         startInFlight = true
         try {

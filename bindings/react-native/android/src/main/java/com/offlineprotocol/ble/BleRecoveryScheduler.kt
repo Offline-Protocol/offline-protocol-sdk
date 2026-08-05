@@ -26,6 +26,17 @@ internal class BleRecoveryScheduler(
         nextDelayMs = (nextDelayMs * 2).coerceAtMost(maxDelayMs)
     }
 
+    /**
+     * A lifecycle resume can get scanning going after [cancel] removed the
+     * pending adapter-recovery task. Keep the peripheral repair alive until
+     * the caller clears its adapter-off latch.
+     */
+    fun onScanStarted(adapterRecoveryPending: Boolean) {
+        if (adapterRecoveryPending) {
+            schedule()
+        }
+    }
+
     fun cancel(resetBackoff: Boolean = true) {
         handler.removeCallbacks(task)
         if (resetBackoff) {

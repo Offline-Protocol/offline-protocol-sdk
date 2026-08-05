@@ -77,6 +77,35 @@ class BleRecoverySchedulerTest {
         assertEquals(1, runs)
     }
 
+    @Test
+    fun `scan resume re-arms a cancelled adapter recovery episode`() {
+        var runs = 0
+        val scheduler = scheduler { runs++ }
+
+        // Adapter-off detection arms recovery, then app backgrounding cancels
+        // it. A successful scan start on resume must not strand the remaining
+        // GATT and advertising repair.
+        scheduler.schedule()
+        scheduler.cancel()
+        scheduler.onScanStarted(adapterRecoveryPending = true)
+
+        advanceTo(9_999L)
+        assertEquals(0, runs)
+        advanceTo(10_000L)
+        assertEquals(1, runs)
+    }
+
+    @Test
+    fun `ordinary scan start does not arm adapter recovery`() {
+        var runs = 0
+        val scheduler = scheduler { runs++ }
+
+        scheduler.onScanStarted(adapterRecoveryPending = false)
+        advanceTo(30_000L)
+
+        assertEquals(0, runs)
+    }
+
     private fun scheduler(block: () -> Unit) = BleRecoveryScheduler(
         handler = handler,
         task = Runnable(block),

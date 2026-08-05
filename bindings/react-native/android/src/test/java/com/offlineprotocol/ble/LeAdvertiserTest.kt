@@ -91,6 +91,10 @@ class LeAdvertiserTest {
         // Bluetooth off: nothing attached, so this start has nothing to do.
         advertiser.start("while-adapter-off")
         assertEquals(0, host.advertiseDataBuilds)
+        assertEquals(
+            listOf("Deferring BLE advertising — advertiser unavailable"),
+            seen,
+        )
 
         // Adapter comes back and the facade re-attaches. This start must be
         // admitted — if the previous one had raised the gate, it would return

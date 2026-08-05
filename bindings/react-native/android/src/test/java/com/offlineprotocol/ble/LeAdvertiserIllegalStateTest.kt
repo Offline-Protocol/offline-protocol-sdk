@@ -24,6 +24,7 @@ import org.robolectric.annotation.Implements
 class ThrowingBluetoothLeAdvertiserShadow {
     companion object {
         var throwOnStart = false
+        var throwOnStop = false
     }
 
     @Implementation
@@ -39,7 +40,11 @@ class ThrowingBluetoothLeAdvertiserShadow {
     }
 
     @Implementation
-    protected fun stopAdvertising(callback: AdvertiseCallback) = Unit
+    protected fun stopAdvertising(callback: AdvertiseCallback) {
+        if (throwOnStop) {
+            throw IllegalStateException("BT Adapter is not turned ON")
+        }
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -69,6 +74,7 @@ class LeAdvertiserIllegalStateTest {
     @After
     fun resetShadow() {
         ThrowingBluetoothLeAdvertiserShadow.throwOnStart = false
+        ThrowingBluetoothLeAdvertiserShadow.throwOnStop = false
     }
 
     @Test
@@ -86,6 +92,26 @@ class LeAdvertiserIllegalStateTest {
         assertTrue(seen.contains("Skipping startAdvertising — BT adapter not on"))
 
         ThrowingBluetoothLeAdvertiserShadow.throwOnStart = false
+        advertiser.start("adapter-recovered")
+        assertEquals(2, host.advertiseDataBuilds)
+    }
+
+    @Test
+    fun `adapter-off stop failure leaves the next start admitted`() {
+        val platformAdvertiser =
+            ((RuntimeEnvironment.getApplication() as Context)
+                .getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager)
+                .adapter!!
+                .bluetoothLeAdvertiser
+        advertiser.attachAdvertiser(platformAdvertiser)
+        advertiser.start("initial")
+        assertEquals(1, host.advertiseDataBuilds)
+
+        ThrowingBluetoothLeAdvertiserShadow.throwOnStop = true
+        advertiser.stop()
+        assertTrue(seen.contains("Skipping stopAdvertising — BT adapter not on"))
+
+        ThrowingBluetoothLeAdvertiserShadow.throwOnStop = false
         advertiser.start("adapter-recovered")
         assertEquals(2, host.advertiseDataBuilds)
     }

@@ -999,17 +999,19 @@ class BleTransportFacade(
             reportedBleAvailable = isAvailable
             Log.i(TAG, "Reported BLE availability=$isAvailable (reason=$reason)")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to report BLE availability=$isAvailable", e)
-            emitDiagnostic(
-                "error",
-                "Failed to report BLE availability",
-                mapOf(
-                    "available" to isAvailable,
-                    "reason" to reason,
-                    "exception" to e.javaClass.simpleName,
-                    "message" to (e.message ?: "unknown"),
-                ),
-            )
+            if (logThrottler.shouldLog("ble_status_report_failed", intervalMs = 60_000L)) {
+                Log.e(TAG, "Failed to report BLE availability=$isAvailable", e)
+                emitDiagnostic(
+                    "error",
+                    "Failed to report BLE availability",
+                    mapOf(
+                        "available" to isAvailable,
+                        "reason" to reason,
+                        "exception" to e.javaClass.simpleName,
+                        "message" to (e.message ?: "unknown"),
+                    ),
+                )
+            }
         }
     }
 
@@ -1094,7 +1096,10 @@ class BleTransportFacade(
             
             // Setup GATT server
             Log.i(TAG, "Setting up GATT server...")
-            check(setupGattServer()) { "GATT server setup did not start" }
+            // Keep the working central role when peripheral setup fails.
+            // setupGattServer reports the failure, and advertising remains
+            // deferred behind the service-ready gate.
+            setupGattServer()
 
             transportStartAt = System.currentTimeMillis()
             meshController.markPeerActive(deviceId)
@@ -1642,6 +1647,10 @@ class BleTransportFacade(
                 return
             }
             isScanning = true
+            // pause() deliberately cancels pending recovery. If this scan was
+            // started by a later resume() while the adapter-off latch is still
+            // raised, re-arm the task that repairs GATT and advertising.
+            bleRecoveryScheduler.onScanStarted(adapterWasOff)
             // Deliberately no ladder reset here. Reaching this line proves only
             // that startScan *returned*; the refusal can still arrive
             // asynchronously at onScanFailed, and resetting on the synchronous
