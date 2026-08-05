@@ -16,9 +16,11 @@ Classification Number (ECCN) 5D002 of the U.S. Export Administration
 Regulations (EAR, 15 CFR parts 730–774).
 
 The source code of the SDK is publicly available without restriction, and
-Offline Protocol, Inc. has notified the U.S. Bureau of Industry and Security
-(BIS) of its Internet location as described in
-[15 CFR §742.15(b)](https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-742/section-742.15).
+Offline Protocol, Inc. has notified both recipients named in
+[15 CFR §742.15(b)](https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-742/section-742.15)
+of its Internet location: the U.S. Bureau of Industry and Security (BIS), at
+crypt@bis.doc.gov, and the ENC Encryption Request Coordinator at the National
+Security Agency (NSA), at enc@nsa.gov.
 Publicly available encryption source code for which that notification has been
 made is not subject to the EAR under
 [15 CFR §734.7(b)](https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-734/section-734.7),
@@ -51,7 +53,8 @@ specifics with your own counsel:
 
 If your application is itself open source, the publicly-available treatment
 described above may extend to it as well — in which case the §742.15(b)
-notification duty for your own source location is yours.
+notification duty for your own source location is yours, and runs to both
+addresses above.
 
 ## Not legal advice
 

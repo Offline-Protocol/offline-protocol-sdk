@@ -4,6 +4,12 @@ All notable changes to the Offline Protocol SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This changelog covers everything after the **v0.7.1** release.
 
+## [Unreleased]
+
+### Documentation
+
+- **The export notice now names both recipients of the §742.15(b) notification.** [15 CFR §742.15(b)](https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-742/section-742.15) requires notifying *two* parties of the Internet location of publicly available encryption source code — BIS at `crypt@bis.doc.gov` **and** the ENC Encryption Request Coordinator at the NSA, at `enc@nsa.gov` — and the notice as shipped in 0.19.0 named only BIS. Both were notified; only the document was incomplete. Since the whole "not subject to the EAR under [§734.7(b)](https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-734/section-734.7)" conclusion is conditioned on that notification, a notice that describes it as half-made understates the basis for the conclusion it draws. The paragraph addressed to app teams whose own application is open source — for whom the notification duty on their own source location is theirs — now says the duty runs to both addresses, since a developer following that sentence would otherwise file with one. No code, packaging, or license-surface change: `EXPORT.md` still ships in the npm package, the Python wheel, and the GitHub release assets, and the three copies stay byte-identical under `scripts/check-license-consistency.sh`.
+
 ## [0.19.0] — 2026-08-04
 
 > **Two receive-side behaviours tighten on first launch.** Cleartext from a peer
