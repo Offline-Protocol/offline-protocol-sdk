@@ -477,6 +477,17 @@ pub struct OfflineProtocol {
     /// which is harmless for a logical clock (the gap is absorbed by the
     /// next merge with any peer).
     last_persisted_lamport: u64,
+
+    /// The Nostr receive watermark last written to storage, or `None` if this
+    /// session has neither written nor restored one. Debounces
+    /// `persist_nostr_watermark()` the same way `last_persisted_lamport`
+    /// debounces the clock.
+    ///
+    /// Deliberately *not* captured for `initialize_mls` rollback, matching
+    /// where the restore itself runs: the mark lives in the transport, which
+    /// the rollback cannot reach, and re-installing a durable value that only
+    /// ever moves forward is not something a failed MLS restore needs undone.
+    last_persisted_nostr_watermark: Option<i64>,
 }
 
 impl Drop for OfflineProtocol {
@@ -484,6 +495,7 @@ impl Drop for OfflineProtocol {
         // Flush debounced Lamport clock so no ticks are lost when the
         // protocol is dropped without an explicit stop() call.
         self.flush_lamport_clock();
+        self.flush_nostr_watermark();
     }
 }
 
@@ -641,6 +653,7 @@ impl OfflineProtocol {
             transport_status_snapshot: HashMap::new(),
             device_capability_snapshot: None,
             last_persisted_lamport: 0,
+            last_persisted_nostr_watermark: None,
             config,
         })
     }
@@ -774,6 +787,15 @@ impl OfflineProtocol {
         // state, idempotent, and must survive an MLS-restore rollback.
         self.restore_or_init_nostr_signing_secret();
 
+        // And for the Nostr receive watermark, which sits outside the
+        // transaction below for a third reason on top of those two: it does
+        // not live in `self` at all. The mark is transport state, so the
+        // rollback — which restores in-memory fields of `OfflineProtocol` —
+        // could not put it back even if it wanted to. Installing it under a
+        // later failure is harmless: it only ever moves forward, and the worst
+        // a stale-but-installed mark does is narrow one replay window.
+        self.restore_nostr_watermark();
+
         // The launch's whole durable-delete allowance, in one place because the
         // bound is on the launch. A device-barrier storm kills *this call*, not
         // any single walk in it, so no walk may hand itself a pool — see
@@ -874,6 +896,7 @@ impl OfflineProtocol {
         self.restore_or_init_state_record_key();
         self.restore_or_init_scrub_secret();
         self.restore_or_init_nostr_signing_secret();
+        self.restore_nostr_watermark();
         // Same three pools as `initialize_mls_inner`, for the same reason.
         let mut advisory_prunes = PruneAllowance::pool();
         let mut pending_prunes = PruneAllowance::pool();
@@ -1197,6 +1220,9 @@ impl OfflineProtocol {
         // Flush debounced Lamport clock before stopping so no ticks are lost.
         drop(state);
         self.flush_lamport_clock();
+        // Same for the Nostr receive watermark: an un-flushed tail costs the
+        // next launch a wider replay window.
+        self.flush_nostr_watermark();
 
         // Clear event callbacks to release shared_state references.
         // NOTE: the routing-decision callback is deliberately NOT cleared
@@ -1222,6 +1248,7 @@ impl OfflineProtocol {
     /// Pauses the protocol (for background mode).
     pub fn pause(&mut self) -> Result<()> {
         self.flush_lamport_clock();
+        self.flush_nostr_watermark();
         let mut state = lock_shared_state(&self.shared_state)?;
 
         if state.state != ProtocolState::Running {

@@ -20,9 +20,11 @@
 //! persisted identity via [`NostrTransport::install_signing_secret`].
 
 use crate::constants::{
-    NOSTR_CONNECTION_TIMEOUT_SECS, NOSTR_MAX_PAYLOAD_SIZE, NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS,
+    NOSTR_CLOCK_SKEW_MARGIN_SECS, NOSTR_CONNECTION_TIMEOUT_SECS, NOSTR_CREATED_AT_JITTER_SECS,
+    NOSTR_FIRST_RUN_BACKFILL_SECS, NOSTR_FUTURE_DATED_TOLERANCE_SECS, NOSTR_MAX_PAYLOAD_SIZE,
+    NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
-use crate::nostr_crypto::{self, NostrKeypair};
+use crate::nostr_crypto::{self, now_unix_secs, NostrKeypair};
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use base64::Engine;
 use offline_protocol_core::{Message, MutexExt, RwLockExt};
@@ -93,8 +95,8 @@ impl Default for NostrConfig {
 /// 5. `receive_queue`
 /// 6. `reconnect_attempts` / `platform_handle`
 ///
-/// `keypair` is a leaf lock: it is only ever held in a narrow scope with no
-/// other lock acquisition inside.
+/// `keypair` and `receive_watermark` are leaf locks: they are only ever held
+/// in a narrow scope with no other lock acquisition inside.
 pub struct NostrTransport {
     device_id: String,
     /// Per-install signing keypair. Ephemeral (random per process) until the
@@ -104,6 +106,16 @@ pub struct NostrTransport {
     /// This device's public routing tag (derived from `device_id`); peers
     /// address us by putting it in the `#p` tag, we subscribe on it.
     routing_tag: String,
+    /// Newest `created_at` (unix seconds) of any relay event this install has
+    /// accepted, or `None` before the first one — the high-water mark the
+    /// subscription's `since` is derived from. See
+    /// [`Self::advance_receive_watermark`].
+    ///
+    /// Owned here because [`Self::create_subscription`] needs it, but it is the
+    /// *engine* that gives it durability: `OfflineProtocol` persists it as a
+    /// protocol-state record and re-installs it on launch. Without that this is
+    /// a per-process value and every cold start replays a full backfill window.
+    receive_watermark: Mutex<Option<i64>>,
     config: NostrConfig,
     status: Arc<Mutex<TransportStatus>>,
     receive_queue: Arc<Mutex<VecDeque<Message>>>,
@@ -138,6 +150,7 @@ impl NostrTransport {
             device_id,
             keypair,
             routing_tag,
+            receive_watermark: Mutex::new(None),
             config,
             status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -385,17 +398,115 @@ impl NostrTransport {
         );
     }
 
+    /// Returns the newest accepted event timestamp (unix seconds), or `None`
+    /// if no event has been accepted since the last watermark install.
+    ///
+    /// Read by the engine to persist the watermark.
+    pub fn receive_watermark_secs(&self) -> Option<i64> {
+        *self.receive_watermark.lock_or_recover()
+    }
+
+    /// Records that an event dated `created_at_secs` (unix seconds) has been
+    /// received, moving the receive watermark forward. Returns whether the
+    /// watermark actually moved.
+    ///
+    /// Two rules, both load-bearing:
+    ///
+    /// - **Monotonic.** The mark only ever advances, so out-of-order delivery
+    ///   (the relay streams stored events newest-first) cannot walk it back.
+    /// - **Never into the future.** Anyone can address an event to our routing
+    ///   tag — it is derived from a public user id — and `created_at` is
+    ///   written by whoever published the event. A single event dated far ahead
+    ///   would otherwise pin the mark there and make every later subscription
+    ///   ask for events `since` the far future, receiving nothing forever. So
+    ///   values more than [`NOSTR_FUTURE_DATED_TOLERANCE_SECS`] ahead of local
+    ///   time are dropped, not clamped.
+    ///
+    /// The restore path goes through this same function deliberately: a
+    /// watermark persisted by a build without the future check must not be able
+    /// to stall a subscription either.
+    ///
+    /// Callers should advance the mark only for frames that actually decoded
+    /// into a [`Message`]. The mark means "receive progress has reached here",
+    /// and a frame we cannot parse is one we never processed — counting it
+    /// would let undecodable traffic push the window past real messages still
+    /// waiting on the relay. The failure mode of the stricter rule is replaying
+    /// more, never less, which is the right bias for a delivery path.
+    pub fn advance_receive_watermark(&self, created_at_secs: i64) -> bool {
+        if created_at_secs <= 0 {
+            return false;
+        }
+        let ceiling = now_unix_secs().saturating_add(NOSTR_FUTURE_DATED_TOLERANCE_SECS);
+        if created_at_secs > ceiling {
+            tracing::debug!(
+                created_at = created_at_secs,
+                ceiling,
+                "Ignoring future-dated Nostr event for the receive watermark"
+            );
+            return false;
+        }
+
+        let mut mark = self.receive_watermark.lock_or_recover();
+        match *mark {
+            Some(current) if current >= created_at_secs => false,
+            _ => {
+                *mark = Some(created_at_secs);
+                true
+            }
+        }
+    }
+
+    /// The `since` this device's subscription filter should carry (unix
+    /// seconds), derived from the receive watermark.
+    ///
+    /// With a watermark, it reaches back past it by the gift-wrap jitter window
+    /// plus a clock-skew margin — an event published now may legitimately carry
+    /// a `created_at` up to a jitter window old, and a sender's clock may lag
+    /// ours, so a `since` sitting exactly at the mark would skip both. The
+    /// watermark is also clamped to `now` first, so a mark restored from an
+    /// older build that lacked the future-dated check cannot push `since`
+    /// forward.
+    ///
+    /// With no watermark — a fresh install, a wiped one, or any subscription
+    /// built before protocol-state storage has been restored — it falls back to
+    /// [`NOSTR_FIRST_RUN_BACKFILL_SECS`] ago. Never zero: an absent or zero
+    /// `since` is the unbounded filter this exists to remove.
+    ///
+    /// **Residual:** the mark can only be as good as what we have received. A
+    /// relay that truncates a reconnect's history at
+    /// [`NOSTR_INITIAL_QUERY_LIMIT`](crate::constants::NOSTR_INITIAL_QUERY_LIMIT)
+    /// hands back its newest events, so a device that comes back to more than
+    /// that much stored history advances past what it never saw. The overlap
+    /// below bounds how much: only events already older than jitter + skew at
+    /// the moment of truncation are at risk.
+    fn subscription_since(&self) -> i64 {
+        let now = now_unix_secs();
+        match self.receive_watermark_secs() {
+            Some(mark) => mark
+                .min(now)
+                .saturating_sub(NOSTR_CREATED_AT_JITTER_SECS)
+                .saturating_sub(NOSTR_CLOCK_SKEW_MARGIN_SECS)
+                .max(0),
+            None => now.saturating_sub(NOSTR_FIRST_RUN_BACKFILL_SECS).max(0),
+        }
+    }
+
     /// Returns a NIP-01 subscription filter JSON for this device's routing tag.
     ///
     /// The platform should send this to each relay after connecting:
-    /// `["REQ", "<sub_id>", {"#p": ["<routing_tag>"], "kinds": [4], "limit": N}]`
+    /// `["REQ", "<sub_id>", {"#p": ["<routing_tag>"], "kinds": [4], "since": T, "limit": N}]`
     ///
     /// The filter is on the routing tag — not the signing pubkey — so it is
-    /// stable across signing-key changes and derivable by peers. The `limit`
-    /// caps the stored-event replay a (re)connect pulls down; it does not cap
-    /// live delivery.
+    /// stable across signing-key changes and derivable by peers. `since` bounds
+    /// how far back stored-event replay reaches (see
+    /// [`Self::subscription_since`]); `limit` caps how much of that window one
+    /// (re)connect pulls down. Neither caps live delivery.
     pub fn create_subscription(&self, subscription_id: &str) -> Result<String> {
-        nostr_crypto::create_subscription_message(&self.routing_tag, subscription_id)
+        nostr_crypto::create_subscription_message(
+            &self.routing_tag,
+            subscription_id,
+            self.subscription_since(),
+        )
     }
 
     /// Fails all pending confirmations and records them as failures.
@@ -492,6 +603,12 @@ impl Transport for NostrTransport {
         Ok(())
     }
 
+    /// Stops the transport, clearing in-flight queues.
+    ///
+    /// `receive_watermark` is deliberately **not** cleared: it records how far
+    /// receive progress has reached, which a `stop()`/`start()` cycle does not
+    /// undo. Clearing it would make every restart fall back to the first-run
+    /// backfill window and replay history the engine has already processed.
     fn stop(&self) -> Result<()> {
         *self.status.lock_or_recover() = TransportStatus::Disconnected;
         self.fail_all_pending();
@@ -1184,6 +1301,135 @@ mod tests {
 
         transport.send(&small_chunk).unwrap();
         assert!(transport.get_next_signed_event().unwrap().is_some());
+    }
+
+    /// Parses the REQ filter object out of a `["REQ", id, {…}]` message.
+    fn subscription_filter(transport: &NostrTransport) -> serde_json::Value {
+        let msg = transport.create_subscription("sub1").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        parsed[2].clone()
+    }
+
+    #[test]
+    fn test_first_run_since_is_a_recent_window_never_zero() {
+        // A zero (or absent) `since` is the unbounded filter the watermark
+        // exists to remove, and no-watermark is the *common* case: the bridges
+        // subscribe on every relay connect, which can precede the restore.
+        let transport = NostrTransport::new("device1").unwrap();
+        assert!(transport.receive_watermark_secs().is_none());
+
+        let since = subscription_filter(&transport)["since"].as_i64().unwrap();
+        let now = now_unix_secs();
+
+        assert!(since > 0, "first-run since must not be zero: {since}");
+        let backfill = now - since;
+        assert!(
+            (NOSTR_FIRST_RUN_BACKFILL_SECS..NOSTR_FIRST_RUN_BACKFILL_SECS + 60).contains(&backfill),
+            "first-run since should reach back one backfill window, got {backfill}s"
+        );
+    }
+
+    #[test]
+    fn test_since_follows_the_watermark_with_a_jitter_and_skew_overlap() {
+        let transport = NostrTransport::new("device1").unwrap();
+        let mark = now_unix_secs() - 30;
+        assert!(transport.advance_receive_watermark(mark));
+
+        let since = subscription_filter(&transport)["since"].as_i64().unwrap();
+        assert_eq!(
+            since,
+            mark - NOSTR_CREATED_AT_JITTER_SECS - NOSTR_CLOCK_SKEW_MARGIN_SECS,
+            "since must sit a full jitter + skew window below the watermark"
+        );
+    }
+
+    #[test]
+    fn test_since_overlap_covers_the_gift_wrap_jitter_window() {
+        // The sealed-envelope work jitters `created_at` backwards by up to
+        // NOSTR_CREATED_AT_JITTER_SECS, so an event published *now* can carry a
+        // timestamp that far in the past. If `since` did not reach back at
+        // least that far past the mark, those events would be filtered out by
+        // the very relay query meant to fetch them — a silent delivery loss
+        // with no error anywhere. This pins the two uses of the constant
+        // together.
+        let transport = NostrTransport::new("device1").unwrap();
+        let mark = now_unix_secs();
+        transport.advance_receive_watermark(mark);
+
+        let since = subscription_filter(&transport)["since"].as_i64().unwrap();
+        assert!(
+            mark - since >= NOSTR_CREATED_AT_JITTER_SECS,
+            "since must reach at least a jitter window below the mark"
+        );
+    }
+
+    #[test]
+    fn test_watermark_only_advances() {
+        let transport = NostrTransport::new("device1").unwrap();
+        let base = now_unix_secs() - 3600;
+
+        assert!(transport.advance_receive_watermark(base));
+        assert_eq!(transport.receive_watermark_secs(), Some(base));
+
+        // Relays stream stored events newest-first, so older ones arrive after
+        // newer ones. They must not walk the mark back.
+        assert!(!transport.advance_receive_watermark(base - 500));
+        assert_eq!(transport.receive_watermark_secs(), Some(base));
+
+        // Equal timestamps are not progress either.
+        assert!(!transport.advance_receive_watermark(base));
+
+        assert!(transport.advance_receive_watermark(base + 1));
+        assert_eq!(transport.receive_watermark_secs(), Some(base + 1));
+    }
+
+    #[test]
+    fn test_future_dated_event_cannot_stall_the_subscription() {
+        // The routing tag is derived from a public user id, so anyone can
+        // publish an event addressed to us, and `created_at` is whatever the
+        // publisher wrote. Accepting a far-future value would pin the mark
+        // there and every later subscription would ask for events `since` the
+        // far future — receiving nothing, permanently, with no error raised.
+        let transport = NostrTransport::new("device1").unwrap();
+        let honest = now_unix_secs() - 10;
+        transport.advance_receive_watermark(honest);
+
+        let year_3000 = 32_503_680_000i64;
+        assert!(
+            !transport.advance_receive_watermark(year_3000),
+            "a far-future created_at must not advance the watermark"
+        );
+        assert_eq!(transport.receive_watermark_secs(), Some(honest));
+
+        let since = subscription_filter(&transport)["since"].as_i64().unwrap();
+        assert!(
+            since < now_unix_secs(),
+            "since must stay in the past: {since}"
+        );
+    }
+
+    #[test]
+    fn test_non_positive_created_at_is_ignored() {
+        // A missing `created_at` reaches the FFI as 0; a malformed one can be
+        // negative. Neither is receive progress.
+        let transport = NostrTransport::new("device1").unwrap();
+        assert!(!transport.advance_receive_watermark(0));
+        assert!(!transport.advance_receive_watermark(-1));
+        assert!(transport.receive_watermark_secs().is_none());
+    }
+
+    #[test]
+    fn test_stop_preserves_the_receive_watermark() {
+        // stop() clears in-flight queues, but receive progress is not undone by
+        // a restart — resetting it here would replay a full backfill window on
+        // every stop/start cycle.
+        let transport = NostrTransport::new("device1").unwrap();
+        let mark = now_unix_secs() - 60;
+        transport.advance_receive_watermark(mark);
+
+        transport.stop().unwrap();
+
+        assert_eq!(transport.receive_watermark_secs(), Some(mark));
     }
 
     #[test]

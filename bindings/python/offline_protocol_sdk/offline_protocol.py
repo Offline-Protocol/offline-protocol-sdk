@@ -711,6 +711,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46003:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 64166:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 57598:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason() != 57939:
@@ -1909,6 +1911,14 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_messag
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.c_int64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2629,6 +2639,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed.restype = ctypes.c_uint16
@@ -9066,6 +9079,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def nostr_message_received(self, sender_id: str,data: typing.List[int]) -> None:
         raise NotImplementedError
+    def nostr_message_received_at(self, sender_id: str,data: typing.List[int],created_at: int) -> None:
+        raise NotImplementedError
     def nostr_send_failed(self, message_id: str) -> None:
         raise NotImplementedError
     def nostr_send_failed_with_reason(self, message_id: str,reason: typing.Optional[str]) -> None:
@@ -10607,6 +10622,27 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def nostr_message_received_at(self, sender_id: str,data: typing.List[int],created_at: int) -> None:
+        
+        _UniffiFfiConverterString.check_lower(sender_id)
+        
+        _UniffiFfiConverterSequenceUInt8.check_lower(data)
+        
+        _UniffiFfiConverterInt64.check_lower(created_at)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(sender_id),
+            _UniffiFfiConverterSequenceUInt8.lower(data),
+            _UniffiFfiConverterInt64.lower(created_at),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

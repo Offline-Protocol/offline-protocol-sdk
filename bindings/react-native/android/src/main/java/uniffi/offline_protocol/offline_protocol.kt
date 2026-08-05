@@ -1080,6 +1080,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nost
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason(
@@ -1487,6 +1489,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`createdAt`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -2046,6 +2050,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46056.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 56173.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 14770.toShort()) {
@@ -3363,6 +3370,8 @@ public interface OfflineProtocolInterface {
     fun `nostrGetSubscriptionFilter`(`subscriptionId`: kotlin.String): kotlin.String?
     
     fun `nostrMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
+    
+    fun `nostrMessageReceivedAt`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>, `createdAt`: kotlin.Long)
     
     fun `nostrSendFailed`(`messageId`: kotlin.String)
     
@@ -4834,6 +4843,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(
         it,
         FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `nostrMessageReceivedAt`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>, `createdAt`: kotlin.Long)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at(
+        it,
+        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),FfiConverterLong.lower(`createdAt`),_status)
 }
     }
     

@@ -121,6 +121,17 @@ pub(crate) const RECONCILIATION_THROTTLE_MS: u64 = 2_000;
 /// is only used for causal ordering and the gap is absorbed on the next
 /// merge with any peer.
 pub(crate) const LAMPORT_PERSIST_INTERVAL: u64 = 64;
+/// Seconds the Nostr receive watermark must advance before it is written back
+/// to protocol-state storage. Same debounce role as
+/// [`LAMPORT_PERSIST_INTERVAL`]: every inbound relay event moves the mark, and
+/// a storage write per message is exactly the I/O the Lamport debounce exists
+/// to avoid.
+///
+/// What an un-flushed gap costs is bounded and one-directional: a launch that
+/// loses up to this much advance re-fetches a slightly wider slice of relay
+/// history, which dedup absorbs. It can never *skip* messages, because the
+/// stale mark is always behind the live one.
+pub(crate) const NOSTR_WATERMARK_PERSIST_INTERVAL_SECS: i64 = 300;
 pub(crate) const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 pub(crate) const MAX_KNOWN_PEERS: usize = 1000;
@@ -1229,6 +1240,15 @@ pub(crate) mod storage_keys {
     pub const NOSTR_SIGNING_SECRET: &str = "nostr_signing_secret";
     /// Key ID for the single Nostr signing-secret entry.
     pub const NOSTR_SIGNING_SECRET_ID: &str = "current";
+    /// Key type for the Nostr receive watermark: the newest event `created_at`
+    /// (unix seconds) this install has accepted from a relay.
+    ///
+    /// Unlike the signing secret this is *protocol-state*, not secure storage:
+    /// it is a coarse timestamp, not key material, and losing it costs one
+    /// wider backfill window rather than an identity.
+    pub const NOSTR_WATERMARK: &str = "nostr_watermark";
+    /// Key ID for the single Nostr receive-watermark entry.
+    pub const NOSTR_WATERMARK_ID: &str = "current";
     /// Key type for the per-install key that seals sensitive protocol-state
     /// records at rest.
     ///

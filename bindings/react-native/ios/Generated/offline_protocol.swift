@@ -982,6 +982,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func nostrMessageReceived(senderId: String, data: [UInt8]) throws 
     
+    func nostrMessageReceivedAt(senderId: String, data: [UInt8], createdAt: Int64) throws 
+    
     func nostrSendFailed(messageId: String) 
     
     func nostrSendFailedWithReason(messageId: String, reason: String?) 
@@ -1967,6 +1969,16 @@ open func nostrMessageReceived(senderId: String, data: [UInt8])throws   {try rus
             self.uniffiCloneHandle(),
         FfiConverterString.lower(senderId),
         FfiConverterSequenceUInt8.lower(data),$0
+    )
+}
+}
+    
+open func nostrMessageReceivedAt(senderId: String, data: [UInt8], createdAt: Int64)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(senderId),
+        FfiConverterSequenceUInt8.lower(data),
+        FfiConverterInt64.lower(createdAt),$0
     )
 }
 }
@@ -9839,6 +9851,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46056) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 56173) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 14770) {

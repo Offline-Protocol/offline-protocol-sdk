@@ -4029,6 +4029,43 @@ impl OfflineProtocol {
 
     /// Called by the platform when data is received from a Nostr relay.
     ///
+    /// Prefer [`Self::nostr_message_received_at`], which additionally carries
+    /// the event's `created_at`. This entry leaves the receive watermark
+    /// untouched, so a bridge that only calls it re-fetches the same slice of
+    /// relay history on every reconnect.
+    pub fn nostr_message_received(
+        &self,
+        sender_id: String,
+        data: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        self.nostr_message_received_inner(sender_id, data, None)
+    }
+
+    /// Called by the platform when data is received from a Nostr relay,
+    /// carrying the relay event's `created_at` (unix **seconds**, straight from
+    /// the event object).
+    ///
+    /// The timestamp advances this install's receive watermark, which is
+    /// persisted and becomes the `since` of every subsequent subscription
+    /// filter — that is what stops a relay from replaying its whole retention
+    /// window on each reconnect. Pass the value verbatim; the core clamps it
+    /// (non-positive and far-future values are ignored) and only ever moves the
+    /// mark forward.
+    ///
+    /// The mark advances only for frames that decode into a protocol message,
+    /// so junk addressed to this device's routing tag cannot push the window
+    /// past history still owed to us.
+    pub fn nostr_message_received_at(
+        &self,
+        sender_id: String,
+        data: Vec<u8>,
+        created_at: i64,
+    ) -> Result<(), ProtocolError> {
+        self.nostr_message_received_inner(sender_id, data, Some(created_at))
+    }
+
+    /// Shared body of the two Nostr receive entries.
+    ///
     /// `sender_id` is the Nostr pubkey hex of the sender (diagnostics only).
     /// The identity surfaced via `NeighborDiscovered` is always the
     /// deserialized `Message.sender`; a frame that fails to deserialize
@@ -4040,10 +4077,11 @@ impl OfflineProtocol {
     /// control message (identity mismatch). We therefore enqueue with
     /// `on_data_received` (no transport peer ID) and rely on the protocol-
     /// level signature check instead.
-    pub fn nostr_message_received(
+    fn nostr_message_received_inner(
         &self,
         sender_id: String,
         data: Vec<u8>,
+        created_at: Option<i64>,
     ) -> Result<(), ProtocolError> {
         // Extract the real sender from the protocol message before consuming `data`.
         // The Message.sender field is the authoritative user identity; the Nostr
@@ -4072,6 +4110,15 @@ impl OfflineProtocol {
         {
             let mut protocol = self.lock_inner()?;
             while protocol.receive_message().is_some() {}
+
+            // Gated on `real_sender`: the watermark means "receive progress has
+            // reached here", and a frame that did not deserialize was never
+            // processed. Counting it would let undecodable traffic addressed to
+            // our (publicly derivable) routing tag drag the window past real
+            // messages the relay still owes us.
+            if let (Some(created_at), Some(_)) = (created_at, real_sender.as_ref()) {
+                protocol.note_nostr_event_received(created_at);
+            }
         }
 
         // Discovery must only ever surface the canonical protocol user id
@@ -7249,6 +7296,108 @@ mod tests {
                 .unwrap()
                 .is_known_peer("nostr-routing-pubkey"),
             "an undecodable frame must not surface the Nostr pubkey as a discovered peer"
+        );
+    }
+
+    /// Reads the `since` the transport would put on its next REQ filter.
+    fn nostr_subscription_since(protocol: &OfflineProtocol) -> i64 {
+        let filter = protocol
+            .nostr_get_subscription_filter("sub".to_string())
+            .expect("nostr transport registered");
+        let parsed: serde_json::Value = serde_json::from_str(&filter).unwrap();
+        parsed[2]["since"].as_i64().unwrap()
+    }
+
+    fn now_unix_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[test]
+    fn test_nostr_message_received_at_advances_the_subscription_window() {
+        let data = serialized_message_from("sender-user", "receiver-user");
+
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+
+        let first_run_since = nostr_subscription_since(&receiver);
+        let created_at = now_unix_secs() - 30;
+
+        receiver
+            .nostr_message_received_at("nostr-routing-pubkey".to_string(), data, created_at)
+            .unwrap();
+
+        let advanced_since = nostr_subscription_since(&receiver);
+        assert!(
+            advanced_since > first_run_since,
+            "an event's created_at must move the subscription window forward \
+             ({first_run_since} -> {advanced_since})"
+        );
+        assert!(
+            advanced_since < created_at,
+            "since must still sit below the mark by the jitter + skew overlap"
+        );
+    }
+
+    #[test]
+    fn test_nostr_undecodable_frame_does_not_advance_the_watermark() {
+        // The routing tag is derived from a public user id, so anyone can
+        // publish to it. Junk must not drag the receive window past history
+        // the relay still owes us.
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+
+        let before = nostr_subscription_since(&receiver);
+        receiver
+            .nostr_message_received_at(
+                "nostr-routing-pubkey".to_string(),
+                b"not a protocol message".to_vec(),
+                now_unix_secs(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            nostr_subscription_since(&receiver),
+            before,
+            "an undecodable frame must not advance the receive watermark"
+        );
+    }
+
+    #[test]
+    fn test_legacy_nostr_message_received_leaves_the_watermark_alone() {
+        // The timestamp-less entry stays for bridges that have not been
+        // updated; it must keep working, just without narrowing the window.
+        let data = serialized_message_from("sender-user", "receiver-user");
+
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+        receiver.start().unwrap();
+
+        let before = nostr_subscription_since(&receiver);
+        receiver
+            .nostr_message_received("nostr-routing-pubkey".to_string(), data)
+            .unwrap();
+
+        assert_eq!(nostr_subscription_since(&receiver), before);
+        assert!(
+            receiver.lock_inner().unwrap().is_known_peer("sender-user"),
+            "the legacy entry must still deliver and surface discovery"
         );
     }
 

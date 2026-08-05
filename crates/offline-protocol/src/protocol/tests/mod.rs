@@ -23879,6 +23879,205 @@ fn nostr_secret_restore_without_nostr_transport_is_a_noop() {
         .is_none());
 }
 
+// ============================================================================
+// PERSISTED NOSTR RECEIVE WATERMARK
+// ============================================================================
+
+fn nostr_watermark(protocol: &OfflineProtocol) -> Option<i64> {
+    let arc = protocol
+        .transport_manager
+        .get_transport(TransportType::Nostr)
+        .expect("nostr transport registered");
+    arc.as_any()
+        .downcast_ref::<offline_protocol_transport::NostrTransport>()
+        .expect("registered transport should be a NostrTransport")
+        .receive_watermark_secs()
+}
+
+fn stored_nostr_watermark(storage: &crate::mls::InMemoryStorage) -> Option<i64> {
+    let raw = storage
+        .load(
+            storage_keys::NOSTR_WATERMARK,
+            storage_keys::NOSTR_WATERMARK_ID,
+        )
+        .unwrap()?;
+    Some(i64::from_le_bytes(raw.try_into().unwrap()))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+#[test]
+fn nostr_watermark_survives_a_restart() {
+    // The whole point of persisting it: without this, every cold start falls
+    // back to the first-run backfill window and replays that much history.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let mark = now_secs() - 120;
+
+    let mut first = protocol_with_nostr_transport();
+    first
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    first.note_nostr_event_received(mark);
+    assert_eq!(nostr_watermark(&first), Some(mark));
+    assert_eq!(stored_nostr_watermark(&storage), Some(mark));
+
+    // A second launch against the same container starts where the first left
+    // off, rather than from nothing.
+    let mut second = protocol_with_nostr_transport();
+    assert_eq!(nostr_watermark(&second), None);
+    second
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert_eq!(nostr_watermark(&second), Some(mark));
+}
+
+#[test]
+fn nostr_watermark_restore_never_goes_backward() {
+    // Mirrors the Lamport clock rule: a restore must not undo progress an
+    // instance already made this session.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let old = now_secs() - 3600;
+    let newer = now_secs() - 60;
+
+    let mut seed = protocol_with_nostr_transport();
+    seed.enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    seed.note_nostr_event_received(old);
+    assert_eq!(stored_nostr_watermark(&storage), Some(old));
+    drop(seed);
+
+    let mut protocol = protocol_with_nostr_transport();
+    // Advance in memory before storage is attached (no persistence yet).
+    protocol.note_nostr_event_received(newer);
+    assert_eq!(nostr_watermark(&protocol), Some(newer));
+
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert_eq!(
+        nostr_watermark(&protocol),
+        Some(newer),
+        "restoring an older persisted mark must not regress the live one"
+    );
+}
+
+#[test]
+fn future_dated_persisted_watermark_cannot_stall_the_subscription() {
+    // A record written by a build without the future-dated check — or edited
+    // in the app container — must not be installable. A watermark in the far
+    // future makes every subsequent `since` ask for events that cannot exist,
+    // which is silent, permanent receive failure.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let year_3000 = 32_503_680_000i64;
+    storage
+        .store(
+            storage_keys::NOSTR_WATERMARK,
+            storage_keys::NOSTR_WATERMARK_ID,
+            &year_3000.to_le_bytes(),
+        )
+        .unwrap();
+
+    let mut protocol = protocol_with_nostr_transport();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    assert_eq!(
+        nostr_watermark(&protocol),
+        None,
+        "a far-future persisted watermark must be refused, not installed"
+    );
+
+    // And the refused record must not become the debounce baseline: measuring
+    // against it makes every later delta negative, so nothing is ever due and
+    // the bad record survives the whole session.
+    let honest = now_secs() - 60;
+    protocol.note_nostr_event_received(honest);
+    assert_eq!(
+        stored_nostr_watermark(&storage),
+        Some(honest),
+        "the first accepted event must overwrite a refused record"
+    );
+}
+
+#[test]
+fn corrupt_persisted_nostr_watermark_is_ignored() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    storage
+        .store(
+            storage_keys::NOSTR_WATERMARK,
+            storage_keys::NOSTR_WATERMARK_ID,
+            &[1, 2, 3], // not 8 bytes
+        )
+        .unwrap();
+
+    let mut protocol = protocol_with_nostr_transport();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    assert_eq!(nostr_watermark(&protocol), None);
+}
+
+#[test]
+fn nostr_watermark_write_is_debounced_then_flushed() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let base = now_secs() - 7200;
+
+    let mut protocol = protocol_with_nostr_transport();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    // First event writes immediately: a launch that receives one message and
+    // is killed should not restart from a full backfill window.
+    protocol.note_nostr_event_received(base);
+    assert_eq!(stored_nostr_watermark(&storage), Some(base));
+
+    // Small advances below the interval stay in memory only.
+    let nudged = base + NOSTR_WATERMARK_PERSIST_INTERVAL_SECS - 1;
+    protocol.note_nostr_event_received(nudged);
+    assert_eq!(nostr_watermark(&protocol), Some(nudged));
+    assert_eq!(
+        stored_nostr_watermark(&storage),
+        Some(base),
+        "an advance below the debounce interval must not hit storage"
+    );
+
+    // Crossing the interval writes.
+    let crossed = base + NOSTR_WATERMARK_PERSIST_INTERVAL_SECS;
+    protocol.note_nostr_event_received(crossed);
+    assert_eq!(stored_nostr_watermark(&storage), Some(crossed));
+
+    // The un-flushed tail is not lost: an explicit flush persists it.
+    let tail = crossed + 5;
+    protocol.note_nostr_event_received(tail);
+    assert_eq!(stored_nostr_watermark(&storage), Some(crossed));
+    protocol.flush_nostr_watermark();
+    assert_eq!(stored_nostr_watermark(&storage), Some(tail));
+}
+
+#[test]
+fn nostr_watermark_is_a_noop_without_a_nostr_transport() {
+    // Nostr defaults off; a protocol without the transport must neither
+    // persist a mark nor fail.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    protocol.note_nostr_event_received(now_secs());
+    protocol.flush_nostr_watermark();
+
+    assert_eq!(stored_nostr_watermark(&storage), None);
+}
+
 #[test]
 fn telemetry_install_id_is_none_without_storage() {
     // The per-instance fallback secret is random, so an id derived from it
