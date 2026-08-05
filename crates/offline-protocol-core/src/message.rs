@@ -61,7 +61,15 @@ impl fmt::Display for MessageId {
 }
 
 /// The type of content carried in a message.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Adding a variant is an additive wire change: older receivers must keep
+/// decoding messages that carry a type they don't know. All three decode
+/// paths therefore share the same fallback — an unrecognised value degrades
+/// to [`File`](Self::File) instead of failing the containing message:
+/// [`parse`](Self::parse) for strings, `content_type_from_u8` for the binary
+/// wire codec, and the hand-written [`Deserialize`] below for JSON (the
+/// derived impl would reject the whole frame on an unknown variant).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentType {
     /// Plain text message.
@@ -107,6 +115,34 @@ impl ContentType {
             "poll" => Self::Poll,
             _ => Self::File,
         }
+    }
+}
+
+/// Tolerant JSON decoding: any string is accepted and routed through
+/// [`ContentType::parse`], so a variant added by a newer sender degrades to
+/// `File` on this receiver rather than failing the whole `Message` (or
+/// sealed rich body) it rides in. Non-string values still error — that is
+/// malformed data, not additive evolution.
+impl<'de> Deserialize<'de> for ContentType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ContentTypeVisitor;
+
+        impl serde::de::Visitor<'_> for ContentTypeVisitor {
+            type Value = ContentType;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a content type string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ContentType, E> {
+                Ok(ContentType::parse(s))
+            }
+        }
+
+        deserializer.deserialize_str(ContentTypeVisitor)
     }
 }
 
@@ -1153,6 +1189,32 @@ mod tests {
             let json = serde_json::to_string(&ct).unwrap();
             assert_eq!(json, format!("\"{ct}\""));
             assert_eq!(serde_json::from_str::<ContentType>(&json).unwrap(), ct);
+            assert_eq!(ContentType::parse(&ct.to_string()), ct);
         }
+    }
+
+    #[test]
+    fn unknown_content_type_degrades_to_file_on_json_decode() {
+        // A variant added by a newer sender must not fail this receiver's
+        // decode: all three paths (JSON, `parse`, binary u8) share the
+        // `File` fallback.
+        assert_eq!(
+            serde_json::from_str::<ContentType>("\"some_future_type\"").unwrap(),
+            ContentType::File
+        );
+        // A non-string is malformed data, not additive evolution — still an
+        // error.
+        assert!(serde_json::from_str::<ContentType>("7").is_err());
+    }
+
+    #[test]
+    fn message_with_unknown_content_type_still_decodes() {
+        let msg = create_test_message();
+        let mut value = serde_json::to_value(&msg).unwrap();
+        value["content_type"] = serde_json::Value::String("some_future_type".to_string());
+        let decoded: Message = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.content_type, ContentType::File);
+        assert_eq!(decoded.content, msg.content);
+        assert_eq!(decoded.id, msg.id);
     }
 }
