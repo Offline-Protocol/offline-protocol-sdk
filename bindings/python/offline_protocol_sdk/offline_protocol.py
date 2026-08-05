@@ -6579,6 +6579,8 @@ class ContentType(enum.Enum):
     
     FILE_CHUNK = 7
     
+    POLL = 8
+    
 
 
 class _UniffiFfiConverterTypeContentType(_UniffiConverterRustBuffer):
@@ -6601,6 +6603,8 @@ class _UniffiFfiConverterTypeContentType(_UniffiConverterRustBuffer):
             return ContentType.FILE
         if variant == 8:
             return ContentType.FILE_CHUNK
+        if variant == 9:
+            return ContentType.POLL
         raise InternalError("Raw enum value doesn't match any cases")
 
     @staticmethod
@@ -6620,6 +6624,8 @@ class _UniffiFfiConverterTypeContentType(_UniffiConverterRustBuffer):
         if value == ContentType.FILE:
             return
         if value == ContentType.FILE_CHUNK:
+            return
+        if value == ContentType.POLL:
             return
         raise ValueError(value)
 
@@ -6641,6 +6647,8 @@ class _UniffiFfiConverterTypeContentType(_UniffiConverterRustBuffer):
             buf.write_i32(7)
         if value == ContentType.FILE_CHUNK:
             buf.write_i32(8)
+        if value == ContentType.POLL:
+            buf.write_i32(9)
 
 
 

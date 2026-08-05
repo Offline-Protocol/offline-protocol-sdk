@@ -81,12 +81,14 @@ pub enum ContentType {
     File,
     /// Internal: a chunk belonging to a multi-part file transfer.
     FileChunk,
+    /// Structured poll, rendered by the app rather than as plain text.
+    Poll,
 }
 
 impl ContentType {
     /// Returns `true` for types that carry binary media data.
     pub fn is_media(&self) -> bool {
-        !matches!(self, Self::Text)
+        !matches!(self, Self::Text | Self::Poll)
     }
 
     /// Parses a content type from its string representation.
@@ -102,6 +104,7 @@ impl ContentType {
             "video_note" => Self::VideoNote,
             "file" => Self::File,
             "file_chunk" => Self::FileChunk,
+            "poll" => Self::Poll,
             _ => Self::File,
         }
     }
@@ -118,6 +121,7 @@ impl fmt::Display for ContentType {
             Self::VideoNote => write!(f, "video_note"),
             Self::File => write!(f, "file"),
             Self::FileChunk => write!(f, "file_chunk"),
+            Self::Poll => write!(f, "poll"),
         }
     }
 }
@@ -1131,5 +1135,24 @@ mod tests {
 
         let next = ForwardInfo::from_message(&msg);
         assert_eq!(next.forward_count, u32::MAX);
+    }
+
+    #[test]
+    fn content_type_json_round_trips_every_variant() {
+        for ct in [
+            ContentType::Text,
+            ContentType::Image,
+            ContentType::Video,
+            ContentType::Audio,
+            ContentType::VoiceNote,
+            ContentType::VideoNote,
+            ContentType::File,
+            ContentType::FileChunk,
+            ContentType::Poll,
+        ] {
+            let json = serde_json::to_string(&ct).unwrap();
+            assert_eq!(json, format!("\"{ct}\""));
+            assert_eq!(serde_json::from_str::<ContentType>(&json).unwrap(), ct);
+        }
     }
 }

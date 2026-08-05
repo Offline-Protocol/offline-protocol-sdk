@@ -8323,7 +8323,8 @@ enum class ContentType {
     VOICE_NOTE,
     VIDEO_NOTE,
     FILE,
-    FILE_CHUNK;
+    FILE_CHUNK,
+    POLL;
     companion object
 }
 

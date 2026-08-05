@@ -1447,6 +1447,7 @@ pub enum ContentType {
     VideoNote,
     File,
     FileChunk,
+    Poll,
 }
 
 impl From<ContentType> for CoreContentType {
@@ -1460,6 +1461,7 @@ impl From<ContentType> for CoreContentType {
             ContentType::VideoNote => CoreContentType::VideoNote,
             ContentType::File => CoreContentType::File,
             ContentType::FileChunk => CoreContentType::FileChunk,
+            ContentType::Poll => CoreContentType::Poll,
         }
     }
 }

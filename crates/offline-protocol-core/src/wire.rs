@@ -221,6 +221,7 @@ pub(crate) fn content_type_to_u8(c: ContentType) -> u8 {
         ContentType::VideoNote => 5,
         ContentType::File => 6,
         ContentType::FileChunk => 7,
+        ContentType::Poll => 8,
     }
 }
 
@@ -236,6 +237,7 @@ pub(crate) fn content_type_from_u8(v: u8) -> ContentType {
         5 => ContentType::VideoNote,
         6 => ContentType::File,
         7 => ContentType::FileChunk,
+        8 => ContentType::Poll,
         _ => ContentType::File,
     }
 }
@@ -452,6 +454,15 @@ mod tests {
         let decoded = Message::from_wire_v1_bytes(&bytes).unwrap();
         assert_eq!(decoded.content_type, ContentType::File);
         assert_eq!(decoded.priority, MessagePriority::Medium);
+    }
+
+    #[test]
+    fn wire_v1_round_trips_poll_content_type() {
+        let mut wire = base_dto();
+        wire.content_type = content_type_to_u8(ContentType::Poll);
+        let bytes = encode(&wire).unwrap();
+        let decoded = Message::from_wire_v1_bytes(&bytes).unwrap();
+        assert_eq!(decoded.content_type, ContentType::Poll);
     }
 
     #[test]
