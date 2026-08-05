@@ -480,14 +480,27 @@ pub(crate) struct KeyPackagePayload {
     /// difference is real privacy rather than a mere optimization.
     ///
     /// Trust boundary — **unlike the three capability lists above, this one is
-    /// signature-bound.** All four ride in the same plaintext envelope, but
-    /// this field is consumed as a *destination key*, not as a feature hint,
-    /// so the distinction matters: `build_canonical_payload` covers the whole
-    /// `__MLS_KEY_PKG__` body under the sender's Ed25519 signature and TOFU
-    /// pin, so substituting it requires forging that signature. Stripping it
-    /// is still possible for a network attacker and downgrades us to the
-    /// bootstrap key — which is a privacy downgrade, not a disclosure to the
-    /// attacker, and one they could equally achieve by dropping the packet.
+    /// only honoured from a signed key package.** All four ride in the same
+    /// plaintext envelope, but this field is consumed as a *destination key*,
+    /// not as a feature hint, so the distinction matters: a wrong capability
+    /// costs a fallback, whereas a wrong key here means envelope metadata is
+    /// sealed *to whoever supplied it* and is then readable off a public relay,
+    /// passively, for as long as the value stands.
+    ///
+    /// `build_canonical_payload` covers the whole `__MLS_KEY_PKG__` body under
+    /// the sender's Ed25519 signature and TOFU pin — but the security gate
+    /// deliberately accepts an *unsigned* control message from a peer it has
+    /// never pinned (`security_gate_control_message`, the TOFU first-contact
+    /// window), so arriving in a key package is not by itself evidence of who
+    /// sent it. `handle_key_package_message` therefore consumes this field only
+    /// when the gate reports the frame was actually signed, which costs nothing:
+    /// a key package exists only once MLS is initialized, and `send_key_package_to`
+    /// signs unconditionally in that state, so every genuine package carrying
+    /// this field is signed.
+    ///
+    /// Stripping it is still possible for a network attacker and downgrades us
+    /// to the bootstrap key — which is a privacy downgrade, not a disclosure to
+    /// the attacker, and one they could equally achieve by dropping the packet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) nostr_pubkey: Option<String>,
 }
@@ -983,6 +996,31 @@ impl PeerCapabilities {
             || !self.attested_rich_versions.is_empty()
             || self.nostr_pubkey.is_some()
     }
+}
+
+/// Outcome of [`OfflineProtocol::security_gate_control_message`].
+///
+/// [`OfflineProtocol`]: crate::OfflineProtocol
+/// [`OfflineProtocol::security_gate_control_message`]: crate::OfflineProtocol
+#[derive(Debug)]
+pub(crate) enum ControlGateOutcome {
+    /// The message may proceed to dispatch.
+    ///
+    /// `signed` is `true` **only** when an Ed25519 signature was present and
+    /// verified against the sender's TOFU-pinned (or newly pinned) key. It is
+    /// deliberately `false` for both of the other ways a message reaches
+    /// dispatch — an unsigned legacy frame from a not-yet-pinned peer, and a
+    /// prefix the gate does not cover at all — so a handler that keys on it
+    /// fails closed without having to know which case it is in.
+    ///
+    /// Note the bit means "this frame carried a valid signature", not "this
+    /// peer is pinned": a valid signature that could not be pinned because the
+    /// TOFU store was full still counts, because the authenticity it proves is
+    /// exactly the same.
+    Proceed { signed: bool },
+    /// The gate rejected the message; the caller must return this result
+    /// without dispatching.
+    Rejected(InternalMessageResult),
 }
 
 /// Result of processing an internal protocol message.

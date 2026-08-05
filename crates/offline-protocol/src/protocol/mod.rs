@@ -2064,17 +2064,19 @@ impl OfflineProtocol {
         let content = &message.content;
 
         // Run the security gate for control messages (transport identity +
-        // signature verification). Returns `Some(Consumed)` to drop the
-        // message, or `None` to proceed.
-        if let Some(result) = self.security_gate_control_message(message) {
-            return Some(result);
-        }
+        // signature verification). `Rejected` drops the message; `Proceed`
+        // carries whether the frame was actually signed, for the one handler
+        // that consumes a payload field as authenticated data.
+        let signed = match self.security_gate_control_message(message) {
+            ControlGateOutcome::Rejected(result) => return Some(result),
+            ControlGateOutcome::Proceed { signed } => signed,
+        };
 
         let sender = message.sender.as_str();
 
         // Handle key package messages
         if let Some(data) = content.strip_prefix(internal_prefixes::KEY_PACKAGE) {
-            self.handle_key_package_message(sender, data);
+            self.handle_key_package_message(sender, data, signed);
             return Some(InternalMessageResult::Consumed);
         }
 

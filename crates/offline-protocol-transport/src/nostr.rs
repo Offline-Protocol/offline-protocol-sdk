@@ -333,13 +333,13 @@ impl NostrTransport {
     /// computable key instead (bootstrap leg). Once it is known, every
     /// subsequent frame is sealed to a key only that install holds.
     ///
-    /// The key arrives inside the Ed25519-signed, TOFU-pinned key package
-    /// payload, so it is bound to the claimed sender — unlike the plaintext
-    /// capability lists that ride alongside it. A wrong value here is a
-    /// delivery denial (the peer cannot unseal), never a disclosure: the
-    /// plaintext is sealed *to* it, so an attacker substituting their own key
-    /// would have to break the signature first, and if they could do that they
-    /// would not need this field.
+    /// A wrong value here is not merely a delivery denial: the plaintext is
+    /// sealed *to* this key, so an attacker who substitutes their own reads the
+    /// envelope metadata off a public relay. The engine is what keeps that
+    /// shut — it calls this only for a key package whose Ed25519 signature it
+    /// verified, never for one that merely arrived (its security gate accepts
+    /// unsigned control messages from not-yet-pinned peers). Do not add a
+    /// caller that skips that check.
     ///
     /// Bounded at [`NOSTR_MAX_TRACKED_PEER_KEYS`]; at capacity the map resets
     /// rather than evicting selectively, matching the engine's other

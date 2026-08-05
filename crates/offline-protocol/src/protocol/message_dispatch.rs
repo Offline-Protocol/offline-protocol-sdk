@@ -21,7 +21,15 @@ use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {
     /// Handles an incoming MLS key package message.
-    pub(crate) fn handle_key_package_message(&mut self, sender: &str, data: &str) {
+    ///
+    /// `signed` is the security gate's verdict on this specific frame (see
+    /// [`ControlGateOutcome::Proceed`]). It gates **only** `nostr_pubkey`,
+    /// which is consumed as a destination key rather than as a feature hint —
+    /// see the comment at that use for why the distinction earns a separate
+    /// trust level from the capability lists around it.
+    ///
+    /// [`ControlGateOutcome::Proceed`]: super::ControlGateOutcome
+    pub(crate) fn handle_key_package_message(&mut self, sender: &str, data: &str, signed: bool) {
         if let Ok(payload) = serde_json::from_str::<KeyPackagePayload>(data) {
             debug!(sender = %sender, session_reset = %payload.session_reset, "Received key package");
 
@@ -104,13 +112,43 @@ impl OfflineProtocol {
             // is sealed at all. Gating it here would instead mean a device that
             // toggles sealing off and back on keeps addressing bootstrap keys
             // until every peer happens to re-exchange.
+            //
+            // SECURITY: it *is* gated on the frame carrying a valid signature,
+            // and that is the one thing separating it from the capability lists
+            // above. Those are feature hints — a wrong value costs a fallback.
+            // This is a public key we then seal envelope metadata *to*, so a
+            // wrong value hands that metadata to whoever supplied it, readable
+            // off a public relay, passively, forever. The security gate accepts
+            // an *unsigned* control message from a peer it has never pinned
+            // (`security_gate_control_message`, the TOFU first-contact window),
+            // so "it arrived in a key package" is not by itself evidence of who
+            // sent it — only the Ed25519 signature is. Nothing is lost by
+            // requiring it: a key package can only be produced once MLS is
+            // initialized, and `send_key_package_to` signs unconditionally in
+            // that state, so every genuine package carrying this field is
+            // signed. An unsigned one must not be able to *clear* it either —
+            // that would be a downgrade to the bootstrap key on demand — so the
+            // stored value is carried forward rather than overwritten.
+            let advertised_nostr_pubkey = if signed {
+                payload.nostr_pubkey.clone()
+            } else {
+                if payload.nostr_pubkey.is_some() {
+                    debug!(
+                        sender = %sender,
+                        "Ignoring nostr_pubkey from an unsigned key package"
+                    );
+                }
+                self.load_peer_capabilities_record(sender)
+                    .and_then(|caps| caps.nostr_pubkey)
+            };
+
             self.transport_manager
-                .mark_peer_nostr_pubkey(sender, payload.nostr_pubkey.as_deref());
+                .mark_peer_nostr_pubkey(sender, advertised_nostr_pubkey.as_deref());
 
             let caps = PeerCapabilities::from_advertised(
                 &payload.env_versions,
                 &payload.rich_versions,
-                payload.nostr_pubkey.as_deref(),
+                advertised_nostr_pubkey.as_deref(),
             );
             if caps.is_any() {
                 self.persist_peer_capabilities(sender, &caps);

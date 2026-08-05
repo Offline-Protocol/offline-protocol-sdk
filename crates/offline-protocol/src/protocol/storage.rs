@@ -2661,13 +2661,18 @@ impl OfflineProtocol {
         }
     }
 
-    /// Reads the durable capability record for a peer. Test-only accessor over
-    /// the private [`Self::load_peer_capabilities`].
-    #[cfg(test)]
-    pub(crate) fn load_peer_capabilities_for_test(
-        &self,
-        peer_id: &str,
-    ) -> Option<PeerCapabilities> {
+    /// Reads the durable capability record for a peer, as an accessor over the
+    /// module-private [`Self::load_peer_capabilities`].
+    ///
+    /// Collapses "never written" and "could not be read this session" into the
+    /// same `None`, which the one production caller
+    /// (`handle_key_package_message`, carrying a stored `nostr_pubkey` forward
+    /// past an unsigned package) can afford: losing the value there degrades
+    /// that peer to bootstrap-key sealing, which still delivers. A caller that
+    /// needs to distinguish them — because writing a default would *destroy* a
+    /// record that is merely unreadable — must use `load_peer_capabilities`
+    /// directly and honour its `Err`, as the attested-capability merge does.
+    pub(crate) fn load_peer_capabilities_record(&self, peer_id: &str) -> Option<PeerCapabilities> {
         self.load_peer_capabilities(peer_id).ok().flatten()
     }
 

@@ -2,9 +2,10 @@
 
 use super::storage::MAX_RESTORE_KEYS_PER_CATEGORY;
 use super::{
-    base64_decode, base64_encode, storage_keys, InternalMessageResult, OfflineProtocol, TofuEntry,
-    CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIG_META_KEY, DATA_PLANE_PREFIXES, INTERNAL_PREFIXES,
-    MAX_PLAINTEXT_RECEIVE_WARNED_PEERS, MAX_TOFU_PEERS, TOFU_MIN_EVICTION_AGE_MS,
+    base64_decode, base64_encode, storage_keys, ControlGateOutcome, InternalMessageResult,
+    OfflineProtocol, TofuEntry, CTRL_PK_META_KEY, CTRL_SIGN_DOMAIN, CTRL_SIG_META_KEY,
+    DATA_PLANE_PREFIXES, INTERNAL_PREFIXES, MAX_PLAINTEXT_RECEIVE_WARNED_PEERS, MAX_TOFU_PEERS,
+    TOFU_MIN_EVICTION_AGE_MS,
 };
 use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
@@ -280,18 +281,23 @@ impl OfflineProtocol {
     /// identity and cryptographic signature before allowing the message to
     /// proceed through `process_internal_message`.
     ///
-    /// Returns `Some(InternalMessageResult::SecurityRejected)` to drop the
-    /// message (without sending a delivery ACK), or `None` to allow it
-    /// through.
+    /// Returns [`ControlGateOutcome::Rejected`] to drop the message (without
+    /// sending a delivery ACK), or [`ControlGateOutcome::Proceed`] to allow it
+    /// through — carrying whether the frame was actually signed, so a handler
+    /// that treats a payload field as authenticated can check rather than
+    /// assume. See [`ControlGateOutcome::Proceed`] for what that bit does and
+    /// does not mean.
     pub(super) fn security_gate_control_message(
         &mut self,
         message: &Message,
-    ) -> Option<InternalMessageResult> {
+    ) -> ControlGateOutcome {
         let content = &message.content;
         let sender = message.sender.as_str();
 
         if !Self::is_security_gated_prefix(content) {
-            return None; // Not a security-gated control message — no gate needed
+            // Not a security-gated control message — no gate needed, and
+            // nothing verified, so `signed` stays false.
+            return ControlGateOutcome::Proceed { signed: false };
         }
 
         // Transport-level identity check
@@ -306,7 +312,7 @@ impl OfflineProtocol {
                 SecurityWarningCode::TransportIdentityMismatch,
                 "Control message sender does not match transport peer identity",
             );
-            return Some(InternalMessageResult::SecurityRejected);
+            return ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected);
         }
 
         // Log telemetry when transport identity is absent (passed best-effort).
@@ -323,9 +329,10 @@ impl OfflineProtocol {
         }
 
         // Cryptographic signature check
-        match self.verify_control_message(message) {
+        let signed = match self.verify_control_message(message) {
             Ok(true) => {
                 // Signed and verified — proceed
+                true
             }
             Ok(false) => {
                 // Unsigned (legacy) — but if the sender already has a TOFU-pinned
@@ -342,7 +349,7 @@ impl OfflineProtocol {
                         SecurityWarningCode::SignatureDowngrade,
                         "Unsigned control message from peer with pinned key (possible downgrade attack)",
                     );
-                    return Some(InternalMessageResult::SecurityRejected);
+                    return ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected);
                 }
                 // Strict deployments reject unsigned control traffic outright.
                 // The transport-identity strict match only covers frames
@@ -363,13 +370,14 @@ impl OfflineProtocol {
                         SecurityWarningCode::UnsignedControlRejected,
                         "Unsigned control message rejected by strict transport-identity policy",
                     );
-                    return Some(InternalMessageResult::SecurityRejected);
+                    return ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected);
                 }
                 debug!(
                     sender = %sender,
                     message_id = %message.id,
                     "Received unsigned control message (legacy peer)"
                 );
+                false
             }
             Err(err) => {
                 // Signature invalid, TOFU violation, or malformed metadata — drop
@@ -384,11 +392,11 @@ impl OfflineProtocol {
                     SecurityWarningCode::ControlSignatureInvalid,
                     format!("Control message rejected: {}", err),
                 );
-                return Some(InternalMessageResult::SecurityRejected);
+                return ControlGateOutcome::Rejected(InternalMessageResult::SecurityRejected);
             }
-        }
+        };
 
-        None // Passed the security gate
+        ControlGateOutcome::Proceed { signed }
     }
 
     /// Validates that the claimed `message.sender` matches the transport-level

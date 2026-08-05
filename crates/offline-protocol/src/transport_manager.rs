@@ -206,13 +206,17 @@ impl TransportManager {
     /// gift wraps addressed to them are sealed to a key only their install
     /// holds instead of to the publicly computable bootstrap key.
     ///
+    /// `None` means "this peer advertises no Nostr key", which **forgets** any
+    /// key already held rather than leaving it in place. That is what keeps the
+    /// in-memory copy consistent with the durable record, whose downgrade
+    /// semantics delete on an empty advertisement: retaining it here instead
+    /// would keep sealing to a key the peer has stopped claiming, and survive
+    /// only until the next restart — a divergence with no symptom.
+    ///
     /// A no-op when the Nostr transport is not installed (the common case —
-    /// `nostr_enabled` defaults off) or when the peer advertised nothing. The
-    /// bound on the underlying map lives in the transport.
+    /// `nostr_enabled` defaults off). The bound on the underlying map lives in
+    /// the transport.
     pub fn mark_peer_nostr_pubkey(&mut self, peer_id: &str, pubkey_hex: Option<&str>) {
-        let Some(pubkey_hex) = pubkey_hex else {
-            return;
-        };
         let Some(transport) = self.transports.get(&TransportType::Nostr) else {
             return;
         };
@@ -220,7 +224,10 @@ impl TransportManager {
             .as_any()
             .downcast_ref::<offline_protocol_transport::nostr::NostrTransport>()
         {
-            nostr.set_peer_nostr_pubkey(peer_id, pubkey_hex);
+            match pubkey_hex {
+                Some(pubkey_hex) => nostr.set_peer_nostr_pubkey(peer_id, pubkey_hex),
+                None => nostr.forget_peer_nostr_pubkey(peer_id),
+            }
         }
     }
 
