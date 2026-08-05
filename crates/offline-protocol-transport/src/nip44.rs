@@ -114,6 +114,20 @@ impl ConversationKey {
     /// signer stores relative to the point a verifier reconstructs — cannot
     /// make the two sides disagree.
     pub(crate) fn derive(secret: &SigningKey, peer_xonly: &[u8]) -> Result<Self> {
+        // SECURITY: check the length before the curve decoder sees it. This key
+        // comes straight off the wire — it is a relay event's `pubkey` field,
+        // and anyone may publish an event — but `VerifyingKey::from_bytes`
+        // takes a fixed-size array internally and *panics* on any other length
+        // rather than returning an error. Without this, one malformed record at
+        // a public routing tag takes the process down. Rejecting it here makes
+        // a malformed key an ordinary decrypt failure, which every caller
+        // already handles.
+        if peer_xonly.len() != 32 {
+            return Err(Error::CryptoError(
+                "NIP-44: peer public key must be 32 bytes".to_string(),
+            ));
+        }
+
         // Rejects off-curve x values; `lift_x` picks the even-y point, per BIP-340.
         let peer = VerifyingKey::from_bytes(peer_xonly).map_err(|_| {
             Error::CryptoError("NIP-44: peer public key is not a valid curve point".to_string())
@@ -808,5 +822,24 @@ mod tests {
         assert!(looks_like_payload(&[VERSION; MIN_DECODED_LEN]));
         assert!(!looks_like_payload(&[VERSION; MIN_DECODED_LEN - 1]));
         assert!(!looks_like_payload(&[b'{'; MIN_DECODED_LEN]));
+    }
+
+    /// A peer key of the wrong length must be an error, never a panic.
+    ///
+    /// It arrives as a relay event's `pubkey` field, so it is attacker-chosen:
+    /// the curve decoder takes a fixed-size array and aborts the process on
+    /// anything else, which made one malformed record at a public routing tag
+    /// a remote crash.
+    #[test]
+    fn derive_rejects_a_peer_key_that_is_not_32_bytes() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]).unwrap();
+        for len in [0usize, 1, 31, 33, 64] {
+            let peer = vec![0xaau8; len];
+            assert!(
+                ConversationKey::derive(&sk, &peer).is_err(),
+                "a {}-byte peer key must be rejected, not panic",
+                len
+            );
+        }
     }
 }

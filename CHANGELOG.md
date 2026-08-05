@@ -36,6 +36,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A Nostr event with a malformed `pubkey` aborted the process.** `ConversationKey::derive` handed the wire-supplied x-only key straight to the BIP-340 decoder, which takes a fixed-size array internally and **panics** rather than erroring on any length other than 32 bytes. The key is a relay event's `pubkey` field, and anyone may publish an event to a public routing tag — so a single record carrying a short-but-valid-hex pubkey and a plausible payload was a remote crash, reachable on the ordinary sealed-frame receive path (`unseal_event_payload`) since gift-wrap sealing shipped. The length is now checked before the decoder sees it, making a malformed key an ordinary decrypt failure, which every caller already handles. Covered by `derive_rejects_a_peer_key_that_is_not_32_bytes` and `test_malformed_event_pubkey_does_not_abort_the_receive_path`.
+
 - **Nostr no longer publishes the protocol envelope in cleartext — outgoing frames are sealed into NIP-59 gift wraps.** The transport handed `serialize_message` — the *entire* `Message` JSON — to the relay, base64'd into the event `content`. Only the inner `content` field was MLS ciphertext. Everything wrapping it was readable by every relay, permanently:
 
   ```json
