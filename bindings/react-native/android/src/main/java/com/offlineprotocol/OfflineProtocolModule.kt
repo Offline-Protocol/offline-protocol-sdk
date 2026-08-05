@@ -51,6 +51,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var reticulumManager: ReticulumManager? = null
     private var nostrManager: NostrManager? = null
     private var processScheduler: ScheduledExecutorService? = null
+
+    /**
+     * Our registration in [MeshForegroundService]'s process-global stop slot,
+     * kept so teardown can clear it by identity rather than unconditionally.
+     * See [releaseForegroundStopCallback].
+     *
+     * Volatile because `start()` writes it from the JS thread while
+     * [invalidate] reads it from React Native's teardown, with no lock between
+     * them: a stale read there would skip the clear and leave this module — and
+     * its ReactContext — pinned by the companion field.
+     */
+    @Volatile
+    private var foregroundStopCallback: (() -> Unit)? = null
     private var listenerCount: Int = 0
     private var currentConfig: ProtocolConfig? = null
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -87,25 +100,68 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     override fun getName(): String = NAME
 
+    /**
+     * Deliberately NOT `@Synchronized`, and deliberately inline rather than
+     * routed through [stopTransportsAndProtocol]: React Native may call this
+     * while holding its own teardown lock, so taking the module monitor here —
+     * and holding it across calls that reach back into RN internals — is a
+     * lock-order inversion. The residual is a double-stop of a transport racing
+     * `stop()`, which every transport tolerates. Please don't "fix" that by
+     * adding the annotation.
+     *
+     * The steps still run through [TeardownSequence] — a plain helper that
+     * takes no locks, so it does not reintroduce that inversion — because a
+     * throwing transport must not skip the ones after it, the keep-alive
+     * service, or the callback clear that unpins this module. Failures only
+     * reach logcat: `invalidate` has no error channel, and reporting through
+     * [emitDiagnostic] would push events into a ReactContext that is already
+     * going down.
+     */
     override fun invalidate() {
         super.invalidate()
-        reactApplicationContext.removeLifecycleEventListener(this)
-        stopProcessScheduler()
-        bleTransport?.stop()
+        val teardown = TeardownSequence()
+
+        teardown.step("lifecycle listener") {
+            reactApplicationContext.removeLifecycleEventListener(this)
+        }
+        teardown.step("process scheduler") { stopProcessScheduler() }
+
+        // The null-outs sit outside their steps so a transport that throws on
+        // stop is still released.
+        teardown.step("BLE manager") { bleTransport?.stop() }
         bleTransport = null
-        internetManager?.stop()
+        teardown.step("Internet manager") { internetManager?.stop() }
         internetManager = null
-        wifiDirectManager?.stop()
+        teardown.step("WiFi Direct manager") { wifiDirectManager?.stop() }
         wifiDirectManager = null
-        reticulumManager?.stop()
+        teardown.step("Reticulum manager") { reticulumManager?.stop() }
         reticulumManager = null
-        nostrManager?.stop()
+        teardown.step("Nostr manager") { nostrManager?.stop() }
         nostrManager = null
         protocol = null
-        stopForegroundService()
-        // Companion field capturing this module — drop it or the module and
-        // its ReactContext outlive teardown.
-        MeshForegroundService.onStopRequestedByUser = null
+
+        teardown.step("mesh foreground service") { stopForegroundService() }
+        releaseForegroundStopCallback()
+
+        for (failure in teardown.failures) {
+            android.util.Log.w(NAME, "Teardown step failed during invalidate: ${failure.step}", failure.cause)
+        }
+    }
+
+    /**
+     * Drops this module's registration from [MeshForegroundService] — a
+     * companion field that captures the module, so leaving it set outlives the
+     * module and its ReactContext for the process lifetime.
+     *
+     * Clears by identity: the slot is process-global while modules are
+     * per-ReactContext, so during a reload this module may be tearing down
+     * *after* its replacement registered, and an unconditional null would
+     * disarm the live host's Stop action.
+     */
+    private fun releaseForegroundStopCallback() {
+        val ours = foregroundStopCallback ?: return
+        foregroundStopCallback = null
+        MeshForegroundService.clearStopRequestCallback(ours)
     }
 
     // MARK: - Host lifecycle (foreground relay heal)
@@ -1012,52 +1068,72 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      *
      * Synchronized because those two callers run on different threads and can
      * overlap — a notification Stop while the app foregrounds and calls `stop()`.
-     * Interleaved passes double-stop the transports mid-teardown, and a throw on
-     * both leaves every later step unreached while the user-stop path still
-     * reports the mesh down. Serialized, the second entrant re-runs the stops
-     * after a completed first pass, which is their idempotent no-op path.
+     * Interleaved passes double-stop the transports mid-teardown. Serialized,
+     * the second entrant re-runs the stops after a completed first pass, which
+     * is their idempotent no-op path.
      *
-     * The keep-alive and the core come down in `finally`: a transport that
-     * throws must not strand the notification advertising an active mesh, nor
-     * leave the core ticking its outbox against stopped transports. The
-     * exception still propagates, so [stop] rejects as it did before.
+     * Every step runs through [TeardownSequence], so a transport that throws
+     * cannot skip the ones after it, strand the notification advertising an
+     * active mesh, or leave the core ticking its outbox against stopped
+     * transports. A BLE stop reaches `stopScan` on an adapter the user may have
+     * just switched off, which throws `IllegalStateException` back across
+     * `runOnMainSync` — and BLE is the first transport in the sequence. The
+     * first failure is rethrown once the rest are down, so [stop] still rejects
+     * with the same cause it did before.
      */
     @Synchronized
     private fun stopTransportsAndProtocol() {
-        try {
-            stopProcessScheduler()
+        val teardown = TeardownSequence()
 
-            // Stop BLE manager first
+        teardown.step("process scheduler") { stopProcessScheduler() }
+
+        teardown.step("BLE manager") {
             bleTransport?.stop()
             android.util.Log.i(NAME, "BLE Manager stopped")
             emitDiagnostic("info", "BLE manager stopped")
+        }
 
-            // Stop Internet manager
+        teardown.step("Internet manager") {
             internetManager?.stop()
             android.util.Log.i(NAME, "Internet Manager stopped")
             emitDiagnostic("info", "Internet manager stopped")
+        }
 
-            // Stop WiFi Direct manager
+        teardown.step("WiFi Direct manager") {
             wifiDirectManager?.stop()
             android.util.Log.i(NAME, "WiFi Direct Manager stopped")
             emitDiagnostic("info", "WiFi Direct manager stopped")
+        }
 
-            // Stop Reticulum manager
+        teardown.step("Reticulum manager") {
             reticulumManager?.stop()
             android.util.Log.i(NAME, "Reticulum Manager stopped")
             emitDiagnostic("info", "Reticulum manager stopped")
+        }
 
-            // Stop Nostr manager
+        teardown.step("Nostr manager") {
             nostrManager?.stop()
             android.util.Log.i(NAME, "Nostr Manager stopped")
             emitDiagnostic("info", "Nostr manager stopped")
-        } finally {
-            // Stop foreground service
-            stopForegroundService()
+        }
 
+        teardown.step("mesh foreground service") { stopForegroundService() }
+
+        teardown.step("protocol core") {
             protocol?.stop()
             emitDiagnostic("info", "Protocol stopped")
         }
+
+        for (failure in teardown.failures) {
+            android.util.Log.e(NAME, "Teardown step failed: ${failure.step}", failure.cause)
+            emitDiagnostic("error", "Teardown step failed", mapOf(
+                "step" to failure.step,
+                "message" to (failure.cause.message ?: "unknown"),
+                "exception" to failure.cause.javaClass.simpleName
+            ))
+        }
+
+        teardown.firstFailureOrNull()?.let { throw it }
     }
 
     /**
@@ -1508,27 +1584,36 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         promise.resolve(messageJson)
     }
 
+    /**
+     * Tear the protocol down and release it, leaving the module able to
+     * [create] a fresh one.
+     *
+     * Runs the same teardown as [stop] rather than its own copy, which is also
+     * what brings the keep-alive service down: a `destroy` without a preceding
+     * `stop` used to leave a "Mesh Active" notification over a protocol that no
+     * longer existed. Sharing the path serializes it against a notification
+     * Stop running concurrently, too.
+     *
+     * A step that throws is logged, not propagated: the sequence has already
+     * run to completion by then, and `destroy` releasing its references is not
+     * conditional on every transport having stopped cleanly — a caller that
+     * could not destroy would have no way forward.
+     */
     @ReactMethod
     fun destroy(promise: Promise) {
         try {
-            stopProcessScheduler()
-            bleTransport?.stop()
-            bleTransport = null
-            internetManager?.stop()
-            internetManager = null
-            wifiDirectManager?.stop()
-            wifiDirectManager = null
-            reticulumManager?.stop()
-            reticulumManager = null
-            nostrManager?.stop()
-            nostrManager = null
-
             try {
-                protocol?.stop()
-            } catch (_: Exception) {
-                // Ignore stop errors during destroy
+                stopTransportsAndProtocol()
+            } catch (e: Exception) {
+                android.util.Log.w(NAME, "Teardown failed during destroy; releasing anyway", e)
             }
 
+            releaseForegroundStopCallback()
+            bleTransport = null
+            internetManager = null
+            wifiDirectManager = null
+            reticulumManager = null
+            nostrManager = null
             protocol = null
             meshServices = null
             listenerCount = 0
@@ -3884,10 +3969,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             // Register before the service exists, so the notification's Stop
             // action always has a host to defer to. The callback lives in a
-            // companion field and captures this module, so invalidate() must
-            // clear it or the module — and the ReactContext it holds — is
-            // pinned for the process lifetime.
-            MeshForegroundService.onStopRequestedByUser = { handleUserRequestedMeshStop() }
+            // companion field and captures this module, so teardown must clear
+            // it or the module — and the ReactContext it holds — is pinned for
+            // the process lifetime. Kept in a field so that clear can check it
+            // is still ours (see releaseForegroundStopCallback).
+            val stopCallback = { handleUserRequestedMeshStop() }
+            foregroundStopCallback = stopCallback
+            MeshForegroundService.registerStopRequestCallback(stopCallback)
             MeshForegroundService.start(reactApplicationContext)
             emitDiagnostic("info", "Mesh foreground service started")
         } catch (e: Exception) {

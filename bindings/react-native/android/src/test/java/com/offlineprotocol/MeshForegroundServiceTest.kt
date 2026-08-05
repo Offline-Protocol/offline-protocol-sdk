@@ -32,7 +32,10 @@ import org.robolectric.annotation.Config
  * The second is the notification's Stop action, which must reach the host
  * module rather than stopping this service directly. Dropping the keep-alive
  * on its own leaves the transports and the process scheduler running with no
- * foreground protection and nothing told to JS.
+ * foreground protection and nothing told to JS. That includes reaching the
+ * *right* host: the callback slot is process-global while hosts are
+ * per-ReactContext, so clearing it is by identity and a departing host must
+ * leave its replacement armed.
  *
  * Action strings are written out verbatim rather than read from the companion:
  * they cross a process boundary inside a PendingIntent that can outlive the
@@ -56,6 +59,9 @@ class MeshForegroundServiceTest {
 
     private var controller: ServiceController<MeshForegroundService>? = null
 
+    /** Every stop callback this test registered, so tearDown can clear them. */
+    private val registeredStopCallbacks = mutableListOf<() -> Unit>()
+
     /**
      * `isRunning` and the internal start-request flag are companion state, so
      * they outlive an individual test. Destroying the instance clears both
@@ -65,15 +71,25 @@ class MeshForegroundServiceTest {
      * A test that calls `start()` without ever creating an instance leaves the
      * start-request flag set with no `onDestroy` to clear it, so `stop()` runs
      * unconditionally here too — it no-ops once both flags are already down.
+     *
+     * The stop slot is cleared by identity like production does, which means
+     * clearing every callback registered here rather than nulling the field.
      */
     @After
     fun tearDown() {
-        MeshForegroundService.onStopRequestedByUser = null
+        registeredStopCallbacks.forEach { MeshForegroundService.clearStopRequestCallback(it) }
+        registeredStopCallbacks.clear()
         MeshForegroundService.onServiceRestarted = null
         controller?.destroy()
         controller = null
         MeshForegroundService.stop(context)
         drainStartedServices()
+    }
+
+    private fun registerHost(callback: () -> Unit): () -> Unit {
+        registeredStopCallbacks.add(callback)
+        MeshForegroundService.registerStopRequestCallback(callback)
+        return callback
     }
 
     private fun createService(): MeshForegroundService {
@@ -134,7 +150,7 @@ class MeshForegroundServiceTest {
     @Test
     fun `stop action defers to the host and leaves the keep-alive up`() {
         var invoked = 0
-        MeshForegroundService.onStopRequestedByUser = { invoked += 1 }
+        registerHost { invoked += 1 }
 
         createService()
         val service = deliver(ACTION_STOP_FROM_NOTIFICATION)
@@ -151,7 +167,7 @@ class MeshForegroundServiceTest {
 
     @Test
     fun `stop action still drops the keep-alive when no host is registered`() {
-        MeshForegroundService.onStopRequestedByUser = null
+        assertNull(MeshForegroundService.onStopRequestedByUser)
 
         createService()
         val service = deliver(ACTION_STOP_FROM_NOTIFICATION)
@@ -165,13 +181,54 @@ class MeshForegroundServiceTest {
 
     @Test
     fun `stop action falls back to stopping itself when the host callback throws`() {
-        MeshForegroundService.onStopRequestedByUser = { throw IllegalStateException("host is gone") }
+        registerHost { throw IllegalStateException("host is gone") }
 
         createService()
         val service = deliver(ACTION_STOP_FROM_NOTIFICATION)
 
         assertTrue(shadowOf(service).isStoppedBySelf)
         assertFalse(MeshForegroundService.isRunning)
+    }
+
+    @Test
+    fun `a host clearing its own registration disarms the stop action`() {
+        var invoked = 0
+        val callback = registerHost { invoked += 1 }
+
+        MeshForegroundService.clearStopRequestCallback(callback)
+
+        createService()
+        val service = deliver(ACTION_STOP_FROM_NOTIFICATION)
+
+        assertEquals("a cleared host must not be called", 0, invoked)
+        assertNull(MeshForegroundService.onStopRequestedByUser)
+        // Nothing left to defer to, so the button falls back to dropping the
+        // keep-alive rather than doing nothing.
+        assertTrue(shadowOf(service).isStoppedBySelf)
+    }
+
+    @Test
+    fun `a stale host clearing after a newer one registered leaves the newer one armed`() {
+        var staleInvoked = 0
+        var currentInvoked = 0
+        // The slot is process-global while modules are per-ReactContext: during
+        // a React reload the replacement registers before the outgoing module
+        // tears down. An unconditional null there would disarm the live host
+        // and the Stop button would drop the keep-alive over a running mesh.
+        val stale = registerHost { staleInvoked += 1 }
+        registerHost { currentInvoked += 1 }
+
+        MeshForegroundService.clearStopRequestCallback(stale)
+
+        createService()
+        val service = deliver(ACTION_STOP_FROM_NOTIFICATION)
+
+        assertEquals("a stale clear must not disarm the current host", 1, currentInvoked)
+        assertEquals(0, staleInvoked)
+        assertFalse(
+            "the current host owns teardown, so the keep-alive stays up",
+            shadowOf(service).isStoppedBySelf
+        )
     }
 
     @Test
