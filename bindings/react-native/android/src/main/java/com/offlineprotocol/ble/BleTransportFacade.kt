@@ -2449,6 +2449,26 @@ class BleTransportFacade(
                 }
                 
                 val gatt = device.connectGatt(context, false, centralClient.callback, BluetoothDevice.TRANSPORT_LE)
+                if (gatt == null) {
+                    // BluetoothDevice.connectGatt is declared @Nullable in the
+                    // Android framework — Kotlin treats it as a platform type,
+                    // but MeshConnectionRegistry.registerGatt takes a non-null
+                    // BluetoothGatt, so a null return trips the compiler-
+                    // inserted Intrinsics.checkNotNullParameter and crashes
+                    // with NullPointerException. connectGatt returns null when
+                    // the adapter has just turned off, the underlying hardware
+                    // handle is stale, or the device unbonded between scan and
+                    // connect — the same adapter-race conditions that motivate
+                    // the SecurityException handler below. Release the pending
+                    // role reserved for this address (mirroring the RSSI and
+                    // connection-cap skip paths above) so state does not hang
+                    // half-set-up, and emit a diagnostic so callers can see
+                    // how often the race fires in the field.
+                    Log.i(TAG, "connectGatt returned null for ${device.address} — adapter unavailable")
+                    emitDiagnostic("info", "Skipping connectGatt — adapter unavailable", mapOf("address" to device.address))
+                    connections.consumePendingRole(device.address)
+                    return
+                }
                 connections.registerGatt(device.address, gatt)
             }
             
