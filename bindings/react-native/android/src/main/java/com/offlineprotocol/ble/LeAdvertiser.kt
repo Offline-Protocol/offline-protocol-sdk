@@ -69,6 +69,20 @@ class LeAdvertiser(
      * main-handler post in the failure callback, which left a window where
      * a synchronous `start()` after a failure would be silently dropped by
      * the gate. Separating the gate from the stop-reference closes it.
+     *
+     * Note it is deliberately *not* lowered by `onStartSuccess`: it guards a
+     * live advertisement as well as an in-flight one, since a second
+     * `startAdvertising` against a running one earns
+     * `ADVERTISE_FAILED_ALREADY_STARTED`, whose handler nulls
+     * [advertiseCallback] and so discards the only reference that could stop
+     * the advertisement that is actually running.
+     *
+     * The consequence, which callers must own: an adapter switched off stops
+     * advertising at the platform without delivering any callback, so the gate
+     * stays raised over an advertisement that is already dead and every later
+     * `start()` returns at it. Recovering from an adapter-off therefore means
+     * calling [stop] first — re-attaching an advertiser and re-calling [start]
+     * is silently a no-op. Pinned by `LeAdvertiserTest`.
      */
     @Volatile
     private var startInFlight: Boolean = false
@@ -105,6 +119,31 @@ class LeAdvertiser(
                 diagnosticEmitter(
                     "info",
                     "Waiting for GATT service registration",
+                    mapOf("reason" to reason),
+                )
+            }
+            return
+        }
+
+        // Nothing to start against: getBluetoothLeAdvertiser() returns null
+        // while the adapter is off, and the facade's adapter-reset path
+        // re-attaches whatever it reads — so this is null exactly when the user
+        // has Bluetooth switched off. Bail before raising the gate below: the
+        // start call itself is a no-op on a null advertiser, so no callback
+        // would ever arrive to lower it again, and every later start() would
+        // return at the in-flight guard above with advertising wedged off for
+        // good.
+        //
+        // Deliberately below the GATT-readiness check rather than above it. A
+        // null advertiser must still latch [pendingAdvertiseReason], so an
+        // attach that lands while the service registration is in flight is
+        // picked up by [onGattServerReady] instead of being dropped silently.
+        if (advertiser == null) {
+            if (host.shouldLog("advertiser_unavailable", 60_000L)) {
+                Log.i(TAG, "Deferring advertising — BLE advertiser unavailable (reason: $reason)")
+                diagnosticEmitter(
+                    "info",
+                    "Deferring BLE advertising — advertiser unavailable",
                     mapOf("reason" to reason),
                 )
             }
@@ -183,6 +222,27 @@ class LeAdvertiser(
                 mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")),
             )
             throw e
+        } catch (e: IllegalStateException) {
+            // The platform refuses both LE entry points while the adapter is
+            // off by throwing IllegalStateException("BT Adapter is not turned
+            // ON") — the advertiser exactly as the scanner does. This one is
+            // reached from bare handler posts ([scheduleRestart], the facade's
+            // adapter-reset path), where nothing above would catch it, so the
+            // user switching Bluetooth off mid-session takes the host app down.
+            //
+            // Clearing the in-flight gate is the load-bearing half: it is
+            // raised before the call and otherwise only lowered by stop() or a
+            // terminal onStartFailure, neither of which runs when the call
+            // throws — so leaving it raised would make every later start()
+            // return early and wedge advertising off permanently.
+            advertiseCallback = null
+            startInFlight = false
+            Log.i(TAG, "Skipping startAdvertising — BT adapter not on: ${e.message}")
+            diagnosticEmitter(
+                "info",
+                "Skipping startAdvertising — BT adapter not on",
+                mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")),
+            )
         }
     }
 
@@ -205,6 +265,18 @@ class LeAdvertiser(
             diagnosticEmitter(
                 "error",
                 "Permission denied while stopping advertising",
+                mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")),
+            )
+        } catch (e: IllegalStateException) {
+            // Same adapter-off refusal as start(). State is already reset above
+            // — the gate and the callback reference come down before the call —
+            // so there is nothing to repair here; the throw just must not
+            // escape, because refresh() reaches this from evict and
+            // membership-change paths that run on bare handler posts.
+            Log.i(TAG, "Skipping stopAdvertising — BT adapter not on: ${e.message}")
+            diagnosticEmitter(
+                "info",
+                "Skipping stopAdvertising — BT adapter not on",
                 mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")),
             )
         }
