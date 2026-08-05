@@ -104,6 +104,7 @@ interface NativeConfig {
   reticulumEnabled: boolean;
   nostrEnabled: boolean;
   nostrSealingEnabled: boolean;
+  nostrColdContactEnabled: boolean;
   preferOnline: boolean;
   initialTtl: number;
   binaryWireEnabled: boolean;
@@ -358,6 +359,9 @@ export class OfflineProtocol {
       // Nested `transports.nostr.sealingEnabled` is the documented home; the
       // flat `nostrSealingEnabled` the bridges read carries the same value.
       nostrSealingEnabled: this.config.transports?.nostr?.sealingEnabled ?? true,
+      // Same nested-is-the-documented-home shape as sealingEnabled above.
+      nostrColdContactEnabled:
+        this.config.transports?.nostr?.coldContactEnabled ?? true,
       preferOnline: dorsSource?.preferOnline ?? false,
       initialTtl: this.config.network?.initialTtl ?? 8,
       binaryWireEnabled: this.config.binaryWireEnabled ?? true,

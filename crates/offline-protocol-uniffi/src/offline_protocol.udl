@@ -473,6 +473,8 @@ dictionary TransportConfig {
     // See ProtocolConfig::nostr_sealing_enabled. Defaulted so existing callers
     // keep compiling.
     boolean nostr_sealing_enabled = true;
+    // See ProtocolConfig::nostr_cold_contact_enabled.
+    boolean nostr_cold_contact_enabled = true;
 };
 
 enum OverflowPolicy {
@@ -568,6 +570,16 @@ dictionary ProtocolConfig {
     // unseal one, making it unreachable over Nostr while this is on.
     // Defaulted so existing callers keep compiling.
     boolean nostr_sealing_enabled = true;
+    // Kill switch for Nostr key-package publication and peer resolution
+    // (default on; only takes effect when nostr_enabled is on, which is off by
+    // default). Buys cold first contact -- reaching a peer known only by
+    // username over Nostr, with no prior key-package exchange -- at the cost of
+    // this install publishing a small set of addressable records at its routing
+    // tag and refreshing them as slots are consumed. Their content is sealed,
+    // but their existence and refresh timing are visible to every relay
+    // published to. Turn it off to keep the transport silent until it has
+    // traffic. Defaulted so existing callers keep compiling.
+    boolean nostr_cold_contact_enabled = true;
     // Kill switch for the compact MLS envelope on encrypted messages (default
     // on). The end-to-end sibling of binary_wire_enabled with the same shape:
     // negotiated per-recipient via the key package, parsing of inbound compact
@@ -1109,6 +1121,22 @@ interface OfflineProtocol {
 
     string? nostr_get_subscription_filter(string subscription_id);
 
+    // Returns the next pending key-package resolution query, or null. The
+    // platform sends `req_json` to its relays, keeps the subscription open
+    // under `query_id`, and routes matching events back via
+    // nostr_query_event_received.
+    NostrQuery? nostr_get_next_query();
+
+    // Delivers one event received on a resolution query's subscription.
+    // `event_json` is the event object (the third element of the relay's
+    // ["EVENT", sub_id, {...}] message), passed through verbatim.
+    [Throws=ProtocolError]
+    void nostr_query_event_received(string query_id, string event_json);
+
+    // Releases a resolution query once the relay signals end-of-stored-events.
+    // The platform should also send ["CLOSE", query_id].
+    void nostr_query_completed(string query_id);
+
     // Transport management
     [Throws=ProtocolError]
     void remove_transport(TransportType transport_type);
@@ -1549,4 +1577,13 @@ dictionary NostrMessage {
     string message_id;
     string event_id;
     string event_json;
+};
+
+// A relay query the platform should issue on the transport's behalf, to fetch
+// a peer's published key-package records. `query_id` is also the NIP-01
+// subscription id: the platform must use it verbatim so inbound events route
+// back to the right request.
+dictionary NostrQuery {
+    string query_id;
+    string req_json;
 };

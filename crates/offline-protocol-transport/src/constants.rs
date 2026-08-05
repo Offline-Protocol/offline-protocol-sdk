@@ -189,11 +189,33 @@ pub const NOSTR_FUTURE_DATED_TOLERANCE_SECS: i64 = 900;
 ///
 /// The map is fed from key packages, whose sender id is wire-claimed, so it is
 /// bounded like every other wire-keyed map in the engine. It resets at capacity
-/// rather than evicting selectively: the only consequence of forgetting a peer
-/// is that the next frame to them is sealed to their publicly computable key
-/// (the bootstrap leg) until their key package is seen again — a privacy
-/// degradation for one frame, never a delivery failure.
+/// rather than evicting selectively: the consequence of forgetting a peer is
+/// that the next frame to them takes the bootstrap leg — a privacy degradation,
+/// never a delivery failure.
+///
+/// How long that degradation lasts depends on whether the peer has published
+/// key packages. A forgotten peer who has is re-resolved on the next miss, so
+/// the window is one frame. A peer who has not (an older build, or Nostr
+/// publication disabled) stays on the bootstrap leg until their key package
+/// arrives again by some other route, which for a flood-induced reset means
+/// until restart — the restore re-marks every peer from `PeerCapabilities` — or
+/// until re-exchange. That second case is what makes a reset-at-capacity flood
+/// a real, if bounded, downgrade vector rather than a one-frame blip.
 pub const NOSTR_MAX_TRACKED_PEER_KEYS: usize = 1000;
+
+/// Number of single-use MLS key packages published for cold contact.
+///
+/// Each occupies its own addressable slot (a distinct `d` tag), because an MLS
+/// key package's init key is consumed by the first peer who uses it: one
+/// replaceable record would mean the second stranger to fetch it builds a
+/// Welcome that can never be processed. Five is sized for concurrent cold
+/// contacts arriving faster than a refresh can republish — the refresh runs on
+/// the process tick, so the buffer only has to cover one tick's worth.
+///
+/// Raising it costs one published event and one key package held in provider
+/// storage per slot; lowering it narrows the burst that can be absorbed before
+/// exhaustion, which fails closed and loudly rather than silently reusing.
+pub const NOSTR_KEY_PACKAGE_SLOTS: usize = 5;
 
 // Transport-wide Constants
 /// Default maximum message size in bytes (1 MB).

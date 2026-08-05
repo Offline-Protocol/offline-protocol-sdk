@@ -115,6 +115,8 @@ The platform managers pull relay URLs and reconnect parameters from the JSON con
 | `autoReconnect` | boolean | `true` | Auto-reconnect on disconnect |
 | `reconnectDelay` | number | `1000` | Reconnect delay in milliseconds |
 | `maxReconnectAttempts` | number | `0` | Max attempts per relay (0 = infinite) |
+| `sealingEnabled` | boolean | `true` | Seal outgoing frames into NIP-59 gift wraps |
+| `coldContactEnabled` | boolean | `true` | Publish key packages and resolve peers' — see [Published key packages](#published-key-packages-and-cold-first-contact) |
 
 ### Transport-Specific Constants
 
@@ -128,7 +130,10 @@ The platform managers pull relay URLs and reconnect parameters from the JSON con
 | First-run backfill | 24 h | How far back `since` reaches when no receive watermark exists yet |
 | `since` overlap | 1 h + 5 min | Jitter window plus clock-skew margin subtracted from the watermark |
 | `created_at` jitter | 1 h | Gift-wrap timestamps are randomized uniformly into the *past* by up to this much. Must stay ≤ the `since` overlap above, or a jittered event falls outside the very query meant to fetch it |
-| Max tracked peer keys | 1000 | Peers whose advertised Nostr key is remembered for sealing; at capacity the map resets, costing one bootstrap-key frame per forgotten peer |
+| Max tracked peer keys | 1000 | Peers whose advertised Nostr key is remembered for sealing; at capacity the map resets. A peer who publishes key packages is re-resolved on the next send; one who does not stays on the bootstrap leg until re-exchange or restart |
+| Key-package slots | 5 | Single-use key packages published for cold contact, one per addressable slot |
+| Resolution retry interval | 5 min | Minimum gap between resolution attempts for the same peer |
+| Max pending resolutions | 64 | Queued and in-flight peer lookups |
 | Future-dated tolerance | 15 min | How far ahead of local time an event's `created_at` may sit and still advance the watermark |
 | DORS tie-break priority | 4 (lowest) | Internet (0) > WiFi Direct (1) > BLE (2) > Reticulum (3) > Nostr (4) |
 | Bandwidth max | 1 MB/s | Practical upper bound for relay-bounded throughput |
@@ -158,8 +163,42 @@ The platform bridge interacts with `NostrTransport` through these UniFFI calls:
 4. **Publish** the `event_json` to every connected relay.
 5. **Confirm** via `nostrConfirmSent(messageId)` when ≥1 relay returns `["OK", event_id, true, ...]`, or `nostrSendFailedWithReason(messageId, reason)` if every relay rejects.
 6. **Receive** subscribed events and pass to `nostrMessageReceivedAt(senderId, data, createdAt)`, with `createdAt` taken verbatim from the event's `created_at` field.
-7. **Report disconnection** via `nostrStatusChanged(false)` if all relays drop.
-8. **Reconnect** automatically per `autoReconnect`/`reconnectDelay` config.
+7. **Issue key-package queries** — see [Resolution queries](#resolution-queries) below.
+8. **Report disconnection** via `nostrStatusChanged(false)` if all relays drop.
+9. **Reconnect** automatically per `autoReconnect`/`reconnectDelay` config.
+
+### Resolution queries
+
+Alongside the standing message subscription, the transport asks the platform to
+run short-lived queries that fetch a peer's published key packages. The contract
+is four calls:
+
+```
+nostrGetNextQuery()                        -> NostrQuery? { queryId, reqJson }
+nostrQueryEventReceived(queryId, eventJson)   // one matching event
+nostrQueryCompleted(queryId)                  // after the relay's EOSE
+```
+
+1. Poll `nostrGetNextQuery()` on the same timer that drains outgoing messages.
+2. Send `reqJson` to **every** connected relay, using `queryId` verbatim as the
+   NIP-01 subscription id. Broadcast rather than primary-only: a peer's records
+   may sit on relays we share with them but not with the first in our list, and
+   nothing would tell us we asked the wrong one.
+3. Route `["EVENT", queryId, {...}]` to `nostrQueryEventReceived` with the event
+   **object** (the third element) serialized — *not* through the message path.
+   These are not messages; their content is sealed to a different key.
+4. On `["EOSE", queryId]`, send `["CLOSE", queryId]` and call
+   `nostrQueryCompleted`. The first EOSE closes it: leaving the subscription
+   open for the other relays' stragglers would keep a live filter on a peer's
+   routing tag for the life of the connection.
+5. If no relay is connected when a query is drained, call
+   `nostrQueryCompleted(queryId)` immediately rather than dropping it — the
+   transport otherwise holds an entry no answer will arrive for.
+
+Both bundled bridges implement this. A bridge that does not is unaffected apart
+from losing cold contact: publication still works (records ride the ordinary
+`nostrGetNextMessage` path, whose `event_json` is opaque to the bridge), and
+sends fall back to the bootstrap leg as before.
 
 ### Subscription Filters
 
@@ -280,7 +319,7 @@ A sealed event carries exactly five things, and none of them names anybody:
 
 | Field | Value | What it reveals |
 |---|---|---|
-| `kind` | `1059` | That this is a gift wrap — the same kind ordinary NIP-17 DM clients publish |
+| `kind` | `1059` | That this is a gift wrap — the same kind ordinary NIP-17 DM clients publish. (Published key packages use `30443`, the kind Marmot publishes them under, for the same anonymity-set reason) |
 | `pubkey` | fresh single-use key | Nothing. A new key per event, so no two events we publish are linkable to each other or to this device |
 | `tags` | `[["p", <recipient routing tag>]]` | An opaque 32-byte label. Computable *from* a `userId`, but not invertible back to one |
 | `created_at` | jittered up to 1 h into the past | A coarse time bucket, deliberately not the publication time |
@@ -299,19 +338,38 @@ Only `content` was MLS ciphertext. Both usernames, the app id, the app's metadat
 
 **What remains observable** is traffic to `SHA-256(userId)` for a username an observer already guessed: that someone is publishing to that inbox, roughly when, and roughly how much. Sealing does not hide that, and rotating rendezvous tags — which would — is deliberately deferred: tying addressing to MLS epoch state turns a desync from "fails to decrypt" into "peers become mutually unreachable". (The Marmot protocol reached the same conclusion and likewise kept stable 1:1 inbox addressing.)
 
-### The first frame of a new conversation
+### Published key packages and cold first contact
 
-Sealing a frame requires the recipient's Nostr public key, which arrives inside their signed key package. Before that exchange there is no such key, so the first frame is sealed to the recipient's **publicly computable** key instead — the same value as their routing tag, derived from the `userId`.
+Sealing a frame requires the recipient's Nostr public key, and until it is known the frame falls back to the recipient's **publicly computable** key — the same value as their routing tag. That fallback is bulk-collection resistance only: a relay scraping everything cannot read it, but anyone who guesses the username holds the matching private half.
 
-That is **bulk-collection resistance only**: a relay operator scraping everything cannot read it, but anyone who guesses the recipient's username holds the matching private half and can. It is not a weaker *kind* of frame on the wire — same kind, same tag shape, same ephemeral outer key, so a relay cannot filter for "these two are just starting to talk". One exchange in each direction upgrades the conversation to keys only the two installs hold.
+To make the fallback rare rather than routine, each install **publishes MLS key packages as fetchable relay records**, and resolves a peer's before sealing to them.
 
-The computable keypair is used for **nothing else**. In particular it must never back NIP-42 AUTH or any authentication decision — its private half is public by construction. Sender authenticity on this transport comes from the protocol-layer Ed25519/TOFU gate and MLS, neither of which consults it.
+- **Publishing.** `NOSTR_KEY_PACKAGE_SLOTS` (5) single-use key packages are published as NIP-33 addressable events (kind `30443`), one per slot, tagged `[["d", <slot id>], ["p", <our routing tag>]]` and signed by the install's real Nostr key. Slots refresh on the process tick: a package consumed by a Welcome, or expired, is replaced and republished under the same slot id.
+- **Resolving.** A send to a peer whose per-install key we lack queues a query — `{"kinds":[30443],"#p":[<their routing tag>]}` — issued to every connected relay. *That send still goes out on the bootstrap leg*: blocking on a relay round-trip would turn a metadata upgrade into latency, and the round-trip may have nothing to return. The answer upgrades the next frame.
 
-#### Residual: a cached key can go stale with no feedback
+This is what makes **cold first contact** possible at all: a peer known only by username becomes reachable over Nostr with no prior key-package exchange over some other transport.
 
-If a peer wipes their storage, their per-install Nostr key rotates. Frames we seal to the key we cached are then readable by nobody, and the transport has no delivery feedback that would tell us so — an unsealable frame is indistinguishable from one addressed to someone else, and the peer cannot signal what they could not decrypt. On a **Nostr-only** path that direction stays dark until the peer's new key package reaches us by some other route.
+**Why slots, and not one record.** An MLS key package's init key is consumed by the first peer who uses it. One replaceable record would mean the second stranger to fetch it builds a Welcome that can never be processed. Consumption is *local* — an init key leaves provider storage only when this node processes a Welcome built against it — so a stranger can drive it only by actually establishing sessions, and each burnt slot is refilled on the next tick. A refill that fails emits the `NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED` security warning rather than leaving a stale record standing silently.
 
-It is narrower than it sounds: a storage wipe also destroys the peer's MLS session, so the conversation needs rebuilding regardless, and any contact over mesh, Internet, or a peer-initiated Nostr message re-exchanges key packages and heals it. The unblock clean slate clears the cached key explicitly, reverting to the bootstrap key. Publishing key packages as fetchable relay events — so a sender resolves the peer's *current* key before sealing rather than trusting a cache — removes the class outright and is the planned follow-up.
+#### Why the published record is sealed, though it is public by intent
+
+An MLS key package carries its owner's username twice: in the `KeyPackagePayload` field, and — unremovably — in the leaf credential, since this SDK uses basic credentials holding the raw user id. Published in the clear, `{"kinds":[30443]}` with no tag and no author would return **a directory of every username on the relay**, handing over exactly the preimages the `SHA-256(userId)` routing tag exists to withhold.
+
+The record's content is therefore NIP-44-sealed to our own publicly computable key. That costs nothing in reach — fetching the record requires the routing tag, which requires the username, which is the same knowledge needed to reconstruct the key and open it — while a scraper filtering by kind sees an opaque blob.
+
+So the computable keypair keeps exactly one encryption use: a self-published record whose only reader already knows whose it is. Real messages seal to the per-install key resolved from it. It must still **never** back NIP-42 AUTH or any authentication decision — its private half is public by construction, and a fetcher takes the peer's Nostr key from the Ed25519-signed payload inside the record, never from the event's self-attesting `pubkey` field.
+
+#### What publication costs
+
+This is the first thing the transport emits **unprompted**. A small set of records sits at this install's routing tag and is refreshed as slots are consumed, whether or not a message is ever sent. Their content is sealed, but *the existence of a record at a given tag, and the timing of its refreshes*, are visible to every relay published to — a liveness signal the transport otherwise does not emit.
+
+`transports.nostr.coldContactEnabled` (RN) / `nostr_cold_contact_enabled` (UniFFI, core `TransportConfig`), default on, turns both halves off and keeps the transport silent until it has traffic. The price is that cold contact stops working: peers become reachable over Nostr only after a key-package exchange over some other transport.
+
+#### Residual: a cached key can still go stale
+
+If a peer wipes their storage, their per-install Nostr key rotates, and frames sealed to the cached key are readable by nobody — the transport has no delivery feedback that would reveal it, since an unsealable frame is indistinguishable from one addressed to someone else.
+
+Resolution narrows this considerably: a peer who publishes is re-resolved whenever we hold no key for them, including after the peer-key map's reset-at-capacity. It does not close it entirely, because a *cached* key is not re-resolved — only a missing one is. It is also narrow to begin with: a storage wipe destroys the peer's MLS session too, so the conversation needs rebuilding regardless, and any contact over mesh, Internet, or a peer-initiated Nostr message heals it. The unblock clean slate clears the cached key explicitly, reverting to the bootstrap key rather than a dead one.
 
 ### Identity
 

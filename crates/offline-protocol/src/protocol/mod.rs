@@ -4,6 +4,7 @@ mod blocking;
 mod config_accessors;
 mod decryption_queue;
 mod message_dispatch;
+mod nostr_publication;
 mod observability;
 mod pending_queue;
 mod prefixes;
@@ -488,6 +489,25 @@ pub struct OfflineProtocol {
     /// the rollback cannot reach, and re-installing a durable value that only
     /// ever moves forward is not something a failed MLS restore needs undone.
     last_persisted_nostr_watermark: Option<i64>,
+
+    /// Which MLS key package stands in each published Nostr slot.
+    ///
+    /// Persisted, because the alternative to remembering it is republishing
+    /// under fresh slot ids on every launch — leaving the old records standing
+    /// with packages we would no longer track for consumption.
+    nostr_publication_slots: Vec<nostr_publication::NostrPublicationSlot>,
+
+    /// Slot ids published during *this* process.
+    ///
+    /// Deliberately not persisted: an addressable record lives on the relays,
+    /// so a launch cannot know which of them still hold it. Publishing each
+    /// slot once per process is the cheap way to be sure — it replaces rather
+    /// than accumulates, so the cost of being wrong is one redundant event.
+    nostr_published_slots: HashSet<String>,
+
+    /// When the publication slots were last re-scanned, throttling the MLS
+    /// storage reads that scan costs. See `nostr_slot_refresh_due`.
+    last_nostr_slot_refresh: Option<Instant>,
 }
 
 impl Drop for OfflineProtocol {
@@ -654,6 +674,9 @@ impl OfflineProtocol {
             device_capability_snapshot: None,
             last_persisted_lamport: 0,
             last_persisted_nostr_watermark: None,
+            nostr_publication_slots: Vec::new(),
+            nostr_published_slots: HashSet::new(),
+            last_nostr_slot_refresh: None,
             config,
         })
     }
@@ -795,6 +818,7 @@ impl OfflineProtocol {
         // later failure is harmless: it only ever moves forward, and the worst
         // a stale-but-installed mark does is narrow one replay window.
         self.restore_nostr_watermark();
+        self.restore_nostr_publication_slots();
 
         // The launch's whole durable-delete allowance, in one place because the
         // bound is on the launch. A device-barrier storm kills *this call*, not
@@ -897,6 +921,7 @@ impl OfflineProtocol {
         self.restore_or_init_scrub_secret();
         self.restore_or_init_nostr_signing_secret();
         self.restore_nostr_watermark();
+        self.restore_nostr_publication_slots();
         // Same three pools as `initialize_mls_inner`, for the same reason.
         let mut advisory_prunes = PruneAllowance::pool();
         let mut pending_prunes = PruneAllowance::pool();
@@ -1142,6 +1167,8 @@ impl OfflineProtocol {
         // config in hand. A no-op when Nostr is not installed.
         self.transport_manager
             .set_nostr_sealing_enabled(self.config.transport.nostr_sealing_enabled);
+        self.transport_manager
+            .set_nostr_cold_contact_enabled(self.config.transport.nostr_cold_contact_enabled);
 
         // Wire DORS event callback so app receives dors_score_updated, dors_transport_selected,
         let shared = self.shared_state.clone();
@@ -2252,6 +2279,7 @@ impl OfflineProtocol {
 
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
         self.pump_media_transfers();
+        self.refresh_nostr_key_package_slots();
         self.cleanup_expired_entries();
         self.evaluate_relay_role();
         self.tick_telemetry_categories();

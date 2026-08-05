@@ -267,6 +267,48 @@ impl TransportManager {
         }
     }
 
+    /// Applies the cold-contact kill switch to the Nostr transport.
+    pub fn set_nostr_cold_contact_enabled(&mut self, enabled: bool) {
+        if let Some(nostr) = self.nostr_transport() {
+            nostr.set_cold_contact_enabled(enabled);
+        }
+    }
+
+    /// Queues a key-package record for publication at `slot_id`.
+    ///
+    /// A no-op when the Nostr transport is not installed, which is the common
+    /// case: publication is driven from the engine's tick, and that tick runs
+    /// whether or not Nostr is enabled.
+    ///
+    /// Serializes through the transport's own chokepoint, which yields JSON for
+    /// an unstamped message — and a published record must never be anything
+    /// else. The binary codec is negotiated per peer from that peer's key
+    /// package, and the reader of this record is by definition a stranger whose
+    /// key package we have not seen. Emitting binary here would make the record
+    /// unreadable by exactly the audience it exists for.
+    pub fn publish_nostr_key_package(&mut self, slot_id: &str, message: &Message) -> Result<()> {
+        let Some(nostr) = self.nostr_transport() else {
+            return Ok(());
+        };
+        let payload = nostr.serialize_message(message)?;
+        nostr.publish_key_package(slot_id, payload);
+        Ok(())
+    }
+
+    /// Whether the Nostr transport is installed and publishing records.
+    pub fn nostr_cold_contact_active(&self) -> bool {
+        self.nostr_transport()
+            .map(|nostr| nostr.cold_contact_enabled())
+            .unwrap_or(false)
+    }
+
+    fn nostr_transport(&self) -> Option<&offline_protocol_transport::nostr::NostrTransport> {
+        self.transports.get(&TransportType::Nostr).and_then(|t| {
+            t.as_any()
+                .downcast_ref::<offline_protocol_transport::nostr::NostrTransport>()
+        })
+    }
+
     /// Sets the callback for DORS decision events (dors_score_updated, dors_transport_selected,
     pub fn set_dors_event_callback(&mut self, callback: Option<Arc<dyn Fn(Event) + Send + Sync>>) {
         self.dors_event_callback = callback;

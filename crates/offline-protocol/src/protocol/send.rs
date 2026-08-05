@@ -4182,17 +4182,18 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
-    pub(crate) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
-        let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
-
-        let key_pkg = {
-            let manager = mls
-                .read()
-                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-            manager.get_or_create_key_package()?
-        };
-
-        let payload = KeyPackagePayload {
+    /// Builds the advertisement body carried by a key package, whether it is
+    /// pushed to a peer or published for a stranger to fetch.
+    ///
+    /// Shared so the two paths cannot drift: a published record that advertised
+    /// a different capability set from a pushed one would make a peer's
+    /// behaviour depend on which way they first met us.
+    pub(crate) fn build_key_package_payload(
+        &self,
+        key_pkg: &offline_protocol_mls::KeyPackageBundle,
+        session_reset: bool,
+    ) -> KeyPackagePayload {
+        KeyPackagePayload {
             user_id: self.config.user_id.clone(),
             key_package_data: key_pkg.key_package_data.clone(),
             remaining_lifetime_ms: key_pkg.remaining_lifetime_ms(),
@@ -4219,7 +4220,20 @@ impl OfflineProtocol {
             // downgrade the peer's traffic to the bootstrap key as a side
             // effect of a local setting.
             nostr_pubkey: self.transport_manager.nostr_public_key(),
+        }
+    }
+
+    pub(crate) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
+        let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
+
+        let key_pkg = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.get_or_create_key_package()?
         };
+
+        let payload = self.build_key_package_payload(&key_pkg, session_reset);
 
         let serialized =
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;

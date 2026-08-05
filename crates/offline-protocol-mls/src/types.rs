@@ -137,6 +137,19 @@ pub struct KeyPackageBundle {
 
     /// Whether this key package has been uploaded to a server.
     pub synced: bool,
+
+    /// Whether this package is reserved for a publication slot.
+    ///
+    /// An MLS key package's init key is consumed by the first peer who uses it,
+    /// so a package standing in a published record must not also be handed to a
+    /// peer over the push path: the second user of it builds a Welcome that can
+    /// never be processed. Reserved packages are therefore invisible to
+    /// [`MlsManager::get_or_create_key_package`], which serves the push path.
+    ///
+    /// Additive and defaulted, so packages written before this field existed
+    /// deserialize as unreserved — which is what they are.
+    #[serde(default)]
+    pub reserved_for_publication: bool,
 }
 
 impl KeyPackageBundle {
@@ -155,6 +168,7 @@ impl KeyPackageBundle {
             created_at_ms: now_ms,
             expires_at_ms: now_ms + (lifetime_secs * 1000),
             synced: false,
+            reserved_for_publication: false,
         }
     }
 
@@ -193,6 +207,8 @@ impl KeyPackageBundle {
             created_at_ms: now_ms,
             expires_at_ms: now_ms.saturating_add(remaining_lifetime_ms),
             synced: false,
+            // A peer's package, never one of our publication slots.
+            reserved_for_publication: false,
         }
     }
 }

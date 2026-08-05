@@ -1340,6 +1340,17 @@ pub(crate) mod storage_keys {
     pub const NOSTR_WATERMARK: &str = "nostr_watermark";
     /// Key ID for the single Nostr receive-watermark entry.
     pub const NOSTR_WATERMARK_ID: &str = "current";
+    /// Key type for the Nostr key-package publication slot map: which MLS key
+    /// package currently stands in each published addressable slot.
+    ///
+    /// Protocol state rather than secure storage, on the same reasoning as the
+    /// watermark: the values are slot labels and package ids, both of which are
+    /// already public in the published record itself. Losing it costs a round
+    /// of republication under fresh slot ids, not an identity — the stale
+    /// records left at the old slots expire with their key packages.
+    pub const NOSTR_KEY_PACKAGE_SLOTS: &str = "nostr_key_package_slots";
+    /// Key ID for the single Nostr publication-slot entry.
+    pub const NOSTR_KEY_PACKAGE_SLOTS_ID: &str = "current";
     /// Key type for the per-install key that seals sensitive protocol-state
     /// records at rest.
     ///

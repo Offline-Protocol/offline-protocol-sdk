@@ -976,6 +976,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func nostrGetNextMessage()  -> NostrMessage?
     
+    func nostrGetNextQuery()  -> NostrQuery?
+    
     func nostrGetPublicKey()  -> String?
     
     func nostrGetSubscriptionFilter(subscriptionId: String)  -> String?
@@ -983,6 +985,10 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func nostrMessageReceived(senderId: String, data: [UInt8]) throws 
     
     func nostrMessageReceivedAt(senderId: String, data: [UInt8], createdAt: Int64) throws 
+    
+    func nostrQueryCompleted(queryId: String) 
+    
+    func nostrQueryEventReceived(queryId: String, eventJson: String) throws 
     
     func nostrSendFailed(messageId: String) 
     
@@ -1947,6 +1953,14 @@ open func nostrGetNextMessage() -> NostrMessage?  {
 })
 }
     
+open func nostrGetNextQuery() -> NostrQuery?  {
+    return try!  FfiConverterOptionTypeNostrQuery.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_query(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
 open func nostrGetPublicKey() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(
@@ -1979,6 +1993,23 @@ open func nostrMessageReceivedAt(senderId: String, data: [UInt8], createdAt: Int
         FfiConverterString.lower(senderId),
         FfiConverterSequenceUInt8.lower(data),
         FfiConverterInt64.lower(createdAt),$0
+    )
+}
+}
+    
+open func nostrQueryCompleted(queryId: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(queryId),$0
+    )
+}
+}
+    
+open func nostrQueryEventReceived(queryId: String, eventJson: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(queryId),
+        FfiConverterString.lower(eventJson),$0
     )
 }
 }
@@ -4278,6 +4309,58 @@ public func FfiConverterTypeNostrMessage_lower(_ value: NostrMessage) -> RustBuf
 }
 
 
+public struct NostrQuery: Equatable, Hashable {
+    public var queryId: String
+    public var reqJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(queryId: String, reqJson: String) {
+        self.queryId = queryId
+        self.reqJson = reqJson
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension NostrQuery: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNostrQuery: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NostrQuery {
+        return
+            try NostrQuery(
+                queryId: FfiConverterString.read(from: &buf), 
+                reqJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NostrQuery, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.queryId, into: &buf)
+        FfiConverterString.write(value.reqJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNostrQuery_lift(_ buf: RustBuffer) throws -> NostrQuery {
+    return try FfiConverterTypeNostrQuery.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNostrQuery_lower(_ value: NostrQuery) -> RustBuffer {
+    return FfiConverterTypeNostrQuery.lower(value)
+}
+
+
 public struct PathConfig: Equatable, Hashable {
     public var forwardToTopK: UInt32
     public var maxCongestionLevel: UInt32
@@ -4471,13 +4554,14 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var requireTransportIdentity: Bool
     public var binaryWireEnabled: Bool
     public var nostrSealingEnabled: Bool
+    public var nostrColdContactEnabled: Bool
     public var compactEnvelopeEnabled: Bool
     public var richPayloadEnabled: Bool
     public var cryptoRecoveryEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -4502,6 +4586,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.requireTransportIdentity = requireTransportIdentity
         self.binaryWireEnabled = binaryWireEnabled
         self.nostrSealingEnabled = nostrSealingEnabled
+        self.nostrColdContactEnabled = nostrColdContactEnabled
         self.compactEnvelopeEnabled = compactEnvelopeEnabled
         self.richPayloadEnabled = richPayloadEnabled
         self.cryptoRecoveryEnabled = cryptoRecoveryEnabled
@@ -4545,6 +4630,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 requireTransportIdentity: FfiConverterBool.read(from: &buf), 
                 binaryWireEnabled: FfiConverterBool.read(from: &buf), 
                 nostrSealingEnabled: FfiConverterBool.read(from: &buf), 
+                nostrColdContactEnabled: FfiConverterBool.read(from: &buf), 
                 compactEnvelopeEnabled: FfiConverterBool.read(from: &buf), 
                 richPayloadEnabled: FfiConverterBool.read(from: &buf), 
                 cryptoRecoveryEnabled: FfiConverterBool.read(from: &buf)
@@ -4576,6 +4662,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.requireTransportIdentity, into: &buf)
         FfiConverterBool.write(value.binaryWireEnabled, into: &buf)
         FfiConverterBool.write(value.nostrSealingEnabled, into: &buf)
+        FfiConverterBool.write(value.nostrColdContactEnabled, into: &buf)
         FfiConverterBool.write(value.compactEnvelopeEnabled, into: &buf)
         FfiConverterBool.write(value.richPayloadEnabled, into: &buf)
         FfiConverterBool.write(value.cryptoRecoveryEnabled, into: &buf)
@@ -5457,16 +5544,18 @@ public struct TransportConfig: Equatable, Hashable {
     public var reticulumEnabled: Bool
     public var nostrEnabled: Bool
     public var nostrSealingEnabled: Bool
+    public var nostrColdContactEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, nostrSealingEnabled: Bool = true) {
+    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true) {
         self.bleEnabled = bleEnabled
         self.wifiDirectEnabled = wifiDirectEnabled
         self.internetEnabled = internetEnabled
         self.reticulumEnabled = reticulumEnabled
         self.nostrEnabled = nostrEnabled
         self.nostrSealingEnabled = nostrSealingEnabled
+        self.nostrColdContactEnabled = nostrColdContactEnabled
     }
 
     
@@ -5488,7 +5577,8 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
                 internetEnabled: FfiConverterBool.read(from: &buf), 
                 reticulumEnabled: FfiConverterBool.read(from: &buf), 
                 nostrEnabled: FfiConverterBool.read(from: &buf), 
-                nostrSealingEnabled: FfiConverterBool.read(from: &buf)
+                nostrSealingEnabled: FfiConverterBool.read(from: &buf), 
+                nostrColdContactEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5499,6 +5589,7 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.reticulumEnabled, into: &buf)
         FfiConverterBool.write(value.nostrEnabled, into: &buf)
         FfiConverterBool.write(value.nostrSealingEnabled, into: &buf)
+        FfiConverterBool.write(value.nostrColdContactEnabled, into: &buf)
     }
 }
 
@@ -9037,6 +9128,30 @@ fileprivate struct FfiConverterOptionTypeNostrMessage: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeNostrQuery: FfiConverterRustBuffer {
+    typealias SwiftType = NostrQuery?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNostrQuery.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNostrQuery.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeReplyContext: FfiConverterRustBuffer {
     typealias SwiftType = ReplyContext?
 
@@ -9852,6 +9967,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 15697) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query() != 45315) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 55139) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9862,6 +9980,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 56173) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed() != 2867) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received() != 9552) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 14770) {

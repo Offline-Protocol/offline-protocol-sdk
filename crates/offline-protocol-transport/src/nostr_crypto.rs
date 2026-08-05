@@ -210,6 +210,19 @@ pub const NOSTR_GIFT_WRAP_KIND: u32 = 1059;
 /// parsing frames from peers that predate sealing.
 pub const NOSTR_LEGACY_DM_KIND: u32 = 4;
 
+/// Event kind for a published MLS key package: a NIP-33 *addressable* event,
+/// so republishing a slot replaces the record in place rather than appending
+/// to a growing pile a fetcher would have to sort through.
+///
+/// 30443 is the kind the Marmot protocol publishes key packages under. Sharing
+/// it is deliberate and follows the same reasoning as reusing NIP-59's wrapper
+/// for sealed traffic: a kind of our own would let one relay filter enumerate
+/// exactly the Offline Protocol userbase, whereas this way the set is every
+/// client that publishes MLS key packages to Nostr. The payloads are not
+/// interchangeable — a Marmot client fetching ours reads a NIP-44 blob it holds
+/// no key for — but interoperability was never the point; the anonymity set is.
+pub const NOSTR_KEY_PACKAGE_KIND: u32 = 30443;
+
 /// Picks a `created_at` uniformly in `[now - NOSTR_CREATED_AT_JITTER_SECS, now]`.
 ///
 /// NIP-59 requires the wrapper's timestamp be randomized into the **past** —
@@ -315,6 +328,69 @@ impl NostrEvent {
         )
     }
 
+    /// Creates a published key package record: an addressable
+    /// [`NOSTR_KEY_PACKAGE_KIND`] event carrying `plaintext` at slot `slot_id`.
+    ///
+    /// Unlike a gift wrap this is signed by the install's **real** signing key,
+    /// and that is the point of the record: a stranger who fetches it learns the
+    /// key to seal to from the event's own `pubkey` field, which is how the
+    /// bootstrap leg stops being necessary. (That field is only self-attesting —
+    /// it is BIP-340-signed by the very key it names and bound to no user id —
+    /// so the *engine* still takes the peer's key from the Ed25519-signed
+    /// `nostr_pubkey` inside the payload. This function's job is to make the
+    /// record fetchable, not to make it trusted.)
+    ///
+    /// # Why the content is sealed even though the record is public
+    ///
+    /// An MLS key package carries its owner's user id twice over: once in the
+    /// `KeyPackagePayload` field and once, unremovably, in the leaf credential —
+    /// this SDK's credentials are basic credentials holding the raw user id, as
+    /// `verify_credential_identity` relies on. Published in the clear, a filter
+    /// naming only this kind and no tag would therefore return a directory of
+    /// every username on the relay, handing over exactly the preimages the
+    /// `SHA-256(user_id)` routing tag exists to withhold.
+    ///
+    /// So the content is NIP-44-sealed to *our own* publicly computable key.
+    /// That costs nothing in reach: fetching the record at all requires knowing
+    /// the routing tag, which requires knowing the username, which is precisely
+    /// the knowledge needed to reconstruct the derivable key and open it. The
+    /// audience is unchanged and a scraper sees an opaque blob.
+    ///
+    /// This is the one encryption use of the derivable key that survives
+    /// publication: real messages seal to the per-install key resolved *from*
+    /// this record, so the weak key protects only a self-published record whose
+    /// sole reader already knows who it belongs to.
+    ///
+    /// `created_at` is the true current time, deliberately **not** jittered into
+    /// the past like a gift wrap's. Relays keep the newest event per
+    /// `(kind, pubkey, d)` and drop anything older, so a backdated republication
+    /// would be silently discarded — leaving a consumed key package standing as
+    /// the live record. Nothing is lost by it: this is a standing record, not a
+    /// message, so its timestamp correlates with no conversation.
+    pub fn create_key_package_publication(
+        keypair: &NostrKeypair,
+        routing_tag: &str,
+        slot_id: &str,
+        plaintext: &[u8],
+    ) -> Result<Self> {
+        let tag_bytes = hex::decode(routing_tag)
+            .map_err(|e| Error::CryptoError(format!("Invalid routing tag: {}", e)))?;
+        let conversation_key = ConversationKey::derive(&keypair.signing_key, &tag_bytes)?;
+        let sealed = nip44::encrypt(plaintext, &conversation_key)?;
+
+        let tags = vec![
+            vec!["d".to_string(), slot_id.to_string()],
+            vec!["p".to_string(), routing_tag.to_string()],
+        ];
+        Self::sign_with_tags(
+            keypair,
+            NOSTR_KEY_PACKAGE_KIND,
+            tags,
+            &sealed,
+            now_unix_secs(),
+        )
+    }
+
     /// Builds and signs a NIP-01 event with a single `p` tag.
     fn sign(
         keypair: &NostrKeypair,
@@ -324,6 +400,17 @@ impl NostrEvent {
         created_at: i64,
     ) -> Result<Self> {
         let tags = vec![vec!["p".to_string(), recipient_pubkey_hex.to_string()]];
+        Self::sign_with_tags(keypair, kind, tags, content, created_at)
+    }
+
+    /// Builds and signs a NIP-01 event with caller-supplied tags.
+    fn sign_with_tags(
+        keypair: &NostrKeypair,
+        kind: u32,
+        tags: Vec<Vec<String>>,
+        content: &str,
+        created_at: i64,
+    ) -> Result<Self> {
         let pubkey = keypair.public_key_hex().to_string();
 
         // NIP-01 canonical serialization for event ID computation:
@@ -457,6 +544,53 @@ pub(crate) fn unwrap_gift_wrap(
         .map_err(|e| Error::CryptoError(format!("Invalid sender pubkey: {}", e)))?;
     let conversation_key = ConversationKey::derive(&recipient_key.signing_key, &sender)?;
     nip44::decrypt_bytes(sealed, &conversation_key)
+}
+
+/// Opens a peer's published key-package record.
+///
+/// Mechanically identical to [`unwrap_gift_wrap`] — NIP-44's conversation key
+/// is symmetric, so the same derive-and-decrypt serves both — but the key here
+/// is the **peer's** publicly computable one, reconstructed from their user id,
+/// not one of ours. That inversion is the reason this has its own name: a
+/// reader who found `unwrap_gift_wrap` being handed someone else's key would be
+/// right to read it as a bug.
+///
+/// Note what is deliberately absent: the event's BIP-340 signature is never
+/// checked. It would prove only that whoever published the record holds the key
+/// the record names, which is not a claim anything relies on — the peer's real
+/// Nostr key is taken from the Ed25519-signed payload inside, under the same
+/// rule the sealed-envelope work established. Verifying it would buy a
+/// reassuring-looking check that authenticates nothing.
+pub(crate) fn open_key_package_publication(
+    peer_derivable_key: &NostrKeypair,
+    author_pubkey_hex: &str,
+    sealed: &[u8],
+) -> Result<Vec<u8>> {
+    unwrap_gift_wrap(peer_derivable_key, author_pubkey_hex, sealed)
+}
+
+/// Builds the REQ that fetches a peer's published key-package records.
+///
+/// Deliberately carries no `since`: the receive watermark bounds the *message*
+/// subscription, where re-reading history is waste, but a key-package record is
+/// republished only when a slot is consumed and may therefore be arbitrarily
+/// old while still being current. A `since` here would hide exactly the records
+/// belonging to a stable peer who has needed no refresh.
+///
+/// `limit` is the slot count rather than [`NOSTR_INITIAL_QUERY_LIMIT`]: a
+/// well-behaved peer publishes that many addressable events and no more, so
+/// anything beyond it is another author crowding the same tag.
+pub(crate) fn create_key_package_query_message(
+    routing_tag: &str,
+    subscription_id: &str,
+) -> Result<String> {
+    let filter = serde_json::json!({
+        "#p": [routing_tag],
+        "kinds": [NOSTR_KEY_PACKAGE_KIND],
+        "limit": crate::constants::NOSTR_KEY_PACKAGE_SLOTS
+    });
+    let msg = serde_json::json!(["REQ", subscription_id, filter]);
+    serde_json::to_string(&msg).map_err(|e| Error::SerializationError(e.to_string()))
 }
 
 /// Whether `data` has the shape of a sealed gift-wrap payload.

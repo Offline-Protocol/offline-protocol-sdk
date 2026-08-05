@@ -249,6 +249,14 @@ class OfflineProtocolModule: RCTEventEmitter {
             ?? raw["nostr_sealing_enabled"] as? Bool
             ?? true
 
+        // Nostr cold contact (key-package publication + peer resolution, kill
+        // switch, default on). Same nested-then-flat shape as sealing above.
+        let nostrColdContactEnabled = nostrRaw?["coldContactEnabled"] as? Bool
+            ?? nostrRaw?["cold_contact_enabled"] as? Bool
+            ?? raw["nostrColdContactEnabled"] as? Bool
+            ?? raw["nostr_cold_contact_enabled"] as? Bool
+            ?? true
+
         // Group section (nested home under `group`, then top level, both
         // cases — same shape rules as `encryption`; mirrors
         // ProtocolConfigParser.kt, keep in sync). These were UniFFI-only
@@ -305,6 +313,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             groupEnforceAdminCommits: groupEnforceAdminCommits,
             binaryWireEnabled: binaryWireEnabled,
             nostrSealingEnabled: nostrSealingEnabled,
+            nostrColdContactEnabled: nostrColdContactEnabled,
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
             richPayloadEnabled: encryption.richPayloadEnabled,
             cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled
