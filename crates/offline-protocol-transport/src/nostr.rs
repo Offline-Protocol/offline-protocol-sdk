@@ -2279,9 +2279,12 @@ mod tests {
         // usernames, the app id, the content type, the metadata map and a
         // millisecond timestamp were readable by every relay, permanently.
         //
-        // Asserted over the entire event JSON, not just `content`: a future
-        // change that moved a username into a tag, or reintroduced a stable
-        // signing pubkey derived from one, must fail here too.
+        // Asserted over the whole event except the ciphertext: a future change
+        // that moved a username into a tag, or reintroduced a stable signing
+        // pubkey derived from one, must fail here too. The ciphertext itself is
+        // excluded only *after* pinning its sealed shape — it is random bytes,
+        // and a case-folded substring assertion over its base64 spells "bob"
+        // roughly once per hundred runs, failing CI with no leak present.
         let transport = NostrTransport::new("alice").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
@@ -2295,7 +2298,24 @@ mod tests {
         transport.send(&msg).unwrap();
 
         let signed = transport.get_next_signed_event().unwrap().unwrap();
-        let wire = signed.event_json.to_lowercase();
+
+        // The content must be a sealed NIP-44 payload — not the pre-sealing
+        // leak shape, base64 of the message JSON.
+        let mut event = event_object(&signed);
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(event["content"].as_str().unwrap())
+            .unwrap();
+        assert!(
+            nostr_crypto::is_sealed_payload(&content),
+            "event content is not a sealed payload: {}",
+            signed.event_json
+        );
+
+        // With the random ciphertext scrubbed, nothing left in the event may
+        // name anyone or anything. `content` is the only non-hex field, so
+        // nothing else can spell these strings by chance.
+        event["content"] = serde_json::Value::String(String::new());
+        let wire = serde_json::to_string(&event).unwrap().to_lowercase();
 
         for leak in ["alice", "bob", "fernweh", "the quick brown fox"] {
             assert!(
