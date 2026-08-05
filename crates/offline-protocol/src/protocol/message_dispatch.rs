@@ -96,8 +96,22 @@ impl OfflineProtocol {
             // switches gate the recording above, restore, and send — not
             // knowledge). A package advertising nothing deletes the record:
             // the durable side of the downgrade semantics above.
-            let caps =
-                PeerCapabilities::from_advertised(&payload.env_versions, &payload.rich_versions);
+            // Record the peer's Nostr key so gift wraps to them are sealed to a
+            // key only their install holds, rather than to the publicly
+            // computable bootstrap key. Unlike the capability flags above this
+            // is not gated on our own config: it is a destination address, and
+            // the transport's own kill switch already decides whether anything
+            // is sealed at all. Gating it here would instead mean a device that
+            // toggles sealing off and back on keeps addressing bootstrap keys
+            // until every peer happens to re-exchange.
+            self.transport_manager
+                .mark_peer_nostr_pubkey(sender, payload.nostr_pubkey.as_deref());
+
+            let caps = PeerCapabilities::from_advertised(
+                &payload.env_versions,
+                &payload.rich_versions,
+                payload.nostr_pubkey.as_deref(),
+            );
             if caps.is_any() {
                 self.persist_peer_capabilities(sender, &caps);
             } else {

@@ -44,6 +44,12 @@ jobs:
       - name: License consistency check
         run: ./scripts/check-license-consistency.sh
 
+      # The NIP-44 vectors are a crypto conformance fixture vendored into the
+      # tree. Pinning them to the checksum the spec publishes is what stops a
+      # green suite from being achieved by editing the vectors.
+      - name: NIP-44 vector integrity
+        run: ./scripts/check-nip44-vectors.sh
+
   # The License Consistency job catches the three THIRD-PARTY-NOTICES.md copies
   # drifting from each other, but a dependency bump leaves all three identical
   # and uniformly stale — regenerating after Cargo.lock changes was manual

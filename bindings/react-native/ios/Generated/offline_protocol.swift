@@ -4470,13 +4470,14 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var groupEnforceAdminCommits: Bool
     public var requireTransportIdentity: Bool
     public var binaryWireEnabled: Bool
+    public var nostrSealingEnabled: Bool
     public var compactEnvelopeEnabled: Bool
     public var richPayloadEnabled: Bool
     public var cryptoRecoveryEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -4500,6 +4501,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.groupEnforceAdminCommits = groupEnforceAdminCommits
         self.requireTransportIdentity = requireTransportIdentity
         self.binaryWireEnabled = binaryWireEnabled
+        self.nostrSealingEnabled = nostrSealingEnabled
         self.compactEnvelopeEnabled = compactEnvelopeEnabled
         self.richPayloadEnabled = richPayloadEnabled
         self.cryptoRecoveryEnabled = cryptoRecoveryEnabled
@@ -4542,6 +4544,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 groupEnforceAdminCommits: FfiConverterBool.read(from: &buf), 
                 requireTransportIdentity: FfiConverterBool.read(from: &buf), 
                 binaryWireEnabled: FfiConverterBool.read(from: &buf), 
+                nostrSealingEnabled: FfiConverterBool.read(from: &buf), 
                 compactEnvelopeEnabled: FfiConverterBool.read(from: &buf), 
                 richPayloadEnabled: FfiConverterBool.read(from: &buf), 
                 cryptoRecoveryEnabled: FfiConverterBool.read(from: &buf)
@@ -4572,6 +4575,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.groupEnforceAdminCommits, into: &buf)
         FfiConverterBool.write(value.requireTransportIdentity, into: &buf)
         FfiConverterBool.write(value.binaryWireEnabled, into: &buf)
+        FfiConverterBool.write(value.nostrSealingEnabled, into: &buf)
         FfiConverterBool.write(value.compactEnvelopeEnabled, into: &buf)
         FfiConverterBool.write(value.richPayloadEnabled, into: &buf)
         FfiConverterBool.write(value.cryptoRecoveryEnabled, into: &buf)
@@ -5452,15 +5456,17 @@ public struct TransportConfig: Equatable, Hashable {
     public var internetEnabled: Bool
     public var reticulumEnabled: Bool
     public var nostrEnabled: Bool
+    public var nostrSealingEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool) {
+    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, nostrSealingEnabled: Bool = true) {
         self.bleEnabled = bleEnabled
         self.wifiDirectEnabled = wifiDirectEnabled
         self.internetEnabled = internetEnabled
         self.reticulumEnabled = reticulumEnabled
         self.nostrEnabled = nostrEnabled
+        self.nostrSealingEnabled = nostrSealingEnabled
     }
 
     
@@ -5481,7 +5487,8 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
                 wifiDirectEnabled: FfiConverterBool.read(from: &buf), 
                 internetEnabled: FfiConverterBool.read(from: &buf), 
                 reticulumEnabled: FfiConverterBool.read(from: &buf), 
-                nostrEnabled: FfiConverterBool.read(from: &buf)
+                nostrEnabled: FfiConverterBool.read(from: &buf), 
+                nostrSealingEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5491,6 +5498,7 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.internetEnabled, into: &buf)
         FfiConverterBool.write(value.reticulumEnabled, into: &buf)
         FfiConverterBool.write(value.nostrEnabled, into: &buf)
+        FfiConverterBool.write(value.nostrSealingEnabled, into: &buf)
     }
 }
 

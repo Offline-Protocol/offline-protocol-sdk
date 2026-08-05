@@ -42,6 +42,10 @@ pub mod error;
 pub mod internet;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
+// NIP-44 v2 is an implementation detail of the Nostr gift wrap: nothing outside
+// this crate should be able to reach the primitives directly, and in particular
+// nothing should be able to hand it a conversation key of its own choosing.
+mod nip44;
 pub mod nostr;
 pub mod nostr_crypto;
 pub mod reticulum;

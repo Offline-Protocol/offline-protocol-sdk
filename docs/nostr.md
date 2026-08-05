@@ -2,7 +2,9 @@
 
 ## Overview
 
-The Nostr transport routes messages over [Nostr](https://nostr.com/) relays via WebSockets, providing a censorship-resistant, decentralized fallback when direct mesh and ordinary Internet endpoints are unreachable. Each install signs events with a BIP-340 Schnorr keypair derived from a random per-install secret (persisted via the app's `MlsStorage`); addressing uses a public *routing tag* deterministically derived from the `userId`, so peers can compute where to send without exchanging keys. Relays simply rebroadcast the signed events to subscribers.
+The Nostr transport routes messages over [Nostr](https://nostr.com/) relays via WebSockets, providing a censorship-resistant, decentralized fallback when direct mesh and ordinary Internet endpoints are unreachable. Addressing uses a public *routing tag* deterministically derived from the `userId`, so peers can compute where to send without exchanging keys. Relays simply rebroadcast the signed events to subscribers.
+
+Outgoing frames are **sealed into [NIP-59](https://github.com/nostr-protocol/nips/blob/master/59.md) gift wraps** (kind `1059`, [NIP-44 v2](https://github.com/nostr-protocol/nips/blob/master/44.md) inner encryption), each signed by a fresh single-use key. A relay sees an opaque routing tag, an unlinkable per-event pubkey, a jittered timestamp, and ciphertext — and nothing that identifies either party. See [What a relay can see](#what-a-relay-can-see).
 
 Nostr is the fifth transport in the Offline Protocol SDK, alongside BLE, WiFi Direct, Internet, and Reticulum. It is disabled by default because it requires at least one relay URL.
 
@@ -17,7 +19,7 @@ Nostr is the fifth transport in the Offline Protocol SDK, alongside BLE, WiFi Di
 
 Nostr is **not** suitable for:
 - Latency-sensitive workloads — relay round-trips add tens of ms at minimum
-- Strict private metadata — relays see sender pubkey, recipient pubkey, and timing
+- Hiding *that* a given user is reachable — the routing tag is derived from the `userId`, so anyone who can guess a username can watch that inbox for traffic volume and timing
 - Pure offline scenarios — relays are reachable only when the device has Internet
 
 ## Architecture
@@ -125,6 +127,8 @@ The platform managers pull relay URLs and reconnect parameters from the JSON con
 | Initial query limit | 500 | `limit` on the REQ filter, capping stored-event replay per (re)connect |
 | First-run backfill | 24 h | How far back `since` reaches when no receive watermark exists yet |
 | `since` overlap | 1 h + 5 min | Jitter window plus clock-skew margin subtracted from the watermark |
+| `created_at` jitter | 1 h | Gift-wrap timestamps are randomized uniformly into the *past* by up to this much. Must stay ≤ the `since` overlap above, or a jittered event falls outside the very query meant to fetch it |
+| Max tracked peer keys | 1000 | Peers whose advertised Nostr key is remembered for sealing; at capacity the map resets, costing one bootstrap-key frame per forgotten peer |
 | Future-dated tolerance | 15 min | How far ahead of local time an event's `created_at` may sit and still advance the watermark |
 | DORS tie-break priority | 4 (lowest) | Internet (0) > WiFi Direct (1) > BLE (2) > Reticulum (3) > Nostr (4) |
 | Bandwidth max | 1 MB/s | Practical upper bound for relay-bounded throughput |
@@ -159,7 +163,9 @@ The platform bridge interacts with `NostrTransport` through these UniFFI calls:
 
 ### Subscription Filters
 
-The Rust core builds NIP-01 filters scoped to the local routing tag (events addressed to this device); the tag is derived from the `userId`, so senders can compute it without a key exchange. Use `nostrGetSubscriptionFilter(subscriptionId)` to fetch the JSON filter to send via `["REQ", subscriptionId, filter]`. Use `nostrGetPublicKey()` to retrieve the install's hex-encoded signing public key (for diagnostics and self-event filtering); read it after MLS initialization, since that is when the persisted signing key is installed.
+The Rust core builds NIP-01 filters scoped to the local routing tag (events addressed to this device); the tag is derived from the `userId`, so senders can compute it without a key exchange. Use `nostrGetSubscriptionFilter(subscriptionId)` to fetch the JSON filter to send via `["REQ", subscriptionId, filter]`. Use `nostrGetPublicKey()` to retrieve the install's hex-encoded signing public key (for diagnostics); read it after MLS initialization, since that is when the persisted signing key is installed.
+
+> **`nostrGetPublicKey()` is no longer a self-event filter.** Every sealed event is signed by a fresh single-use key, so comparing an inbound event's `pubkey` against this value never matches our own sealed traffic — and by design nothing on a gift wrap identifies its author. The bundled bridges keep the comparison only for the legacy unsealed form. Self-delivery is prevented by the `#p` filter (our outbound events are addressed to a *peer's* tag, not ours) and, for self-addressed messages, by the engine's deduplication.
 
 The filter carries two independent bounds on how much history a (re)connect pulls down, and they do different jobs:
 
@@ -268,11 +274,59 @@ Nostr will **not** be selected when:
 
 ## Identity & Privacy
 
-- **The signing key is a per-install secret** — derived via HKDF from a random 32-byte secret persisted through the app's `MlsStorage` on first `initialize_mls`, never from any public identifier. Before storage is available the transport signs with an ephemeral key that rotates per process. Wiping app storage rotates the install's Nostr identity.
-- **The routing tag is derived from `userId`** — running the same `userId` on two devices means they share an inbox (both receive events tagged to that ID), but each install still signs with its own key. Use distinct user IDs per device for separate inboxes.
-- **Relays see metadata** — sender pubkey, recipient routing tag, event size, and timing are visible to every relay you publish through.
-- **Payload is end-to-end encrypted by MLS** before reaching this transport. The Nostr layer does not add or replace encryption.
+### What a relay can see
+
+A sealed event carries exactly five things, and none of them names anybody:
+
+| Field | Value | What it reveals |
+|---|---|---|
+| `kind` | `1059` | That this is a gift wrap — the same kind ordinary NIP-17 DM clients publish |
+| `pubkey` | fresh single-use key | Nothing. A new key per event, so no two events we publish are linkable to each other or to this device |
+| `tags` | `[["p", <recipient routing tag>]]` | An opaque 32-byte label. Computable *from* a `userId`, but not invertible back to one |
+| `created_at` | jittered up to 1 h into the past | A coarse time bucket, deliberately not the publication time |
+| `content` | NIP-44 v2 ciphertext | Length, rounded up to a power-of-two bucket |
+
+**Before sealing, the same event published the entire protocol envelope in cleartext**, base64'd into `content`:
+
+```json
+{"id":"…","sender":"alice_real_username","recipient":"bob_real_username",
+ "app_id":"fernweh","priority":"medium","ttl":8,"hop_count":0,
+ "timestamp":1785919090277,"lamport_clock":0,"content_type":"text",
+ "content":"__MLS_ENC__…","metadata":{…},"requires_ack":true}
+```
+
+Only `content` was MLS ciphertext. Both usernames, the app id, the app's metadata map, the content type and a millisecond timestamp were readable by every relay, permanently. Relays are not hops — they are third-party-operated, public, and archival — so this was a durable social-graph disclosure, not transient hop metadata. Sealing closes it.
+
+**What remains observable** is traffic to `SHA-256(userId)` for a username an observer already guessed: that someone is publishing to that inbox, roughly when, and roughly how much. Sealing does not hide that, and rotating rendezvous tags — which would — is deliberately deferred: tying addressing to MLS epoch state turns a desync from "fails to decrypt" into "peers become mutually unreachable". (The Marmot protocol reached the same conclusion and likewise kept stable 1:1 inbox addressing.)
+
+### The first frame of a new conversation
+
+Sealing a frame requires the recipient's Nostr public key, which arrives inside their signed key package. Before that exchange there is no such key, so the first frame is sealed to the recipient's **publicly computable** key instead — the same value as their routing tag, derived from the `userId`.
+
+That is **bulk-collection resistance only**: a relay operator scraping everything cannot read it, but anyone who guesses the recipient's username holds the matching private half and can. It is not a weaker *kind* of frame on the wire — same kind, same tag shape, same ephemeral outer key, so a relay cannot filter for "these two are just starting to talk". One exchange in each direction upgrades the conversation to keys only the two installs hold.
+
+The computable keypair is used for **nothing else**. In particular it must never back NIP-42 AUTH or any authentication decision — its private half is public by construction. Sender authenticity on this transport comes from the protocol-layer Ed25519/TOFU gate and MLS, neither of which consults it.
+
+#### Residual: a cached key can go stale with no feedback
+
+If a peer wipes their storage, their per-install Nostr key rotates. Frames we seal to the key we cached are then readable by nobody, and the transport has no delivery feedback that would tell us so — an unsealable frame is indistinguishable from one addressed to someone else, and the peer cannot signal what they could not decrypt. On a **Nostr-only** path that direction stays dark until the peer's new key package reaches us by some other route.
+
+It is narrower than it sounds: a storage wipe also destroys the peer's MLS session, so the conversation needs rebuilding regardless, and any contact over mesh, Internet, or a peer-initiated Nostr message re-exchanges key packages and heals it. The unblock clean slate clears the cached key explicitly, reverting to the bootstrap key. Publishing key packages as fetchable relay events — so a sender resolves the peer's *current* key before sealing rather than trusting a cache — removes the class outright and is the planned follow-up.
+
+### Identity
+
+- **The signing key is a per-install secret** — derived via HKDF from a random 32-byte secret persisted through the app's `MlsStorage` on first `initialize_mls`, never from any public identifier. It is advertised in outgoing key packages so peers can seal to it, and it is *not* what signs sealed events (those use a throwaway key each). Wiping app storage rotates the install's Nostr identity.
+- **The routing tag is derived from `userId`** — running the same `userId` on two devices means they share an inbox (both receive events tagged to that ID). Use distinct user IDs per device for separate inboxes.
+- **Payload is end-to-end encrypted by MLS** before reaching this transport. Gift-wrap sealing is an additional, hop-local layer over the whole envelope; it does not replace MLS.
 - **Telemetry scrubbing** — when telemetry `scrub_ids` is on (default), pubkeys flowing through the SDK's telemetry sink are SHA-256 hashed before emission.
+
+### Interoperability and the kill switch
+
+The receive path always accepts both forms: gift wraps and the legacy unsealed kind-4 event. The subscription requests both kinds permanently, so a peer on an older build stays reachable. Sealing is therefore safe to enable or disable on one device without coordinating a fleet — unlike the negotiated wire/envelope switches, it needs no peer capability.
+
+`transports.nostr.sealingEnabled` (RN) / `nostr_sealing_enabled` (UniFFI, core `TransportConfig`) turns sealing off, restoring the cleartext kind-4 form above. Set it only for a relay that rejects kind 1059.
+
+**Sealing costs size.** NIP-44 pads to a power-of-two bucket, so a payload just past a boundary nearly doubles before the MAC and base64 are applied — considerably more than base64's ~33% alone. The 64 KiB event cap is measured on the final sealed event, so a message that fits unsealed may not fit sealed.
 
 ## Troubleshooting
 

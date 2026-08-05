@@ -56,6 +56,16 @@ internal object ProtocolConfigParser {
         // dictionary.
         val binaryWireEnabled =
             json.optBooleanCompat("binaryWireEnabled", "binary_wire_enabled") ?: true
+        // Nostr sealing (kill switch, default on). Nested home under
+        // `transports.nostr.sealingEnabled` — where the rest of the Nostr
+        // transport settings live — then the flat key, both cases. Same
+        // nested-wins-over-flat rule as `encryption` and `group`; mirrors
+        // OfflineProtocolModule.swift, keep in sync.
+        val nostrJson = json.optJSONObject("transports")?.optJSONObject("nostr")
+        val nostrSealingEnabled = nostrJson?.optBooleanCompat(
+            "sealingEnabled",
+            "sealing_enabled"
+        ) ?: json.optBooleanCompat("nostrSealingEnabled", "nostr_sealing_enabled") ?: true
         val compactEnvelopeEnabled = encryptionJson?.optBooleanCompat(
             "compactEnvelopeEnabled",
             "compact_envelope_enabled"
@@ -144,6 +154,7 @@ internal object ProtocolConfigParser {
             groupRelayBroadcastEnabled = groupRelayBroadcastEnabled,
             groupEnforceAdminCommits = groupEnforceAdminCommits,
             binaryWireEnabled = binaryWireEnabled,
+            nostrSealingEnabled = nostrSealingEnabled,
             compactEnvelopeEnabled = compactEnvelopeEnabled,
             richPayloadEnabled = richPayloadEnabled,
             cryptoRecoveryEnabled = cryptoRecoveryEnabled

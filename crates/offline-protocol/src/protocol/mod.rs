@@ -1135,6 +1135,14 @@ impl OfflineProtocol {
         drop(state);
         self.transport_manager.start()?;
 
+        // Apply the Nostr sealing kill switch here rather than at transport
+        // construction: the transport is built by the bindings layer, so this
+        // is the one place every caller — FFI, RN, and a pure-Rust embedder
+        // that installed its own `NostrTransport` — passes through with the
+        // config in hand. A no-op when Nostr is not installed.
+        self.transport_manager
+            .set_nostr_sealing_enabled(self.config.transport.nostr_sealing_enabled);
+
         // Wire DORS event callback so app receives dors_score_updated, dors_transport_selected,
         let shared = self.shared_state.clone();
         self.transport_manager

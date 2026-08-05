@@ -470,6 +470,9 @@ dictionary TransportConfig {
     boolean internet_enabled;
     boolean reticulum_enabled;
     boolean nostr_enabled;
+    // See ProtocolConfig::nostr_sealing_enabled. Defaulted so existing callers
+    // keep compiling.
+    boolean nostr_sealing_enabled = true;
 };
 
 enum OverflowPolicy {
@@ -550,6 +553,17 @@ dictionary ProtocolConfig {
     // advertising/emitting at runtime without an SDK release if a field interop
     // issue ever surfaces. Defaulted so existing callers keep compiling.
     boolean binary_wire_enabled = true;
+    // Kill switch for sealing outgoing Nostr frames into NIP-59 gift wraps
+    // (default on). Unlike the three negotiated switches around it, this one
+    // needs no peer capability: the receive path always unseals gift wraps and
+    // always parses legacy frames, so it is safe to flip on one device alone.
+    // With it off, the transport publishes the legacy kind-4 event whose
+    // content is the whole protocol envelope in cleartext -- both usernames,
+    // the app id, the metadata map, the content type and a millisecond
+    // timestamp, readable by every relay, permanently. Turn it off only for a
+    // relay that rejects kind 1059. Defaulted so existing callers keep
+    // compiling.
+    boolean nostr_sealing_enabled = true;
     // Kill switch for the compact MLS envelope on encrypted messages (default
     // on). The end-to-end sibling of binary_wire_enabled with the same shape:
     // negotiated per-recipient via the key package, parsing of inbound compact

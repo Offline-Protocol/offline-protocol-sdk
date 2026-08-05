@@ -7253,6 +7253,8 @@ data class ProtocolConfig (
     , 
     var `binaryWireEnabled`: kotlin.Boolean = true 
     , 
+    var `nostrSealingEnabled`: kotlin.Boolean = true 
+    , 
     var `compactEnvelopeEnabled`: kotlin.Boolean = true 
     , 
     var `richPayloadEnabled`: kotlin.Boolean = true 
@@ -7298,6 +7300,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -7325,6 +7328,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`groupEnforceAdminCommits`) +
             FfiConverterBoolean.allocationSize(value.`requireTransportIdentity`) +
             FfiConverterBoolean.allocationSize(value.`binaryWireEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`nostrSealingEnabled`) +
             FfiConverterBoolean.allocationSize(value.`compactEnvelopeEnabled`) +
             FfiConverterBoolean.allocationSize(value.`richPayloadEnabled`) +
             FfiConverterBoolean.allocationSize(value.`cryptoRecoveryEnabled`)
@@ -7354,6 +7358,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`groupEnforceAdminCommits`, buf)
             FfiConverterBoolean.write(value.`requireTransportIdentity`, buf)
             FfiConverterBoolean.write(value.`binaryWireEnabled`, buf)
+            FfiConverterBoolean.write(value.`nostrSealingEnabled`, buf)
             FfiConverterBoolean.write(value.`compactEnvelopeEnabled`, buf)
             FfiConverterBoolean.write(value.`richPayloadEnabled`, buf)
             FfiConverterBoolean.write(value.`cryptoRecoveryEnabled`, buf)
@@ -8060,6 +8065,8 @@ data class TransportConfig (
     var `reticulumEnabled`: kotlin.Boolean
     , 
     var `nostrEnabled`: kotlin.Boolean
+    , 
+    var `nostrSealingEnabled`: kotlin.Boolean = true 
     
 ){
     
@@ -8079,6 +8086,7 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8087,7 +8095,8 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.allocationSize(value.`wifiDirectEnabled`) +
             FfiConverterBoolean.allocationSize(value.`internetEnabled`) +
             FfiConverterBoolean.allocationSize(value.`reticulumEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`nostrEnabled`)
+            FfiConverterBoolean.allocationSize(value.`nostrEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`nostrSealingEnabled`)
     )
 
     override fun write(value: TransportConfig, buf: ByteBuffer) {
@@ -8096,6 +8105,7 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.write(value.`internetEnabled`, buf)
             FfiConverterBoolean.write(value.`reticulumEnabled`, buf)
             FfiConverterBoolean.write(value.`nostrEnabled`, buf)
+            FfiConverterBoolean.write(value.`nostrSealingEnabled`, buf)
     }
 }
 

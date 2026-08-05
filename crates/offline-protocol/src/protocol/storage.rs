@@ -2661,6 +2661,23 @@ impl OfflineProtocol {
         }
     }
 
+    /// Reads the durable capability record for a peer. Test-only accessor over
+    /// the private [`Self::load_peer_capabilities`].
+    #[cfg(test)]
+    pub(crate) fn load_peer_capabilities_for_test(
+        &self,
+        peer_id: &str,
+    ) -> Option<PeerCapabilities> {
+        self.load_peer_capabilities(peer_id).ok().flatten()
+    }
+
+    /// The Nostr public key an outgoing key package would advertise.
+    /// Test-only accessor for the value `send_key_package_to` embeds.
+    #[cfg(test)]
+    pub(crate) fn outgoing_key_package_nostr_pubkey_for_test(&self) -> Option<String> {
+        self.transport_manager.nostr_public_key()
+    }
+
     /// Records an inviter-attested rich-payload capability for a peer we
     /// never directly exchanged key packages with (a group member added by
     /// someone else). In-memory recording mirrors the direct path in
@@ -2828,6 +2845,16 @@ impl OfflineProtocol {
                 && caps.attested_rich_versions.contains(&RICH_PAYLOAD_V1)
             {
                 self.peer_rich_attested.insert(peer_id.clone());
+            }
+            // Not gated on the sealing kill switch: this is a destination
+            // address, and the transport decides whether to seal at all. A
+            // restore that skipped it would leave the peer addressed by the
+            // publicly computable bootstrap key until the next live key-package
+            // exchange — a silent privacy regression across every restart,
+            // which is the exact failure this whole record exists to prevent.
+            if let Some(pubkey) = caps.nostr_pubkey.as_deref() {
+                self.transport_manager
+                    .mark_peer_nostr_pubkey(&peer_id, Some(pubkey));
             }
             kept += 1;
         }

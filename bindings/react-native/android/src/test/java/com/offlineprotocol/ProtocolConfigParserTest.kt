@@ -28,6 +28,48 @@ class ProtocolConfigParserTest {
     }
 
     @Test
+    fun nostrSealingDefaultsOnWhenOmitted() {
+        // Defaulting this to false would silently publish the whole protocol
+        // envelope — both usernames included — in cleartext to every relay.
+        assertTrue(parse("""{"appId":"app","userId":"alice"}""").nostrSealingEnabled)
+    }
+
+    @Test
+    fun nostrSealingReadsItsNestedTransportHome() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","transports":{"nostr":{"enabled":true,"sealingEnabled":false}}}"""
+        )
+        assertFalse(config.nostrSealingEnabled)
+    }
+
+    @Test
+    fun nostrSealingReadsTheFlatShapeTheJsWrapperSends() {
+        // The JS wrapper flattens `transports.nostr.sealingEnabled` to this
+        // key; both shapes must parse or an app-set value is dropped.
+        assertFalse(
+            parse("""{"appId":"app","userId":"alice","nostrSealingEnabled":false}""")
+                .nostrSealingEnabled
+        )
+        assertFalse(
+            parse("""{"appId":"app","userId":"alice","nostr_sealing_enabled":false}""")
+                .nostrSealingEnabled
+        )
+        assertFalse(
+            parse(
+                """{"appId":"app","userId":"alice","transports":{"nostr":{"sealing_enabled":false}}}"""
+            ).nostrSealingEnabled
+        )
+    }
+
+    @Test
+    fun nestedNostrSealingWinsOverTopLevel() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","nostrSealingEnabled":false,"transports":{"nostr":{"sealingEnabled":true}}}"""
+        )
+        assertTrue(config.nostrSealingEnabled)
+    }
+
+    @Test
     fun pendingTtlFallsBackToTheRustDefault() {
         // Mirrors DEFAULT_PENDING_TTL_MS (30 min); the iOS reader asserts the
         // same, and `rn_bridge_pending_ttl_fallbacks_match_rust_default` pins

@@ -26,7 +26,8 @@
 //! derivable, so only it retains the deterministic derivation (unchanged on
 //! the wire for interoperability with older peers).
 
-use crate::constants::NOSTR_INITIAL_QUERY_LIMIT;
+use crate::constants::{NOSTR_CREATED_AT_JITTER_SECS, NOSTR_INITIAL_QUERY_LIMIT};
+use crate::nip44::{self, ConversationKey};
 use crate::{Error, Result};
 use hkdf::Hkdf;
 use k256::schnorr::SigningKey;
@@ -136,6 +137,36 @@ impl NostrKeypair {
     pub fn public_key_hex(&self) -> &str {
         &self.public_key_hex
     }
+
+    /// Reconstructs the keypair whose public half is
+    /// [`routing_tag_for_device_id`] — the *publicly computable* keypair.
+    ///
+    /// # This key is not a secret
+    ///
+    /// Its private half is `SHA-256(device_id)`, so anyone who knows a device
+    /// ID holds it. It exists for exactly one purpose: unsealing (and sealing)
+    /// the **first** frame of a conversation, before the two sides have learned
+    /// each other's real per-install Nostr keys. That gives bulk-collection
+    /// resistance — a relay operator scraping everything cannot read it — and
+    /// nothing more: an observer who guesses the username can.
+    ///
+    /// It must therefore **never** be used to authenticate anything: not
+    /// NIP-42 AUTH, not inbound sender attribution, not any decision that
+    /// treats "this decrypted" as evidence of who sent it. Sender authenticity
+    /// on this transport comes from the protocol-layer Ed25519/TOFU gate and
+    /// MLS, both of which sit above this function and are unaffected by it.
+    /// [`Self::from_install_secret`] is the only unforgeable identity here.
+    pub fn derivable_for_device_id(device_id: &str) -> Result<Self> {
+        let scalar = Sha256::digest(device_id.as_bytes());
+        let signing_key = SigningKey::from_bytes(scalar.as_slice()).map_err(|e| {
+            Error::CryptoError(format!("Invalid derivable key for device_id: {}", e))
+        })?;
+        let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
+        Ok(Self {
+            signing_key,
+            public_key_hex,
+        })
+    }
 }
 
 /// Current wall-clock time as unix seconds — the unit every Nostr timestamp
@@ -166,6 +197,43 @@ pub fn routing_tag_for_device_id(device_id: &str) -> Result<String> {
     let tag_key = SigningKey::from_bytes(tag_scalar.as_slice())
         .map_err(|e| Error::CryptoError(format!("Invalid routing tag for device_id: {}", e)))?;
     Ok(hex::encode(tag_key.verifying_key().to_bytes()))
+}
+
+/// Event kind for a NIP-59 gift wrap. Relays and other clients see our sealed
+/// traffic as ordinary wrapped DMs, which is the whole point: the anonymity set
+/// is every NIP-17 conversation on the relay, not "the Offline Protocol users".
+pub const NOSTR_GIFT_WRAP_KIND: u32 = 1059;
+
+/// Legacy NIP-04 direct-message kind. Deprecated upstream (`unrecommended`,
+/// superseded by NIP-17) and, as used here historically, published the whole
+/// protocol envelope in cleartext. Retained only so the receive path keeps
+/// parsing frames from peers that predate sealing.
+pub const NOSTR_LEGACY_DM_KIND: u32 = 4;
+
+/// Picks a `created_at` uniformly in `[now - NOSTR_CREATED_AT_JITTER_SECS, now]`.
+///
+/// NIP-59 requires the wrapper's timestamp be randomized into the **past** —
+/// never the future — so a relay cannot use publication time to correlate a
+/// wrapper with the conversation it belongs to, and so a clock-skewed client
+/// does not publish events its peers' `until` filters reject.
+///
+/// Past-only is also what makes the subscription window sound: `since` is
+/// derived from the receive watermark minus this same constant (see
+/// `NostrTransport::subscription_since`), so an event jittered to the far edge
+/// of the window is still inside the next query. Widening the jitter without
+/// widening that overlap silently drops messages.
+fn jittered_created_at() -> i64 {
+    let now = now_unix_secs();
+    let mut buf = [0u8; 8];
+    if OsRng.try_fill_bytes(&mut buf).is_err() {
+        // Randomness is a privacy input here, not a security one: without it
+        // the timestamp is merely un-jittered, which is what every event
+        // published before this change already looked like. Failing the send
+        // instead would turn an RNG hiccup into a delivery outage.
+        return now;
+    }
+    let offset = (u64::from_be_bytes(buf) % (NOSTR_CREATED_AT_JITTER_SECS as u64 + 1)) as i64;
+    now.saturating_sub(offset).max(0)
 }
 
 /// A fully signed NIP-01 Nostr event ready for relay submission.
@@ -199,8 +267,62 @@ impl NostrEvent {
         recipient_pubkey_hex: &str,
         content_base64: &str,
     ) -> Result<Self> {
-        let created_at = now_unix_secs();
-        let kind: u32 = 4;
+        Self::sign(
+            keypair,
+            NOSTR_LEGACY_DM_KIND,
+            recipient_pubkey_hex,
+            content_base64,
+            now_unix_secs(),
+        )
+    }
+
+    /// Creates a NIP-59 gift wrap (kind [`NOSTR_GIFT_WRAP_KIND`]) carrying
+    /// `plaintext` sealed to `recipient_encryption_pubkey`.
+    ///
+    /// - `recipient_tag`: the recipient's routing tag, the `#p` value they
+    ///   subscribe on. Addressing only — it is not necessarily the key the
+    ///   payload is sealed to.
+    /// - `recipient_encryption_pubkey`: the x-only key the NIP-44 layer is
+    ///   sealed to. Either the recipient's real per-install Nostr key (once we
+    ///   have learned it from their key package) or, on the bootstrap leg,
+    ///   their publicly computable key — which is the same value as
+    ///   `recipient_tag`. The two arguments are kept separate precisely so that
+    ///   coincidence stays visible at every call site rather than being assumed.
+    ///
+    /// The wrapper is signed by a **freshly generated, single-use** keypair, so
+    /// no two events this device publishes are linkable to each other or back
+    /// to it. That key is discarded when this function returns; nothing
+    /// retains it, and nothing needs to — the recipient recovers the shared
+    /// secret from the event's own `pubkey` field.
+    pub fn create_gift_wrap(
+        recipient_tag: &str,
+        recipient_encryption_pubkey: &str,
+        plaintext: &[u8],
+    ) -> Result<Self> {
+        let ephemeral = NostrKeypair::generate_ephemeral()?;
+        let peer = hex::decode(recipient_encryption_pubkey).map_err(|e| {
+            Error::CryptoError(format!("Invalid recipient encryption pubkey: {}", e))
+        })?;
+        let conversation_key = ConversationKey::derive(&ephemeral.signing_key, &peer)?;
+        let sealed = nip44::encrypt(plaintext, &conversation_key)?;
+
+        Self::sign(
+            &ephemeral,
+            NOSTR_GIFT_WRAP_KIND,
+            recipient_tag,
+            &sealed,
+            jittered_created_at(),
+        )
+    }
+
+    /// Builds and signs a NIP-01 event with a single `p` tag.
+    fn sign(
+        keypair: &NostrKeypair,
+        kind: u32,
+        recipient_pubkey_hex: &str,
+        content: &str,
+        created_at: i64,
+    ) -> Result<Self> {
         let tags = vec![vec!["p".to_string(), recipient_pubkey_hex.to_string()]];
         let pubkey = keypair.public_key_hex().to_string();
 
@@ -208,8 +330,8 @@ impl NostrEvent {
         // [0, <pubkey>, <created_at>, <kind>, <tags_json>, <content>]
         let tags_json =
             serde_json::to_string(&tags).map_err(|e| Error::SerializationError(e.to_string()))?;
-        let content_escaped = serde_json::to_string(content_base64)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
+        let content_escaped =
+            serde_json::to_string(content).map_err(|e| Error::SerializationError(e.to_string()))?;
         let serialized = format!(
             "[0,\"{}\",{},{},{},{}]",
             pubkey, created_at, kind, tags_json, content_escaped
@@ -228,7 +350,7 @@ impl NostrEvent {
             created_at,
             kind,
             tags,
-            content: content_base64.to_string(),
+            content: content.to_string(),
             sig,
         })
     }
@@ -256,11 +378,18 @@ impl NostrEvent {
     }
 }
 
-/// Creates a NIP-01 REQ subscription message for kind-4 DMs addressed to `pubkey_hex`
+/// Creates a NIP-01 REQ subscription message for DMs addressed to `pubkey_hex`
 /// (this device's own routing tag, from [`routing_tag_for_device_id`]).
 ///
 /// Returns
-/// `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4], "since": T, "limit": N}]`.
+/// `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4, 1059], "since": T, "limit": N}]`.
+///
+/// **Both kinds are requested, permanently.** [`NOSTR_GIFT_WRAP_KIND`] carries
+/// sealed traffic and is what this device publishes; [`NOSTR_LEGACY_DM_KIND`]
+/// is what peers that predate sealing publish, and dropping it from the filter
+/// would make those peers silently undeliverable rather than merely
+/// unprotected. The receive path distinguishes the two by payload shape, not by
+/// the kind, so nothing downstream depends on this list.
 ///
 /// The two bounds do different jobs and neither replaces the other:
 ///
@@ -298,12 +427,41 @@ pub fn create_subscription_message(
 ) -> Result<String> {
     let filter = serde_json::json!({
         "#p": [pubkey_hex],
-        "kinds": [4],
+        "kinds": [NOSTR_LEGACY_DM_KIND, NOSTR_GIFT_WRAP_KIND],
         "since": since.max(0),
         "limit": NOSTR_INITIAL_QUERY_LIMIT
     });
     let msg = serde_json::json!(["REQ", subscription_id, filter]);
     serde_json::to_string(&msg).map_err(|e| Error::SerializationError(e.to_string()))
+}
+
+/// Unseals a gift wrap's payload with one of our own keys.
+///
+/// - `recipient_key`: the key to attempt — our per-install signing key for
+///   steady-state traffic, or the publicly computable one for the bootstrap leg.
+/// - `sender_ephemeral_pubkey_hex`: the wrapper event's `pubkey` field, which is
+///   the sender's single-use key. It is the *only* input to the shared secret;
+///   it carries no identity, and the sender named inside the plaintext is the
+///   one the protocol layer authenticates.
+/// - `sealed`: the base64-decoded event `content` (the raw NIP-44 payload
+///   bytes), which is the form the platform bridges hand us.
+///
+/// Failure is expected and cheap: the caller tries each candidate key in turn
+/// and a wrong one is rejected by the MAC.
+pub(crate) fn unwrap_gift_wrap(
+    recipient_key: &NostrKeypair,
+    sender_ephemeral_pubkey_hex: &str,
+    sealed: &[u8],
+) -> Result<Vec<u8>> {
+    let sender = hex::decode(sender_ephemeral_pubkey_hex)
+        .map_err(|e| Error::CryptoError(format!("Invalid sender pubkey: {}", e)))?;
+    let conversation_key = ConversationKey::derive(&recipient_key.signing_key, &sender)?;
+    nip44::decrypt_bytes(sealed, &conversation_key)
+}
+
+/// Whether `data` has the shape of a sealed gift-wrap payload.
+pub(crate) fn is_sealed_payload(data: &[u8]) -> bool {
+    nip44::looks_like_payload(data)
 }
 
 /// BIP-340 Schnorr signature of a 32-byte event ID hash.
@@ -318,6 +476,7 @@ fn sign_event_id(signing_key: &SigningKey, event_id_hash: &[u8]) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     #[test]
     fn test_from_install_secret_deterministic() {
@@ -462,7 +621,138 @@ mod tests {
 
         assert!(msg.starts_with("[\"REQ\",\"sub123\",{"));
         assert!(msg.contains(&format!("\"#p\":[\"{}\"]", pubkey)));
-        assert!(msg.contains("\"kinds\":[4]"));
+        assert!(msg.contains(&format!(
+            "\"kinds\":[{},{}]",
+            NOSTR_LEGACY_DM_KIND, NOSTR_GIFT_WRAP_KIND
+        )));
+    }
+
+    #[test]
+    fn test_subscription_keeps_requesting_the_legacy_dm_kind() {
+        // Sealed traffic is published as kind 1059, but a peer running a build
+        // from before sealing still publishes kind 4. Dropping kind 4 from the
+        // filter would make those peers silently undeliverable — no error, no
+        // event, just nothing arriving — so both kinds stay requested.
+        let pubkey = routing_tag_for_device_id("alice").unwrap();
+        let msg = create_subscription_message(&pubkey, "sub123", 1_700_000_000).unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        let kinds: Vec<u64> = parsed[2]["kinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k.as_u64().unwrap())
+            .collect();
+        assert!(kinds.contains(&u64::from(NOSTR_LEGACY_DM_KIND)));
+        assert!(kinds.contains(&u64::from(NOSTR_GIFT_WRAP_KIND)));
+    }
+
+    #[test]
+    fn test_gift_wrap_is_signed_by_a_single_use_key() {
+        // The wrapper's signing key must be fresh per event: a stable one would
+        // let a relay group every message this device ever publishes, which is
+        // most of the metadata that sealing exists to remove.
+        let bob_tag = routing_tag_for_device_id("bob").unwrap();
+
+        let a = NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"hello").unwrap();
+        let b = NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"hello").unwrap();
+
+        assert_eq!(a.kind, NOSTR_GIFT_WRAP_KIND);
+        assert_ne!(
+            a.pubkey, b.pubkey,
+            "outer key must not repeat across events"
+        );
+        assert_ne!(a.content, b.content, "fresh nonce must change the payload");
+        assert_eq!(a.tags[0], vec!["p".to_string(), bob_tag.clone()]);
+    }
+
+    #[test]
+    fn test_gift_wrap_round_trips_to_the_recipients_key() {
+        let bob = NostrKeypair::from_install_secret(&[77u8; 32]).unwrap();
+        let bob_tag = routing_tag_for_device_id("bob").unwrap();
+
+        let event =
+            NostrEvent::create_gift_wrap(&bob_tag, bob.public_key_hex(), b"payload").unwrap();
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(&event.content)
+            .unwrap();
+
+        assert_eq!(
+            unwrap_gift_wrap(&bob, &event.pubkey, &sealed).unwrap(),
+            b"payload"
+        );
+
+        // Sealed to Bob's install key, so Bob's *derivable* key must not open
+        // it — otherwise the steady-state seal would be no better than the
+        // bootstrap one.
+        let bob_derivable = NostrKeypair::derivable_for_device_id("bob").unwrap();
+        assert!(unwrap_gift_wrap(&bob_derivable, &event.pubkey, &sealed).is_err());
+    }
+
+    #[test]
+    fn test_bootstrap_wrap_opens_with_the_derivable_key() {
+        // First contact: the sender knows only the recipient's user id, so it
+        // seals to the publicly computable key — which is the routing tag.
+        let bob_tag = routing_tag_for_device_id("bob").unwrap();
+        let event = NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"first contact").unwrap();
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(&event.content)
+            .unwrap();
+
+        let bob_derivable = NostrKeypair::derivable_for_device_id("bob").unwrap();
+        assert_eq!(
+            unwrap_gift_wrap(&bob_derivable, &event.pubkey, &sealed).unwrap(),
+            b"first contact"
+        );
+    }
+
+    #[test]
+    fn test_derivable_public_half_is_exactly_the_routing_tag() {
+        // Load-bearing coincidence: the bootstrap seal targets the same value
+        // that appears in `#p`. If these ever diverged, first-contact frames
+        // would be addressed to one key and sealed to another — undeliverable,
+        // with nothing in the logs pointing at the cause.
+        for id in ["alice", "bob", "device1", "a-very-long-user-id-with-dashes"] {
+            assert_eq!(
+                NostrKeypair::derivable_for_device_id(id)
+                    .unwrap()
+                    .public_key_hex(),
+                routing_tag_for_device_id(id).unwrap(),
+                "derivable key and routing tag diverged for {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gift_wrap_created_at_is_jittered_into_the_past_only() {
+        // NIP-59 requires past-only jitter. A future-dated wrapper would be
+        // filtered out by peers' `until` bounds and, on our own receive path,
+        // is exactly what `NOSTR_FUTURE_DATED_TOLERANCE_SECS` refuses to let
+        // advance the watermark.
+        let bob_tag = routing_tag_for_device_id("bob").unwrap();
+        let mut saw_jitter = false;
+
+        for _ in 0..64 {
+            let now = now_unix_secs();
+            let event = NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"x").unwrap();
+            assert!(
+                event.created_at <= now,
+                "created_at must never be in the future: {} > {}",
+                event.created_at,
+                now
+            );
+            assert!(
+                now - event.created_at <= NOSTR_CREATED_AT_JITTER_SECS,
+                "created_at must stay inside the jitter window the subscription overlaps"
+            );
+            if now - event.created_at > 0 {
+                saw_jitter = true;
+            }
+        }
+        assert!(
+            saw_jitter,
+            "timestamps were never jittered across 64 events"
+        );
     }
 
     #[test]

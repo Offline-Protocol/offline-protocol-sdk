@@ -270,6 +270,19 @@ pub struct TransportConfig {
     /// and a secp256k1 keypair.
     pub nostr_enabled: bool,
 
+    /// Whether outgoing Nostr frames are sealed into NIP-59 gift wraps.
+    ///
+    /// Defaults to `true`. With it off, the transport publishes the legacy
+    /// kind-4 event whose content is the whole protocol envelope in cleartext —
+    /// both usernames, the app id, the metadata map, the content type and a
+    /// millisecond timestamp, readable by every relay, permanently. Turn it off
+    /// only to interoperate with a relay that rejects kind 1059 outright.
+    ///
+    /// Send-side only. Inbound gift wraps are always unsealed and inbound
+    /// legacy frames always parsed, so this flag never makes a peer
+    /// unreadable and needs no negotiation in either direction.
+    pub nostr_sealing_enabled: bool,
+
     /// Whether to negotiate and emit the compact binary wire codec.
     ///
     /// Defaults to `true`. It only takes effect between two peers that both
@@ -287,6 +300,7 @@ impl Default for TransportConfig {
             internet_enabled: true,
             reticulum_enabled: false,
             nostr_enabled: false,
+            nostr_sealing_enabled: true,
             binary_wire_enabled: true,
         }
     }
@@ -741,6 +755,12 @@ impl ProtocolConfigBuilder {
     /// Enables or disables Nostr relay transport.
     pub fn nostr_enabled(mut self, enabled: bool) -> Self {
         self.config.transport.nostr_enabled = enabled;
+        self
+    }
+
+    /// Enables or disables sealing of outgoing Nostr frames (default on).
+    pub fn nostr_sealing_enabled(mut self, enabled: bool) -> Self {
+        self.config.transport.nostr_sealing_enabled = enabled;
         self
     }
 

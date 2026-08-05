@@ -1930,6 +1930,8 @@ pub struct TransportConfig {
     pub internet_enabled: bool,
     pub reticulum_enabled: bool,
     pub nostr_enabled: bool,
+    /// See [`ProtocolConfig::nostr_sealing_enabled`].
+    pub nostr_sealing_enabled: bool,
 }
 
 /// Encryption configuration for automatic MLS handling
@@ -2025,6 +2027,11 @@ pub struct ProtocolConfig {
     /// Kill switch for the compact binary wire codec (default on). See the UDL
     /// dictionary and `TransportConfig::binary_wire_enabled` for semantics.
     pub binary_wire_enabled: bool,
+    /// Kill switch for sealing outgoing Nostr frames into NIP-59 gift wraps
+    /// (default on). See the UDL dictionary and
+    /// `TransportConfig::nostr_sealing_enabled` — unlike the negotiated
+    /// switches, this one is safe to flip on a single device.
+    pub nostr_sealing_enabled: bool,
     /// Kill switch for the compact MLS envelope (default on). See the UDL
     /// dictionary and `EncryptionConfig::compact_envelope_enabled` for
     /// semantics.
@@ -2059,6 +2066,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.transport.internet_enabled = config.internet_enabled;
         core_config.transport.reticulum_enabled = config.reticulum_enabled;
         core_config.transport.nostr_enabled = config.nostr_enabled;
+        core_config.transport.nostr_sealing_enabled = config.nostr_sealing_enabled;
         core_config.transport.binary_wire_enabled = config.binary_wire_enabled;
         core_config.encryption.compact_envelope_enabled = config.compact_envelope_enabled;
         core_config.encryption.rich_payload_enabled = config.rich_payload_enabled;
@@ -4066,16 +4074,21 @@ impl OfflineProtocol {
 
     /// Shared body of the two Nostr receive entries.
     ///
-    /// `sender_id` is the Nostr pubkey hex of the sender (diagnostics only).
+    /// `sender_id` is the sender's Nostr pubkey hex, straight off the relay
+    /// event. It has two jobs and neither is identification:
+    ///
+    /// 1. it is the ECDH input that unseals a gift wrap (for a sealed frame it
+    ///    is a **single-use** key that names nobody at all); and
+    /// 2. it is a diagnostic label in the logs.
+    ///
     /// The identity surfaced via `NeighborDiscovered` is always the
     /// deserialized `Message.sender`; a frame that fails to deserialize
     /// surfaces no discovery at all.
     ///
-    /// Unlike BLE/Reticulum, the Nostr pubkey is the sender's per-install
-    /// transport signing key — not the protocol user ID. Setting it as
-    /// `transport_peer_id` would cause the security gate to reject every
-    /// control message (identity mismatch). We therefore enqueue with
-    /// `on_data_received` (no transport peer ID) and rely on the protocol-
+    /// Unlike BLE/Reticulum, the Nostr pubkey is never the protocol user ID.
+    /// Setting it as `transport_peer_id` would cause the security gate to
+    /// reject every control message (identity mismatch). We therefore enqueue
+    /// with `on_data_received` (no transport peer ID) and rely on the protocol-
     /// level signature check instead.
     fn nostr_message_received_inner(
         &self,
@@ -4083,6 +4096,21 @@ impl OfflineProtocol {
         data: Vec<u8>,
         created_at: Option<i64>,
     ) -> Result<(), ProtocolError> {
+        // Unseal before anything else looks at the bytes. This is the single
+        // point where a gift wrap becomes a protocol frame: it is done once and
+        // the plaintext reused, so the deserialize peek below and the enqueue
+        // that follows can never disagree about what arrived. A frame that is
+        // not sealed, or that is sealed to someone else, comes back unchanged
+        // and takes the ordinary decode path.
+        let data = self
+            .with_transport(CoreTransportType::Nostr, |nt| {
+                nt.as_any()
+                    .downcast_ref::<offline_protocol_transport::nostr::NostrTransport>()
+                    .map(|nostr| nostr.unseal_event_payload(&sender_id, &data).into_owned())
+            })
+            .flatten()
+            .unwrap_or(data);
+
         // Extract the real sender from the protocol message before consuming `data`.
         // The Message.sender field is the authoritative user identity; the Nostr
         // pubkey (`sender_id`) is only a transport-level routing key.
@@ -4214,8 +4242,18 @@ impl OfflineProtocol {
 
     /// Returns this install's Nostr signing public key as a 64-char hex string.
     ///
-    /// The platform uses this for display and for filtering out self-authored
-    /// events. Returns `None` if the Nostr transport is not configured.
+    /// Used for display, and as the identity a peer seals gift wraps to once
+    /// they have received our key package. Returns `None` if the Nostr
+    /// transport is not configured.
+    ///
+    /// **No longer usable as a self-event filter.** With sealing on (the
+    /// default) every event we publish is signed by a fresh single-use key, so
+    /// comparing an inbound event's `pubkey` against this value never matches
+    /// our own sealed traffic — and nothing else on a gift wrap identifies its
+    /// author, by design. The bridges keep the comparison only for the legacy
+    /// unsealed form; self-delivery is otherwise prevented by the `#p`
+    /// subscription filter and, for self-addressed messages, by the engine's
+    /// deduplication.
     ///
     /// The key is ephemeral until `initialize_mls` installs the persisted
     /// per-install signing secret, so read it after MLS initialization rather
@@ -5932,6 +5970,7 @@ mod tests {
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -5963,6 +6002,7 @@ mod tests {
     fn create_ble_only_config() -> ProtocolConfig {
         ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6314,6 +6354,7 @@ mod tests {
     fn create_reticulum_config() -> ProtocolConfig {
         ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6638,6 +6679,7 @@ mod tests {
         // Sender protocol sends a message; we capture serialized bytes
         let sender_config = ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6666,6 +6708,7 @@ mod tests {
         // Receiver protocol blocks the sender before ingesting data
         let receiver_config = ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6695,6 +6738,7 @@ mod tests {
         // via reticulum_message_received.
         let sender_config = ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6723,6 +6767,7 @@ mod tests {
         // Receiver protocol ingests the serialized bytes
         let receiver_config = ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6759,6 +6804,7 @@ mod tests {
         // will be created.
         let config = ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6811,6 +6857,7 @@ mod tests {
     fn serialized_message_from(sender_id: &str, recipient: &str) -> Vec<u8> {
         let sender = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6898,6 +6945,7 @@ mod tests {
     fn test_internet_control_frame_spoofed_sender_rejected() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6927,6 +6975,7 @@ mod tests {
     fn test_internet_control_frame_matching_sender_passes_gate() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6955,6 +7004,7 @@ mod tests {
     fn test_internet_control_frame_relayed_carrier_mismatch_passes_gate() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -6987,6 +7037,7 @@ mod tests {
     fn test_internet_message_received_empty_sender_falls_back_to_unattributed() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7034,6 +7085,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7142,6 +7194,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7222,6 +7275,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7248,6 +7302,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7407,6 +7462,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7440,6 +7496,7 @@ mod tests {
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7491,6 +7548,7 @@ mod tests {
     fn test_internet_confirm_in_same_batch_suppresses_redundant_welcome() {
         let owner = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
@@ -7510,6 +7568,7 @@ mod tests {
 
         let peer = OfflineProtocol::new(ProtocolConfig {
             binary_wire_enabled: true,
+            nostr_sealing_enabled: true,
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,

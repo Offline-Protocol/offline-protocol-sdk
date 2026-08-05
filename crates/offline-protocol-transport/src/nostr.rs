@@ -22,12 +22,13 @@
 use crate::constants::{
     NOSTR_CLOCK_SKEW_MARGIN_SECS, NOSTR_CONNECTION_TIMEOUT_SECS, NOSTR_CREATED_AT_JITTER_SECS,
     NOSTR_FIRST_RUN_BACKFILL_SECS, NOSTR_FUTURE_DATED_TOLERANCE_SECS, NOSTR_MAX_PAYLOAD_SIZE,
-    NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS,
+    NOSTR_MAX_TRACKED_PEER_KEYS, NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
 use crate::nostr_crypto::{self, now_unix_secs, NostrKeypair};
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use base64::Engine;
 use offline_protocol_core::{Message, MutexExt, RwLockExt};
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -95,8 +96,10 @@ impl Default for NostrConfig {
 /// 5. `receive_queue`
 /// 6. `reconnect_attempts` / `platform_handle`
 ///
-/// `keypair` and `receive_watermark` are leaf locks: they are only ever held
-/// in a narrow scope with no other lock acquisition inside.
+/// `keypair`, `receive_watermark`, `peer_nostr_pubkeys` and `sealing_enabled`
+/// are leaf locks: they are only ever held in a narrow scope with no other lock
+/// acquisition inside. In particular the sealing path releases each before
+/// calling into the crypto layer, so a slow ECDH never blocks the send queue.
 pub struct NostrTransport {
     device_id: String,
     /// Per-install signing keypair. Ephemeral (random per process) until the
@@ -116,6 +119,21 @@ pub struct NostrTransport {
     /// protocol-state record and re-installs it on launch. Without that this is
     /// a per-process value and every cold start replays a full backfill window.
     receive_watermark: Mutex<Option<i64>>,
+    /// The publicly computable keypair whose public half is `routing_tag`.
+    ///
+    /// Held only to unseal (and seal) bootstrap-leg frames — see
+    /// [`NostrKeypair::derivable_for_device_id`], which documents why this is
+    /// not a secret and must never authenticate anything.
+    derivable_keypair: NostrKeypair,
+    /// Peer user ID → that peer's real per-install Nostr public key, learned
+    /// from the `nostr_pubkey` field of their signed key package. Populated by
+    /// the engine via [`Self::set_peer_nostr_pubkey`]; a peer absent here takes
+    /// the bootstrap path.
+    peer_nostr_pubkeys: RwLock<HashMap<String, String>>,
+    /// Whether outgoing frames are sealed into gift wraps. Mirrors
+    /// `TransportConfig::nostr_sealing_enabled`; the receive path always
+    /// accepts both forms regardless.
+    sealing_enabled: Mutex<bool>,
     config: NostrConfig,
     status: Arc<Mutex<TransportStatus>>,
     receive_queue: Arc<Mutex<VecDeque<Message>>>,
@@ -145,12 +163,16 @@ impl NostrTransport {
     pub fn with_config(device_id: impl Into<String>, config: NostrConfig) -> Result<Self> {
         let device_id = device_id.into();
         let routing_tag = nostr_crypto::routing_tag_for_device_id(&device_id)?;
+        let derivable_keypair = NostrKeypair::derivable_for_device_id(&device_id)?;
         let keypair = RwLock::new(NostrKeypair::generate_ephemeral()?);
         Ok(Self {
             device_id,
             keypair,
             routing_tag,
             receive_watermark: Mutex::new(None),
+            derivable_keypair,
+            peer_nostr_pubkeys: RwLock::new(HashMap::new()),
+            sealing_enabled: Mutex::new(true),
             config,
             status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -290,6 +312,179 @@ impl NostrTransport {
         Ok(())
     }
 
+    /// Enables or disables sealing of outgoing frames.
+    ///
+    /// Only the *send* side is gated. Inbound gift wraps are unsealed
+    /// unconditionally, so turning this off does not make a peer's traffic
+    /// unreadable and turning it back on needs no renegotiation.
+    pub fn set_sealing_enabled(&self, enabled: bool) {
+        *self.sealing_enabled.lock_or_recover() = enabled;
+    }
+
+    /// Whether outgoing frames are sealed.
+    pub fn sealing_enabled(&self) -> bool {
+        *self.sealing_enabled.lock_or_recover()
+    }
+
+    /// Records a peer's real per-install Nostr public key, learned from the
+    /// `nostr_pubkey` field of their key package.
+    ///
+    /// Until this is known, frames to that peer are sealed to their publicly
+    /// computable key instead (bootstrap leg). Once it is known, every
+    /// subsequent frame is sealed to a key only that install holds.
+    ///
+    /// The key arrives inside the Ed25519-signed, TOFU-pinned key package
+    /// payload, so it is bound to the claimed sender — unlike the plaintext
+    /// capability lists that ride alongside it. A wrong value here is a
+    /// delivery denial (the peer cannot unseal), never a disclosure: the
+    /// plaintext is sealed *to* it, so an attacker substituting their own key
+    /// would have to break the signature first, and if they could do that they
+    /// would not need this field.
+    ///
+    /// Bounded at [`NOSTR_MAX_TRACKED_PEER_KEYS`]; at capacity the map resets
+    /// rather than evicting selectively, matching the engine's other
+    /// wire-keyed maps. The only cost of forgetting a peer is that the next
+    /// frame to them takes the bootstrap path until their key package is seen
+    /// again.
+    pub fn set_peer_nostr_pubkey(&self, user_id: &str, pubkey_hex: &str) {
+        if user_id.is_empty()
+            || pubkey_hex.len() != 64
+            || !pubkey_hex.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            tracing::debug!(
+                user_id = %user_id,
+                "Ignoring malformed peer Nostr pubkey"
+            );
+            return;
+        }
+
+        let mut map = self.peer_nostr_pubkeys.write_or_recover();
+        if map.len() >= NOSTR_MAX_TRACKED_PEER_KEYS && !map.contains_key(user_id) {
+            tracing::warn!(
+                capacity = NOSTR_MAX_TRACKED_PEER_KEYS,
+                "Nostr peer key map at capacity; clearing"
+            );
+            map.clear();
+        }
+        map.insert(user_id.to_string(), pubkey_hex.to_ascii_lowercase());
+    }
+
+    /// Forgets a peer's per-install Nostr public key, reverting frames to them
+    /// to the bootstrap path.
+    ///
+    /// The engine calls this when it declares everything learned about a peer
+    /// stale (the unblock clean slate). Reverting rather than refusing to send
+    /// is deliberate: the bootstrap key is derived from the peer's user id, so
+    /// it is readable by whatever install they are on now — where a key cached
+    /// from a since-wiped install is readable by nobody.
+    pub fn forget_peer_nostr_pubkey(&self, user_id: &str) {
+        self.peer_nostr_pubkeys.write_or_recover().remove(user_id);
+    }
+
+    /// Returns the recipient's known per-install Nostr public key, if any.
+    fn peer_nostr_pubkey(&self, user_id: &str) -> Option<String> {
+        self.peer_nostr_pubkeys
+            .read_or_recover()
+            .get(user_id)
+            .cloned()
+    }
+
+    /// Unseals an inbound event payload, or returns it unchanged if it is not
+    /// sealed.
+    ///
+    /// `sender_pubkey_hex` is the wrapper event's `pubkey` — a single-use key
+    /// with no identity attached. `data` is the base64-decoded event `content`,
+    /// which is the form the platform bridges produce.
+    ///
+    /// Two of our own keys can unseal a frame and both are tried, cheapest and
+    /// most likely first:
+    ///
+    /// 1. the per-install signing key, used by any peer that has seen our key
+    ///    package — the steady state;
+    /// 2. the publicly computable key, used on the bootstrap leg before the
+    ///    sender has learned our real one.
+    ///
+    /// A wrong key is rejected by the NIP-44 MAC, so trying both is
+    /// unambiguous rather than a guess. A frame that unseals with neither is
+    /// returned to the caller **as-is**: it may still be a legacy unsealed
+    /// frame, and the caller's decoder is what decides. That ordering matters —
+    /// deciding "sealed but undecryptable" here and dropping would break every
+    /// peer that predates sealing.
+    pub fn unseal_event_payload<'a>(
+        &self,
+        sender_pubkey_hex: &str,
+        data: &'a [u8],
+    ) -> Cow<'a, [u8]> {
+        if !nostr_crypto::is_sealed_payload(data) {
+            return Cow::Borrowed(data);
+        }
+        // Anyone can publish to our routing tag, so this is attacker-sized
+        // input. Unsealing costs an ECDH plus an HMAC and a ChaCha20 pass over
+        // the whole buffer; do that only for something that could plausibly be
+        // a message. The receive path rejects it at the same bound anyway, so
+        // this only moves the rejection ahead of the crypto.
+        if data.len() > crate::constants::DEFAULT_MAX_MESSAGE_SIZE {
+            tracing::warn!(
+                len = data.len(),
+                "Oversized sealed Nostr frame; not attempting to unseal"
+            );
+            return Cow::Borrowed(data);
+        }
+
+        {
+            let keypair = self.keypair.read_or_recover();
+            if let Ok(plaintext) = nostr_crypto::unwrap_gift_wrap(&keypair, sender_pubkey_hex, data)
+            {
+                return Cow::Owned(plaintext);
+            }
+        }
+
+        match nostr_crypto::unwrap_gift_wrap(&self.derivable_keypair, sender_pubkey_hex, data) {
+            Ok(plaintext) => {
+                tracing::debug!("Unsealed a bootstrap-leg Nostr frame");
+                Cow::Owned(plaintext)
+            }
+            Err(e) => {
+                // Not addressed to us, or corrupt. Handing the original bytes
+                // back lets the caller's decoder produce the single
+                // "undecodable frame" outcome rather than two divergent ones.
+                tracing::debug!(error = %e, "Sealed Nostr frame did not unseal with either key");
+                Cow::Borrowed(data)
+            }
+        }
+    }
+
+    /// Builds the event content for `message`: a gift wrap when sealing is on,
+    /// the legacy base64 envelope otherwise.
+    ///
+    /// Returns the whole signed event so the two paths differ in kind, signing
+    /// key, and timestamp — not just in how `content` is encoded.
+    fn build_event(&self, message: &Message) -> Result<nostr_crypto::NostrEvent> {
+        let recipient_device_id = message.recipient.as_str();
+        let recipient_tag = nostr_crypto::routing_tag_for_device_id(recipient_device_id)?;
+        let data = self.serialize_message(message)?;
+
+        if !self.sealing_enabled() {
+            let content_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
+            let keypair = self.keypair.read_or_recover();
+            return nostr_crypto::NostrEvent::create_dm(&keypair, &recipient_tag, &content_base64);
+        }
+
+        // With no known per-install key for the recipient, seal to their
+        // publicly computable one. That is the bootstrap leg: it defeats bulk
+        // collection by a relay, and nothing more — anyone who guesses the
+        // recipient's user ID holds the matching private half. It is chosen
+        // over refusing to send (which would make a stranger unreachable over
+        // Nostr) and over falling back to a cleartext kind-4 event (which
+        // would make first contact trivially identifiable with a one-line
+        // relay filter). On the wire the two cases are indistinguishable.
+        let encryption_pubkey = self
+            .peer_nostr_pubkey(recipient_device_id)
+            .unwrap_or_else(|| recipient_tag.clone());
+
+        nostr_crypto::NostrEvent::create_gift_wrap(&recipient_tag, &encryption_pubkey, &data)
+    }
+
     /// Pops the next outgoing message, creates a signed Nostr event, and returns
     /// `(message_id, recipient_device_id, relay_event_json)`.
     ///
@@ -302,6 +497,12 @@ impl NostrTransport {
     /// That drop is permanent — unlike a signing failure, an oversized event is
     /// oversized on every attempt, so retrying it would only head-of-line-block
     /// the queue behind a message no relay will accept.
+    ///
+    /// **Sealing shrinks how much fits under that cap**, by more than the
+    /// base64 layer alone suggests: NIP-44 pads to a power-of-two bucket, so a
+    /// payload just past a boundary very nearly doubles before the MAC and
+    /// base64 are applied. The check therefore runs on the final event, after
+    /// sealing, and a message that fits unsealed may not fit sealed.
     pub fn get_next_signed_event(&self) -> Result<Option<SignedNostrEvent>> {
         self.drain_expired_pending();
 
@@ -314,17 +515,9 @@ impl NostrTransport {
         };
 
         let message_id = message.id.to_string();
-        let recipient_device_id = message.recipient.as_str().to_string();
 
         let result = (|| {
-            let data = self.serialize_message(&message)?;
-            let content_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
-
-            let recipient_tag = nostr_crypto::routing_tag_for_device_id(&recipient_device_id)?;
-            let keypair = self.keypair.read_or_recover();
-            let event =
-                nostr_crypto::NostrEvent::create_dm(&keypair, &recipient_tag, &content_base64)?;
-            drop(keypair);
+            let event = self.build_event(&message)?;
             let event_id = event.id.clone();
             let event_json = event.to_relay_message()?;
             if event_json.len() > NOSTR_MAX_PAYLOAD_SIZE {
@@ -658,7 +851,21 @@ impl Transport for NostrTransport {
         }
     }
 
+    /// Queues an inbound frame that has **already been unsealed**.
+    ///
+    /// Unsealing needs the wrapper event's `pubkey` (the sender's single-use
+    /// key), which this signature has no way to carry, so the caller must run
+    /// [`NostrTransport::unseal_event_payload`] first — the FFI receive entry
+    /// does. A still-sealed frame arriving here cannot be recovered, so it is
+    /// reported rather than being left to look like ordinary malformed data.
     fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
+        if nostr_crypto::is_sealed_payload(&data) {
+            tracing::warn!(
+                "Sealed Nostr frame reached the unsealed receive path; dropping. \
+                 Callers must unseal via unseal_event_payload() first."
+            );
+            return Ok(());
+        }
         crate::common::on_data_received(&self.receive_queue, data)
     }
 
@@ -674,9 +881,18 @@ impl Transport for NostrTransport {
     /// The message enters the pending-confirmation state until the platform
     /// calls [`Transport::confirm_sent`] or [`Transport::report_send_failure`].
     ///
-    /// Most Nostr platforms should poll
-    /// [`NostrTransport::get_next_signed_event`] instead, which wraps and
-    /// signs the payload as a Nostr event.
+    /// **This path does not seal, and no Nostr bridge should use it.** It
+    /// returns the bare serialized `Message` — the entire protocol envelope,
+    /// both usernames included — with no gift wrap and no event around it, so
+    /// publishing the result puts exactly the cleartext this transport now
+    /// avoids in front of every relay. There is nowhere to put a sealed event
+    /// in this signature; it exists only to satisfy the generic [`Transport`]
+    /// trait.
+    ///
+    /// Poll [`NostrTransport::get_next_signed_event`] instead: it produces a
+    /// complete signed, sealed `["EVENT", …]` message ready for the wire. That
+    /// is what the bundled bridges and the UniFFI `nostr_get_next_message`
+    /// entry call.
     fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
         self.drain_expired_pending();
 
@@ -1438,6 +1654,10 @@ mod tests {
         let transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
+        // Addressing is a property of the unsealed path too; assert it there so
+        // this test keeps covering the legacy shape rather than duplicating the
+        // sealed-path tests below.
+        transport.set_sealing_enabled(false);
 
         // create_test_message is addressed to "bob".
         let msg = create_test_message();
@@ -1453,7 +1673,283 @@ mod tests {
             signed
                 .event_json
                 .contains(&format!("\"pubkey\":\"{}\"", transport.public_key_hex())),
-            "event must be signed by this install's signing key"
+            "unsealed event must be signed by this install's signing key"
+        );
+    }
+
+    // ===================================================================
+    // Sealed envelope
+    // ===================================================================
+
+    /// Parses the event object out of a signed `["EVENT", {…}]` message.
+    fn event_object(signed: &SignedNostrEvent) -> serde_json::Value {
+        let parsed: serde_json::Value = serde_json::from_str(&signed.event_json).unwrap();
+        parsed[1].clone()
+    }
+
+    #[test]
+    fn test_relay_visible_payload_contains_no_username() {
+        // THE regression test for the finding this work closes. Before sealing,
+        // the event content was base64 of the whole `Message` JSON, so both
+        // usernames, the app id, the content type, the metadata map and a
+        // millisecond timestamp were readable by every relay, permanently.
+        //
+        // Asserted over the entire event JSON, not just `content`: a future
+        // change that moved a username into a tag, or reintroduced a stable
+        // signing pubkey derived from one, must fail here too.
+        let transport = NostrTransport::new("alice").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        let msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("fernweh").unwrap(),
+            "the quick brown fox",
+        );
+        transport.send(&msg).unwrap();
+
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        let wire = signed.event_json.to_lowercase();
+
+        for leak in ["alice", "bob", "fernweh", "the quick brown fox"] {
+            assert!(
+                !wire.contains(leak),
+                "relay-visible payload leaks {leak:?}: {}",
+                signed.event_json
+            );
+        }
+
+        // The only thing a relay legitimately learns is the recipient's routing
+        // tag — an opaque label it cannot invert without already knowing the
+        // user id it is looking for.
+        let bob_tag = nostr_crypto::routing_tag_for_device_id("bob").unwrap();
+        assert!(wire.contains(&bob_tag));
+    }
+
+    #[test]
+    fn test_sealed_event_is_a_gift_wrap_not_signed_by_our_install_key() {
+        let transport = NostrTransport::new("alice").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+        transport.send(&create_test_message()).unwrap();
+
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        let event = event_object(&signed);
+
+        assert_eq!(
+            event["kind"].as_u64(),
+            Some(u64::from(nostr_crypto::NOSTR_GIFT_WRAP_KIND))
+        );
+        assert_ne!(
+            event["pubkey"].as_str().unwrap(),
+            transport.public_key_hex(),
+            "the wrapper must not be signed by our stable install key, or every \
+             event we publish is linkable back to this device"
+        );
+    }
+
+    #[test]
+    fn test_sealed_frame_round_trips_through_the_recipients_transport() {
+        // End-to-end over the two transports, which is what proves the send and
+        // receive halves agree about which key seals what.
+        let alice = NostrTransport::new("alice").unwrap();
+        alice.start().unwrap();
+        alice.on_status_changed(TransportStatus::Available);
+
+        let bob = NostrTransport::new("bob").unwrap();
+        bob.install_signing_secret(&[88u8; 32]).unwrap();
+        // Alice has seen Bob's key package, so this is the steady state.
+        alice.set_peer_nostr_pubkey("bob", &bob.public_key_hex());
+
+        let msg = create_test_message();
+        alice.send(&msg).unwrap();
+        let signed = alice.get_next_signed_event().unwrap().unwrap();
+
+        let event = event_object(&signed);
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(event["content"].as_str().unwrap())
+            .unwrap();
+        let sender_pubkey = event["pubkey"].as_str().unwrap();
+
+        let plaintext = bob.unseal_event_payload(sender_pubkey, &sealed);
+        let received = bob.deserialize_message(&plaintext).unwrap();
+        assert_eq!(received.id, msg.id);
+        assert_eq!(received.sender.as_str(), "alice");
+    }
+
+    #[test]
+    fn test_bootstrap_frame_round_trips_before_any_key_exchange() {
+        // Cold first contact: Alice knows only Bob's user id. The frame is
+        // sealed to Bob's publicly computable key, and Bob's receive path finds
+        // it on the second attempt.
+        let alice = NostrTransport::new("alice").unwrap();
+        alice.start().unwrap();
+        alice.on_status_changed(TransportStatus::Available);
+
+        let bob = NostrTransport::new("bob").unwrap();
+        bob.install_signing_secret(&[91u8; 32]).unwrap();
+        // Deliberately NOT calling set_peer_nostr_pubkey.
+
+        let msg = create_test_message();
+        alice.send(&msg).unwrap();
+        let signed = alice.get_next_signed_event().unwrap().unwrap();
+        let event = event_object(&signed);
+
+        // Indistinguishable from the steady-state case on the wire: same kind,
+        // same tag shape, ephemeral pubkey. A relay cannot filter for "these
+        // two are just starting to talk".
+        assert_eq!(
+            event["kind"].as_u64(),
+            Some(u64::from(nostr_crypto::NOSTR_GIFT_WRAP_KIND))
+        );
+
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(event["content"].as_str().unwrap())
+            .unwrap();
+        let plaintext = bob.unseal_event_payload(event["pubkey"].as_str().unwrap(), &sealed);
+        assert_eq!(bob.deserialize_message(&plaintext).unwrap().id, msg.id);
+    }
+
+    #[test]
+    fn test_unseal_leaves_legacy_unsealed_frames_untouched() {
+        // A peer on a build from before sealing publishes the old cleartext
+        // envelope. It must pass straight through, or upgrading breaks every
+        // conversation with a peer that has not upgraded yet.
+        let alice = NostrTransport::new("alice").unwrap();
+        alice.set_sealing_enabled(false);
+        alice.start().unwrap();
+        alice.on_status_changed(TransportStatus::Available);
+
+        let msg = create_test_message();
+        alice.send(&msg).unwrap();
+        let signed = alice.get_next_signed_event().unwrap().unwrap();
+        let event = event_object(&signed);
+        assert_eq!(
+            event["kind"].as_u64(),
+            Some(u64::from(nostr_crypto::NOSTR_LEGACY_DM_KIND))
+        );
+
+        let legacy = base64::engine::general_purpose::STANDARD
+            .decode(event["content"].as_str().unwrap())
+            .unwrap();
+
+        let bob = NostrTransport::new("bob").unwrap();
+        let passed_through = bob.unseal_event_payload(event["pubkey"].as_str().unwrap(), &legacy);
+        assert_eq!(passed_through.as_ref(), legacy.as_slice());
+        assert_eq!(bob.deserialize_message(&passed_through).unwrap().id, msg.id);
+    }
+
+    #[test]
+    fn test_frame_sealed_to_someone_else_is_returned_unchanged_not_forged() {
+        // An event addressed to our routing tag but sealed to a third party
+        // must fail closed. Returning the ciphertext unchanged lets the
+        // ordinary decoder reject it as one undecodable frame — the same
+        // outcome as random junk, which is what it is to us.
+        let bob = NostrTransport::new("bob").unwrap();
+        let carol_tag = nostr_crypto::routing_tag_for_device_id("carol").unwrap();
+
+        let event =
+            nostr_crypto::NostrEvent::create_gift_wrap(&carol_tag, &carol_tag, b"not for bob")
+                .unwrap();
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(&event.content)
+            .unwrap();
+
+        let out = bob.unseal_event_payload(&event.pubkey, &sealed);
+        assert_eq!(out.as_ref(), sealed.as_slice());
+        assert!(bob.deserialize_message(&out).is_err());
+    }
+
+    #[test]
+    fn test_sealed_frame_on_the_unsealed_receive_path_is_dropped_not_queued() {
+        // `on_data_received` cannot unseal — it has no access to the wrapper's
+        // pubkey. A bridge wired to it would otherwise enqueue ciphertext as if
+        // it were a message.
+        let bob = NostrTransport::new("bob").unwrap();
+        let bob_tag = nostr_crypto::routing_tag_for_device_id("bob").unwrap();
+        let event =
+            nostr_crypto::NostrEvent::create_gift_wrap(&bob_tag, &bob_tag, b"sealed").unwrap();
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(&event.content)
+            .unwrap();
+
+        assert!(bob.on_data_received(sealed).is_ok());
+        assert!(bob.receive().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_peer_key_map_is_bounded_and_rejects_malformed_keys() {
+        let transport = NostrTransport::new("device1").unwrap();
+
+        transport.set_peer_nostr_pubkey("bob", "not-hex");
+        transport.set_peer_nostr_pubkey("bob", &"ab".repeat(31)); // 62 chars
+        transport.set_peer_nostr_pubkey("", &"ab".repeat(32));
+        assert!(transport.peer_nostr_pubkey("bob").is_none());
+
+        // Case is normalized: `#p`-style values are lowercase hex by spec, and a
+        // mixed-case duplicate must not seal to a different string.
+        let key = "AB".repeat(32);
+        transport.set_peer_nostr_pubkey("bob", &key);
+        assert_eq!(transport.peer_nostr_pubkey("bob"), Some(key.to_lowercase()));
+
+        for i in 0..NOSTR_MAX_TRACKED_PEER_KEYS + 10 {
+            transport.set_peer_nostr_pubkey(&format!("peer{i}"), &"cd".repeat(32));
+        }
+        assert!(
+            transport.peer_nostr_pubkeys.read().unwrap().len() <= NOSTR_MAX_TRACKED_PEER_KEYS,
+            "wire-keyed map must stay bounded"
+        );
+    }
+
+    #[test]
+    fn test_sealing_can_be_disabled_without_breaking_inbound_unsealing() {
+        // The kill switch gates the send side only. A peer that keeps sealing
+        // must stay readable, or flipping the flag on one device would sever
+        // conversations rather than merely un-protecting our own traffic.
+        let alice = NostrTransport::new("alice").unwrap();
+        alice.start().unwrap();
+        alice.on_status_changed(TransportStatus::Available);
+
+        let bob = NostrTransport::new("bob").unwrap();
+        bob.set_sealing_enabled(false);
+        assert!(!bob.sealing_enabled());
+
+        let msg = create_test_message();
+        alice.send(&msg).unwrap();
+        let signed = alice.get_next_signed_event().unwrap().unwrap();
+        let event = event_object(&signed);
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(event["content"].as_str().unwrap())
+            .unwrap();
+
+        let plaintext = bob.unseal_event_payload(event["pubkey"].as_str().unwrap(), &sealed);
+        assert_eq!(bob.deserialize_message(&plaintext).unwrap().id, msg.id);
+    }
+
+    #[test]
+    fn test_sealing_overhead_stays_within_the_relay_cap_for_ordinary_messages() {
+        // NIP-44 pads to a power-of-two bucket, so sealing can nearly double a
+        // payload before base64 — considerably more than the ~33% a base64
+        // layer alone would suggest. Ordinary text messages must still fit
+        // comfortably, and the cap must be measured on the sealed event.
+        let transport = NostrTransport::new("alice").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        let msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "x".repeat(4096),
+        );
+        transport.send(&msg).unwrap();
+
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        assert!(
+            signed.event_json.len() <= NOSTR_MAX_PAYLOAD_SIZE,
+            "a 4 KiB message must still fit sealed: {} bytes",
+            signed.event_json.len()
         );
     }
 }
