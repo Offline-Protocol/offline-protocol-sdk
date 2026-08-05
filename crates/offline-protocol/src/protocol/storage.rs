@@ -4413,12 +4413,24 @@ impl OfflineProtocol {
             return;
         }
 
-        let Ok(Some(data)) = self.read_state_record(
+        // A *missing* record is the ordinary first run; a read *error* is a
+        // storage problem, and collapsing the two would hide it behind the
+        // most common path in the function.
+        let data = match self.read_state_record(
             storage.as_ref(),
             storage_keys::NOSTR_WATERMARK,
             storage_keys::NOSTR_WATERMARK_ID,
-        ) else {
-            return;
+        ) {
+            Ok(Some(data)) => data,
+            Ok(None) => return,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to read the Nostr receive watermark; \
+                     this launch falls back to the first-run backfill window"
+                );
+                return;
+            }
         };
 
         let Ok(bytes) = <[u8; 8]>::try_from(data.as_slice()) else {
@@ -4442,14 +4454,28 @@ impl OfflineProtocol {
         // make every later `current - baseline` negative, so nothing would be
         // due and the bad record would survive until the next flush. Treat that
         // as no baseline, so the next accepted event overwrites it promptly.
-        self.last_persisted_nostr_watermark = match live {
-            Some(live) if live >= restored => Some(restored),
-            _ => None,
-        };
-        debug!(
-            watermark = restored,
-            live, "Restored Nostr receive watermark from storage"
-        );
+        // One predicate, used for both the debounce baseline and the log, so
+        // the two can never disagree about whether the record was adopted.
+        let adopted = matches!(live, Some(live) if live >= restored);
+        self.last_persisted_nostr_watermark = adopted.then_some(restored);
+
+        if adopted {
+            debug!(
+                watermark = restored,
+                live, "Restored Nostr receive watermark from storage"
+            );
+        } else {
+            // Say which outcome this is. A refused record installs nothing, so
+            // logging "restored" here would mislead exactly when someone is
+            // debugging the failure this path exists to contain — a
+            // subscription stalled by a future-dated mark.
+            warn!(
+                watermark = restored,
+                live,
+                "Refused a future-dated Nostr receive watermark from storage; \
+                 keeping the live mark and rewriting on the next accepted event"
+            );
+        }
     }
 
     /// Installs `secret` as the telemetry fallback secret and rebuilds the

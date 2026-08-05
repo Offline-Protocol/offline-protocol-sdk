@@ -498,9 +498,10 @@ impl NostrTransport {
     ///
     /// The filter is on the routing tag — not the signing pubkey — so it is
     /// stable across signing-key changes and derivable by peers. `since` bounds
-    /// how far back stored-event replay reaches (see
-    /// [`Self::subscription_since`]); `limit` caps how much of that window one
-    /// (re)connect pulls down. Neither caps live delivery.
+    /// how far back stored-event replay reaches — it is derived from the
+    /// receive watermark by the private `subscription_since`, documented on
+    /// [`Self::advance_receive_watermark`] — while `limit` caps how much of
+    /// that window one (re)connect pulls down. Neither caps live delivery.
     pub fn create_subscription(&self, subscription_id: &str) -> Result<String> {
         nostr_crypto::create_subscription_message(
             &self.routing_tag,

@@ -24079,6 +24079,48 @@ fn nostr_watermark_is_a_noop_without_a_nostr_transport() {
 }
 
 #[test]
+fn nostr_replay_overlap_exceeds_dedup_retention() {
+    // Drift guard between two constants that live in different crates and are
+    // only related here, in the crate that owns both the Nostr transport and
+    // the deduplicator.
+    //
+    // Every reconnect re-requests `[mark - (jitter + skew), ...]`. That overlap
+    // is mandatory — the sender writes `created_at`, so an event published now
+    // can be stamped a jitter window in the past, and a `since` sitting at the
+    // mark would filter out the very events the query exists to fetch. Dedup is
+    // what would otherwise make the resulting duplicates free, and it does not
+    // reach far enough: ids are retained for `retention_time_secs`, which is
+    // *shorter* than the overlap, so a reconnect after longer than the
+    // retention window re-processes rather than absorbs it.
+    //
+    // That residual is documented in `docs/nostr.md`, the CHANGELOG, and
+    // `create_subscription_message`. This test exists so those notes cannot go
+    // stale: if someone raises dedup retention past the overlap (or shrinks the
+    // overlap below retention), the residual is gone and this fails — at which
+    // point the fix is to update those three notes to claim full absorption,
+    // not to weaken this assertion.
+    let overlap_secs = offline_protocol_transport::constants::NOSTR_CREATED_AT_JITTER_SECS
+        + offline_protocol_transport::constants::NOSTR_CLOCK_SKEW_MARGIN_SECS;
+
+    // Read retention off the config the engine actually ships, not
+    // `DeduplicatorConfig::default()`: the shipped value is what governs a real
+    // install, and the two could diverge.
+    let retention_secs = ProtocolConfig::new("test-app", "user123")
+        .reliability
+        .dedup
+        .retention_time_secs as i64;
+
+    assert!(
+        overlap_secs > retention_secs,
+        "the documented replay residual is gone: the {overlap_secs}s Nostr replay \
+         overlap now fits inside the {retention_secs}s dedup retention window, so \
+         duplicates ARE fully absorbed. Update docs/nostr.md, the CHANGELOG entry, \
+         and the create_subscription_message doc comment, which all state the \
+         opposite."
+    );
+}
+
+#[test]
 fn telemetry_install_id_is_none_without_storage() {
     // The per-instance fallback secret is random, so an id derived from it
     // would rotate every launch — the accessor must expose nothing instead.
