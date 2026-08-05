@@ -47,6 +47,7 @@ pub struct Message {
     pub timestamp: Timestamp,       // When message was created (wall-clock, display only)
     pub lamport_clock: LamportClock, // Logical clock for causal ordering across devices
     pub content_type: ContentType,  // Type of content carried (text, file chunk, etc.)
+                                    // Unknown future types decode as `File` — see note below
     pub content: String,            // Message content
     pub binary_content: Option<Vec<u8>>,    // Raw payload for file-chunk data
     pub media_metadata: Option<MediaMetadata>, // Media details for non-text content
@@ -56,6 +57,20 @@ pub struct Message {
     pub forwarded_from: Option<ForwardInfo>, // Forwarding attribution, if forwarded
 }
 ```
+
+#### Unknown content types
+
+`ContentType` decodes tolerantly on every path — string, JSON, and the binary
+wire codec. A content type this build does not know (one added by a newer
+sender) degrades to `ContentType::File` rather than failing the message it
+rides in, so adding a variant is an additive wire change and never a silent
+frame drop.
+
+Apps should therefore read `File` as "a file **or** a type this build doesn't
+know". A degraded value keeps `is_media()` `true` while carrying no
+`media_metadata` and no associated transfer, so render that combination as a
+generic unsupported-content placeholder — "this message needs a newer app
+version" — rather than as a broken or empty attachment.
 
 ## Configuration
 

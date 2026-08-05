@@ -69,8 +69,24 @@ impl fmt::Display for MessageId {
 /// [`parse`](Self::parse) for strings, `content_type_from_u8` for the binary
 /// wire codec, and the hand-written [`Deserialize`] below for JSON (the
 /// derived impl would reject the whole frame on an unknown variant).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// Both serde impls are hand-written over [`as_wire_str`](Self::as_wire_str)
+/// rather than derived, so *every* serde format — not only the
+/// self-describing ones — speaks the same strings as the other two decode
+/// paths. A derived `Serialize` would emit the variant *index* in a
+/// non-self-describing format (postcard, bincode), which the tolerant
+/// string-based `Deserialize` would then read back as a zero-length string
+/// and degrade to `File` — silently turning `Text` into `File` with no
+/// error. Nothing in-tree does that today (the binary wire codec maps to
+/// `u8` by hand), but this type is published, so the two directions are
+/// kept symmetric in all formats rather than only in JSON.
+///
+/// Apps should treat `File` as "a file *or* a type this build doesn't
+/// know". A degraded value keeps [`is_media`](Self::is_media) `true` while
+/// carrying no [`MediaMetadata`] and no transfer, so render that
+/// combination as a generic unsupported-content placeholder rather than as
+/// a broken attachment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ContentType {
     /// Plain text message.
     #[default]
@@ -94,14 +110,56 @@ pub enum ContentType {
 }
 
 impl ContentType {
+    /// Every variant, in declaration order.
+    ///
+    /// Provably complete — see the `const` block below — which is what lets
+    /// `content_type_json_round_trips_every_variant` stand in for the
+    /// compiler over [`parse`](Self::parse).
+    pub const ALL: [Self; 9] = [
+        Self::Text,
+        Self::Image,
+        Self::Video,
+        Self::Audio,
+        Self::VoiceNote,
+        Self::VideoNote,
+        Self::File,
+        Self::FileChunk,
+        Self::Poll,
+    ];
+
     /// Returns `true` for types that carry binary media data.
     pub fn is_media(&self) -> bool {
         !matches!(self, Self::Text | Self::Poll)
     }
 
+    /// The canonical wire string for this type.
+    ///
+    /// The single source of truth for the variant → string direction,
+    /// shared by [`Display`](fmt::Display), [`Serialize`] and the JSON
+    /// [`Deserialize`]. Exhaustive, so rustc — not a test — guarantees
+    /// every variant has exactly one wire string.
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::VoiceNote => "voice_note",
+            Self::VideoNote => "video_note",
+            Self::File => "file",
+            Self::FileChunk => "file_chunk",
+            Self::Poll => "poll",
+        }
+    }
+
     /// Parses a content type from its string representation.
     ///
-    /// Falls back to `File` for unrecognised strings.
+    /// Falls back to `File` for unrecognised strings. This is the inverse of
+    /// [`as_wire_str`](Self::as_wire_str), and the one mapping rustc cannot
+    /// check: the `_` arm swallows a variant whose arm was forgotten, which
+    /// would make that variant decode as `File` even between same-version
+    /// peers. `content_type_json_round_trips_every_variant` is what pins it,
+    /// iterating [`ALL`](Self::ALL) so it cannot silently miss a variant.
     pub fn parse(s: &str) -> Self {
         match s {
             "text" => Self::Text,
@@ -118,7 +176,54 @@ impl ContentType {
     }
 }
 
-/// Tolerant JSON decoding: any string is accepted and routed through
+/// Pins [`ContentType::ALL`] complete and correctly ordered at compile time.
+///
+/// Adding a variant fails to compile twice over: the match below is
+/// exhaustive, so the new variant must be named here, and the arm naming it
+/// then indexes past the end of `ALL` (a deny-by-default `unconditional_panic`
+/// error) until the array grows too. The loop then const-evaluates each entry,
+/// pinning position as well as membership.
+///
+/// This matters because `ALL` is what the round-trip test iterates to cover
+/// [`ContentType::parse`]'s unavoidable `_` arm. A hand-maintained list would
+/// leave "forgot the `parse` arm" and "forgot the test entry" as the same
+/// omission, so the test could never catch it.
+const _: () = {
+    const fn listed_at_own_index(ct: ContentType) -> bool {
+        match ct {
+            ContentType::Text => matches!(ContentType::ALL[0], ContentType::Text),
+            ContentType::Image => matches!(ContentType::ALL[1], ContentType::Image),
+            ContentType::Video => matches!(ContentType::ALL[2], ContentType::Video),
+            ContentType::Audio => matches!(ContentType::ALL[3], ContentType::Audio),
+            ContentType::VoiceNote => matches!(ContentType::ALL[4], ContentType::VoiceNote),
+            ContentType::VideoNote => matches!(ContentType::ALL[5], ContentType::VideoNote),
+            ContentType::File => matches!(ContentType::ALL[6], ContentType::File),
+            ContentType::FileChunk => matches!(ContentType::ALL[7], ContentType::FileChunk),
+            ContentType::Poll => matches!(ContentType::ALL[8], ContentType::Poll),
+        }
+    }
+
+    let mut i = 0;
+    while i < ContentType::ALL.len() {
+        assert!(listed_at_own_index(ContentType::ALL[i]));
+        i += 1;
+    }
+};
+
+/// Serializes as the [`wire string`](ContentType::as_wire_str), in every
+/// format rather than only the self-describing ones. Byte-identical to the
+/// derived `snake_case` impl on JSON; see the type docs for why the derived
+/// impl is not used.
+impl Serialize for ContentType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_wire_str())
+    }
+}
+
+/// Tolerant decoding: any string is accepted and routed through
 /// [`ContentType::parse`], so a variant added by a newer sender degrades to
 /// `File` on this receiver rather than failing the whole `Message` (or
 /// sealed rich body) it rides in. Non-string values still error — that is
@@ -148,17 +253,7 @@ impl<'de> Deserialize<'de> for ContentType {
 
 impl fmt::Display for ContentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Text => write!(f, "text"),
-            Self::Image => write!(f, "image"),
-            Self::Video => write!(f, "video"),
-            Self::Audio => write!(f, "audio"),
-            Self::VoiceNote => write!(f, "voice_note"),
-            Self::VideoNote => write!(f, "video_note"),
-            Self::File => write!(f, "file"),
-            Self::FileChunk => write!(f, "file_chunk"),
-            Self::Poll => write!(f, "poll"),
-        }
+        f.write_str(self.as_wire_str())
     }
 }
 
@@ -1175,21 +1270,28 @@ mod tests {
 
     #[test]
     fn content_type_json_round_trips_every_variant() {
-        for ct in [
-            ContentType::Text,
-            ContentType::Image,
-            ContentType::Video,
-            ContentType::Audio,
-            ContentType::VoiceNote,
-            ContentType::VideoNote,
-            ContentType::File,
-            ContentType::FileChunk,
-            ContentType::Poll,
-        ] {
+        // Iterating `ALL` (compile-time-pinned complete) rather than a
+        // hand-written list is what makes this test able to catch a variant
+        // added without a `ContentType::parse` arm — the one string mapping
+        // rustc cannot check for itself.
+        for ct in ContentType::ALL {
             let json = serde_json::to_string(&ct).unwrap();
             assert_eq!(json, format!("\"{ct}\""));
             assert_eq!(serde_json::from_str::<ContentType>(&json).unwrap(), ct);
-            assert_eq!(ContentType::parse(&ct.to_string()), ct);
+            assert_eq!(ContentType::parse(ct.as_wire_str()), ct);
+        }
+    }
+
+    #[test]
+    fn content_type_round_trips_in_non_self_describing_formats() {
+        // Both serde directions speak strings, so a format that carries no
+        // field/variant names round-trips too. A derived `Serialize` would
+        // write the variant index here, which the tolerant string-based
+        // `Deserialize` would read back as "" and degrade to `File` —
+        // silently turning `Text` into `File`.
+        for ct in ContentType::ALL {
+            let bytes = postcard::to_allocvec(&ct).unwrap();
+            assert_eq!(postcard::from_bytes::<ContentType>(&bytes).unwrap(), ct);
         }
     }
 
