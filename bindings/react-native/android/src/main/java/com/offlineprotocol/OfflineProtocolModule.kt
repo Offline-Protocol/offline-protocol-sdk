@@ -157,6 +157,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * per-ReactContext, so during a reload this module may be tearing down
      * *after* its replacement registered, and an unconditional null would
      * disarm the live host's Stop action.
+     *
+     * A backstop, not the main path, and idempotent so it stays cheap as one:
+     * mesh teardown surrenders the registration through [stopForegroundService]
+     * instead, because the slot is the service's sticky-restart liveness signal
+     * and must fall with the mesh rather than with the module. This covers a
+     * teardown that never reached that step.
      */
     private fun releaseForegroundStopCallback() {
         val ours = foregroundStopCallback ?: return
@@ -3991,7 +3997,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     private fun stopForegroundService() {
         try {
-            MeshForegroundService.stop(reactApplicationContext)
+            // Surrender our registration along with the stop. That slot is also
+            // the service's sticky-restart liveness signal, so it has to fall
+            // when the mesh does — not when this module does, which is later
+            // and may never happen at all. Left set over a stopped mesh, a
+            // sticky restart reads it as "a host has mesh up" and re-posts
+            // "Mesh Active" over a protocol that is gone. Cleared by identity
+            // inside stop(), so a reload's replacement host stays armed.
+            val ours = foregroundStopCallback
+            foregroundStopCallback = null
+            MeshForegroundService.stop(reactApplicationContext, ours)
             emitDiagnostic("info", "Mesh foreground service stopped")
         } catch (e: Exception) {
             android.util.Log.w(NAME, "Failed to stop foreground service: ${e.message}", e)

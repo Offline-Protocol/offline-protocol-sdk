@@ -87,6 +87,13 @@ class MeshForegroundService : Service() {
          * no JS-visible state change — the user sees "mesh off" while the
          * radios keep draining until the OS reaps the process.
          *
+         * Carries a second meaning that constrains when it may be set: a
+         * non-null slot is the only signal in the process that a live host
+         * believes mesh is running, which is what [handleStickyRestart] gates
+         * on. So it is registered as mesh comes up and surrendered as mesh goes
+         * down — see [stop] — rather than tracking the module's own lifetime,
+         * which outlives the mesh.
+         *
          * Held in a companion field, so a host that captures itself here must
          * drop it on teardown or it pins that host for the process lifetime.
          * Mutated only through [registerStopRequestCallback] and
@@ -141,7 +148,26 @@ class MeshForegroundService : Service() {
             }
         }
 
-        fun stop(context: Context) {
+        /**
+         * Brings the keep-alive down, and with it [host]'s registration when
+         * that is still the live one.
+         *
+         * Surrendering the registration is part of stopping rather than a
+         * courtesy. The slot doubles as the sticky-restart liveness signal (see
+         * [handleStickyRestart]), so leaving it set over a mesh the host has
+         * already torn down re-arms the exact restart that gate exists to
+         * refuse — "Mesh Active" and START_STICKY over a protocol that is gone.
+         * It has to fall with the mesh, which is here, not with the module,
+         * which outlives it and may never be torn down at all.
+         *
+         * The clear runs ahead of the nothing-to-stop guard below, so a host
+         * whose service is already down still deregisters, and it clears by
+         * identity, so a departing host cannot disarm its replacement — see
+         * [clearStopRequestCallback]. [host] is nullable only for callers that
+         * hold no registration to surrender; one that does must pass it.
+         */
+        fun stop(context: Context, host: (() -> Unit)?) {
+            host?.let { clearStopRequestCallback(it) }
             // Skip when there is nothing to stop. Callers invoke this from
             // both stop() and invalidate(), so a stop-after-stop would
             // otherwise create an instance purely to tear it down — and since
@@ -214,12 +240,14 @@ class MeshForegroundService : Service() {
      * The old process took the protocol, every transport and the host module
      * with it, so this instance is only worth keeping if a host in the *new*
      * process has since brought a mesh back up. [onStopRequestedByUser] is
-     * exactly that signal: the module registers it immediately before starting
-     * this service and clears it by identity on every teardown path, so a
-     * non-null slot means a live host that believes mesh is running. That
-     * ordering does happen — an app that boots React Native from
-     * Application.onCreate can have re-started the mesh before this
-     * re-delivered intent lands.
+     * exactly that signal, because it is scoped to the mesh and not to the
+     * host: the module registers it immediately before starting this service
+     * and surrenders it to [stop] as the mesh comes down, so a non-null slot
+     * means a host that believes mesh is running *now* — not merely one that
+     * started it at some point. A slot that outlived its mesh would send this
+     * gate straight back into the behaviour it exists to refuse. That ordering
+     * does happen — an app that boots React Native from Application.onCreate
+     * can have re-started the mesh before this re-delivered intent lands.
      *
      * With no host, staying up is strictly worse than dying. The notification
      * claims "Mesh Active" over a protocol nothing can rebuild, and survives

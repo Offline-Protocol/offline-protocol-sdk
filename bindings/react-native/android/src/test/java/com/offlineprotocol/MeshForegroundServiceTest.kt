@@ -42,7 +42,10 @@ import org.robolectric.annotation.Config
  * service back after a process kill, but the protocol, the transports and the
  * module died with the old process, and nothing native can rebuild them — so
  * the restart has to check whether a host has brought a mesh back up before it
- * re-posts a notification claiming one is running.
+ * re-posts a notification claiming one is running. That check reads the same
+ * stop-callback slot, which is why the slot's lifetime is pinned here too: it
+ * has to be surrendered when the mesh stops, not when the module dies, or the
+ * gate reads "host present" over a mesh that is already down.
  *
  * Action strings are written out verbatim rather than read from the companion:
  * they cross a process boundary inside a PendingIntent that can outlive the
@@ -89,7 +92,7 @@ class MeshForegroundServiceTest {
         MeshForegroundService.onServiceRestarted = null
         controller?.destroy()
         controller = null
-        MeshForegroundService.stop(context)
+        MeshForegroundService.stop(context, null)
         drainStartedServices()
     }
 
@@ -304,6 +307,70 @@ class MeshForegroundServiceTest {
     }
 
     @Test
+    fun `stopping the mesh surrenders the host registration`() {
+        val host = registerHost { }
+
+        // Nothing is up, so stop() takes its nothing-to-stop early return. The
+        // registration must go anyway: it tracks the mesh rather than the
+        // module, and the mesh is down either way. Clearing after that guard
+        // instead of before it would strand the slot on exactly the path the
+        // app runs twice (stop() and invalidate()).
+        MeshForegroundService.stop(context, host)
+
+        assertNull(
+            "the slot is the sticky-restart liveness signal and must fall with the mesh",
+            MeshForegroundService.onStopRequestedByUser
+        )
+    }
+
+    @Test
+    fun `a stale host stopping the mesh leaves the current one armed`() {
+        var staleInvoked = 0
+        var currentInvoked = 0
+        // The same reload overlap the clear path guards against, reached
+        // through a stop: the replacement registers before the outgoing module
+        // tears its own mesh down. Surrendering by identity is what keeps the
+        // live host's Stop action armed.
+        val stale = registerHost { staleInvoked += 1 }
+        registerHost { currentInvoked += 1 }
+
+        MeshForegroundService.stop(context, stale)
+        drainStartedServices()
+
+        createService()
+        deliver(ACTION_STOP_FROM_NOTIFICATION)
+
+        assertEquals("a stale host's stop must not disarm the current one", 1, currentInvoked)
+        assertEquals(0, staleInvoked)
+    }
+
+    @Test
+    fun `sticky restart after the host stopped the mesh stops instead of re-promoting`() {
+        var restarted = 0
+        MeshForegroundService.onServiceRestarted = { restarted += 1 }
+
+        // The window the host-present branch exists for, with a mesh that went
+        // down inside it: the kill leaves a restart pending, the new process
+        // boots React Native, brings mesh up and takes it back down — all
+        // before the re-delivered intent lands. A slot scoped to the module
+        // rather than the mesh would still read "host present" here and
+        // re-post "Mesh Active" over a protocol that is gone.
+        val host = registerHost { }
+        MeshForegroundService.start(context)
+        drainStartedServices()
+        MeshForegroundService.stop(context, host)
+        drainStartedServices()
+
+        createService()
+        val service = deliver(null)
+
+        assertEquals("a host that stopped its mesh is not a host to notify", 0, restarted)
+        assertTrue(shadowOf(service).isForegroundStopped)
+        assertTrue(shadowOf(service).isStoppedBySelf)
+        assertFalse(MeshForegroundService.isRunning)
+    }
+
+    @Test
     fun `stop does not create a service when none was started`() {
         // Establish the precondition explicitly: onDestroy clears both the
         // running flag and the start-request flag that survive between tests.
@@ -312,7 +379,7 @@ class MeshForegroundServiceTest {
         controller = null
         drainStartedServices()
 
-        MeshForegroundService.stop(context)
+        MeshForegroundService.stop(context, null)
 
         // Without the guard this would start the service just to stop it —
         // and since onCreate now promotes, that is a notification flash on a
@@ -331,7 +398,7 @@ class MeshForegroundServiceTest {
         MeshForegroundService.start(context)
         drainStartedServices()
 
-        MeshForegroundService.stop(context)
+        MeshForegroundService.stop(context, null)
 
         val stopIntent = shadowOf(RuntimeEnvironment.getApplication()).nextStartedService
         assertNotNull("stop() must reach a service that start() already requested", stopIntent)
