@@ -61,6 +61,10 @@ class MeshForegroundServiceTest {
      * they outlive an individual test. Destroying the instance clears both
      * through `onDestroy`, which keeps the no-op assertions in
      * [stop_does_not_create_a_service_when_none_was_started] honest.
+     *
+     * A test that calls `start()` without ever creating an instance leaves the
+     * start-request flag set with no `onDestroy` to clear it, so `stop()` runs
+     * unconditionally here too — it no-ops once both flags are already down.
      */
     @After
     fun tearDown() {
@@ -68,6 +72,7 @@ class MeshForegroundServiceTest {
         MeshForegroundService.onServiceRestarted = null
         controller?.destroy()
         controller = null
+        MeshForegroundService.stop(context)
         drainStartedServices()
     }
 
