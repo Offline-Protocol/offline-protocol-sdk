@@ -555,14 +555,18 @@ dictionary ProtocolConfig {
     boolean binary_wire_enabled = true;
     // Kill switch for sealing outgoing Nostr frames into NIP-59 gift wraps
     // (default on). Unlike the three negotiated switches around it, this one
-    // needs no peer capability: the receive path always unseals gift wraps and
-    // always parses legacy frames, so it is safe to flip on one device alone.
+    // needs no peer capability on the receive side: the receive path always
+    // unseals gift wraps and always parses legacy frames, so nothing a peer
+    // sends us becomes unreadable whatever this is set to.
     // With it off, the transport publishes the legacy kind-4 event whose
     // content is the whole protocol envelope in cleartext -- both usernames,
     // the app id, the metadata map, the content type and a millisecond
-    // timestamp, readable by every relay, permanently. Turn it off only for a
-    // relay that rejects kind 1059. Defaulted so existing callers keep
-    // compiling.
+    // timestamp, readable by every relay, permanently.
+    // Two reasons to turn it off: a relay that rejects kind 1059, and reaching
+    // a peer on a build that predates sealing -- such a peer subscribes with
+    // kinds [4] only, so it is never handed our kind-1059 events and cannot
+    // unseal one, making it unreachable over Nostr while this is on.
+    // Defaulted so existing callers keep compiling.
     boolean nostr_sealing_enabled = true;
     // Kill switch for the compact MLS envelope on encrypted messages (default
     // on). The end-to-end sibling of binary_wire_enabled with the same shape:

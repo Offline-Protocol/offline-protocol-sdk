@@ -322,9 +322,13 @@ It is narrower than it sounds: a storage wipe also destroys the peer's MLS sessi
 
 ### Interoperability and the kill switch
 
-The receive path always accepts both forms: gift wraps and the legacy unsealed kind-4 event. The subscription requests both kinds permanently, so a peer on an older build stays reachable. Sealing is therefore safe to enable or disable on one device without coordinating a fleet — unlike the negotiated wire/envelope switches, it needs no peer capability.
+**Compatibility with pre-sealing builds is asymmetric.** Inbound is fully compatible: the receive path always accepts both forms — gift wraps and the legacy unsealed kind-4 event — and the subscription requests both kinds permanently, so a peer on an older build can still reach us.
 
-`transports.nostr.sealingEnabled` (RN) / `nostr_sealing_enabled` (UniFFI, core `TransportConfig`) turns sealing off, restoring the cleartext kind-4 form above. Set it only for a relay that rejects kind 1059.
+Outbound to such a peer, however, does **not** work while sealing is on. A pre-sealing build's REQ filter is `{"kinds":[4]}`, so a relay never delivers a kind-1059 event to it, and it carries no NIP-44 layer to unseal one with. The failure is visible rather than silent — no ACK returns, so the send fails through the ordinary retry ladder and DORS demotes Nostr for that peer — but the message does not arrive. Reaching a not-yet-upgraded peer over Nostr requires turning sealing off on the sender until they upgrade.
+
+Sealing is therefore safe to enable or disable on one device without coordinating a fleet **of sealed-capable builds** — unlike the negotiated wire/envelope switches, it needs no peer capability, and no state becomes unreadable either way.
+
+`transports.nostr.sealingEnabled` (RN) / `nostr_sealing_enabled` (UniFFI, core `TransportConfig`) turns sealing off, restoring the cleartext kind-4 form above. Set it only for a relay that rejects kind 1059, or to reach a peer on a pre-sealing build.
 
 **Sealing costs size.** NIP-44 pads to a power-of-two bucket, so a payload just past a boundary nearly doubles before the MAC and base64 are applied — considerably more than base64's ~33% alone. The 64 KiB event cap is measured on the final sealed event, so a message that fits unsealed may not fit sealed.
 

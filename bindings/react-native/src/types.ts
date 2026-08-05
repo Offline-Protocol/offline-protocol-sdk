@@ -193,10 +193,15 @@ export interface NostrTransportConfig {
    * cleartext — both usernames, the app id, the metadata map, the content type
    * and a millisecond timestamp, readable by every relay, permanently.
    *
-   * Send-side only, and needs no peer support: inbound gift wraps are always
-   * unsealed and inbound legacy frames always parsed, so this is safe to
-   * change on one device without coordinating a fleet. Turn it off only for a
-   * relay that rejects kind 1059.
+   * Send-side only: inbound gift wraps are always unsealed and inbound legacy
+   * frames always parsed, so nothing a peer sends you becomes unreadable
+   * whatever this is set to.
+   *
+   * It does affect outbound reachability against builds that predate sealing.
+   * Those subscribe to kind 4 only, so they are never handed a kind-1059 event
+   * and cannot unseal one — leaving this on makes such a peer unreachable over
+   * Nostr (visibly: no ACK, so the send fails through the retry ladder). Turn
+   * it off to reach one, or for a relay that rejects kind 1059.
    */
   sealingEnabled?: boolean;
 }

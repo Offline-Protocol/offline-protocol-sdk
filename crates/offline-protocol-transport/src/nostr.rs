@@ -687,7 +687,7 @@ impl NostrTransport {
     /// Returns a NIP-01 subscription filter JSON for this device's routing tag.
     ///
     /// The platform should send this to each relay after connecting:
-    /// `["REQ", "<sub_id>", {"#p": ["<routing_tag>"], "kinds": [4], "since": T, "limit": N}]`
+    /// `["REQ", "<sub_id>", {"#p": ["<routing_tag>"], "kinds": [4, 1059], "since": T, "limit": N}]`
     ///
     /// The filter is on the routing tag — not the signing pubkey — so it is
     /// stable across signing-key changes and derivable by peers. `since` bounds

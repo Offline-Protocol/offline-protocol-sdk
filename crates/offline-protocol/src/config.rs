@@ -278,9 +278,18 @@ pub struct TransportConfig {
     /// millisecond timestamp, readable by every relay, permanently. Turn it off
     /// only to interoperate with a relay that rejects kind 1059 outright.
     ///
-    /// Send-side only. Inbound gift wraps are always unsealed and inbound
-    /// legacy frames always parsed, so this flag never makes a peer
-    /// unreadable and needs no negotiation in either direction.
+    /// Send-side only, and never negotiated: inbound gift wraps are always
+    /// unsealed and inbound legacy frames always parsed, so whatever this is
+    /// set to, anything a peer sends us stays readable.
+    ///
+    /// It does still affect *outbound* reachability, in the one direction the
+    /// receive path cannot cover. A peer on a build that predates sealing
+    /// subscribes with `kinds: [4]` only, so it is never handed our kind-1059
+    /// events and has no NIP-44 layer to open one with — leaving it on makes
+    /// such a peer unreachable over Nostr (visibly: no ACK returns, so the
+    /// send fails through the retry ladder rather than vanishing). That is the
+    /// second reason to turn this off, alongside a relay that rejects
+    /// kind 1059.
     pub nostr_sealing_enabled: bool,
 
     /// Whether to negotiate and emit the compact binary wire codec.
