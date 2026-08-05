@@ -3591,6 +3591,9 @@ mod tests {
             "internet_server_message",
             "internet_status_changed",
             "internet_session_superseded",
+            // Android only: the mesh foreground service's notification has no
+            // iOS counterpart.
+            "mesh_stopped_by_user",
         ]
         .map(str::to_string)
         .into();
