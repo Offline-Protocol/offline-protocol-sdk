@@ -69,6 +69,20 @@ class LeAdvertiser(
      * main-handler post in the failure callback, which left a window where
      * a synchronous `start()` after a failure would be silently dropped by
      * the gate. Separating the gate from the stop-reference closes it.
+     *
+     * Note it is deliberately *not* lowered by `onStartSuccess`: it guards a
+     * live advertisement as well as an in-flight one, since a second
+     * `startAdvertising` against a running one earns
+     * `ADVERTISE_FAILED_ALREADY_STARTED`, whose handler nulls
+     * [advertiseCallback] and so discards the only reference that could stop
+     * the advertisement that is actually running.
+     *
+     * The consequence, which callers must own: an adapter switched off stops
+     * advertising at the platform without delivering any callback, so the gate
+     * stays raised over an advertisement that is already dead and every later
+     * `start()` returns at it. Recovering from an adapter-off therefore means
+     * calling [stop] first — re-attaching an advertiser and re-calling [start]
+     * is silently a no-op. Pinned by `LeAdvertiserTest`.
      */
     @Volatile
     private var startInFlight: Boolean = false

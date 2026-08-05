@@ -808,40 +808,75 @@ class BleTransportFacade(
      * cancelled by [stopScanning] so a paused or stopped transport cannot bring
      * scanning back behind the app's back.
      *
-     * Known limit: this heals advertising only as a passenger on a scan
-     * recovery. A device whose scan is healthy while advertising alone is dead
+     * Known limits. First, advertising is healed only as a passenger on a scan
+     * recovery: a device whose scan is healthy while advertising alone is dead
      * — an adapter reset that re-attached a null advertiser, or a terminal
      * `onStartFailure` — returns at the [isScanning] guard below and stays
-     * discoverable-to-nobody. Closing that needs its own advertising-side
-     * retry; it is not covered here.
+     * discoverable-to-nobody. Second, this does not escalate:
+     * [evaluateBleHealthAfterRestart], the stack rebuild that repeated scan
+     * stalls climb to, hangs off the scan watchdog and so is unreachable while
+     * there is no live scan to watch. That is the right trade for an adapter
+     * that is simply off — there is nothing to rebuild until it comes back —
+     * but it does mean a genuinely wedged stack is retried at the cap rather
+     * than escalated. Both need their own retry paths and are not covered here.
      */
     private val bleRecoveryRunnable = object : Runnable {
         override fun run() {
             if (state != TransportState.RUNNING || isScanning) {
                 return
             }
-            // Re-acquire the scanner before retrying: getBluetoothLeScanner()
-            // yields null while the adapter is off, so the instance cached at
-            // start (or nulled by an adapter reset that ran while it was off)
-            // can belong to a dead adapter session. Only overwrite on a
-            // non-null read, so a still-working cached scanner is never lost.
+            // Re-acquire the scanner before retrying. Not because the cached
+            // instance goes stale — the platform hands back a per-adapter
+            // singleton, not a fresh object per session — but because
+            // [evaluateBleHealthAfterRestart] assigns whatever
+            // getBluetoothLeScanner() returns, which is null while the adapter
+            // is down, and nothing else re-reads it afterwards. Only overwrite
+            // on a non-null read, so a working cached scanner is never lost.
             bluetoothAdapter?.bluetoothLeScanner?.let { bluetoothLeScanner = it }
-            // Same for the advertiser, which the adapter-reset path re-attaches
-            // from the same nullable read and so can have left detached.
+            // Same for the advertiser, which that path re-attaches from the
+            // same nullable read and so can have left detached.
             bluetoothAdapter?.bluetoothLeAdvertiser?.let { leAdvertiser.attachAdvertiser(it) }
-            // Scan first. startScanning is what re-arms this runnable when the
-            // adapter is still off, so nothing that can throw may sit upstream
-            // of it: run() is a bare handler post, and an escape here would
-            // leave nothing pending — the exact terminal state this runnable
-            // exists to prevent.
-            startScanning("adapter_recovery")
-            // Best-effort, and explicitly non-fatal: LeAdvertiser.start
-            // rethrows SecurityException by design so the synchronous start()
-            // path can surface it to its caller, but there is no caller on a
-            // handler post. start() is also gated on its own in-flight flag and
-            // on GATT-service readiness, so this is a no-op when advertising is
-            // already healthy or the service has not come back yet.
-            runCatching { startAdvertising("adapter_recovery") }
+            // Scan first, and let nothing that can throw sit upstream of it:
+            // run() is a bare handler post, so an escape both takes the host app
+            // down and leaves nothing pending — the exact terminal state this
+            // runnable exists to prevent. startScanning re-arms us on every exit
+            // it handles itself, but it rethrows SecurityException by design so
+            // startUnsafe can surface it to its caller, and there is no caller
+            // here to receive it. Re-arm by hand on that one path.
+            try {
+                startScanning("adapter_recovery")
+            } catch (e: Exception) {
+                Log.e(TAG, "BLE recovery scan attempt failed", e)
+                emitDiagnostic("error", "BLE recovery scan attempt failed", mapOf(
+                    "exception" to e.javaClass.simpleName,
+                    "message" to (e.message ?: "unknown"),
+                ))
+                scheduleBleRecovery()
+            }
+            // Tear advertising down before retrying it, or the retry is a no-op
+            // in the very scenario this runnable exists for. The platform stops
+            // advertising on adapter-off *without* delivering onStartFailure,
+            // and nothing between the watchdog restart and here calls
+            // stopAdvertising — so LeAdvertiser's in-flight gate is still raised
+            // from the pre-outage session and start() would return at it on
+            // every tick, leaving the device scanning but discoverable to
+            // nobody. stop() is throw-safe (it catches both platform refusals)
+            // and returns immediately when there is no callback to release, so
+            // the cost when advertising is genuinely live is one re-registration.
+            stopAdvertising()
+            // Best-effort, and explicitly non-fatal: LeAdvertiser.start rethrows
+            // SecurityException for the same reason startScanning does. start()
+            // is still gated on GATT-service readiness, so this defers itself
+            // when the service registration has not come back yet.
+            try {
+                startAdvertising("adapter_recovery")
+            } catch (e: Exception) {
+                Log.w(TAG, "BLE recovery advertising attempt failed", e)
+                emitDiagnostic("warning", "BLE recovery advertising attempt failed", mapOf(
+                    "exception" to e.javaClass.simpleName,
+                    "message" to (e.message ?: "unknown"),
+                ))
+            }
         }
     }
 
@@ -1462,32 +1497,47 @@ class BleTransportFacade(
                         SCAN_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
                         else -> "Unknown error $errorCode"
                     }
-                    Log.e(TAG, "BLE scan failed: $errorMsg (code=$errorCode)")
                     // Repost to main so the state mutation and the runnable
                     // teardown match the threading contract the rest of the
                     // facade follows.
                     mainHandler.post {
-                        emitDiagnostic("error", "BLE scan failed", mapOf(
-                            "errorCode" to errorCode,
-                            "errorMessage" to errorMsg
-                        ))
                         // Ignore a failure belonging to a callback we have
                         // already replaced or torn down — the scan we would
                         // stop is a newer, possibly healthy one, and a
-                        // deliberate stop/pause must not be undone. Same
-                        // identity check LeAdvertiser.onStartFailure uses.
+                        // deliberate stop/pause must not be undone. Checked
+                        // ahead of the logging below so a stale failure is
+                        // silent as well as inert. Same identity check
+                        // LeAdvertiser.onStartFailure uses.
                         if (scanCallback !== self) return@post
+                        // Throttled, because the retry armed below re-enters
+                        // startScan on a ladder: a stack that keeps refusing
+                        // asynchronously would otherwise emit an error at the
+                        // retry cadence for as long as the transport runs.
+                        if (logThrottler.shouldLog("scan_failed", intervalMs = 60_000L)) {
+                            Log.e(TAG, "BLE scan failed: $errorMsg (code=$errorCode)")
+                            emitDiagnostic("error", "BLE scan failed", mapOf(
+                                "errorCode" to errorCode,
+                                "errorMessage" to errorMsg
+                            ))
+                        }
                         // Route through stopScanning instead of clearing the
                         // flags inline. Reaching this callback means startScan
                         // returned normally — the refusal is asynchronous — so
                         // isScanning is still true and the framework may yet
-                        // hold a scanner registration for this callback
-                        // (SCAN_FAILED_ALREADY_STARTED is precisely that case).
-                        // stopScanning releases it and runs the one shared
-                        // teardown; leaving it registered and re-entering
-                        // startScanning with a fresh callback would strand one
-                        // registration per attempt against a per-app cap of 5.
+                        // hold a scanner registration for this callback: the
+                        // client entry is inserted before registration is
+                        // attempted, and only stopScan removes it. stopScanning
+                        // releases it and runs the one shared teardown; leaving
+                        // it and re-entering startScanning with a fresh callback
+                        // would strand one entry per attempt against a per-app
+                        // cap of 5.
                         stopScanning("scan_failed")
+                        // Terminal — the hardware cannot do what we are asking,
+                        // so a retry only burns wakeups for the life of the
+                        // process. isAvailable() screens most such devices out
+                        // at start via FEATURE_BLUETOOTH_LE, but not every OEM
+                        // reports the capability consistently.
+                        if (errorCode == SCAN_FAILED_FEATURE_UNSUPPORTED) return@post
                         // Arm recovery after the teardown, since stopScanning
                         // cancels a pending one by design. Without this an
                         // async scan failure lands in exactly the state
@@ -1522,11 +1572,13 @@ class BleTransportFacade(
                 return
             }
             isScanning = true
-            // A live scan ends the recovery episode. stopScanning already
-            // resets the ladder on the paths that go through it, but the
-            // recovery runnable reaches a successful start without one, so
-            // reset here too or the next adapter-off inherits a stale rung.
-            bleRecoveryDelayMs = BLE_RECOVERY_RETRY_MIN_MS
+            // Deliberately no ladder reset here. Reaching this line proves only
+            // that startScan *returned*; the refusal can still arrive
+            // asynchronously at onScanFailed, and resetting on the synchronous
+            // return would pin a stack that keeps failing that way to the
+            // bottom rung forever — retry, return, reset, fail, retry. The reset
+            // lives in [handleScanResult] instead, which is the first point that
+            // proves a scan is actually alive.
             val now = System.currentTimeMillis()
             lastDiscoveryAt = now
             lastProactiveScanRefresh = now
@@ -1792,7 +1844,14 @@ class BleTransportFacade(
         val address = device.address
         val now = System.currentTimeMillis()
         lastDiscoveryAt = now
-        
+        // A result in hand is the one proof the scan is genuinely live, which is
+        // what ends a recovery episode and resets its backoff ladder. Anchored
+        // here rather than on a successful startScan return because that return
+        // does not rule out an asynchronous onScanFailed a moment later. A
+        // device with no peers in range simply holds at the cap, which costs
+        // nothing: every deliberate stop resets the ladder via stopScanning.
+        bleRecoveryDelayMs = BLE_RECOVERY_RETRY_MIN_MS
+
         // Duplicate advertisement detection - avoid processing identical advertisements
         // This improves performance in dense networks
         val advertHash = computeAdvertisementHash(result)

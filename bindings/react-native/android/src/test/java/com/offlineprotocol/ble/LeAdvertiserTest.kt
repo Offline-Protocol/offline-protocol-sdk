@@ -13,40 +13,56 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /**
- * Pins what [LeAdvertiser.start] must do when it has no platform advertiser to
- * start against — the state this class is in whenever the user has Bluetooth
- * switched off, since `getBluetoothLeAdvertiser()` returns null for exactly
- * that reason and the facade's adapter-reset path re-attaches whatever it
- * reads.
+ * Pins the gate behaviour of [LeAdvertiser.start] on the two paths that decide
+ * whether a device is discoverable at all after the user toggles Bluetooth: a
+ * start with no platform advertiser attached (`getBluetoothLeAdvertiser()`
+ * returns null while the adapter is off, and the facade's adapter-reset path
+ * re-attaches whatever it reads), and a start that follows an adapter-off which
+ * left the in-flight gate raised over an advertisement the platform has already
+ * torn down.
  *
- * Two properties, both invisible in the source once written and both permanent
+ * Three properties, all invisible in the source once written and all permanent
  * if broken:
  *
- *  1. The in-flight gate must stay *down*. It is raised immediately before the
- *     platform call and otherwise lowered only by `stop()` or a terminal
- *     `onStartFailure` — neither of which runs when there is no call to make.
- *     Raising it against a null advertiser therefore wedges advertising off for
- *     the rest of the process lifetime.
- *  2. The deferral must still be latched. The null check sits *below* the
- *     GATT-readiness check precisely so an advertiser attached while the
- *     service registration is still in flight is picked up by
+ *  1. A null advertiser must leave the in-flight gate *down*. It is raised
+ *     immediately before the platform call and otherwise lowered only by
+ *     `stop()` or a terminal `onStartFailure` — neither of which runs when
+ *     there is no call to make. Raising it against a null advertiser wedges
+ *     advertising off for the rest of the process lifetime.
+ *  2. A null advertiser must still latch the deferral. The null check sits
+ *     *below* the GATT-readiness check precisely so an advertiser attached
+ *     while the service registration is still in flight is picked up by
  *     [LeAdvertiser.onGattServerReady] rather than dropped on the floor.
+ *  3. After a successful start, the gate stays raised until an explicit
+ *     `stop()` — including across an adapter-off, which the platform performs
+ *     without any callback. This is why the facade's recovery runnable stops
+ *     before it re-starts; re-attaching and re-starting alone is a no-op.
  *
- * Neither is directly observable — `startInFlight` and `pendingAdvertiseReason`
- * are private, and Robolectric's shadow advertiser accepts `startAdvertising`
- * without invoking the callback, so `isAdvertising` never flips. Both tests
- * therefore observe the same downstream tell: `stop()` emits "Stopped BLE
- * advertising" only when a start actually reached the platform call and left an
- * `advertiseCallback` behind. A start that was swallowed by a wedged gate, or
- * never triggered because the deferral was dropped, leaves that emission out.
+ * None of it is directly observable — `startInFlight` and
+ * `pendingAdvertiseReason` are private, and Robolectric's shadow advertiser
+ * accepts `startAdvertising` without invoking the callback, so `isAdvertising`
+ * never flips. The probe is [FakeHost.advertiseDataBuilds]: `buildAdvertiseData`
+ * is called just-in-time *inside* `start`, past all three gates, so it counts
+ * exactly the starts that reached the platform call and nothing else.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class LeAdvertiserTest {
 
     private class FakeHost(var gattReady: Boolean) : LeAdvertiser.Host {
+        /**
+         * Number of starts that got past every gate and reached the platform
+         * call. `buildAdvertiseData` is invoked just-in-time after the in-flight
+         * gate, the GATT-readiness check and the null-advertiser bail, so this
+         * is an exact count of admitted starts.
+         */
+        var advertiseDataBuilds = 0
+
         override fun isGattServerReady(): Boolean = gattReady
-        override fun buildAdvertiseData(): AdvertiseData = AdvertiseData.Builder().build()
+        override fun buildAdvertiseData(): AdvertiseData {
+            advertiseDataBuilds++
+            return AdvertiseData.Builder().build()
+        }
         override fun buildScanResponse(): AdvertiseData = AdvertiseData.Builder().build()
         override fun refreshPublishedIdentity() {}
         // Defeat throttling so every admitted call is individually observable.
@@ -74,6 +90,7 @@ class LeAdvertiserTest {
 
         // Bluetooth off: nothing attached, so this start has nothing to do.
         advertiser.start("while-adapter-off")
+        assertEquals(0, host.advertiseDataBuilds)
 
         // Adapter comes back and the facade re-attaches. This start must be
         // admitted — if the previous one had raised the gate, it would return
@@ -81,9 +98,31 @@ class LeAdvertiserTest {
         // for good.
         advertiser.attachAdvertiser(platformAdvertiser())
         advertiser.start("after-adapter-recovery")
+        assertEquals(1, host.advertiseDataBuilds)
+    }
 
+    @Test
+    fun `a start surviving an adapter cycle is admitted only after a stop`() {
+        host.gattReady = true
+        advertiser.attachAdvertiser(platformAdvertiser())
+        advertiser.start("initial")
+        assertEquals(1, host.advertiseDataBuilds)
+
+        // Bluetooth goes off and comes back. The platform stops advertising
+        // without delivering onStartFailure, so nothing lowered the gate that
+        // this successful start raised — it now guards an advertisement that is
+        // already dead. A recovery that only re-attaches and re-starts, which is
+        // the obvious shape, is swallowed whole and the device stays
+        // discoverable to nobody.
+        advertiser.attachAdvertiser(platformAdvertiser())
+        advertiser.start("adapter_recovery")
+        assertEquals(1, host.advertiseDataBuilds)
+
+        // Which is what makes the stop in the facade's recovery runnable
+        // load-bearing rather than defensive.
         advertiser.stop()
-        assertEquals(listOf("Stopped BLE advertising"), seen)
+        advertiser.start("adapter_recovery")
+        assertEquals(2, host.advertiseDataBuilds)
     }
 
     @Test
@@ -93,29 +132,26 @@ class LeAdvertiserTest {
         host.gattReady = false
         advertiser.start("deferred-while-adapter-off")
         assertEquals(listOf("Waiting for GATT service registration"), seen)
+        assertEquals(0, host.advertiseDataBuilds)
 
         // Service registration lands after the adapter came back. The latched
         // reason is what makes this start happen at all.
         advertiser.attachAdvertiser(platformAdvertiser())
         host.gattReady = true
         advertiser.onGattServerReady()
-
-        advertiser.stop()
-        assertEquals(
-            listOf("Waiting for GATT service registration", "Stopped BLE advertising"),
-            seen,
-        )
+        assertEquals(1, host.advertiseDataBuilds)
     }
 
     @Test
     fun `onGattServerReady is inert when no start was ever deferred`() {
-        // Guards the negative half of the test above: the "Stopped BLE
-        // advertising" tell has to come from the latched deferral, not from
-        // onGattServerReady starting unconditionally.
+        // Guards the negative half of the test above: the admitted start there
+        // has to come from the latched deferral, not from onGattServerReady
+        // starting unconditionally.
         host.gattReady = true
         advertiser.attachAdvertiser(platformAdvertiser())
 
         advertiser.onGattServerReady()
+        assertEquals(0, host.advertiseDataBuilds)
 
         advertiser.stop()
         assertEquals(emptyList<String>(), seen)
