@@ -724,6 +724,19 @@ public class NostrManager: NSObject, TransportManager {
     /// life of the connection, which is precisely the standing signal this
     /// design avoids elsewhere. A later relay's records are simply missed, and
     /// the next send to that peer re-queues the lookup.
+    ///
+    /// Releasing the query in the transport is deferred onto `messageQueue`,
+    /// and that is load-bearing rather than tidiness. A relay sends its stored
+    /// events immediately before EOSE, and `handleQueryEvent` hands each to
+    /// `messageQueue` asynchronously — so releasing here, synchronously on the
+    /// WebSocket receive path, can drop the `activeQueries` entry while this
+    /// query's own records are still queued behind it. Those records then find
+    /// an unknown query id and are discarded: cold contact silently fails to
+    /// upgrade, and the peer waits out the resolution rate limit before another
+    /// attempt. `messageQueue` is serial, so hopping onto it puts the release
+    /// strictly after every event already enqueued. The `_activeQueryIds`
+    /// removal and the CLOSE stay synchronous — they must beat the *next*
+    /// relay's EOSE, and they touch nothing the engine owns.
     private func finishQuery(subscriptionId: String) {
         stateLock.lock()
         let wasActive = _activeQueryIds.remove(subscriptionId) != nil
@@ -740,7 +753,9 @@ public class NostrManager: NSObject, TransportManager {
             sendToRelay(relayUrl, message: closeMessage)
         }
 
-        protocolInstance.nostrQueryCompleted(queryId: subscriptionId)
+        messageQueue.async { [weak self] in
+            self?.protocolInstance.nostrQueryCompleted(queryId: subscriptionId)
+        }
     }
 
     // MARK: - WebSocket Message Handling
