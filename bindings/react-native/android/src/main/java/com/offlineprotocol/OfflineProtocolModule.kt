@@ -103,6 +103,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         nostrManager = null
         protocol = null
         stopForegroundService()
+        // Companion field capturing this module — drop it or the module and
+        // its ReactContext outlive teardown.
+        MeshForegroundService.onStopRequestedByUser = null
     }
 
     // MARK: - Host lifecycle (foreground relay heal)
@@ -988,39 +991,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun stop(promise: Promise) {
-        stopProcessScheduler()
-        
-        // Stop BLE manager first
-        bleTransport?.stop()
-        android.util.Log.i(NAME, "BLE Manager stopped")
-        emitDiagnostic("info", "BLE manager stopped")
-        
-        // Stop Internet manager
-        internetManager?.stop()
-        android.util.Log.i(NAME, "Internet Manager stopped")
-        emitDiagnostic("info", "Internet manager stopped")
-
-        // Stop WiFi Direct manager
-        wifiDirectManager?.stop()
-        android.util.Log.i(NAME, "WiFi Direct Manager stopped")
-        emitDiagnostic("info", "WiFi Direct manager stopped")
-
-        // Stop Reticulum manager
-        reticulumManager?.stop()
-        android.util.Log.i(NAME, "Reticulum Manager stopped")
-        emitDiagnostic("info", "Reticulum manager stopped")
-
-        // Stop Nostr manager
-        nostrManager?.stop()
-        android.util.Log.i(NAME, "Nostr Manager stopped")
-        emitDiagnostic("info", "Nostr manager stopped")
-
-        // Stop foreground service
-        stopForegroundService()
-        
         try {
-            protocol?.stop()
-            emitDiagnostic("info", "Protocol stopped")
+            stopTransportsAndProtocol()
             promise.resolve(null)
         } catch (e: Exception) {
             emitDiagnostic("error", "Failed to stop protocol", mapOf(
@@ -1028,6 +1000,111 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 "exception" to e.javaClass.simpleName
             ))
             promise.reject("ERROR_STOP", "Failed to stop protocol: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Stop every transport, the process scheduler, the keep-alive service and
+     * the protocol core. Shared by the JS-facing [stop] and the mesh
+     * notification's Stop action so both tear down identically: the foreground
+     * service is only a keep-alive, and dropping it on its own would leave the
+     * transports and the scheduler running with no process protection.
+     *
+     * Synchronized because those two callers run on different threads and can
+     * overlap — a notification Stop while the app foregrounds and calls `stop()`.
+     * Interleaved passes double-stop the transports mid-teardown, and a throw on
+     * both leaves every later step unreached while the user-stop path still
+     * reports the mesh down. Serialized, the second entrant re-runs the stops
+     * after a completed first pass, which is their idempotent no-op path.
+     *
+     * The keep-alive and the core come down in `finally`: a transport that
+     * throws must not strand the notification advertising an active mesh, nor
+     * leave the core ticking its outbox against stopped transports. The
+     * exception still propagates, so [stop] rejects as it did before.
+     */
+    @Synchronized
+    private fun stopTransportsAndProtocol() {
+        try {
+            stopProcessScheduler()
+
+            // Stop BLE manager first
+            bleTransport?.stop()
+            android.util.Log.i(NAME, "BLE Manager stopped")
+            emitDiagnostic("info", "BLE manager stopped")
+
+            // Stop Internet manager
+            internetManager?.stop()
+            android.util.Log.i(NAME, "Internet Manager stopped")
+            emitDiagnostic("info", "Internet manager stopped")
+
+            // Stop WiFi Direct manager
+            wifiDirectManager?.stop()
+            android.util.Log.i(NAME, "WiFi Direct Manager stopped")
+            emitDiagnostic("info", "WiFi Direct manager stopped")
+
+            // Stop Reticulum manager
+            reticulumManager?.stop()
+            android.util.Log.i(NAME, "Reticulum Manager stopped")
+            emitDiagnostic("info", "Reticulum manager stopped")
+
+            // Stop Nostr manager
+            nostrManager?.stop()
+            android.util.Log.i(NAME, "Nostr Manager stopped")
+            emitDiagnostic("info", "Nostr manager stopped")
+        } finally {
+            // Stop foreground service
+            stopForegroundService()
+
+            protocol?.stop()
+            emitDiagnostic("info", "Protocol stopped")
+        }
+    }
+
+    /**
+     * The user tapped "Stop" on the mesh notification. Runs the same teardown
+     * as the JS-facing [stop], then tells JS — without the event, the app would
+     * keep reporting mesh as active against transports that are now down.
+     *
+     * The service invokes this from its main-thread `onStartCommand`, so the
+     * work moves off that thread: [stopProcessScheduler] blocks for up to
+     * [PROCESS_SHUTDOWN_TIMEOUT_MS] waiting for an in-flight process tick, and
+     * it waits again for any overlapping teardown to release the lock.
+     *
+     * The event fires in `finally` so a throwing transport cannot leave JS
+     * believing the mesh is still up; [stopTransportsAndProtocol] already
+     * guarantees the keep-alive came down on that path.
+     */
+    private fun handleUserRequestedMeshStop() {
+        Thread({
+            try {
+                stopTransportsAndProtocol()
+            } catch (e: Exception) {
+                android.util.Log.e(NAME, "User-requested mesh stop failed", e)
+                emitDiagnostic("error", "User-requested mesh stop failed", mapOf(
+                    "message" to (e.message ?: "unknown"),
+                    "exception" to e.javaClass.simpleName
+                ))
+            } finally {
+                emitMeshStoppedByUserEvent()
+            }
+        }, "mesh-user-stop").start()
+    }
+
+    /**
+     * Reports that the mesh was stopped from the notification's Stop action
+     * rather than through a JS `stop()` call, so the app can reconcile its own
+     * "mesh active" state with a teardown it did not initiate.
+     */
+    private fun emitMeshStoppedByUserEvent() {
+        try {
+            val json = JSONObject()
+            json.put("type", "mesh_stopped_by_user")
+            val params = Arguments.createMap().apply {
+                putString("eventJson", json.toString())
+            }
+            sendEvent(EVENT_NAME, params)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Failed to emit mesh stopped event", e)
         }
     }
 
@@ -3805,6 +3882,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     private fun startForegroundService() {
         try {
+            // Register before the service exists, so the notification's Stop
+            // action always has a host to defer to. The callback lives in a
+            // companion field and captures this module, so invalidate() must
+            // clear it or the module — and the ReactContext it holds — is
+            // pinned for the process lifetime.
+            MeshForegroundService.onStopRequestedByUser = { handleUserRequestedMeshStop() }
             MeshForegroundService.start(reactApplicationContext)
             emitDiagnostic("info", "Mesh foreground service started")
         } catch (e: Exception) {

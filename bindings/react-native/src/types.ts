@@ -1951,6 +1951,20 @@ export interface InternetSessionSupersededEvent extends BaseEvent {
 }
 
 /**
+ * The user stopped the mesh from the Android foreground-service notification's
+ * "Stop" action rather than through a `stop()` call. The SDK has already torn
+ * down the transports, the process scheduler, the keep-alive service and the
+ * protocol core by the time this arrives — it is a notification, not a request
+ * to act. Apps that track mesh state themselves must reconcile it here, or
+ * they will keep reporting an active mesh against stopped transports.
+ *
+ * Android only; iOS has no equivalent notification affordance.
+ */
+export interface MeshStoppedByUserEvent extends BaseEvent {
+  type: 'mesh_stopped_by_user';
+}
+
+/**
  * Relay-side registration state of a group (`groupRelaySyncState`).
  */
 export type RelaySyncState = 'synced' | 'pending' | 'unsynced';
@@ -2019,6 +2033,7 @@ export type ProtocolEvent =
   | InternetServerMessageEvent
   | InternetStatusChangedEvent
   | InternetSessionSupersededEvent
+  | MeshStoppedByUserEvent
   | TypingIndicatorReceivedEvent
   | ReadReceiptReceivedEvent
   | MessageRelayedEvent
