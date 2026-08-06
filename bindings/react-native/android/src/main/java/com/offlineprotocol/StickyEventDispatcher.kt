@@ -37,10 +37,16 @@ package com.offlineprotocol
  * under both the bridge and the New Architecture.
  *
  * @param buffer where undeliverable events wait.
- * @param canEmit whether an emit has any chance of reaching JS. Checked before
- *   [emit] so a caller that builds a payload (a JNI-backed `WritableMap`) does
- *   not build one it will not use, and before [schedule] so a doomed runnable is
- *   never posted.
+ * @param canEmit whether an emit has any chance of reaching JS. Checked on the
+ *   two paths where the answer saves real work: before [send]'s emit, so a
+ *   caller that builds a payload (a JNI-backed `WritableMap`) does not build one
+ *   it will not use, and before [flush]'s [schedule], so a doomed runnable is
+ *   never posted. Deliberately *not* re-checked per entry inside [deliverHeld]:
+ *   the gate was read microseconds earlier when the flush was posted, the batch
+ *   is capped at [StickyEventBuffer.DEFAULT_MAX_ENTRIES], and an [emit] that
+ *   reads a since-shut gate for itself returns false and puts the entry back —
+ *   so the only cost of the missing check is a handful of maps built and
+ *   dropped, against a per-entry gate read on the delivering path.
  * @param emit hands one event's JSON to JS, returning whether it got that far.
  *   Never a delivery receipt — nothing at this layer observes JS receiving
  *   anything — which is why [deliverHeld] drops entries once handed over rather
