@@ -12,7 +12,14 @@ use crate::{Error, Result};
 use chrono::Utc;
 use offline_protocol_core::{Message, UserId};
 use offline_protocol_mls::KeyPackageTrust;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
+
+/// Minimum gap between [`SecurityWarningCode::PushKeyPackagePoolExhausted`]
+/// emissions. Matches the suppression the Nostr slot-exhaustion and
+/// unauthorized-membership reports use, for the same reason: the condition
+/// persists, so an unsuppressed warning reports one cause many times.
+const PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL: Duration = Duration::from_secs(300);
 
 impl OfflineProtocol {
     /// Builds a canonical signing payload using length-prefixed encoding.
@@ -506,6 +513,35 @@ impl OfflineProtocol {
                  is not initialized, and require_encryption is false",
             );
         }
+    }
+
+    /// Emits a [`SecurityWarningCode::PushKeyPackagePoolExhausted`] warning,
+    /// at most once per [`PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL`].
+    ///
+    /// The condition — the per-peer key-package pool at its ceiling, so this
+    /// advertisement reuses a package another peer already holds — persists
+    /// until packages are consumed or expire, and every push meanwhile would
+    /// otherwise emit. Suppressed on time rather than per peer because the
+    /// interesting fact is the pool's state, not which peer happened to ask.
+    pub(super) fn warn_push_key_package_pool_exhausted(&mut self, peer_id: &str) {
+        let now = Instant::now();
+        if let Some(last) = self.last_push_key_package_warning {
+            if now.duration_since(last) < PUSH_KEY_PACKAGE_WARNING_SUPPRESS_INTERVAL {
+                return;
+            }
+        }
+        self.last_push_key_package_warning = Some(now);
+        warn!(
+            peer_id = %peer_id,
+            "Key-package pool at capacity; this peer shares an init key with another"
+        );
+        self.emit_security_warning(
+            peer_id,
+            SecurityWarningCode::PushKeyPackagePoolExhausted,
+            "key-package pool at capacity: this peer was advertised an init key \
+             another peer also holds, weakening forward secrecy at session \
+             establishment until packages are consumed or expire",
+        );
     }
 
     /// Emits a [`SecurityWarningCode::PlaintextReceiveRejected`] warning for

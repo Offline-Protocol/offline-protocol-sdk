@@ -516,6 +516,13 @@ pub struct OfflineProtocol {
     /// When the slot-exhaustion security warning was last emitted, suppressing
     /// repeats for a cause that by nature persists.
     last_nostr_slot_warning: Option<Instant>,
+
+    /// When the push key-package pool-exhaustion warning was last emitted.
+    ///
+    /// Suppressed for the same reason the slot warning is: the condition is a
+    /// pool at its ceiling, which persists until packages are consumed or
+    /// expire, and every push while it holds would otherwise emit.
+    last_push_key_package_warning: Option<Instant>,
 }
 
 impl Drop for OfflineProtocol {
@@ -687,6 +694,7 @@ impl OfflineProtocol {
             last_nostr_slot_refresh: None,
             nostr_publication_backoff: HashMap::new(),
             last_nostr_slot_warning: None,
+            last_push_key_package_warning: None,
             config,
         })
     }

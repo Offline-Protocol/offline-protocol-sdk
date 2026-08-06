@@ -22,6 +22,29 @@ use uuid::Uuid;
 /// Default lifetime for key packages (30 days in seconds).
 const DEFAULT_KEY_PACKAGE_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
 
+/// How long an expired key package's private init key is kept before it is
+/// destroyed (7 days in seconds).
+///
+/// Expiry stops a package being advertised; this window is what still lets a
+/// Welcome built against it just before that moment be processed. Past it the
+/// material is genuinely deleted — without this, every package this device ever
+/// minted would keep its init key in provider storage for the life of the
+/// install, because the only other thing that removes one is a peer actually
+/// using it.
+const KEY_PACKAGE_PURGE_GRACE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Ceiling on live, unconsumed key packages the push path will keep in flight.
+///
+/// The pool is normally self-limiting: one package per peer, minted only when
+/// that peer's previous one was consumed or expired, so its size tracks the
+/// number of peers with an outstanding unused advertisement. This is the
+/// backstop for the case where it does not — a device meeting an unbounded
+/// stream of peers that never establish sessions. Reaching it degrades the
+/// push path to sharing one package again, which is what it did unconditionally
+/// before, so the failure mode is the old behaviour rather than a new one; it
+/// is reported (see `PushKeyPackagePoolExhausted`) rather than left silent.
+pub const MAX_PUSH_KEY_PACKAGES: usize = 64;
+
 /// What the caller knows about the identity behind a key package.
 ///
 /// RFC 9420 delegates credential validation to an Authentication Service that
@@ -47,6 +70,26 @@ pub enum KeyPackageTrust<'a> {
     /// holding one silently discards the only check that distinguishes the peer
     /// from anyone who can write the string `bob` into a basic credential.
     FirstUse,
+}
+
+/// A key package handed to the push path, plus how healthy the pool was.
+///
+/// The flag is not an error: the package is usable either way. It reports that
+/// the pool hit [`MAX_PUSH_KEY_PACKAGES`] and this package is therefore shared
+/// with another peer, which is the one condition under which the push path
+/// still has the reuse shape it otherwise no longer has.
+#[derive(Debug, Clone)]
+pub struct PushKeyPackage {
+    /// The package to advertise.
+    pub bundle: KeyPackageBundle,
+    /// Whether the pool ceiling forced this package to be shared.
+    pub pool_exhausted: bool,
+}
+
+/// Whether `candidate` was minted more recently than `current`, treating an
+/// absent `current` as older than anything.
+fn newer_than(candidate: &KeyPackageBundle, current: Option<&KeyPackageBundle>) -> bool {
+    current.is_none_or(|existing| candidate.created_at_ms > existing.created_at_ms)
 }
 
 /// Main MLS manager for end-to-end encryption.
@@ -262,6 +305,16 @@ impl MlsManager {
             .tls_serialize_detached()
             .map_err(|e| MlsError::Serialization(e.to_string()))?;
 
+        // Stamped now because deriving it later from the serialized bytes
+        // costs a parse plus a signature validation, which the pool scan
+        // would pay per stored package per push. Best-effort: a record
+        // without it takes the derive path once and is backfilled on load.
+        let provider_hash_ref = key_package_bundle
+            .key_package()
+            .hash_ref(self.provider.crypto())
+            .ok()
+            .and_then(|hash_ref| hash_ref.tls_serialize_detached().ok());
+
         let package_id = Uuid::new_v4().to_string();
 
         let key_type = StorageKeyType::KeyPackage.as_str();
@@ -272,6 +325,7 @@ impl MlsManager {
             DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
         );
         bundle.reserved_for_publication = reserved;
+        bundle.provider_hash_ref = provider_hash_ref;
         let serialized =
             serde_json::to_vec(&bundle).map_err(|e| MlsError::Serialization(e.to_string()))?;
         self.storage
@@ -281,19 +335,30 @@ impl MlsManager {
         Ok(bundle)
     }
 
-    /// Gets an existing key package or generates a new one, for the push path.
+    /// Gets an existing *unclaimed* key package or generates a new one.
     ///
-    /// Skips packages reserved for publication slots: handing one out here
-    /// would let a pushed-to peer and a stranger who fetched the published
-    /// record race for the same single-use init key, and the loser's Welcome
-    /// is unprocessable.
+    /// Two kinds of package are skipped, for the same underlying reason — an
+    /// MLS init key is consumed by its first user, so two parties must never be
+    /// pointed at one:
+    ///
+    /// - packages reserved for publication slots, or a pushed-to peer and a
+    ///   stranger who fetched the published record would race for it;
+    /// - packages already claimed by a peer over the push path
+    ///   ([`Self::take_push_key_package`]), or this peer-less entry point would
+    ///   hand out a key another peer is expected to use.
+    ///
+    /// This is the peer-less escape hatch (the FFI surface and tests). Callers
+    /// that know the recipient should use [`Self::take_push_key_package`],
+    /// which is what actually holds the one-key-per-peer property; a package
+    /// handed out here is unclaimed, so the push path may later claim it for
+    /// the first peer it is pushed to.
     pub fn get_or_create_key_package(&self) -> Result<KeyPackageBundle> {
         let key_type = StorageKeyType::KeyPackage.as_str();
         let packages = self.storage.list_keys(key_type)?;
 
         for package_id in packages {
             if let Some(bundle) = self.load_stored_key_package(&package_id)? {
-                if bundle.reserved_for_publication {
+                if bundle.reserved_for_publication || bundle.assigned_peer.is_some() {
                     continue;
                 }
                 return Ok(bundle);
@@ -301,6 +366,152 @@ impl MlsManager {
         }
 
         self.generate_key_package()
+    }
+
+    /// Hands `peer_id` the key package to advertise to it, minting one if it
+    /// has no live package of its own.
+    ///
+    /// This is the push path's entry point, and the whole point of it is that
+    /// two peers never receive the same init key. Before this existed the push
+    /// path returned the first stored package to every caller until somebody's
+    /// Welcome consumed it — the LastResort-style reuse RFC 9420 §16.8 permits
+    /// only as a denial-of-service fallback, and which the Least Authority MDK
+    /// audit flagged as enabling unsolicited joins and cross-group linkage. It
+    /// also made a second peer's Welcome unprocessable once the first had used
+    /// the key, with nothing to re-drive the exchange.
+    ///
+    /// Assignment is stored on the package rather than in a separate map, so it
+    /// survives restarts for free and cannot disagree with the pool it
+    /// describes. Resolution order:
+    ///
+    /// 1. this peer's own live package — a repeat push costs no new material;
+    /// 2. an unclaimed package (minted by the peer-less entry point, or by a
+    ///    build predating assignment), claimed here so upgrading does not
+    ///    strand it;
+    /// 3. a freshly minted package, claimed for this peer.
+    ///
+    /// Past [`MAX_PUSH_KEY_PACKAGES`] live packages it stops growing the pool
+    /// and reuses the newest one, reporting that through
+    /// [`PushKeyPackage::pool_exhausted`] so the caller can surface it. That is
+    /// a deliberate degradation to the old behaviour rather than an error: the
+    /// alternative — refusing to advertise, or evicting a package a peer may
+    /// still be about to use — costs session establishment, which is worse than
+    /// the weakened forward secrecy it would buy.
+    ///
+    /// Only step 3 is gated by the ceiling, because only minting grows the
+    /// pool: claiming an unclaimed package relabels one that already exists, so
+    /// degrading to a shared package while a claimable one sits idle would buy
+    /// nothing. A corollary is that the shared package is always assigned to
+    /// *another* peer — reaching that branch means neither an own nor an
+    /// unclaimed package was found — and "newest" makes it the most recently
+    /// assigned one, which has the most lifetime left but is also the peer most
+    /// likely to be mid-establishment. If the over-ceiling peer's Welcome lands
+    /// first, that peer's held advertisement becomes unprocessable until the
+    /// next push to it mints a successor. Sharing the oldest instead would
+    /// trade that for the shortest remaining lifetime; neither is free, and the
+    /// exhaustion report is what makes the condition visible either way.
+    ///
+    /// Consumption is what rotates a peer's key: a Welcome built against the
+    /// package removes its init key from provider storage, the loader then
+    /// reports the package gone, and the next push to that peer mints a fresh
+    /// one.
+    pub fn take_push_key_package(&self, peer_id: &str) -> Result<PushKeyPackage> {
+        let key_type = StorageKeyType::KeyPackage.as_str();
+        let package_ids = self.storage.list_keys(key_type)?;
+
+        let mut live = 0usize;
+        let mut assigned_here: Option<KeyPackageBundle> = None;
+        let mut unclaimed: Option<KeyPackageBundle> = None;
+        let mut newest: Option<KeyPackageBundle> = None;
+
+        // One pass, which also does the pruning: `load_stored_key_package`
+        // drops consumed and long-expired entries as it reads them, so the
+        // count below is of genuinely usable packages.
+        for package_id in package_ids {
+            let Some(bundle) = self.load_stored_key_package(&package_id)? else {
+                continue;
+            };
+            if bundle.reserved_for_publication {
+                continue;
+            }
+            live += 1;
+
+            if bundle.assigned_peer.as_deref() == Some(peer_id) {
+                // Newest wins if a past interruption left this peer two.
+                if newer_than(&bundle, assigned_here.as_ref()) {
+                    assigned_here = Some(bundle.clone());
+                }
+            } else if bundle.assigned_peer.is_none() && newer_than(&bundle, unclaimed.as_ref()) {
+                unclaimed = Some(bundle.clone());
+            }
+
+            if newer_than(&bundle, newest.as_ref()) {
+                newest = Some(bundle);
+            }
+        }
+
+        if let Some(bundle) = assigned_here {
+            return Ok(PushKeyPackage {
+                bundle,
+                pool_exhausted: false,
+            });
+        }
+
+        // Before the ceiling check, not after: claiming relabels a package that
+        // already exists, so it cannot breach a bound on how many exist.
+        if let Some(bundle) = unclaimed {
+            return Ok(PushKeyPackage {
+                bundle: self.claim_key_package(bundle, peer_id)?,
+                pool_exhausted: false,
+            });
+        }
+
+        // Minting is the only thing left that would grow the pool, so it is the
+        // only thing the ceiling gates.
+        if live >= MAX_PUSH_KEY_PACKAGES {
+            // `live` is non-zero here, so `newest` is `Some`; minting on the
+            // unreachable branch keeps this total without an unwrap.
+            if let Some(bundle) = newest {
+                debug!(
+                    peer_id = %peer_id,
+                    live = live,
+                    "Push key-package pool at capacity; reusing an existing package"
+                );
+                return Ok(PushKeyPackage {
+                    bundle,
+                    pool_exhausted: true,
+                });
+            }
+        }
+
+        let bundle = self.claim_key_package(self.generate_key_package()?, peer_id)?;
+
+        Ok(PushKeyPackage {
+            bundle,
+            pool_exhausted: false,
+        })
+    }
+
+    /// Records `peer_id` as the owner of `bundle` and persists the claim.
+    fn claim_key_package(
+        &self,
+        mut bundle: KeyPackageBundle,
+        peer_id: &str,
+    ) -> Result<KeyPackageBundle> {
+        bundle.assigned_peer = Some(peer_id.to_string());
+        let serialized =
+            serde_json::to_vec(&bundle).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        self.storage.store(
+            StorageKeyType::KeyPackage.as_str(),
+            &bundle.package_id,
+            &serialized,
+        )?;
+        debug!(
+            package_id = %bundle.package_id,
+            peer_id = %peer_id,
+            "Assigned key package to peer"
+        );
+        Ok(bundle)
     }
 
     /// Loads a specific key package this device owns, or `None` if it is gone.
@@ -322,10 +533,37 @@ impl MlsManager {
     /// references it — nothing else would remove it before its lifetime runs
     /// out, so a repeatedly failing publish would otherwise strand fresh
     /// provider key material every refresh.
+    ///
+    /// "Strand" is meant literally, which is why this destroys the private init
+    /// key too: deleting the bundle record alone leaves the material OpenMLS
+    /// holds in place with nothing left pointing at it.
     pub fn delete_key_package(&self, package_id: &str) -> Result<()> {
-        self.storage
-            .delete(StorageKeyType::KeyPackage.as_str(), package_id)?;
-        Ok(())
+        let Some(data) = self
+            .storage
+            .load(StorageKeyType::KeyPackage.as_str(), package_id)?
+        else {
+            return Ok(());
+        };
+
+        match serde_json::from_slice::<KeyPackageBundle>(&data) {
+            Ok(bundle) => self.purge_key_package_material(package_id, &bundle),
+            // Legacy raw storage: the record *is* the serialized key package,
+            // the same reading `load_stored_key_package` applies when it
+            // upgrades one. Wrapping it lets the purge derive the provider ref
+            // and destroy the init key instead of stranding it — and if the
+            // bytes are not a key package at all, the purge finds no ref and
+            // falls back to deleting the record, which is all that is left to
+            // do for a record that names nothing.
+            Err(_) => {
+                let legacy = KeyPackageBundle::new(
+                    package_id.to_string(),
+                    self.user_id.clone(),
+                    data,
+                    DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
+                );
+                self.purge_key_package_material(package_id, &legacy)
+            }
+        }
     }
 
     /// Imports a contact's key package for later use.
@@ -1062,7 +1300,7 @@ impl MlsManager {
             None => return Ok(None),
         };
 
-        let bundle = match serde_json::from_slice::<KeyPackageBundle>(&data) {
+        let mut bundle = match serde_json::from_slice::<KeyPackageBundle>(&data) {
             Ok(bundle) => bundle,
             Err(_) => {
                 let legacy_bundle = KeyPackageBundle::new(
@@ -1079,11 +1317,33 @@ impl MlsManager {
         };
 
         if bundle.is_expired() {
-            self.storage.delete(key_type, package_id)?;
+            // Expiry and key destruction are separate moments on purpose. A
+            // peer handed this package shortly before it expired may still
+            // Welcome us, and that Welcome is only processable while the init
+            // key is resident — so the record is kept (invisible to every
+            // caller, since they all read through here) until the grace window
+            // closes, and only then is the material destroyed.
+            if bundle.expired_past_grace(KEY_PACKAGE_PURGE_GRACE_SECS) {
+                self.purge_key_package_material(package_id, &bundle)?;
+            }
             return Ok(None);
         }
 
-        if !self.is_key_package_usable(&bundle.key_package_data) {
+        // Usability means the private init key is still in provider storage.
+        // The lookup key is cached on the record; deriving it instead is the
+        // expensive path (a parse plus a signature validation), paid once for
+        // records written before the cache existed and stamped back below so
+        // their next load is cheap.
+        let needs_backfill = bundle.provider_hash_ref.is_none();
+        let Some(hash_ref) = self.bundle_hash_ref(&bundle) else {
+            warn!(
+                package_id = %package_id,
+                "Key package bytes no longer parse as a key package, pruning stale entry"
+            );
+            self.storage.delete(key_type, package_id)?;
+            return Ok(None);
+        };
+        if !self.provider_has_init_key(&hash_ref) {
             warn!(
                 package_id = %package_id,
                 "Key package private key no longer in provider storage, pruning stale entry"
@@ -1092,33 +1352,99 @@ impl MlsManager {
             return Ok(None);
         }
 
-        let serialized =
-            serde_json::to_vec(&bundle).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        self.storage.store(key_type, package_id, &serialized)?;
+        if needs_backfill {
+            if let Ok(bytes) = hash_ref.tls_serialize_detached() {
+                bundle.provider_hash_ref = Some(bytes);
+                let serialized = serde_json::to_vec(&bundle)
+                    .map_err(|e| MlsError::Serialization(e.to_string()))?;
+                self.storage.store(key_type, package_id, &serialized)?;
+            }
+        }
 
         Ok(Some(bundle))
     }
 
-    /// Checks whether a key package's private init key is still present in
-    /// the OpenMLS provider storage. Returns `false` when the key material
-    /// has been consumed (e.g. by processing a Welcome) or was never stored.
-    fn is_key_package_usable(&self, key_package_data: &[u8]) -> bool {
-        let kp_in = match KeyPackageIn::tls_deserialize_exact(key_package_data) {
-            Ok(kp) => kp,
-            Err(_) => return false,
-        };
-        let kp: KeyPackage = match kp_in.validate(self.provider.crypto(), ProtocolVersion::Mls10) {
-            Ok(kp) => kp,
-            Err(_) => return false,
-        };
-        let hash_ref = match kp.hash_ref(self.provider.crypto()) {
-            Ok(hr) => hr,
-            Err(_) => return false,
-        };
+    /// Destroys a key package: its bundle record *and* the private init key
+    /// OpenMLS holds for it.
+    ///
+    /// Deleting the record alone — which is all this crate used to do — leaves
+    /// the init key resident forever, because the only other thing that removes
+    /// one is OpenMLS consuming it to process a Welcome. That turns every
+    /// expired or reclaimed package into permanently retained key material,
+    /// which is exactly the property the lifetime was supposed to bound.
+    ///
+    /// The provider key goes first: if that fails, the record is deliberately
+    /// left in place so the next scan retries rather than orphaning key
+    /// material no record points at any more. The package is already out of
+    /// every caller's reach by the time this runs, so a retained record costs
+    /// one storage read per scan and nothing else.
+    fn purge_key_package_material(
+        &self,
+        package_id: &str,
+        bundle: &KeyPackageBundle,
+    ) -> Result<()> {
+        if let Some(hash_ref) = self.bundle_hash_ref(bundle) {
+            use openmls_traits::storage::StorageProvider;
+            if let Err(e) = self.provider.storage().delete_key_package(&hash_ref) {
+                warn!(
+                    package_id = %package_id,
+                    error = %e,
+                    "Failed to delete a key package's private init key; keeping the record to retry"
+                );
+                return Ok(());
+            }
+        }
+
+        self.storage
+            .delete(StorageKeyType::KeyPackage.as_str(), package_id)?;
+        debug!(package_id = %package_id, "Purged key package and its init key");
+        Ok(())
+    }
+
+    /// Computes the OpenMLS hash reference a key package's private material is
+    /// stored under, or `None` if the bytes no longer parse as a key package.
+    ///
+    /// This is the expensive path — a TLS parse plus a signature validation —
+    /// that [`KeyPackageBundle::provider_hash_ref`] caches the result of; go
+    /// through [`Self::bundle_hash_ref`] when a bundle is in hand.
+    fn key_package_hash_ref(&self, key_package_data: &[u8]) -> Option<KeyPackageRef> {
+        let kp_in = KeyPackageIn::tls_deserialize_exact(key_package_data).ok()?;
+        let kp: KeyPackage = kp_in
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+            .ok()?;
+        kp.hash_ref(self.provider.crypto()).ok()
+    }
+
+    /// Resolves the provider hash reference for one of this device's bundles:
+    /// the copy cached at mint time when present and decodable, else derived
+    /// from the serialized package bytes.
+    fn bundle_hash_ref(&self, bundle: &KeyPackageBundle) -> Option<KeyPackageRef> {
+        bundle
+            .provider_hash_ref
+            .as_deref()
+            .and_then(|bytes| KeyPackageRef::tls_deserialize_exact(bytes).ok())
+            .or_else(|| self.key_package_hash_ref(&bundle.key_package_data))
+    }
+
+    /// Whether the private init key `hash_ref` names is still in the OpenMLS
+    /// provider storage. Absent means consumed (a Welcome was processed
+    /// against it) or never stored.
+    fn provider_has_init_key(&self, hash_ref: &KeyPackageRef) -> bool {
         use openmls_traits::storage::StorageProvider;
         let found: std::result::Result<Option<openmls::key_packages::KeyPackageBundle>, _> =
-            self.provider.storage().key_package(&hash_ref);
+            self.provider.storage().key_package(hash_ref);
         matches!(found, Ok(Some(_)))
+    }
+
+    /// Ground-truth usability check from the serialized package bytes alone,
+    /// bypassing the cached provider ref. Test-only so tests observe the
+    /// provider directly rather than a cache they may be manipulating;
+    /// production reads go through [`Self::bundle_hash_ref`].
+    #[cfg(test)]
+    fn is_key_package_usable(&self, key_package_data: &[u8]) -> bool {
+        self.key_package_hash_ref(key_package_data)
+            .map(|hash_ref| self.provider_has_init_key(&hash_ref))
+            .unwrap_or(false)
     }
 
     /// Loads group metadata from storage.
@@ -1226,12 +1552,18 @@ impl MlsManager {
     ///
     /// # Arguments
     ///
-    /// * `min` - Minimum number of key packages to maintain
+    /// * `min` - Minimum number of key packages to maintain, capped at
+    ///   [`MAX_PUSH_KEY_PACKAGES`]. The packages this mints are unclaimed, so
+    ///   [`Self::take_push_key_package`] draws them down one per peer; asking
+    ///   for more than the pool ceiling would only mint key material that
+    ///   ceiling stops it ever handing out, while holding the pool at capacity
+    ///   so every peer past the last claim is advertised a shared package.
     ///
     /// # Returns
     ///
     /// Returns the total number of valid key packages after ensuring minimum.
     pub fn ensure_min_key_packages(&self, min: usize) -> Result<usize> {
+        let min = min.min(MAX_PUSH_KEY_PACKAGES);
         let key_type = StorageKeyType::KeyPackage.as_str();
         let package_ids = self.storage.list_keys(key_type)?;
 
@@ -1387,6 +1719,283 @@ mod tests {
         MlsManager::new(user_id, storage).unwrap()
     }
 
+    /// Same, but keeps a handle on the storage so a test can age a package in
+    /// place — the only way to reach the expiry and purge paths without either
+    /// waiting 30 days or making the clock injectable.
+    fn create_test_manager_with_storage(user_id: &str) -> (MlsManager, Arc<InMemoryStorage>) {
+        let storage = Arc::new(InMemoryStorage::new());
+        let manager = MlsManager::new(user_id, storage.clone()).unwrap();
+        (manager, storage)
+    }
+
+    /// Rewrites a stored package's expiry to `secs_ago` seconds in the past.
+    fn expire_package(storage: &InMemoryStorage, package_id: &str, secs_ago: u64) {
+        let key_type = StorageKeyType::KeyPackage.as_str();
+        let data = storage
+            .load(key_type, package_id)
+            .unwrap()
+            .expect("package to age is not in storage");
+        let mut bundle: KeyPackageBundle = serde_json::from_slice(&data).unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        bundle.expires_at_ms = now_ms - (secs_ago * 1000);
+        storage
+            .store(key_type, package_id, &serde_json::to_vec(&bundle).unwrap())
+            .unwrap();
+    }
+
+    /// Whether the private init key for `bundle` is still in provider storage.
+    fn init_key_present(manager: &MlsManager, bundle: &KeyPackageBundle) -> bool {
+        manager.is_key_package_usable(&bundle.key_package_data)
+    }
+
+    /// Rewrites a stored package's record without its cached provider hash
+    /// ref, the way a build predating the cache would have written it.
+    fn strip_cached_ref(storage: &InMemoryStorage, package_id: &str) {
+        let key_type = StorageKeyType::KeyPackage.as_str();
+        let data = storage
+            .load(key_type, package_id)
+            .unwrap()
+            .expect("package to strip is not in storage");
+        let mut bundle: KeyPackageBundle = serde_json::from_slice(&data).unwrap();
+        bundle.provider_hash_ref = None;
+        storage
+            .store(key_type, package_id, &serde_json::to_vec(&bundle).unwrap())
+            .unwrap();
+    }
+
+    /// The provider hash ref is stamped at mint so the pool scan never pays a
+    /// TLS parse plus a signature validation per stored package per push —
+    /// unstamped, a scan-heavy path (many peers, full pool) costs tens of
+    /// debug-build seconds.
+    #[test]
+    fn test_minted_package_carries_its_provider_hash_ref() {
+        let manager = create_test_manager("alice");
+        let bundle = manager.take_push_key_package("bob").unwrap().bundle;
+
+        let cached = bundle
+            .provider_hash_ref
+            .as_deref()
+            .expect("mint must stamp the provider hash ref");
+        let derived = manager
+            .key_package_hash_ref(&bundle.key_package_data)
+            .expect("freshly minted package bytes must parse")
+            .tls_serialize_detached()
+            .unwrap();
+        assert_eq!(
+            cached,
+            &derived[..],
+            "cached ref disagrees with the one derived from the package bytes"
+        );
+    }
+
+    /// Records written before the cache existed take the derive path once and
+    /// are stamped back, so every later load is cheap.
+    #[test]
+    fn test_record_without_cached_ref_is_backfilled_on_first_load() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        let minted = manager.take_push_key_package("bob").unwrap().bundle;
+        strip_cached_ref(&storage, &minted.package_id);
+
+        let loaded = manager
+            .key_package_by_id(&minted.package_id)
+            .unwrap()
+            .expect("a record without a cached ref must still load");
+        assert_eq!(
+            loaded.provider_hash_ref, minted.provider_hash_ref,
+            "load must hand back a bundle stamped with the same ref the mint computed"
+        );
+
+        let stored: KeyPackageBundle = serde_json::from_slice(
+            &storage
+                .load(StorageKeyType::KeyPackage.as_str(), &minted.package_id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stored.provider_hash_ref, minted.provider_hash_ref,
+            "the backfilled ref must be persisted, not only returned"
+        );
+    }
+
+    /// The purge destroys key material for pre-cache records too, deriving
+    /// the ref they never carried.
+    #[test]
+    fn test_purge_destroys_init_key_for_a_record_without_cached_ref() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        let bundle = manager.take_push_key_package("bob").unwrap().bundle;
+        strip_cached_ref(&storage, &bundle.package_id);
+        expire_package(
+            &storage,
+            &bundle.package_id,
+            KEY_PACKAGE_PURGE_GRACE_SECS + 60,
+        );
+
+        assert!(manager
+            .key_package_by_id(&bundle.package_id)
+            .unwrap()
+            .is_none());
+        assert!(
+            !init_key_present(&manager, &bundle),
+            "the private init key outlived a pre-cache package"
+        );
+    }
+
+    /// An expired package stops being advertised immediately, but its init key
+    /// has to outlive the last advertisement: a peer handed it just before
+    /// expiry may still Welcome us, and that Welcome is only processable while
+    /// the key is resident.
+    #[test]
+    fn test_expired_package_is_withdrawn_but_its_init_key_survives_the_grace_window() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        let bundle = manager.take_push_key_package("bob").unwrap().bundle;
+
+        expire_package(&storage, &bundle.package_id, 60);
+
+        assert!(
+            manager
+                .key_package_by_id(&bundle.package_id)
+                .unwrap()
+                .is_none(),
+            "an expired package must not be handed out"
+        );
+        assert!(
+            init_key_present(&manager, &bundle),
+            "the init key was destroyed on the expiry edge, breaking a late Welcome"
+        );
+
+        // The next push to that peer mints a replacement rather than reviving it.
+        let replacement = manager.take_push_key_package("bob").unwrap().bundle;
+        assert_ne!(replacement.package_id, bundle.package_id);
+    }
+
+    /// Past the grace window the key material is genuinely destroyed. Without
+    /// this, every package this device ever minted keeps its init key for the
+    /// life of the install — deleting the bundle record, which is all this
+    /// crate used to do, never touched the key OpenMLS holds.
+    #[test]
+    fn test_package_past_the_grace_window_has_its_init_key_destroyed() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        let bundle = manager.take_push_key_package("bob").unwrap().bundle;
+        assert!(init_key_present(&manager, &bundle));
+
+        expire_package(
+            &storage,
+            &bundle.package_id,
+            KEY_PACKAGE_PURGE_GRACE_SECS + 60,
+        );
+
+        // The purge runs as a side effect of the scan that reads it.
+        assert!(manager
+            .key_package_by_id(&bundle.package_id)
+            .unwrap()
+            .is_none());
+
+        assert!(
+            !init_key_present(&manager, &bundle),
+            "the private init key outlived its package"
+        );
+        assert!(
+            storage
+                .load(StorageKeyType::KeyPackage.as_str(), &bundle.package_id)
+                .unwrap()
+                .is_none(),
+            "the bundle record outlived its key material"
+        );
+    }
+
+    /// Reclaiming an unpublished package has to reclaim the key too, for the
+    /// same reason — the publication path mints one per failed refresh, and a
+    /// record-only delete would strand fresh key material every time.
+    #[test]
+    fn test_delete_key_package_destroys_the_init_key() {
+        let manager = create_test_manager("alice");
+        let bundle = manager.generate_publication_key_package().unwrap();
+        assert!(init_key_present(&manager, &bundle));
+
+        manager.delete_key_package(&bundle.package_id).unwrap();
+
+        assert!(
+            !init_key_present(&manager, &bundle),
+            "delete_key_package left the private init key in provider storage"
+        );
+    }
+
+    /// A legacy record — raw key package bytes rather than a serialized bundle,
+    /// which `load_stored_key_package` still upgrades in place — must have its
+    /// init key destroyed too. Reading the record as unparseable and deleting
+    /// only the record is what strands key material.
+    #[test]
+    fn test_delete_key_package_destroys_the_init_key_of_a_legacy_record() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        let bundle = manager.generate_publication_key_package().unwrap();
+        // Rewrite the record the way a build predating the bundle wrote it.
+        storage
+            .store(
+                StorageKeyType::KeyPackage.as_str(),
+                &bundle.package_id,
+                &bundle.key_package_data,
+            )
+            .unwrap();
+
+        manager.delete_key_package(&bundle.package_id).unwrap();
+
+        assert!(
+            !init_key_present(&manager, &bundle),
+            "a legacy record's private init key survived its deletion"
+        );
+        assert!(
+            storage
+                .load(StorageKeyType::KeyPackage.as_str(), &bundle.package_id)
+                .unwrap()
+                .is_none(),
+            "the legacy record outlived its key material"
+        );
+    }
+
+    /// A record whose bytes name no key package at all still gets deleted —
+    /// there is no material to destroy, and leaving it would make the pool scan
+    /// carry it forever.
+    #[test]
+    fn test_delete_key_package_removes_an_unreadable_record() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        storage
+            .store(
+                StorageKeyType::KeyPackage.as_str(),
+                "junk",
+                b"not a package",
+            )
+            .unwrap();
+
+        manager.delete_key_package("junk").unwrap();
+
+        assert!(storage
+            .load(StorageKeyType::KeyPackage.as_str(), "junk")
+            .unwrap()
+            .is_none());
+    }
+
+    /// `ensure_min_key_packages` mints *unclaimed* packages, which the push
+    /// path draws down one per peer. Minting past the pool ceiling would put
+    /// material in storage that the ceiling then stops it ever handing out,
+    /// while pinning the pool at capacity so every peer past the last claim is
+    /// advertised a shared init key.
+    #[test]
+    fn test_ensure_min_key_packages_is_capped_at_the_pool_ceiling() {
+        let manager = create_test_manager("alice");
+
+        let count = manager
+            .ensure_min_key_packages(MAX_PUSH_KEY_PACKAGES + 50)
+            .unwrap();
+
+        assert_eq!(count, MAX_PUSH_KEY_PACKAGES);
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            MAX_PUSH_KEY_PACKAGES,
+            "pre-filling minted past the ceiling the push path enforces"
+        );
+    }
+
     #[test]
     fn test_manager_creation() {
         let manager = create_test_manager("alice");
@@ -1464,6 +2073,243 @@ mod tests {
         // IF the logic reuses existing key packages.
         // get_or_create_key_package logic iterates list_keys.
         assert_eq!(pkg1.package_id, pkg2.package_id);
+    }
+
+    // ========================================================================
+    // PUSH-PATH KEY PACKAGE POOL
+    // ========================================================================
+
+    /// The property the whole per-peer pool exists for: two peers must never be
+    /// advertised the same init key. Sharing one weakens forward secrecy at
+    /// session establishment (a single compromised init key opens every Welcome
+    /// built against it) and is the LastResort-style reuse RFC 9420 §16.8
+    /// permits only as a denial-of-service fallback.
+    #[test]
+    fn test_push_path_gives_each_peer_its_own_key_package() {
+        let manager = create_test_manager("alice");
+
+        let for_bob = manager.take_push_key_package("bob").unwrap();
+        let for_carol = manager.take_push_key_package("carol").unwrap();
+
+        assert_ne!(
+            for_bob.bundle.package_id, for_carol.bundle.package_id,
+            "two peers were advertised the same key package"
+        );
+        assert_ne!(
+            for_bob.bundle.key_package_data, for_carol.bundle.key_package_data,
+            "two peers were advertised the same init key"
+        );
+        assert!(!for_bob.pool_exhausted && !for_carol.pool_exhausted);
+        assert_eq!(for_bob.bundle.assigned_peer.as_deref(), Some("bob"));
+        assert_eq!(for_carol.bundle.assigned_peer.as_deref(), Some("carol"));
+    }
+
+    /// The other half of the property: a repeat push to one peer must NOT mint
+    /// fresh key material. Pushes to the same peer are routine (rediscovery,
+    /// session establishment, group invites), and minting per push would grow
+    /// the pool without bound and hit the ceiling within days.
+    #[test]
+    fn test_push_path_reuses_one_package_for_repeat_pushes_to_a_peer() {
+        let manager = create_test_manager("alice");
+
+        let first = manager.take_push_key_package("bob").unwrap();
+        let second = manager.take_push_key_package("bob").unwrap();
+        let third = manager.take_push_key_package("bob").unwrap();
+
+        assert_eq!(first.bundle.package_id, second.bundle.package_id);
+        assert_eq!(first.bundle.package_id, third.bundle.package_id);
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            1,
+            "repeat pushes to one peer minted extra key material"
+        );
+    }
+
+    /// A peer's package is rotated by *consumption*, not by time: once a
+    /// Welcome built against it has been processed the init key is gone, and
+    /// the next push to that peer must mint a fresh one rather than re-handing
+    /// a package nobody can use.
+    #[test]
+    fn test_push_path_mints_a_fresh_package_after_the_peer_consumed_one() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+
+        let advertised = alice.take_push_key_package("bob").unwrap().bundle;
+        bob.import_key_package(
+            "alice",
+            &advertised.key_package_data,
+            KeyPackageTrust::FirstUse,
+        )
+        .unwrap();
+        let welcome = bob.create_session("alice").unwrap();
+        alice.join_session(&welcome).unwrap();
+
+        let next = alice.take_push_key_package("bob").unwrap();
+        assert_ne!(
+            next.bundle.package_id, advertised.package_id,
+            "a consumed package was advertised again"
+        );
+        assert!(!next.pool_exhausted);
+    }
+
+    /// The race the old shape created, end to end: one package handed to two
+    /// peers means the second Welcome is built against an init key the first
+    /// has already consumed, and it can never be processed. Nothing re-drives
+    /// the exchange, so that peer is stuck.
+    #[test]
+    fn test_two_peers_can_both_establish_sessions_after_being_pushed_to() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let carol = create_test_manager("carol");
+
+        for (peer, manager) in [("bob", &bob), ("carol", &carol)] {
+            let advertised = alice.take_push_key_package(peer).unwrap().bundle;
+            manager
+                .import_key_package(
+                    "alice",
+                    &advertised.key_package_data,
+                    KeyPackageTrust::FirstUse,
+                )
+                .unwrap();
+        }
+
+        // Both Welcomes are built before either is processed — the interleaving
+        // that makes shared init keys fail.
+        let from_bob = bob.create_session("alice").unwrap();
+        let from_carol = carol.create_session("alice").unwrap();
+
+        alice.join_session(&from_bob).unwrap();
+        alice
+            .join_session(&from_carol)
+            .expect("second peer's Welcome must still be processable");
+
+        assert!(alice.has_session("bob").unwrap());
+        assert!(alice.has_session("carol").unwrap());
+    }
+
+    /// Publication slots stay off-limits to the push path for the same
+    /// single-use reason, now via the peer-keyed entry point.
+    #[test]
+    fn test_push_path_never_takes_a_publication_package() {
+        let manager = create_test_manager("alice");
+        let reserved = manager.generate_publication_key_package().unwrap();
+
+        for peer in ["bob", "carol", "dave"] {
+            let taken = manager.take_push_key_package(peer).unwrap();
+            assert_ne!(
+                taken.bundle.package_id, reserved.package_id,
+                "the push path took the package a published record stands on"
+            );
+        }
+    }
+
+    /// The peer-less entry point (the FFI surface and tests) must not hand out
+    /// a package a peer is expected to use, or it re-opens the cross-peer
+    /// sharing the pool prevents.
+    #[test]
+    fn test_get_or_create_never_returns_a_peer_assigned_package() {
+        let manager = create_test_manager("alice");
+        let for_bob = manager.take_push_key_package("bob").unwrap().bundle;
+
+        let unclaimed = manager.get_or_create_key_package().unwrap();
+        assert_ne!(unclaimed.package_id, for_bob.package_id);
+        assert!(unclaimed.assigned_peer.is_none());
+    }
+
+    /// An unclaimed package — minted by the peer-less entry point, or by a
+    /// build predating assignment — is claimed rather than left behind, so
+    /// upgrading does not strand the package already in storage.
+    #[test]
+    fn test_push_path_claims_an_unclaimed_package_instead_of_stranding_it() {
+        let manager = create_test_manager("alice");
+        let legacy = manager.get_or_create_key_package().unwrap();
+        assert!(legacy.assigned_peer.is_none());
+
+        let taken = manager.take_push_key_package("bob").unwrap();
+        assert_eq!(
+            taken.bundle.package_id, legacy.package_id,
+            "the pre-existing package was stranded instead of claimed"
+        );
+        assert_eq!(taken.bundle.assigned_peer.as_deref(), Some("bob"));
+        assert_eq!(manager.count_valid_key_packages().unwrap(), 1);
+    }
+
+    /// At the ceiling the pool stops growing and shares a package, which is the
+    /// old behaviour — deliberately, since refusing to advertise would cost
+    /// session establishment. It must say so, because that is the one condition
+    /// under which the reuse this pool removes is back.
+    #[test]
+    fn test_push_pool_ceiling_shares_a_package_and_reports_it() {
+        let manager = create_test_manager("alice");
+
+        for i in 0..MAX_PUSH_KEY_PACKAGES {
+            let taken = manager.take_push_key_package(&format!("peer{i}")).unwrap();
+            assert!(
+                !taken.pool_exhausted,
+                "pool reported exhausted at {i}, below the ceiling"
+            );
+        }
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            MAX_PUSH_KEY_PACKAGES
+        );
+
+        let over = manager.take_push_key_package("one-peer-too-many").unwrap();
+        assert!(over.pool_exhausted, "ceiling breach was not reported");
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            MAX_PUSH_KEY_PACKAGES,
+            "the pool grew past its ceiling"
+        );
+
+        // A peer that already holds a package keeps getting its own, even with
+        // the pool at capacity — the ceiling must not downgrade existing peers.
+        let established = manager.take_push_key_package("peer0").unwrap();
+        assert!(!established.pool_exhausted);
+        assert_eq!(established.bundle.assigned_peer.as_deref(), Some("peer0"));
+    }
+
+    /// The ceiling bounds how many packages *exist*, so it must gate minting
+    /// and nothing else. A full pool holding an unclaimed package has one to
+    /// give: claiming it relabels a package rather than adding one, and
+    /// degrading to a shared init key while it sat idle would weaken forward
+    /// secrecy to stay under a bound the claim never approaches.
+    #[test]
+    fn test_ceiling_claims_an_unclaimed_package_rather_than_sharing() {
+        let manager = create_test_manager("alice");
+
+        for i in 0..(MAX_PUSH_KEY_PACKAGES - 1) {
+            manager.take_push_key_package(&format!("peer{i}")).unwrap();
+        }
+        // The last live slot is an unclaimed package — as the peer-less entry
+        // point, `ensure_min_key_packages`, or a pre-upgrade record leaves one.
+        let unclaimed = manager.get_or_create_key_package().unwrap();
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            MAX_PUSH_KEY_PACKAGES,
+            "test premise: the pool is at the ceiling"
+        );
+
+        let taken = manager.take_push_key_package("late-arrival").unwrap();
+        assert!(
+            !taken.pool_exhausted,
+            "shared a package while a claimable one was in the pool"
+        );
+        assert_eq!(
+            taken.bundle.package_id, unclaimed.package_id,
+            "the claimable package was passed over"
+        );
+        assert_eq!(taken.bundle.assigned_peer.as_deref(), Some("late-arrival"));
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            MAX_PUSH_KEY_PACKAGES,
+            "claiming grew the pool"
+        );
+
+        // With the last unclaimed package now spoken for, the next new peer has
+        // nothing left to claim and does take the shared-package degradation.
+        let over = manager.take_push_key_package("one-peer-too-many").unwrap();
+        assert!(over.pool_exhausted);
     }
 
     #[test]

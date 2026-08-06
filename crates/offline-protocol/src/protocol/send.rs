@@ -4223,16 +4223,30 @@ impl OfflineProtocol {
         }
     }
 
+    /// Advertises this device's key package to `peer_id`.
+    ///
+    /// The package comes from the peer-keyed pool
+    /// ([`MlsManager::take_push_key_package`]): `peer_id` gets its own init key,
+    /// re-handed on every push until a Welcome consumes it. Before that, this
+    /// path handed the *same* package to every peer until somebody used it,
+    /// which both weakened forward secrecy at session establishment (one
+    /// compromised init key opens every Welcome built against it) and made the
+    /// second peer's Welcome permanently unprocessable.
     pub(crate) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
         let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
 
-        let key_pkg = {
+        let push = {
             let manager = mls
                 .read()
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-            manager.get_or_create_key_package()?
+            manager.take_push_key_package(peer_id)?
         };
 
+        if push.pool_exhausted {
+            self.warn_push_key_package_pool_exhausted(peer_id);
+        }
+
+        let key_pkg = push.bundle;
         let payload = self.build_key_package_payload(&key_pkg, session_reset);
 
         let serialized =

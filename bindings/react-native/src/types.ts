@@ -1861,7 +1861,9 @@ export type SecurityWarningCode =
   | 'PLAINTEXT_SEND'
   | 'PLAINTEXT_RECEIVE_REJECTED'
   | 'SESSION_SENDER_GROUP_MISMATCH'
-  | 'SESSION_REKEY_TRIGGERED';
+  | 'SESSION_REKEY_TRIGGERED'
+  | 'NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED'
+  | 'PUSH_KEY_PACKAGE_POOL_EXHAUSTED';
 
 /**
  * A security-relevant anomaly was detected for a peer. `TOFU_KEY_MISMATCH`
@@ -1873,6 +1875,13 @@ export type SecurityWarningCode =
  * epoch fork heals this way occasionally, but the frame that triggers it is
  * not authenticated (see `schedule_session_rekey`), so a sustained rate for
  * one peer indicates injected frames. Delivery is delayed, never lost.
+ *
+ * `PUSH_KEY_PACKAGE_POOL_EXHAUSTED` is also rate-based: each peer normally
+ * gets its own single-use MLS init key, and this reports that the pool of
+ * unconsumed packages hit its ceiling so one is being shared. Nothing fails —
+ * it clears as packages are consumed or expire — but a sustained rate means
+ * the device is accumulating advertisements to peers that never establish a
+ * session.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';

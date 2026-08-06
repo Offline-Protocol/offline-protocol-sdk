@@ -13112,10 +13112,15 @@ fn test_session_reset_retains_pending_outbound_and_delivers_after_rebuild() {
 /// `rekey_due_at` is keyed by a wire-claimed peer id — the desync that reaches
 /// `schedule_session_rekey` is classified before MLS authenticates anything — so
 /// it must be bounded like every other map fed from the wire.
+///
+/// Deliberately built WITHOUT MLS: the map insert happens before the reset
+/// key-package advertisement, which `schedule_session_rekey` tolerates failing
+/// (here, fast, with `MlsNotInitialized`). With MLS wired, a thousand distinct
+/// peers would each mint into and scan the per-peer push pool — tens of
+/// seconds of debug-build signature work that proves nothing about the bound.
 #[test]
 fn test_rekey_tracking_map_is_bounded() {
-    let (mut alice, _h) = make_encrypted_protocol("alice");
-    alice.start().unwrap();
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
 
     for i in 0..(MAX_REKEY_TRACKED_PEERS + 5) {
         alice.schedule_session_rekey(&format!("peer-{i}"));
@@ -32094,4 +32099,96 @@ fn nostr_slot_exhaustion_warning_is_suppressed_between_passes() {
         seen.len()
     );
     assert_eq!(seen[0], SecurityWarningCode::NostrKeyPackageSlotExhausted);
+}
+
+/// The push chokepoint must actually route through the peer-keyed pool. Every
+/// auto key exchange, group-invite backfill and desync re-key advertisement
+/// goes through here, and before the pool existed they all handed out one
+/// package until somebody's Welcome consumed it.
+#[test]
+fn push_path_advertises_a_distinct_key_package_per_peer() {
+    let mut protocol = protocol_with_mls_storage(Arc::new(InMemoryStorage::new()));
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport.clone()));
+    protocol.start().unwrap();
+
+    protocol.send_key_package_to("bob", false).unwrap();
+    protocol.send_key_package_to("carol", false).unwrap();
+    // A repeat push to a peer we already advertised to: routine (rediscovery,
+    // session establishment, group invites) and must cost no new key material.
+    protocol.send_key_package_to("bob", false).unwrap();
+
+    let advertised: Vec<Vec<u8>> = transport
+        .sent_messages()
+        .iter()
+        .filter_map(|m| m.content.strip_prefix(internal_prefixes::KEY_PACKAGE))
+        .map(|json| {
+            serde_json::from_str::<KeyPackagePayload>(json)
+                .expect("key package payload must parse")
+                .key_package_data
+        })
+        .collect();
+
+    assert_eq!(
+        advertised.len(),
+        3,
+        "test premise: three key-package advertisements went out"
+    );
+    assert_ne!(
+        advertised[0], advertised[1],
+        "two peers were advertised the same init key"
+    );
+    assert_eq!(
+        advertised[0], advertised[2],
+        "a repeat push to one peer minted fresh key material"
+    );
+}
+
+/// The pool ceiling is a real degradation — the peer that trips it shares an
+/// init key with another — so it must reach the app, and exactly once per
+/// suppression window rather than once per push while the pool stays full.
+#[test]
+fn push_pool_exhaustion_warns_once_per_window() {
+    let mut protocol = protocol_with_mls_storage(Arc::new(InMemoryStorage::new()));
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport.clone()));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    // Fill the pool, then push to three more peers: each shares a package.
+    for i in 0..(offline_protocol_mls::MAX_PUSH_KEY_PACKAGES + 3) {
+        protocol
+            .send_key_package_to(&format!("peer{i}"), false)
+            .unwrap();
+    }
+
+    let warnings: Vec<SecurityWarningCode> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::SecurityWarning { reason_code, .. } => Some(*reason_code),
+            _ => None,
+        })
+        .filter(|c| *c == SecurityWarningCode::PushKeyPackagePoolExhausted)
+        .collect();
+
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one pool-exhaustion warning for three over-ceiling \
+         pushes in one suppression window, got {}",
+        warnings.len()
+    );
 }
