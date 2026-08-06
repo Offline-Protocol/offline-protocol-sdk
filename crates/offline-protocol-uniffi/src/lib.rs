@@ -8932,14 +8932,93 @@ mod tests {
     /// Nothing else guards this: the values are not part of the UDL, so a
     /// bindings regen would not catch a drift, and the repo's other types.ts
     /// guard covers event *tags* only. Follows that guard's shape — read the
-    /// file, compare against the Rust source of truth.
+    /// files, compare against the Rust source of truth.
+    ///
+    /// Both edges are checked, because both can drift independently: the
+    /// TypeScript enum apps compare against, and the two native `getState`
+    /// implementations that actually produce the string.
     #[test]
     fn react_native_protocol_state_members_match_the_wire() {
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let types_ts_path = manifest_dir.join("../../bindings/react-native/src/types.ts");
-        let types_ts = std::fs::read_to_string(&types_ts_path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", types_ts_path.display()));
+        /// The string a variant crosses the bridge as.
+        ///
+        /// Exhaustive on purpose, and that is the point of the function rather
+        /// than a `Debug` format: nothing else forces a *new* `ProtocolState`
+        /// variant to be reflected in the bindings — the values are not in the
+        /// UDL — but adding one stops this match compiling, which lands whoever
+        /// added it here, in front of the three surfaces below.
+        fn wire_name(state: ProtocolState) -> &'static str {
+            match state {
+                ProtocolState::Stopped => "Stopped",
+                ProtocolState::Running => "Running",
+                ProtocolState::Paused => "Paused",
+            }
+        }
 
+        /// UniFFI's Kotlin backend spells enum variants `SCREAMING_SNAKE_CASE`.
+        fn kotlin_spelling(name: &str) -> String {
+            let mut out = String::new();
+            for (i, ch) in name.char_indices() {
+                if i > 0 && ch.is_uppercase() {
+                    out.push('_');
+                }
+                out.extend(ch.to_uppercase());
+            }
+            out
+        }
+
+        /// UniFFI's Swift backend spells them `lowerCamelCase`.
+        fn swift_spelling(name: &str) -> String {
+            let mut chars = name.chars();
+            match chars.next() {
+                Some(first) => first.to_lowercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        }
+
+        /// Drops `//` comment lines and collapses whitespace, so an assertion
+        /// can match a multi-line `switch` arm without matching the prose that
+        /// explains it.
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        /// The region of a source file between two anchors, so an assertion
+        /// cannot accidentally satisfy itself somewhere else in the file.
+        fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let after = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1;
+            after
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0
+        }
+
+        const VARIANTS: [ProtocolState; 3] = [
+            ProtocolState::Stopped,
+            ProtocolState::Running,
+            ProtocolState::Paused,
+        ];
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        // --- Edge 1: the enum apps compare against ------------------------
+        let types_ts = read("src/types.ts");
         let body = types_ts
             .split_once("export enum ProtocolState {")
             .expect("types.ts must export a ProtocolState enum")
@@ -8961,17 +9040,11 @@ mod tests {
             })
             .collect();
 
-        // The names the native modules resolve. Both must map every variant to
-        // its own name, and both must fall back to "Stopped" on an unknown one
-        // — an "Unknown" that is not a member would make the declared return
-        // type `Promise<ProtocolState>` unsound.
-        let expected: Vec<(String, String)> = [ProtocolState::Stopped, ProtocolState::Running]
+        let expected: Vec<(String, String)> = VARIANTS
             .iter()
-            .chain(std::iter::once(&ProtocolState::Paused))
             .map(|s| {
-                let name = format!("{s:?}");
-                let value = format!("\"{name}\"");
-                (name, value)
+                let name = wire_name(*s);
+                (name.to_string(), format!("\"{name}\""))
             })
             .collect();
 
@@ -8981,6 +9054,50 @@ mod tests {
              the variant names both native modules resolve (see getState in \
              OfflineProtocolModule.kt / .swift). Numeric members make every comparison against \
              getState() silently false."
+        );
+
+        // --- Edge 2: the two modules that produce those strings ------------
+        let kotlin_src = read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
+        let kotlin = code_only(slice_between(
+            &kotlin_src,
+            "fun getState(",
+            "promise.resolve(stateString)",
+        ));
+        let swift_src = read("ios/OfflineProtocolModule.swift");
+        let swift = code_only(slice_between(
+            &swift_src,
+            "func getState(",
+            "resolver(stateString)",
+        ));
+
+        for state in VARIANTS {
+            let name = wire_name(state);
+
+            let kotlin_arm = format!("ProtocolState.{} -> \"{name}\"", kotlin_spelling(name));
+            assert!(
+                kotlin.contains(&kotlin_arm),
+                "OfflineProtocolModule.kt getState must resolve `{kotlin_arm}`; \
+                 a name that disagrees with types.ts is invisible to tsc and to a bindings regen"
+            );
+
+            let swift_arm = format!("case .{}: stateString = \"{name}\"", swift_spelling(name));
+            assert!(
+                swift.contains(&swift_arm),
+                "OfflineProtocolModule.swift getState must resolve `{swift_arm}`; \
+                 nothing in CI compiles this file, so this assertion is its only guard"
+            );
+        }
+
+        // Both fall back to a real member. An "Unknown" that is not in the enum
+        // would make the declared `getState(): Promise<ProtocolState>` unsound,
+        // and the two modules disagreeing would make it platform-dependent.
+        assert!(
+            kotlin.contains("else -> \"Stopped\""),
+            "OfflineProtocolModule.kt getState must fall back to \"Stopped\""
+        );
+        assert!(
+            swift.contains("@unknown default: stateString = \"Stopped\""),
+            "OfflineProtocolModule.swift getState must fall back to \"Stopped\", matching Android"
         );
     }
 }
