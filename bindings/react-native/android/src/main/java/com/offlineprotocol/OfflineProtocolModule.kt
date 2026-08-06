@@ -1797,7 +1797,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             nostrManager = null
             protocol = null
             meshServices = null
-            listenerCount.set(0)
+            // [listenerCount] is deliberately *not* reset here. React Native
+            // owns it through addListener/removeListeners, and this module is a
+            // singleton per React instance while `OfflineProtocol` is not: an
+            // app that constructs a second one before destroying the first —
+            // the logout-and-re-create sequence that shuts the gate in the
+            // first place — leaves live subscriptions behind that this call
+            // knows nothing about. Zeroing the count then reports no listeners
+            // while JS is fully subscribed, and since removeListeners only ever
+            // subtracts (coerced at zero), nothing resyncs it until the
+            // survivor resubscribes. Through the JS SDK the reset was a no-op
+            // anyway — destroy() removes both subscriptions before calling
+            // here, so the count is already zero, which is exactly why the line
+            // survived. Leave the counter to the framework.
+            //
             // The app tore the SDK down itself, so it is not waiting to be told
             // about a teardown it did not initiate. Ends the session rather
             // than just emptying the buffer: a stop emitted moments earlier can
