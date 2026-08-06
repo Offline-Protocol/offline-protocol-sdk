@@ -413,6 +413,10 @@ Sealing is therefore safe to enable or disable on one device without coordinatin
 
 **Sealing costs size.** NIP-44 pads to a power-of-two bucket, so a payload just past a boundary nearly doubles before the MAC and base64 are applied — considerably more than base64's ~33% alone. The 64 KiB event cap is measured on the final sealed event, so a message that fits unsealed may not fit sealed.
 
+**Sealing may cost deliverability on public relays — measure before enabling in production.** Every sealed event is signed by a fresh single-use key, which is what makes our events mutually unlinkable. NIP-59 concedes the direct consequence: ephemeral author keys defeat the pubkey-reputation anti-spam that public relays rely on, so a relay may rate-limit, deprioritise, or reject events from never-before-seen keys more aggressively than events from an established one. Every frame this transport publishes looks new by design, so if a relay applies such a policy it applies to all of them.
+
+Nothing in the SDK can detect this on your behalf: a relay that drops an event without an `["OK"]` is indistinguishable from a slow one, and the send fails through the ordinary pending-confirmation timeout. Before enabling Nostr in production, send real traffic through **your configured relays** and confirm delivery holds at your expected rate — a relay that works fine for one event per minute may not for a busy conversation. If it does not, the options are a relay you operate or one whose policy you know, rather than turning sealing off: unsealed frames publish the whole envelope in cleartext (see [What a relay can see](#what-a-relay-can-see)).
+
 ## Troubleshooting
 
 ### Nostr Not Connecting
@@ -427,6 +431,7 @@ Sealing is therefore safe to enable or disable on one device without coordinatin
 1. Verify both devices subscribe to filters matching their own routing tags (built automatically by the SDK)
 2. Confirm at least one relay is shared between sender and recipient — relays do not federate
 3. Check pending confirmation timeouts (30 s) — relays sometimes accept events without sending `["OK"]`
+4. If losses are intermittent and scale with send rate, suspect relay anti-spam: sealed events carry a fresh author key every time, which some public relays rate-limit harder than an established one (see [Interoperability and the kill switch](#interoperability-and-the-kill-switch)). Compare against a relay you operate to isolate it
 
 ### "Signing failed" Errors After Retries
 
