@@ -4,7 +4,13 @@
  * @packageDocumentation
  */
 
-import { NativeModules, NativeEventEmitter, EmitterSubscription } from 'react-native';
+import {
+  AppRegistry,
+  NativeModules,
+  NativeEventEmitter,
+  Platform,
+  EmitterSubscription,
+} from 'react-native';
 import type {
   ProtocolConfig,
   SendMessageParams,
@@ -17,6 +23,7 @@ import type {
   SendFileParams,
   SendMediaParams,
   MediaMetadata,
+  MeshWakeTaskData,
   ProtocolEvent,
   EventListener,
   EventType,
@@ -50,7 +57,11 @@ import type {
   TransportMetrics,
 } from './types';
 import { ContentType, MessagePriority } from './types';
-import { LINKING_ERROR, ONE_SHOT_EVENT_TYPES } from './constants';
+import {
+  LINKING_ERROR,
+  MESH_WAKE_TASK_KEY,
+  ONE_SHOT_EVENT_TYPES,
+} from './constants';
 
 export * from './types';
 export * from './constants';
@@ -3539,6 +3550,82 @@ export class MeshServices {
       body
     );
   }
+}
+
+/**
+ * Registers the task that restores the mesh after Android killed your process.
+ * No-op on iOS, which has no equivalent restart to hook.
+ *
+ * Android can kill the app process while mesh is running. The keep-alive
+ * service is `START_STICKY`, so the system hands the service back — but the SDK
+ * will not rebuild the protocol from there, because a protocol with no
+ * JavaScript behind it *destroys* the messages it receives and tells their
+ * senders they arrived (see §6.2 of the React Native integration guide). This
+ * task is the sound alternative: JavaScript is started *first*, so a receiver
+ * exists before a protocol does, and your app — not the SDK — decides whether
+ * to bring the mesh back.
+ *
+ * Opting in takes both halves. Add the manifest flag to your
+ * `<application>` block:
+ *
+ * ```xml
+ * <meta-data android:name="com.offlineprotocol.MESH_WAKE_ENABLED"
+ *            android:value="true" />
+ * ```
+ *
+ * and register the task at **module scope** in `index.js`, next to
+ * `AppRegistry.registerComponent` — not inside a component, which will not have
+ * mounted:
+ *
+ * ```js
+ * import { registerMeshWakeTask } from '@offline-protocol/mesh-sdk';
+ *
+ * registerMeshWakeTask(async () => {
+ *   if (getLiveProtocol()) return;          // already running: nothing to do
+ *   const config = await loadSavedConfig(); // your storage, your credentials
+ *   if (!config) return;                    // logged out: stay down
+ *   const protocol = new OfflineProtocol(config);
+ *   protocol.on('message_received', persistMessage); // BEFORE start()
+ *   await protocol.start();
+ *   await protocol.enableTransport('internet', { serverAddress, authToken });
+ * });
+ * ```
+ *
+ * Four obligations, each of which the SDK cannot meet for you:
+ *
+ * 1. **Store what you receive, durably, before `start()`.** The core never
+ *    persists inbound content, and the receive path ACKs a message before it
+ *    emits it — so a handler registered late, or one that only updates React
+ *    state, loses the message *and* has already told its sender otherwise. This
+ *    is the single reason the wake is opt-in rather than a default.
+ * 2. **Be idempotent and cheap when there is nothing to do.** The task is
+ *    allowed to run while the app is in the foreground (the alternative is a
+ *    process crash if the user opens the app mid-wake), so it can find a live
+ *    protocol. Return early rather than building a second one.
+ * 3. **Re-issue anything `start()` does not restore** — Wi-Fi Direct always, and
+ *    the relay whenever its `serverAddress`/`authToken` reach the SDK through
+ *    `enableTransport('internet', ...)`. Same list as a normal cold launch.
+ * 4. **Resolve promptly.** The keep-alive holds the process; the task does not
+ *    need to. It has a bounded budget (60s by default, override with the
+ *    `com.offlineprotocol.MESH_WAKE_TIMEOUT_SECONDS` meta-data), after which
+ *    React Native terminates it.
+ *
+ * If the task never registers, throws, or declines, the keep-alive stops itself
+ * on a watchdog rather than leaving a "Mesh Active" notification over a mesh
+ * that is not running — the same honest outcome as before you opted in.
+ *
+ * Requires React Native 0.76.5+ when the New Architecture is enabled (headless
+ * tasks were broken under bridgeless before 0.76, and patchy until 0.76.5).
+ *
+ * @param task - Runs on wake. Receives {@link MeshWakeTaskData}.
+ */
+export function registerMeshWakeTask(
+  task: (data: MeshWakeTaskData) => Promise<void>
+): void {
+  if (Platform.OS !== 'android') {
+    return;
+  }
+  AppRegistry.registerHeadlessTask(MESH_WAKE_TASK_KEY, () => task);
 }
 
 /**

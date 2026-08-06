@@ -2628,3 +2628,18 @@ export type TelemetryRecord =
 
 /** Listener type for onTelemetry. */
 export type TelemetryListener = (record: TelemetryRecord) => void;
+
+/**
+ * Payload handed to a mesh wake task (Android only).
+ *
+ * @see registerMeshWakeTask
+ */
+export interface MeshWakeTaskData {
+  /**
+   * Why JavaScript was woken. Only `'sticky_restart'` exists today — the system
+   * handed the mesh keep-alive service back after the process was killed. Match
+   * on it rather than assuming, so a future reason cannot be mistaken for this
+   * one.
+   */
+  reason: 'sticky_restart' | (string & {});
+}

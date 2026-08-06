@@ -9469,6 +9469,116 @@ mod tests {
         );
     }
 
+    /// The Android mesh wake (issue #307) is wired end to end: one task key
+    /// spelled the same in Kotlin and TypeScript, a wake service that is named
+    /// correctly *and* declared in the manifest, and a JS registration that
+    /// actually uses the shared constant.
+    ///
+    /// Every link in that chain fails silently and none of them can be caught
+    /// where they live. A task key that drifts compiles on both sides and ends
+    /// with React Native logging "No task registered for key" to the device log
+    /// — the app sees an opt-in that does nothing. The service class name is a
+    /// *string* in Kotlin on purpose (`react-android` is `compileOnly`, so
+    /// resolving a class constant would take the Robolectric suite down with a
+    /// `NoClassDefFoundError`), which means the compiler never checks it either.
+    /// An undeclared service makes `startService` a silent no-op, and the
+    /// Robolectric test runs against the *test* manifest, so it cannot see the
+    /// library's. And the package has no TypeScript test harness — the same
+    /// argument as [`react_native_one_shot_event_set_matches_native`] above.
+    ///
+    /// A wake that never fires is indistinguishable from an app that declined
+    /// to restore its mesh, which is a legitimate outcome, so nothing downstream
+    /// reports the failure either. It has to be pinned here.
+    #[test]
+    fn react_native_mesh_wake_wiring_is_present() {
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*'))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        /// The one spelling, which both sides have to agree on.
+        const TASK_KEY: &str = "OfflineProtocolMeshWake";
+        const WAKE_SERVICE: &str = "MeshHeadlessWakeService";
+
+        // --- The task key, on both sides of the bridge ----------------------
+        let constants_ts = code_only(&read("src/constants.ts"));
+        assert!(
+            constants_ts.contains(&format!("export const MESH_WAKE_TASK_KEY = '{TASK_KEY}';")),
+            "src/constants.ts must declare MESH_WAKE_TASK_KEY as {TASK_KEY:?}"
+        );
+        let policy_kt = code_only(&read(
+            "android/src/main/java/com/offlineprotocol/MeshWakePolicy.kt",
+        ));
+        assert!(
+            policy_kt.contains(&format!("const val TASK_KEY = \"{TASK_KEY}\"")),
+            "MeshWakePolicy.TASK_KEY must be {TASK_KEY:?}, matching src/constants.ts — React \
+             Native matches the headless task by this string and logs a warning rather than \
+             failing when it does not resolve"
+        );
+
+        // --- The wake service: named, existing, and declared ----------------
+        assert!(
+            policy_kt.contains(&format!(
+                "const val WAKE_SERVICE_CLASS = \"com.offlineprotocol.{WAKE_SERVICE}\""
+            )),
+            "MeshWakePolicy.WAKE_SERVICE_CLASS must name com.offlineprotocol.{WAKE_SERVICE}"
+        );
+        let wake_service_kt = code_only(&read(&format!(
+            "android/src/main/java/com/offlineprotocol/{WAKE_SERVICE}.kt"
+        )));
+        assert!(
+            wake_service_kt.contains(&format!("class {WAKE_SERVICE} : HeadlessJsTaskService()")),
+            "{WAKE_SERVICE}.kt must declare `class {WAKE_SERVICE} : HeadlessJsTaskService()` — \
+             WAKE_SERVICE_CLASS is a string, so nothing else checks that the class it names \
+             exists or is startable"
+        );
+        assert!(
+            wake_service_kt.contains("MeshWakePolicy.TASK_KEY"),
+            "{WAKE_SERVICE} must start its task under the shared MeshWakePolicy.TASK_KEY rather \
+             than a literal, or the constant above stops being the single spelling"
+        );
+        let manifest = read("android/src/main/AndroidManifest.xml");
+        assert!(
+            manifest.contains(&format!("android:name=\".{WAKE_SERVICE}\"")),
+            "AndroidManifest.xml must declare .{WAKE_SERVICE} — an undeclared service makes \
+             startService a silent no-op, and the Robolectric suite runs against the test \
+             manifest so it cannot catch this"
+        );
+        assert!(
+            manifest.contains("android.permission.WAKE_LOCK"),
+            "AndroidManifest.xml must declare WAKE_LOCK: HeadlessJsTaskService takes a \
+             PARTIAL_WAKE_LOCK for the lifetime of every task it starts"
+        );
+
+        // --- The JS registration -------------------------------------------
+        let index_ts = code_only(&read("src/index.ts"));
+        assert!(
+            index_ts.contains("export function registerMeshWakeTask("),
+            "src/index.ts must export registerMeshWakeTask — the manifest opt-in alone wakes \
+             JavaScript into an app with no task registered for it"
+        );
+        assert!(
+            index_ts.contains("AppRegistry.registerHeadlessTask(MESH_WAKE_TASK_KEY,"),
+            "registerMeshWakeTask must register through AppRegistry using MESH_WAKE_TASK_KEY, \
+             not a literal"
+        );
+    }
+
     /// The iOS emit gate must check *both* of the conditions React Native
     /// itself checks, and report whether the event was handed over.
     ///
