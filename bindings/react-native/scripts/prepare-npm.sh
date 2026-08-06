@@ -15,7 +15,10 @@ echo ""
 # carrying only the device slice still installs and still builds for a device,
 # so a missing simulator slice would otherwise ship silently and read to
 # consumers as "this SDK doesn't support the simulator".
-IOS_XCFRAMEWORK="$RN_DIR/ios/libs/offline_protocol_uniffi.xcframework"
+# Package-relative, so the on-disk checks and the packlist check below cannot
+# name different bundles.
+IOS_XCFRAMEWORK_REL="ios/libs/offline_protocol_uniffi.xcframework"
+IOS_XCFRAMEWORK="$RN_DIR/$IOS_XCFRAMEWORK_REL"
 IOS_DEVICE_SLICE="$IOS_XCFRAMEWORK/ios-arm64/liboffline_protocol_uniffi.a"
 IOS_SIM_SLICE="$IOS_XCFRAMEWORK/ios-arm64_x86_64-simulator/liboffline_protocol_uniffi.a"
 
@@ -126,6 +129,62 @@ if [ "$LOWEST" != "$AUTOLINK_MIN_VERSION" ]; then
   exit 1
 fi
 echo "✅ Version $PKG_VERSION is consistent with the documented autolinking release"
+echo ""
+
+# Every check above reads the working tree, which proves an artifact was built —
+# not that it ships. package.json's files[] allowlist decides that, and for the
+# iOS binary it is the *only* reason the artifact ships at all: ios/libs/ is
+# gitignored. Drop or mistype an entry there (or add an .npmignore) and every
+# check above stays green while npm publishes a package with no native binary —
+# the same silently-wrong-packaging class as the podspec autolinking could not
+# see. So assert the real packlist.
+#
+# Everything required here was already proven present on disk above, so a miss
+# has exactly one cause: the file was excluded from the tarball.
+#
+# --ignore-scripts because `npm pack` runs `prepare` (tsc), which the publish
+# flow ran moments ago; without it this recompiles the package for nothing.
+echo "Verifying the npm packlist..."
+
+REQUIRED_PACKED=(
+  "MeshSdk.podspec"
+  "$IOS_XCFRAMEWORK_REL/Info.plist"
+  "$IOS_XCFRAMEWORK_REL/ios-arm64/liboffline_protocol_uniffi.a"
+  "$IOS_XCFRAMEWORK_REL/ios-arm64_x86_64-simulator/liboffline_protocol_uniffi.a"
+  "ios/Generated/offline_protocol.swift"
+  "ios/Generated/offline_protocolFFI.h"
+  "ios/Generated/offline_protocolFFI.modulemap"
+  "ios/OfflineProtocolModule.swift"
+  "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"
+  "src/index.ts"
+  "src/types.ts"
+)
+for abi in "${ANDROID_ABIS[@]}"; do
+  REQUIRED_PACKED+=("android/src/main/jniLibs/$abi/libuniffi_offline_protocol.so")
+done
+
+MISSING_PACKED="$(cd "$RN_DIR" && npm pack --dry-run --ignore-scripts --json | node -e '
+  let raw = "";
+  process.stdin.on("data", (chunk) => (raw += chunk)).on("end", () => {
+    const packed = new Set(JSON.parse(raw)[0].files.map((f) => f.path));
+    for (const p of process.argv.slice(1)) {
+      if (!packed.has(p)) console.log("   " + p);
+    }
+  });
+' "${REQUIRED_PACKED[@]}")"
+
+if [ -n "$MISSING_PACKED" ]; then
+  echo "❌ Built on disk but excluded from the npm tarball:"
+  echo "$MISSING_PACKED"
+  echo ""
+  echo "   Publishing this would ship a package missing the files above."
+  echo "   Fix the files[] allowlist in package.json (or remove the .npmignore"
+  echo "   entry) that drops them. Note ios/libs/ is gitignored, so files[] is"
+  echo "   the only thing putting the native binary in the tarball."
+  exit 1
+fi
+
+echo "✅ npm packlist ships every validated artifact"
 echo ""
 
 echo "========================================="
