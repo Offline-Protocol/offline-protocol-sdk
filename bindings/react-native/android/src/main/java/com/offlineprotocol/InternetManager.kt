@@ -273,13 +273,6 @@ class InternetManager(
      */
     fun isSessionSuperseded(): Boolean = supersedeLatch.isSuperseded
 
-    // Metrics. Atomic: send paths mutate on main, receive paths on the
-    // OkHttp reader thread, and getMetrics() reads from the caller's thread.
-    private val bytesSent = java.util.concurrent.atomic.AtomicLong(0)
-    private val bytesReceived = java.util.concurrent.atomic.AtomicLong(0)
-    private val messagesSent = java.util.concurrent.atomic.AtomicLong(0)
-    private val messagesReceived = java.util.concurrent.atomic.AtomicLong(0)
-    
     // MARK: - Helper
     
     private fun <T> runOnMainSync(action: () -> T): T {
@@ -1039,8 +1032,6 @@ class InternetManager(
     // MARK: - Message Handling
     
     private fun processReceivedData(ws: WebSocket, data: ByteArray) {
-        bytesReceived.addAndGet(data.size.toLong())
-
         val rawText = String(data, Charsets.UTF_8)
         val json: org.json.JSONObject
         val messageType: String
@@ -1186,8 +1177,6 @@ class InternetManager(
                     return
                 }
 
-                messagesReceived.incrementAndGet()
-                
                 try {
                     // The protocol expects the full serialized Message JSON bytes
                     // The WebSocket server sends the message content, which should be the full Message JSON
@@ -1753,8 +1742,6 @@ class InternetManager(
         if (sent) {
             // Reset failure counter on successful send
             consecutiveSendFailures.set(0)
-            bytesSent.addAndGet(jsonString.toByteArray(Charsets.UTF_8).size.toLong())
-            messagesSent.incrementAndGet()
             // Track for recipient-keyed failure correlation: a later
             // DeliveryError for this recipient fails-fast this message id.
             inFlightTracker.recordSent(recipientId, messageId, monotonicNowMs())
@@ -1848,8 +1835,6 @@ class InternetManager(
                 val sent = ws.send(primaryJson)
                 if (sent) {
                     consecutiveSendFailures.set(0)
-                    bytesSent.addAndGet(primaryJson.toByteArray(Charsets.UTF_8).size.toLong())
-                    messagesSent.incrementAndGet()
                     // Group primaries (CreateGroup / SendGroupMessage /
                     // LeaveGroup) are never recorded in the recipient-keyed
                     // in-flight tracker: they answer on the group-scoped
@@ -1934,7 +1919,6 @@ class InternetManager(
                     pendingControlFrames.clear()
                     return
                 }
-                bytesSent.addAndGet(frameJson.toByteArray(Charsets.UTF_8).size.toLong())
                 pending.frames.removeFirst()
             }
             pending.commit?.invoke()

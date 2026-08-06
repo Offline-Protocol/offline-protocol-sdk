@@ -992,12 +992,6 @@ class BleTransportFacade(
         }
     }
     
-    // Metrics
-    private var bytesSent: Long = 0
-    private var bytesReceived: Long = 0
-    private var fragmentsSent: Long = 0
-    private var fragmentsReceived: Long = 0
-
     // Per-peer BLE write gate. Android 13+ (API 33) rejects a second
     // writeCharacteristic on the same connection with
     // ERROR_GATT_WRITE_REQUEST_BUSY (201) while one write is still
@@ -3072,8 +3066,6 @@ class BleTransportFacade(
             return false
         }
 
-        bytesSent += data.size
-        fragmentsSent++
         meshController.markPeerActive(recipientId)
         meshController.markPeerActive(deviceId)
 
@@ -3101,13 +3093,11 @@ class BleTransportFacade(
     private fun sendFragmentData(recipientId: String, data: ByteArray): Boolean {
         // Every call site (drainAndSendFragments, pollAndSendFragments, the
         // OutboundFragmentQueue.flush callback) runs on main already, but
-        // the function mutates main-only state (bytesSent, fragmentsSent),
-        // calls into MeshController, and issues gatt.writeCharacteristic —
-        // which the Android BLE stack serialises one op at a time per
-        // client. A future caller that forgets this contract would
-        // silently corrupt counters and interleave writes, so pin it to
-        // the runtime check that the rest of the facade's main-thread
-        // invariants already use.
+        // the function calls into MeshController and issues
+        // gatt.writeCharacteristic — which the Android BLE stack serialises
+        // one op at a time per client. A future caller that forgets this
+        // contract would interleave writes, so pin it to the runtime check
+        // that the rest of the facade's main-thread invariants already use.
         assertMainThread("sendFragmentData")
         // Find GATT client for recipient
         val address = resolveTargetAddress(recipientId)
@@ -3287,8 +3277,6 @@ class BleTransportFacade(
         }
         
         // Write was initiated successfully (actual completion is asynchronous for WRITE_TYPE_NO_RESPONSE)
-        bytesSent += data.size
-        fragmentsSent++
         meshController.markPeerActive(recipientId)
         meshController.markPeerActive(deviceId)
 
@@ -3450,9 +3438,6 @@ class BleTransportFacade(
                     "exception" to e.javaClass.simpleName
                 ))
             }
-            
-            bytesReceived += data.size
-            fragmentsReceived++
         } catch (e: Exception) {
             Log.e(TAG, "Error processing received fragment", e)
             emitDiagnostic("error", "Error processing received fragment", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))

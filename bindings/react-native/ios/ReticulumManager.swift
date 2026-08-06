@@ -93,28 +93,6 @@ public class ReticulumManager: NSObject, TransportManager {
         set { stateLock.lock(); defer { stateLock.unlock() }; _consecutiveSendFailures = newValue }
     }
 
-    // Metrics (guarded by stateLock)
-    private var _bytesSent: UInt64 = 0
-    private var bytesSent: UInt64 {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _bytesSent }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _bytesSent = newValue }
-    }
-    private var _bytesReceived: UInt64 = 0
-    private var bytesReceived: UInt64 {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _bytesReceived }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _bytesReceived = newValue }
-    }
-    private var _messagesSent: UInt64 = 0
-    private var messagesSent: UInt64 {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _messagesSent }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _messagesSent = newValue }
-    }
-    private var _messagesReceived: UInt64 = 0
-    private var messagesReceived: UInt64 {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _messagesReceived }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _messagesReceived = newValue }
-    }
-
     // Receive buffer for line-delimited TCP (only accessed on connectionQueue)
     private var receiveBuffer = Data()
 
@@ -328,7 +306,6 @@ public class ReticulumManager: NSObject, TransportManager {
             guard let self = self else { return }
 
             if let data = content {
-                self.bytesReceived += UInt64(data.count)
                 self.receiveBuffer.append(data)
 
                 // Process complete lines (newline-delimited JSON)
@@ -469,8 +446,6 @@ public class ReticulumManager: NSObject, TransportManager {
             }
 
             let encoding = json["encoding"] as? String
-
-            messagesReceived += 1
 
             messageQueue.async { [weak self] in
                 guard let self = self else { return }
@@ -620,8 +595,6 @@ public class ReticulumManager: NSObject, TransportManager {
                 }
             } else {
                 self.consecutiveSendFailures = 0
-                self.bytesSent += UInt64(jsonData.count)
-                self.messagesSent += 1
                 self.protocolInstance.reticulumConfirmSent(messageId: messageId)
 
                 self.emitDiagnostic("debug", "Message sent via Reticulum", context: [

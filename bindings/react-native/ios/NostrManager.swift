@@ -117,28 +117,6 @@ public class NostrManager: NSObject, TransportManager {
         set { stateLock.lock(); defer { stateLock.unlock() }; _consecutiveSendFailures = newValue }
     }
 
-    // Metrics
-    private var _bytesSent: UInt64 = 0
-    private var bytesSent: UInt64 {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _bytesSent }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _bytesSent = newValue }
-    }
-    private var _bytesReceived: UInt64 = 0
-    private var bytesReceived: UInt64 {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _bytesReceived }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _bytesReceived = newValue }
-    }
-    private var _messagesSent: UInt64 = 0
-    private var messagesSent: UInt64 {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _messagesSent }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _messagesSent = newValue }
-    }
-    private var _messagesReceived: UInt64 = 0
-    private var messagesReceived: UInt64 {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _messagesReceived }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _messagesReceived = newValue }
-    }
-
     // MARK: - Initialization
 
     public init(protocol protocolInstance: OfflineProtocol, deviceId: String) {
@@ -539,8 +517,6 @@ public class NostrManager: NSObject, TransportManager {
             // treated as receive progress.
             let createdAt = (event["created_at"] as? NSNumber)?.int64Value ?? 0
 
-            messagesReceived += 1
-
             messageQueue.async { [weak self] in
                 guard let self = self else { return }
 
@@ -784,10 +760,8 @@ public class NostrManager: NSObject, TransportManager {
             case .success(let message):
                 switch message {
                 case .string(let text):
-                    self.bytesReceived += UInt64(text.utf8.count)
                     self.processNostrMessage(text)
                 case .data(let data):
-                    self.bytesReceived += UInt64(data.count)
                     if let text = String(data: data, encoding: .utf8) {
                         self.processNostrMessage(text)
                     }
@@ -928,8 +902,6 @@ public class NostrManager: NSObject, TransportManager {
                     }
                 } else {
                     self.consecutiveSendFailures = 0
-                    self.bytesSent += UInt64(eventMessage.utf8.count)
-                    self.messagesSent += 1
 
                     // Track event_id → message_id so we can confirm/fail
                     // when the relay sends ["OK", event_id, accepted, reason].

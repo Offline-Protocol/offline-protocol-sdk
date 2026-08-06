@@ -100,16 +100,12 @@ public class InternetManager: NSObject, TransportManager {
     private var pingTimer: DispatchSourceTimer?
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.internet.messages")
     
-    // Reconnection. reconnectAttempts is lock-guarded (stateLock): written
-    // on main, read by getMetrics() from the caller's thread — mirrors the
-    // Kotlin bridge's AtomicInteger. currentReconnectDelay stays a plain var:
-    // unlike Kotlin (whose handleAuthenticated runs on the reader thread),
-    // every touch here is on main.
-    private var _reconnectAttempts: Int = 0
-    private var reconnectAttempts: Int {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _reconnectAttempts }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _reconnectAttempts = newValue }
-    }
+    // Reconnection. Both are main-owned plain vars: every touch is on main —
+    // startOnMain and forceReconnect via runOnMainSync, handleAuthenticatedOnMain
+    // and scheduleReconnect only via the main-hopping close funnel. (Kotlin keeps
+    // an AtomicInteger for reconnectAttempts because its handleAuthenticated runs
+    // on the OkHttp reader thread; this bridge has no such path.)
+    private var reconnectAttempts: Int = 0
     private var currentReconnectDelay: TimeInterval = 1.0
     private var reconnectWorkItem: DispatchWorkItem?
     // Auth watchdog (mirrors the Kotlin bridge's authTimeoutRunnable):
@@ -415,15 +411,6 @@ public class InternetManager: NSObject, TransportManager {
         return json
     }
 
-    // Metrics. Atomic (lock-guarded): send completions mutate on the
-    // URLSession delegate queue, receive paths too, and getMetrics() reads
-    // from the caller's thread — mirrors the Kotlin bridge's AtomicLong
-    // metrics.
-    private let bytesSent = AtomicCounter()
-    private let bytesReceived = AtomicCounter()
-    private let messagesSent = AtomicCounter()
-    private let messagesReceived = AtomicCounter()
-    
     // MARK: - Initialization
     
     public init(protocol protocolInstance: OfflineProtocol, deviceId: String, serverUrl: String? = nil) {
@@ -1365,8 +1352,6 @@ public class InternetManager: NSObject, TransportManager {
     }
 
     private func processReceivedData(_ data: Data, task: URLSessionWebSocketTask) {
-        bytesReceived.add(Int64(data.count))
-
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let messageType = json["type"] as? String,
               let rawText = String(data: data, encoding: .utf8) else {
@@ -1493,8 +1478,6 @@ public class InternetManager: NSObject, TransportManager {
             let messageId = json["message_id"] as? String
             let timestampStr = json["timestamp"] as? String ?? ""
 
-            messagesReceived.increment()
-            
             messageQueue.async { [weak self] in
                 guard let self = self else { return }
                 
@@ -2148,8 +2131,6 @@ public class InternetManager: NSObject, TransportManager {
             } else {
                 // Reset failure counter on successful send
                 self.consecutiveSendFailures.set(0)
-                self.bytesSent.add(Int64(jsonData.count))
-                self.messagesSent.increment()
                 self.protocolInstance.internetConfirmSent(messageId: messageId)
 
                 self.emitDiagnostic("debug", "Message sent via relay", context: [
@@ -2287,8 +2268,6 @@ public class InternetManager: NSObject, TransportManager {
                         }
                     } else {
                         self.consecutiveSendFailures.set(0)
-                        self.bytesSent.add(Int64(primaryData.count))
-                        self.messagesSent.increment()
                         self.protocolInstance.internetConfirmSent(messageId: messageId)
                         // Only now, with the primary provably written, may
                         // the deltas chase it and the commit arm — keeping
@@ -2390,7 +2369,6 @@ public class InternetManager: NSObject, TransportManager {
                     self.pendingControlFrames.removeAll()
                     return
                 }
-                self.bytesSent.add(Int64(frameData.count))
                 // The queue may have been cleared (RateLimited) — and even
                 // repopulated by a newer translation — while the write was in
                 // flight. Only the translation that owns the in-flight frame

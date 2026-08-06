@@ -72,17 +72,10 @@ class WifiDirectManager(
     private val discoveredPeers = ConcurrentHashMap<String, WifiP2pDevice>()
     
     // State tracking
-    private var isDiscovering = false
     private var isGroupOwner = false
     private var groupOwnerAddress: String? = null
     private var transportStartAt: Long = 0L
-    
-    // Metrics
-    private var bytesSent: Long = 0
-    private var bytesReceived: Long = 0
-    private var messagesSent: Long = 0
-    private var messagesReceived: Long = 0
-    
+
     // Message polling
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
@@ -271,12 +264,10 @@ class WifiDirectManager(
 
         wifiP2pManager?.discoverPeers(channel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                isDiscovering = true
                 emitDiagnostic("info", "Peer discovery started")
             }
 
             override fun onFailure(reason: Int) {
-                isDiscovering = false
                 emitDiagnostic("error", "Failed to start peer discovery", mapOf(
                     "reason" to reasonToString(reason)
                 ))
@@ -287,7 +278,6 @@ class WifiDirectManager(
     private fun stopPeerDiscovery() {
         wifiP2pManager?.stopPeerDiscovery(channel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                isDiscovering = false
                 emitDiagnostic("info", "Peer discovery stopped")
             }
 
@@ -461,10 +451,7 @@ class WifiDirectManager(
                             // Read message data
                             val data = ByteArray(length)
                             inputStream.readFully(data)
-                            
-                            bytesReceived += length
-                            messagesReceived++
-                            
+
                             // Process message
                             mainHandler.post {
                                 try {
@@ -622,10 +609,7 @@ class WifiDirectManager(
                     outputStream.writeInt(data.size)
                     outputStream.write(data)
                     outputStream.flush()
-                    
-                    bytesSent += data.size
-                    messagesSent++
-                    
+
                     emitDiagnostic("debug", "Message sent", mapOf(
                         "to" to (if (targetSocket != null) recipientId else "broadcast"),
                         "size" to data.size
