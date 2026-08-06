@@ -64,21 +64,6 @@ class MeshForegroundService : Service() {
         private var startRequested: Boolean = false
 
         /**
-         * Optional hook, invoked on a START_STICKY restart *only* when a host is
-         * registered in [onStopRequestedByUser]. A restart into a hostless
-         * process stops the service instead of announcing itself to nobody —
-         * see [handleStickyRestart].
-         *
-         * Nothing in production assigns this yet, and a host that does still
-         * cannot rebuild the protocol from here: that needs the ProtocolConfig,
-         * which only JS has. Issue #291 tracks the two designs that could supply
-         * it (persist the config natively, or wake JS); this is the seam either
-         * would attach to.
-         */
-        @Volatile
-        var onServiceRestarted: (() -> Unit)? = null
-
-        /**
          * Callback invoked when the user taps "Stop" on the service
          * notification. The host module must register one and run the same
          * teardown as its JS-facing `stop()`: this service is only a
@@ -264,9 +249,42 @@ class MeshForegroundService : Service() {
      * startForeground() obligation attaches to Context.startForegroundService()
      * calls, which a system restart is not.
      *
-     * Re-initializing the protocol instead would need the ProtocolConfig, which
-     * only JS has. See issue #291 for the two designs that could supply it;
-     * whichever lands attaches here, through [onServiceRestarted].
+     * **Rebuilding the protocol here is refused, not merely unimplemented.**
+     * Issue #291 proposed persisting the ProtocolConfig natively so this branch
+     * could re-create the protocol without JS. It cannot: a protocol running
+     * with no React context does not fail to deliver, it *destroys* messages,
+     * and tells their senders they arrived. The receive path ACKs before it
+     * emits — `send_delivery_ack` runs in `protocol/receive.rs` a dozen lines
+     * ahead of the `Event::MessageReceived` it will hand to the event callback —
+     * and that ACK makes the sender drop its outbox entry (`remove_outbox_entry`
+     * in `protocol/send.rs`), retiring the retry ladder that is otherwise what
+     * recovers this whole situation. The event then reaches
+     * `OfflineProtocolModule.sendEvent`, whose `canEmitToJs()` gate requires a
+     * live React instance *and* a subscribed listener, and is dropped. Nothing
+     * catches it on the way past: the core persists outbound and session state,
+     * never inbound content, so the message exists only in that dropped event.
+     * The MLS ratchet generation is spent by then too, so a resend cannot
+     * reconstruct it either.
+     *
+     * Holding the event natively instead — the way [OfflineProtocolModule]'s
+     * sticky dispatcher holds `mesh_stopped_by_user` for a JS that was not
+     * listening — does not rescue it. That buffer keeps one entry per key, so
+     * it does not scale to one per message, and it is in memory, so it dies
+     * with the process whose death is the entire premise of this branch.
+     *
+     * So the choice on a hostless restart is not "mesh back" versus "mesh
+     * down". It is a recoverable outage — sender retries, parks, and pushes for
+     * up to seven days, and delivers when this device is next actually running
+     * — versus permanent silent loss under a delivery receipt. Stopping is the
+     * cheaper of the two by a wide margin.
+     *
+     * That leaves waking JS as the only sound direction, because it puts a
+     * receiver in place *before* the protocol exists rather than after. It
+     * needs React Native's Headless JS, an opt-in from the app (the config,
+     * including relay credentials, is the app's and must stay there), and a
+     * watchdog to stop this service when the wake does not arrive — or the
+     * "Mesh Active" lie #294 removed comes straight back. That is a feature,
+     * not a fix, and it is deliberately not built here.
      */
     private fun handleStickyRestart(): Int {
         if (onStopRequestedByUser == null) {
@@ -276,7 +294,6 @@ class MeshForegroundService : Service() {
         }
         Log.i(TAG, "Service restarted after process kill; host present")
         promoteToForeground()
-        onServiceRestarted?.invoke()
         return START_STICKY
     }
 

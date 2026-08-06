@@ -40,12 +40,14 @@ import org.robolectric.annotation.Config
  *
  * The third is what a START_STICKY restart may assert. The system hands the
  * service back after a process kill, but the protocol, the transports and the
- * module died with the old process, and nothing native can rebuild them — so
- * the restart has to check whether a host has brought a mesh back up before it
- * re-posts a notification claiming one is running. That check reads the same
- * stop-callback slot, which is why the slot's lifetime is pinned here too: it
- * has to be surrendered when the mesh stops, not when the module dies, or the
- * gate reads "host present" over a mesh that is already down.
+ * module died with the old process, and rebuilding them from here is refused —
+ * a protocol with no React context behind it ACKs the messages it decrypts and
+ * then drops them, which retires the sender's retry ladder for messages that
+ * reached nobody. So the restart has to check whether a host has brought a
+ * mesh back up before it re-posts a notification claiming one is running. That
+ * check reads the same stop-callback slot, which is why its lifetime is pinned
+ * here too: it has to be surrendered when the mesh stops, not when the module
+ * dies, or the gate reads "host present" over a mesh that is already down.
  *
  * Action strings are written out verbatim rather than read from the companion:
  * they cross a process boundary inside a PendingIntent that can outlive the
@@ -89,7 +91,6 @@ class MeshForegroundServiceTest {
     fun tearDown() {
         registeredStopCallbacks.forEach { MeshForegroundService.clearStopRequestCallback(it) }
         registeredStopCallbacks.clear()
-        MeshForegroundService.onServiceRestarted = null
         controller?.destroy()
         controller = null
         MeshForegroundService.stop(context, null)
@@ -252,21 +253,23 @@ class MeshForegroundServiceTest {
     }
 
     @Test
-    fun `sticky restart re-promotes and notifies a host that is already back up`() {
-        var restarted = 0
+    fun `sticky restart re-promotes for a host that is already back up`() {
         // A registered stop callback is what "a host in this process has a mesh
         // running" looks like — the module registers it immediately before
         // starting the service. Reachable on a restart because an app that
         // boots React Native from Application.onCreate can beat the
         // re-delivered intent.
         registerHost { }
-        MeshForegroundService.onServiceRestarted = { restarted += 1 }
 
         createService()
         // A null intent is how the system re-delivers after a process kill.
         val service = deliver(null)
 
-        assertEquals(1, restarted)
+        // Re-promotion is all this branch does. It deliberately does not try to
+        // rebuild anything: the mesh it is keeping alive is the one that host
+        // already brought up, and a protocol started with no React context
+        // behind it would ACK incoming messages into a void rather than deliver
+        // them — see handleStickyRestart.
         assertEquals(NOTIFICATION_ID, shadowOf(service).lastForegroundNotificationId)
         assertTrue(MeshForegroundService.isRunning)
         assertFalse(shadowOf(service).isStoppedBySelf)
@@ -274,18 +277,20 @@ class MeshForegroundServiceTest {
 
     @Test
     fun `sticky restart with no host stops instead of outliving the mesh`() {
-        var restarted = 0
-        MeshForegroundService.onServiceRestarted = { restarted += 1 }
         assertNull("no host registered is the whole precondition", MeshForegroundService.onStopRequestedByUser)
 
         createService()
         val service = deliver(null)
 
-        // The protocol died with the old process and nothing here can rebuild
+        // The protocol died with the old process and nothing here may rebuild
         // it, so "Mesh Active" would be a lie that outlives the mesh. On 12+ it
         // is worse: the promotion is refused from the background, leaving an
         // empty process squatting with no notification at all.
-        assertEquals("there is no host to notify", 0, restarted)
+        //
+        // "May not", not "cannot": rebuilding natively is reachable and refused.
+        // Without a React context the rebuilt protocol ACKs every message it
+        // decrypts and then drops the event, so senders retire messages that
+        // were never delivered anywhere. Stopping keeps the outage recoverable.
         assertTrue(shadowOf(service).isForegroundStopped)
         assertTrue(shadowOf(service).isStoppedBySelf)
         assertFalse(MeshForegroundService.isRunning)
@@ -346,9 +351,6 @@ class MeshForegroundServiceTest {
 
     @Test
     fun `sticky restart after the host stopped the mesh stops instead of re-promoting`() {
-        var restarted = 0
-        MeshForegroundService.onServiceRestarted = { restarted += 1 }
-
         // The window the host-present branch exists for, with a mesh that went
         // down inside it: the kill leaves a restart pending, the new process
         // boots React Native, brings mesh up and takes it back down — all
@@ -360,11 +362,14 @@ class MeshForegroundServiceTest {
         drainStartedServices()
         MeshForegroundService.stop(context, host)
         drainStartedServices()
+        assertNull(
+            "a host that stopped its mesh is not a host the gate may keep us up for",
+            MeshForegroundService.onStopRequestedByUser
+        )
 
         createService()
         val service = deliver(null)
 
-        assertEquals("a host that stopped its mesh is not a host to notify", 0, restarted)
         assertTrue(shadowOf(service).isForegroundStopped)
         assertTrue(shadowOf(service).isStoppedBySelf)
         assertFalse(MeshForegroundService.isRunning)
