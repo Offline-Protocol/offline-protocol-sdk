@@ -61,29 +61,49 @@ class StickyEventDispatcher(
      * [key] identifies the event for last-wins collapsing, so a repeated stop
      * cannot accumulate copies. Callers pass the event's `type` tag.
      *
-     * The hold sits in a `finally` for the same reason [deliverHeld]'s restore
-     * does: an [emit] that *throws* delivered nothing, and treating a throw as
-     * anything but a failed attempt would drop the event on the floor — the
-     * exact hole this class closes. The module's [emit] catches its own
+     * The hold survives a throwing [emit] for the same reason [deliverHeld]'s
+     * restore does: an [emit] that *throws* delivered nothing, and treating a
+     * throw as anything but a failed attempt would drop the event on the floor
+     * — the exact hole this class closes. The module's [emit] catches its own
      * exceptions, but it builds a JNI-backed payload outside that catch and an
      * `Error` escapes it regardless. The throwable still propagates; it is only
      * the event that is no longer lost with it.
+     *
+     * Written as catch-and-rethrow rather than a `finally` because the retry
+     * this does after holding can throw too — [flush] reads the gate and posts
+     * to the JS queue, and the module's [schedule] catches `Exception` but not
+     * the `Error` this whole path exists to survive. Out of a `finally` that
+     * second throwable would *replace* the first, so the caller would be told
+     * about the retry instead of about the emit that actually failed. The
+     * original always wins; a failure from the retry rides along as a
+     * suppressed exception, which is all it is worth — the event is held by
+     * then, so the next trigger collects it.
      */
     fun send(key: String, eventJson: String) {
         val generation = buffer.currentGeneration()
         var delivered = false
+        var failure: Throwable? = null
         try {
             delivered = canEmit() && emit(eventJson)
-        } finally {
-            if (delivered) {
-                // A copy held by an earlier failed attempt is now stale news;
-                // left behind it would redeliver *after* the event that
-                // superseded it. See [StickyEventBuffer.discard].
-                buffer.discard(key, generation)
-            } else if (buffer.hold(key, eventJson, generation)) {
+        } catch (t: Throwable) {
+            failure = t
+        }
+
+        if (delivered) {
+            // A copy held by an earlier failed attempt is now stale news;
+            // left behind it would redeliver *after* the event that
+            // superseded it. See [StickyEventBuffer.discard].
+            buffer.discard(key, generation)
+        } else if (buffer.hold(key, eventJson, generation)) {
+            try {
                 flush()
+            } catch (t: Throwable) {
+                val original = failure
+                if (original == null) failure = t else original.addSuppressed(t)
             }
         }
+
+        failure?.let { throw it }
     }
 
     /**

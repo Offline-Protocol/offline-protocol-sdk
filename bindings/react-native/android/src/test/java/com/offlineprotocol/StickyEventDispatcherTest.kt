@@ -226,6 +226,29 @@ class StickyEventDispatcherTest {
         assertTrue("a stale copy outlived the event that superseded it", harness.buffer.isEmpty())
     }
 
+    @Test
+    fun aFlushThatThrowsDoesNotReplaceTheEmitThatFailed() {
+        // The retry a successful hold runs reads the gate and posts to the JS
+        // queue, either of which can throw — and out of a `finally` that second
+        // throwable replaces the first, so the caller is told about the retry
+        // instead of about the emit that actually failed. The original wins and
+        // the retry's failure rides along suppressed.
+        val harness = Harness(canEmit = true)
+        harness.onEmit = { throw OutOfMemoryError("emit") }
+        // Throws on the way back in through flush(), not on the first read.
+        harness.onCanEmit = { if (harness.canEmitCalls > 1) throw IllegalStateException("flush") }
+
+        try {
+            harness.dispatcher.send("mesh_stopped_by_user", "{}")
+            throw AssertionError("expected the emit failure to propagate")
+        } catch (e: OutOfMemoryError) {
+            assertEquals("emit", e.message)
+            assertEquals(listOf("flush"), e.suppressed.map { it.message })
+        }
+
+        assertFalse("the event was lost with the throwable", harness.buffer.isEmpty())
+    }
+
     // MARK: - Superseded inside a live session
 
     @Test
