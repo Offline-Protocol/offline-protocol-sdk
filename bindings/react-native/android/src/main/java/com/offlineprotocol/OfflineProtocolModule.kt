@@ -769,12 +769,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // moment a new one comes up, and redelivering it would be the bug
             // this whole mechanism exists to prevent, inverted: an app told
             // "mesh stopped" or "relay superseded" just after starting has
-            // nothing to restate it. Today `destroy()` is the only path that
-            // shuts the gate, so it is also the only way an event can outlive
-            // its session — which makes this line redundant *right now*. It is
-            // here so the invariant is structural rather than incidental: any
-            // future change that lets the gate shut without a destroy() would
-            // otherwise reintroduce the stale-redelivery hole silently.
+            // nothing to restate it.
+            //
+            // Not redundant with destroy()'s endSession(): destroy() is *not*
+            // the only way the gate shuts — canEmitToJs() also refuses while
+            // there is no live React instance — so an event can be held across
+            // a window the app tore nothing down for, and still be waiting
+            // here. Which means this can discard a genuinely pending event: the
+            // flush onHostResume posts runs on the JS queue, so an app calling
+            // start() from its own foreground handler can bump the generation
+            // first. That is the right trade — the app is bringing the mesh
+            // back up, which is what a held stop would have told it to
+            // reconcile against — and it is why the getState() reconcile in
+            // docs/react-native-integration.md §6.1 is documented as the
+            // belt-and-braces rather than as an optional extra.
             stickyEvents.endSession()
             emitDiagnostic("info", "Starting protocol")
             protocol?.start()

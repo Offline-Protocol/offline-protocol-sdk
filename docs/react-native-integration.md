@@ -158,7 +158,7 @@ sdk.on('mesh_stopped_by_user', () => {
 - **They are not durable.** The hold is in-memory and per-React-instance, so a JS reload or a process kill loses a held event. Persisting it would not help: if the process was killed, the event was never generated in the first place.
 - **The hold is Android-only.** `mesh_stopped_by_user` has no iOS counterpart at all (the notification affordance is Android-only), but `internet_session_superseded` fires on both platforms and on iOS is emitted best-effort — if nothing is subscribed at that moment it is dropped, with nothing to restate it.
 
-**So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have on both platforms, and it covers the windows no event can:
+**So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have on both platforms. It takes two reads, because the two events report different things and no single call covers both:
 
 ```ts
 import { ProtocolState } from '@offline-protocol/mesh-sdk';
@@ -168,9 +168,15 @@ const state = await sdk.getState();
 if (state !== ProtocolState.Running) {
   setMeshActive(false); // reconcile whatever local "mesh active" flag you keep
 }
+
+if (!(await sdk.isInternetReady())) {
+  setRelayConnected(false); // a transient drop — or a supersede you never heard about
+}
 ```
 
-`getState()` reads the live protocol state, so it stays correct after a notification Stop, after a sticky service restart, and after any teardown the app did not drive.
+`getState()` reads the live protocol state, so it stays correct after a notification Stop, after a sticky service restart, and after any teardown the app did not drive. It says nothing about the relay: after a supersede the protocol is still `Running`, because only the relay session was displaced.
+
+`isInternetReady()` is that other half, and on iOS it is the **only** cover for a missed `internet_session_superseded`. Note what it cannot tell you: a `false` from an ordinary disconnect — which reconnects itself — and a `false` from a supersede — which will **not** reconnect on its own, ever — look identical. If you stay disconnected across several foregrounds with no `internet_status_changed` reporting `connected: true`, treat it as a possible supersession and offer the user an explicit reconnect: `enableTransport('internet', ...)` is the deliberate re-enable that clears the latch.
 
 ---
 
