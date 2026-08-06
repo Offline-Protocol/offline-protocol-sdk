@@ -52,10 +52,47 @@ class LeAdvertiser(
         private const val MIN_ADVERTISE_INTERVAL_MS = 1500L
         private const val ADVERTISE_RESTART_MIN_MS = 200L
         private const val ADVERTISE_RESTART_MAX_MS = 1200L
+        private const val ADVERTISE_RETRY_MIN_MS = 10_000L
+        private const val ADVERTISE_RETRY_MAX_MS = 30_000L
+        private const val ADVERTISE_RETRY_REASON = "advertise_retry"
     }
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var advertiseCallback: AdvertiseCallback? = null
+
+    /**
+     * The one path back to a live advertisement after the platform *accepts* a
+     * start and then refuses it asynchronously at `onStartFailure`.
+     *
+     * Every other thing that revives advertising is a passenger on something
+     * else: the facade's `bleRecoveryRunnable` repairs advertising only inside
+     * an adapter-off episode (it re-reads the advertiser, replaces the GATT
+     * server and restarts), and [refresh] runs only when the published identity
+     * changes. A terminal failure while the adapter is on and the scan is
+     * healthy trips none of them — it clears [isAdvertising] and the in-flight
+     * gate and schedules nothing — so the device stays discoverable to nobody
+     * for the rest of the process lifetime while the transport still reports
+     * RUNNING. This runnable is the only thing that closes that.
+     *
+     * Deliberately a bare `start`: it needs no state check of its own because
+     * [startInFlight] already refuses a start against a live or in-flight
+     * advertisement, which is what makes a retry that races a recovery
+     * elsewhere a no-op rather than a second `startAdvertising`.
+     *
+     * It does **not** re-acquire the platform advertiser. A null advertiser
+     * means the adapter is down, and healing that — scanner, GATT server and
+     * advertising together — belongs to the facade's adapter-off episode. The
+     * retry lands on [start]'s null-advertiser bail and is inert, which is the
+     * hand-over, not a gap.
+     */
+    private val advertiseRetryRunnable = Runnable { start(ADVERTISE_RETRY_REASON) }
+
+    private val advertiseRetryScheduler = BleRecoveryScheduler(
+        handler = mainHandler,
+        task = advertiseRetryRunnable,
+        minDelayMs = ADVERTISE_RETRY_MIN_MS,
+        maxDelayMs = ADVERTISE_RETRY_MAX_MS,
+    )
 
     @Volatile
     var isAdvertising: Boolean = false
@@ -167,10 +204,28 @@ class LeAdvertiser(
             val scanResponse = host.buildScanResponse()
 
             val cb = object : AdvertiseCallback() {
+                // Bind the callback identity explicitly rather than leaning on
+                // `this` resolving through the posted lambdas below. Same shape
+                // the facade's onScanFailed uses, and load-bearing in both
+                // callbacks here: a result belonging to a callback that has
+                // already been replaced or stopped must not disturb its
+                // successor's state.
+                private val self = this
+
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
                     Log.i(TAG, "BLE advertising started successfully (reason=$reason)")
                     isAdvertising = true
                     lastAdvertiseRestartAt = System.currentTimeMillis()
+                    // A live advertisement retires any retry armed by an earlier
+                    // failure, and puts the ladder back on its bottom rung so
+                    // the next outage is retried fast rather than at the cap.
+                    // Posted because this arrives on a private Binder thread
+                    // while the scheduler's ladder is main-confined.
+                    mainHandler.post {
+                        if (advertiseCallback === self) {
+                            advertiseRetryScheduler.cancel()
+                        }
+                    }
                     diagnosticEmitter(
                         "info",
                         "BLE advertising started",
@@ -194,18 +249,31 @@ class LeAdvertiser(
                     // observes the clear immediately — no main-handler hop
                     // required, which closes the retry window.
                     startInFlight = false
+                    val willRetry = isRetriableFailure(errorCode)
                     // Drop the stop-reference on main so a concurrent stop()
                     // doesn't race our clear. stop() is main-thread only, so
                     // posting here is sufficient.
                     mainHandler.post {
-                        if (advertiseCallback === this) {
+                        if (advertiseCallback === self) {
                             advertiseCallback = null
+                            // Arm inside the identity check, not beside it. A
+                            // failure from a callback already replaced by a
+                            // newer start belongs to that start, and one whose
+                            // reference stop() has already cleared must not be
+                            // resurrected by a retry the app never asked for.
+                            if (willRetry) {
+                                advertiseRetryScheduler.schedule()
+                            }
                         }
                     }
                     diagnosticEmitter(
                         "error",
                         "BLE advertising failed",
-                        mapOf("errorCode" to errorCode, "errorMessage" to errorMsg),
+                        mapOf(
+                            "errorCode" to errorCode,
+                            "errorMessage" to errorMsg,
+                            "willRetry" to willRetry,
+                        ),
                     )
                 }
             }
@@ -246,6 +314,49 @@ class LeAdvertiser(
         }
     }
 
+    /**
+     * Whether a terminal `onStartFailure` is worth another attempt.
+     *
+     * Codes and their meanings are from the platform
+     * [AdvertiseCallback] contract:
+     *
+     *  - `TOO_MANY_ADVERTISERS` — "no advertising instance is available", i.e.
+     *    every hardware slot is held, usually by other apps. Nothing about this
+     *    device is broken and slots are released all the time, so this is the
+     *    case the retry exists for.
+     *  - `INTERNAL_ERROR` — an unattributed stack failure, routinely transient.
+     *  - `ALREADY_STARTED` — an advertisement *is* running, so a retry earns
+     *    the same code forever. (The handler above has already dropped the only
+     *    reference that could stop it; that is a separate, pre-existing hazard
+     *    documented on [startInFlight] and not something a retry can repair.)
+     *  - `DATA_TOO_LARGE` — the payload is built by this SDK and does not vary
+     *    between attempts, so this is a bug in what we advertise, not a
+     *    condition that clears. It stays a loud error diagnostic instead.
+     *  - `FEATURE_UNSUPPORTED` — hardware truth. Retrying only burns wakeups
+     *    for the process lifetime; the scan path treats its own
+     *    `FEATURE_UNSUPPORTED` as terminal for the same reason.
+     *
+     * Unknown codes retry: an unrecognized value is more likely a
+     * vendor-specific transient than a new permanent class, and the ladder's
+     * cap bounds the cost of being wrong.
+     *
+     * Note this deliberately reports nothing to the transport's availability
+     * signal, even for the permanent codes. A device that cannot advertise but
+     * can still scan keeps the central role — it discovers peers and connects
+     * out — so BLE is degraded, not unusable, and saying otherwise would take
+     * a working transport out of DORS.
+     */
+    private fun isRetriableFailure(errorCode: Int): Boolean = when (errorCode) {
+        AdvertiseCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS,
+        AdvertiseCallback.ADVERTISE_FAILED_INTERNAL_ERROR,
+        -> true
+        AdvertiseCallback.ADVERTISE_FAILED_ALREADY_STARTED,
+        AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE,
+        AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED,
+        -> false
+        else -> true
+    }
+
     fun stop() {
         val cb = advertiseCallback
         advertiseCallback = null
@@ -255,6 +366,16 @@ class LeAdvertiser(
             mainHandler.removeCallbacks(it)
             pendingAdvertiseRestart = null
         }
+        // Cancel the failure retry *above* the early return below, not beside
+        // the stopAdvertising call. A retry is armed precisely when a failure
+        // has already nulled [advertiseCallback], so the `cb == null` return is
+        // the common path out of a deliberate stop that follows one — leaving
+        // the cancel below it would let a paused or stopped transport put
+        // itself back on air. This is the single point every deliberate
+        // teardown (stop, shutdown, refresh, the facade's adapter-off repair
+        // and its BLE reset) routes through, which is what makes them all
+        // authoritative over the retry without knowing it exists.
+        advertiseRetryScheduler.cancel()
         if (cb == null) return
         try {
             advertiser?.stopAdvertising(cb)
@@ -329,6 +450,7 @@ class LeAdvertiser(
         pendingAdvertiseReason = null
         lastAdvertiseRestartAt = 0L
         startInFlight = false
+        advertiseRetryScheduler.cancel()
         advertiser = null
     }
 }
