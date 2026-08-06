@@ -149,6 +149,21 @@ pub enum SecurityWarningCode {
     /// design must never absorb silently: a stale published record makes every
     /// stranger who fetches it build a Welcome that can never be processed.
     NostrKeyPackageSlotExhausted,
+    /// The per-peer key-package pool hit its ceiling, so a peer was advertised
+    /// an init key another peer already holds.
+    ///
+    /// The push path normally gives each peer its own single-use init key. Past
+    /// the ceiling it reuses one instead of growing the pool without bound —
+    /// weakening forward secrecy at session establishment (one compromised init
+    /// key opens every Welcome built against it) and re-introducing the race
+    /// where the second peer to use a package finds it already consumed. Both
+    /// clear as packages are consumed or expire.
+    ///
+    /// Reaching it means a device has accumulated unconsumed advertisements:
+    /// many peers met that never established a session. Sustained emission is
+    /// the signal that the ceiling, not peer churn, is now the binding
+    /// constraint.
+    PushKeyPackagePoolExhausted,
 }
 
 impl SecurityWarningCode {
@@ -167,6 +182,7 @@ impl SecurityWarningCode {
             Self::SessionSenderGroupMismatch => "SESSION_SENDER_GROUP_MISMATCH",
             Self::SessionRekeyTriggered => "SESSION_REKEY_TRIGGERED",
             Self::NostrKeyPackageSlotExhausted => "NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED",
+            Self::PushKeyPackagePoolExhausted => "PUSH_KEY_PACKAGE_POOL_EXHAUSTED",
         }
     }
 }
@@ -3487,6 +3503,7 @@ mod tests {
             SecurityWarningCode::SessionSenderGroupMismatch,
             SecurityWarningCode::SessionRekeyTriggered,
             SecurityWarningCode::NostrKeyPackageSlotExhausted,
+            SecurityWarningCode::PushKeyPackagePoolExhausted,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -3511,7 +3528,8 @@ mod tests {
                 | SecurityWarningCode::PlaintextReceiveRejected
                 | SecurityWarningCode::SessionSenderGroupMismatch
                 | SecurityWarningCode::SessionRekeyTriggered
-                | SecurityWarningCode::NostrKeyPackageSlotExhausted => {}
+                | SecurityWarningCode::NostrKeyPackageSlotExhausted
+                | SecurityWarningCode::PushKeyPackagePoolExhausted => {}
             }
         }
     }
@@ -3627,6 +3645,78 @@ mod tests {
             stale.is_empty(),
             "types.ts declares event tags with no core Event variant \
              (stale, or a new bridge-only event that needs allowlisting here): {stale:?}"
+        );
+    }
+
+    /// Drift guard for the *payload* side of the same seam: apps switch on
+    /// `reason_code`, so a code with no entry in the RN union is invisible to
+    /// exhaustive handling on the app side and silently falls into whatever
+    /// default a `switch` has. `NOSTR_KEY_PACKAGE_SLOT_EXHAUSTED` had already
+    /// drifted this way before this guard existed.
+    #[test]
+    fn react_native_types_cover_all_security_warning_codes() {
+        use std::collections::BTreeSet;
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let events_rs = std::fs::read_to_string(manifest_dir.join("src/events.rs")).unwrap();
+        let types_ts_path = manifest_dir.join("../../bindings/react-native/src/types.ts");
+        let types_ts = std::fs::read_to_string(&types_ts_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", types_ts_path.display()));
+
+        // The wire forms are exactly the string literals `as_str` maps to, and
+        // the test above already pins those to serde's rendering.
+        // Anchored on the impl block: several enums in this file have an
+        // identical `as_str` signature, and the first match is a different one.
+        let as_str_body = events_rs
+            .split_once("impl SecurityWarningCode {")
+            .expect("impl SecurityWarningCode not found")
+            .1
+            .split_once("    pub fn as_str(&self) -> &'static str {")
+            .expect("SecurityWarningCode::as_str not found")
+            .1
+            .split_once("\n    }")
+            .expect("as_str body not terminated")
+            .0;
+        let rust_codes: BTreeSet<String> = as_str_body
+            .lines()
+            .filter_map(|l| l.split_once("=> \""))
+            .filter_map(|(_, rest)| rest.split_once('"'))
+            .map(|(code, _)| code.to_string())
+            .collect();
+
+        // Negative control: a scan that silently matched nothing would make
+        // every assertion below vacuously true.
+        assert!(
+            rust_codes.len() >= 12,
+            "as_str scan looks broken: only {} codes found",
+            rust_codes.len()
+        );
+
+        let union = types_ts
+            .split_once("export type SecurityWarningCode =")
+            .expect("SecurityWarningCode union not found in types.ts")
+            .1
+            .split_once(';')
+            .expect("SecurityWarningCode union not terminated")
+            .0;
+        let ts_codes: BTreeSet<String> = union
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("| '"))
+            .filter_map(|rest| rest.strip_suffix('\''))
+            .map(str::to_string)
+            .collect();
+
+        let missing: Vec<_> = rust_codes.difference(&ts_codes).collect();
+        assert!(
+            missing.is_empty(),
+            "SecurityWarningCode variants missing from the union in \
+             bindings/react-native/src/types.ts: {missing:?}"
+        );
+
+        let stale: Vec<_> = ts_codes.difference(&rust_codes).collect();
+        assert!(
+            stale.is_empty(),
+            "types.ts declares security warning codes with no Rust variant: {stale:?}"
         );
     }
 }

@@ -143,13 +143,39 @@ pub struct KeyPackageBundle {
     /// An MLS key package's init key is consumed by the first peer who uses it,
     /// so a package standing in a published record must not also be handed to a
     /// peer over the push path: the second user of it builds a Welcome that can
-    /// never be processed. Reserved packages are therefore invisible to
-    /// [`MlsManager::get_or_create_key_package`], which serves the push path.
+    /// never be processed. Reserved packages are therefore invisible to both
+    /// entry points that hand packages out —
+    /// [`MlsManager::take_push_key_package`](crate::MlsManager::take_push_key_package)
+    /// (the push path) and
+    /// [`MlsManager::get_or_create_key_package`](crate::MlsManager::get_or_create_key_package)
+    /// (the peer-less one).
     ///
     /// Additive and defaulted, so packages written before this field existed
     /// deserialize as unreserved — which is what they are.
     #[serde(default)]
     pub reserved_for_publication: bool,
+
+    /// The peer this package has been handed to over the push path, if any.
+    ///
+    /// This is what keeps the push path from advertising one init key to
+    /// everybody: a package is claimed by the first peer it is pushed to and
+    /// afterwards only ever re-handed to *that* peer, so a repeat push costs no
+    /// new key material while two peers never share one. RFC 9420 §16.8 asks
+    /// for a key package to be rotated as soon as possible after use; the
+    /// rotation trigger is consumption, which
+    /// [`MlsManager::key_package_by_id`](crate::MlsManager::key_package_by_id)
+    /// already reports, and a consumed package's successor is minted on the
+    /// next push to that peer.
+    ///
+    /// `None` means unclaimed — either minted outside the push path (the
+    /// peer-less FFI entry point) or written before this field existed. Those
+    /// are claimable, so upgrading does not strand the package already in
+    /// storage.
+    ///
+    /// Local bookkeeping only: never serialized onto the wire, and never part
+    /// of the FFI record.
+    #[serde(default)]
+    pub assigned_peer: Option<String>,
 }
 
 impl KeyPackageBundle {
@@ -169,6 +195,7 @@ impl KeyPackageBundle {
             expires_at_ms: now_ms + (lifetime_secs * 1000),
             synced: false,
             reserved_for_publication: false,
+            assigned_peer: None,
         }
     }
 
@@ -179,6 +206,23 @@ impl KeyPackageBundle {
     pub fn is_expired(&self) -> bool {
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         now_ms >= self.expires_at_ms
+    }
+
+    /// Whether the package expired more than `grace_secs` ago.
+    ///
+    /// Expiry and the destruction of the private init key are deliberately two
+    /// different moments. An expired package is no longer advertised, but a peer
+    /// holding a copy handed out just before expiry may still Welcome us — and
+    /// that Welcome is only processable while the init key is in provider
+    /// storage. The grace window is how long that stays true; past it the key
+    /// material is destroyed rather than left resident for the life of the
+    /// install.
+    pub fn expired_past_grace(&self, grace_secs: u64) -> bool {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        now_ms
+            >= self
+                .expires_at_ms
+                .saturating_add(grace_secs.saturating_mul(1000))
     }
 
     /// Returns the remaining valid lifetime in milliseconds.
@@ -209,6 +253,9 @@ impl KeyPackageBundle {
             synced: false,
             // A peer's package, never one of our publication slots.
             reserved_for_publication: false,
+            // Nor one of ours to hand out — the push-path assignment is about
+            // packages this device minted.
+            assigned_peer: None,
         }
     }
 }
