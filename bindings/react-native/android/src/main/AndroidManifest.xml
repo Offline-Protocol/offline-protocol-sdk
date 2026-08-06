@@ -24,12 +24,31 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
+    <!-- Required by the mesh wake service: React Native's HeadlessJsTaskService
+         takes a PARTIAL_WAKE_LOCK for the lifetime of a headless task, so the
+         permission has to be held by whoever starts one. Normal permission, no
+         runtime grant. Only ever exercised by an app that opted in to
+         MESH_WAKE_ENABLED. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application>
         <service
             android:name=".MeshForegroundService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Boots JavaScript after a process kill so a receiver exists before a
+             protocol does (issue #307). Inert unless the app opts in with
+             <meta-data android:name="com.offlineprotocol.MESH_WAKE_ENABLED"
+             android:value="true" /> and registers a task via
+             registerMeshWakeTask. Not a foreground service and never promotes
+             itself: it is started from under the already-promoted keep-alive.
+             Not exported — only this SDK's own service starts it. -->
+        <service
+            android:name=".MeshHeadlessWakeService"
+            android:enabled="true"
+            android:exported="false" />
     </application>
     
 </manifest>
