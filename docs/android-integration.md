@@ -135,6 +135,32 @@ class MeshEventHandler : EventCallback {
 }
 ```
 
+> **`message_received` is the only copy.** The core persists outbound and session
+> state; it never stores inbound content. Your callback either durably records
+> the message or it is gone. This is why `start()` must never run ahead of a
+> callback that can actually keep what it is handed — see below.
+
+#### Never start the protocol without a live consumer
+
+If you run the protocol from a `Service` — a foreground keep-alive, a
+`START_STICKY` restart, a boot receiver — resist the obvious shape of
+"reconstruct the config and call `start()`". Starting without a consumer that
+durably stores `message_received` does not degrade delivery, it destroys
+messages **and tells their senders they arrived**:
+
+1. The receive path sends the delivery ACK *before* it emits the event.
+2. That ACK makes the sender drop its outbox entry, retiring the retry ladder.
+3. Your callback drops the event (or there is no callback yet), so nothing keeps it.
+4. The MLS ratchet generation is spent, so a resend cannot reconstruct it either.
+
+Not starting is strictly better: the sender's outbox holds for up to seven days,
+retries, parks, and pushes, and delivers once the device is genuinely running
+again. Order it so the consumer exists first — `setEventCallback` before
+`start()`, as above — and if a restart path cannot guarantee one, let the mesh
+stay down until the app is running. The React Native bindings make the same
+call in `MeshForegroundService.handleStickyRestart`, which stops the keep-alive
+rather than rebuild a protocol JavaScript is not there to receive from.
+
 ### 5. Storage: Two Providers, Two Lifecycles
 
 `initializeMls` takes two providers because key material and restartable

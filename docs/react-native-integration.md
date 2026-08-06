@@ -174,9 +174,30 @@ if (!(await sdk.isInternetReady())) {
 }
 ```
 
-`getState()` reads the live protocol state, so it stays correct after a notification Stop, after a sticky service restart, and after any teardown the app did not drive. It says nothing about the relay: after a supersede the protocol is still `Running`, because only the relay session was displaced.
+`getState()` reads the live protocol state, so it stays correct after a notification Stop, after a sticky service restart, and after any teardown the app did not drive — including one that took the whole process with it, where a fresh module reports `Stopped` because there is no protocol yet. It says nothing about the relay: after a supersede the protocol is still `Running`, because only the relay session was displaced.
 
 `isInternetReady()` is that other half, and on iOS it is the **only** cover for a missed `internet_session_superseded`. Note what it cannot tell you: a `false` from an ordinary disconnect — which reconnects itself — and a `false` from a supersede — which will **not** reconnect on its own, ever — look identical. If you stay disconnected across several foregrounds with no `internet_status_changed` reporting `connected: true`, treat it as a possible supersession and offer the user an explicit reconnect: `enableTransport('internet', ...)` is the deliberate re-enable that clears the latch. That re-enable also drops any `internet_session_superseded` still held on Android, so a notice about the session you just replaced cannot arrive after you are reconnected — you will not have to filter one out.
+
+### 6.2 Process death, and why the mesh does not resume itself (Android)
+
+Android can kill your process while mesh is running — memory pressure is the usual reason, and a foreground service makes it less likely, not impossible. The keep-alive service is `START_STICKY`, so the system hands the service back afterwards, **but the SDK deliberately does not restart the mesh from there.** It stops the service instead, so no "Mesh Active" notification outlives the protocol it advertises.
+
+This is a decision, not a missing feature. A protocol re-created with no JavaScript context behind it is worse than one that is simply down: the receive path sends a delivery ACK *before* it emits `message_received`, that ACK makes the sender retire the message from its outbox, and the event is then dropped because nothing is subscribed. The message is gone, and its sender was told it arrived. Staying down keeps the failure recoverable — the sender's outbox holds for up to seven days, retries, parks, and pushes, and delivers once this device is genuinely running again.
+
+**What your app should do.** Nothing on Android's behalf, but treat mesh state as something to reconcile at launch rather than assume:
+
+```ts
+// on app start, after your own "mesh should be on" preference says yes
+const state = await sdk.getState();
+if (state !== ProtocolState.Running) {
+  await sdk.start();
+}
+```
+
+Two things to know if you restart the SDK yourself:
+
+- **Never reuse a `destroy()`ed instance.** `destroy()` removes the event subscriptions, and only the constructor creates them — a destroyed instance that is `start()`ed again will run but deliver zero events. Construct a new `OfflineProtocol`.
+- **Nothing is queued for you while the process is dead.** The one-shot event hold described in §6.1 is in-memory; a process kill loses it. That is not a gap in the hold — if the process was killed, the event was never generated.
 
 ---
 
