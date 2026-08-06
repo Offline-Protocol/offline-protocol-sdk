@@ -784,6 +784,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // docs/react-native-integration.md §6.1 is documented as the
             // belt-and-braces rather than as an optional extra.
             //
+            // That trade is stated for a start() that *succeeds*, and this runs
+            // before the one that can throw, so a failed start() discards a
+            // held stop as well. Still right, but for a different reason: the
+            // caller learns the mesh is not up from its own rejected promise,
+            // which is strictly more than the held event would have told it.
+            // Kept first rather than moved after protocol.start() so there is
+            // no window where a start() is underway with the buffer still
+            // closed by the previous destroy().
+            //
             // beginSession(), not endSession(): this is a session *starting*,
             // so the buffer must take what follows. destroy() is the transition
             // that closes it. Collapsing the two is how an event emitted by the

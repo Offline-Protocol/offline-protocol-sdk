@@ -70,10 +70,15 @@ package com.offlineprotocol
  * that must be right across those windows reconcile with `getState()` on
  * foreground; see docs/react-native-integration.md.
  *
- * No iOS twin, deliberately: the notification Stop action that produces the
- * event this was built for is Android-only, and iOS has no one-shot event of
- * this shape to hold. Mirroring it there now would be an abstraction with no
- * caller.
+ * No iOS twin **for the hold**, deliberately: the notification Stop action that
+ * produces `mesh_stopped_by_user` is Android-only, so mirroring a buffer there
+ * would leave it with one caller. The *other* half of this fix did land on both
+ * — `internet_session_superseded` fires on iOS too, and its listener flag is
+ * lock-guarded there for the same stale-read hazard Android's `listenerCount`
+ * AtomicInteger closes. Read that asymmetry as scope, not as iOS being exempt:
+ * the iOS race was missed on the first pass precisely because the work was
+ * framed as "Android", and an event's fix is scoped by where the event *fires*.
+ * docs/react-native-integration.md §6.1 states what iOS does and does not get.
  */
 class StickyEventBuffer(private val maxEntries: Int = DEFAULT_MAX_ENTRIES) {
 
