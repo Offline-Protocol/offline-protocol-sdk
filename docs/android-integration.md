@@ -162,6 +162,13 @@ stay down until the app is running. The React Native bindings make the same
 call in `MeshForegroundService.handleStickyRestart`, which stops the keep-alive
 rather than rebuild a protocol JavaScript is not there to receive from.
 
+Note what the sound version of "bring it back" looks like, since you own the
+equivalent path here: those bindings can optionally start *JavaScript* on a
+sticky restart and let the app run its own `start()`, so the consumer exists
+before the protocol does. The native analogue is the same shape — restore your
+durable `EventCallback` first, then `start()` — and the ordering, not the
+service, is what makes it safe.
+
 ### 5. Storage: Two Providers, Two Lifecycles
 
 `initializeMls` takes two providers because key material and restartable
