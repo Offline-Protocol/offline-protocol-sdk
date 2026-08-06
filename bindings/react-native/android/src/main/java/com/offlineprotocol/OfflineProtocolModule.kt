@@ -140,8 +140,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
          */
         private const val EVENT_MESH_STOPPED_BY_USER = "mesh_stopped_by_user"
 
-        /** @see EVENT_MESH_STOPPED_BY_USER */
-        private const val EVENT_INTERNET_SESSION_SUPERSEDED = "internet_session_superseded"
+        /**
+         * @see EVENT_MESH_STOPPED_BY_USER
+         *
+         * Aliased from [SupersededLatchPolicy.EVENT_TYPE] rather than spelled
+         * again, so the tag has exactly one definition across both platforms —
+         * and, unlike a literal here, one a unit test can pin (this module has
+         * no test harness; the policy does, on both platforms).
+         */
+        private const val EVENT_INTERNET_SESSION_SUPERSEDED = SupersededLatchPolicy.EVENT_TYPE
 
         /** How long `destroy` waits for an in-flight process tick to finish. */
         private const val PROCESS_SHUTDOWN_TIMEOUT_MS = 2_000L
@@ -754,10 +761,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     private fun emitInternetSupersededEvent(reason: String?) {
         try {
-            val json = JSONObject()
-            json.put("type", EVENT_INTERNET_SESSION_SUPERSEDED)
-            if (reason != null) json.put("reason", reason)
-            sendStickyEvent(EVENT_INTERNET_SESSION_SUPERSEDED, json.toString())
+            sendStickyEvent(
+                EVENT_INTERNET_SESSION_SUPERSEDED,
+                SupersededLatchPolicy.eventJson(reason)
+            )
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Failed to emit internet superseded event", e)
         }
@@ -4118,6 +4125,28 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun internetIsReady(promise: Promise) {
         promise.resolve(internetManager?.isReady() ?: false)
+    }
+
+    /**
+     * Whether the relay displaced this session ("connected elsewhere") and
+     * latched the transport stopped. Resolves false (never rejects) when the
+     * internet transport isn't initialized.
+     *
+     * The pull half of the supersede contract, and the disambiguation
+     * [internetIsReady] cannot offer: a `false` there from an ordinary
+     * disconnect — which reconnects itself — and a `false` from a displacement
+     * — which will not reconnect on its own, ever — are indistinguishable.
+     * True here means the only recovery is a deliberate re-enable
+     * (`enableTransport('internet', …)`), which clears the latch.
+     *
+     * Complements the `internet_session_superseded` event rather than
+     * replacing it: the event tells an app that is listening, this answers an
+     * app that asks — including one whose process died and came back, which no
+     * in-memory hold survives.
+     */
+    @ReactMethod
+    fun internetIsSuperseded(promise: Promise) {
+        promise.resolve(internetManager?.isSessionSuperseded() ?: false)
     }
 
     /**

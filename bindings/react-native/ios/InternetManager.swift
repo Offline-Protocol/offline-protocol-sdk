@@ -383,7 +383,38 @@ public class InternetManager: NSObject, TransportManager {
         defer { stateLock.unlock() }
         return _isConnected && _isAuthenticated
     }
-    
+
+    /// True while the relay has displaced this session and the transport is
+    /// latched stopped — it will not reconnect on its own, ever, until an
+    /// explicit `start()`.
+    ///
+    /// The pull half of the supersede contract, and the answer to a question
+    /// `isReady()` structurally cannot resolve: a `false` from an ordinary
+    /// disconnect (which reconnects itself) and a `false` from a displacement
+    /// (which never will) are identical there. Reads the latch on main, its
+    /// single writer, rather than the best-effort off-main read `getMetrics`
+    /// takes — this one gates whether the app offers the user a reconnect.
+    public func isSessionSuperseded() -> Bool {
+        var superseded = false
+        runOnMainSync { superseded = supersedeLatch.isSuperseded }
+        return superseded
+    }
+
+    /// The `internet_session_superseded` event JSON if this transport is
+    /// *currently* superseded, else nil.
+    ///
+    /// The push half, re-derived from the latch instead of replayed from a
+    /// buffered copy of the original emit. The bridge calls this on app
+    /// foreground: a non-nil result is true at the moment it is delivered, so
+    /// a dropped emit heals on the next foreground and a re-enabled transport
+    /// simply returns nil rather than needing the emit to be discarded
+    /// somewhere. See SupersededLatchPolicy.restatementEventJson.
+    public func supersedeRestatementJson() -> String? {
+        var json: String?
+        runOnMainSync { json = supersedeLatch.restatementEventJson() }
+        return json
+    }
+
     // Metrics. Atomic (lock-guarded): send completions mutate on the
     // URLSession delegate queue, receive paths too, and getMetrics() reads
     // from the caller's thread — mirrors the Kotlin bridge's AtomicLong
@@ -1149,8 +1180,12 @@ public class InternetManager: NSObject, TransportManager {
     /// relay emits both a SessionSuperseded notice and close 4000, and the
     /// close itself fires 2-3 terminal signals, so several paths reach here
     /// for one displacement. Main-thread only.
+    ///
+    /// The reason is handed to the latch, not just to the emitter: it has to
+    /// outlive this call so a foreground restatement can report *why* the
+    /// session was displaced even though the original emit was dropped.
     private func markSuperseded(reason: String?) {
-        guard supersedeLatch.mark() else { return }
+        guard supersedeLatch.mark(reason: reason) else { return }
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
         emitDiagnostic("warning", "Relay superseded this session; not auto-reconnecting", context: [

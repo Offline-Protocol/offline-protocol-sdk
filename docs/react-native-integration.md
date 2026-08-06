@@ -152,13 +152,18 @@ sdk.on('mesh_stopped_by_user', () => {
 });
 ```
 
-**Delivery, and what it does not promise.** `mesh_stopped_by_user` and `internet_session_superseded` are *one-shot*: nothing else ever restates them. **On Android** both are held natively and redelivered on your next event subscription or app foreground if JS could not take them when they fired. Three limits worth designing against:
+**Delivery, and what it does not promise.** `mesh_stopped_by_user` and `internet_session_superseded` are *one-shot*: nothing else ever restates them, so both bridges work to keep them from being lost. **Delivery is at-least-once, and the events are state, not edges.**
 
-- **They can arrive late.** Treat them as "this happened", not "this just happened" — reconcile against actual state rather than assuming the event is fresh.
-- **They are not durable.** The hold is in-memory and per-React-instance, so a JS reload or a process kill loses a held event. Persisting it would not help: if the process was killed, the event was never generated in the first place.
-- **The hold is Android-only.** `mesh_stopped_by_user` has no iOS counterpart at all (the notification affordance is Android-only), but `internet_session_superseded` fires on both platforms and on iOS is emitted best-effort — if nothing is subscribed at that moment it is dropped, with nothing to restate it.
+- **Android** holds a copy of an emit JS could not take and redelivers it on your next event subscription or app foreground.
+- **iOS** re-derives `internet_session_superseded` from the live transport latch on every app foreground, for as long as the session stays superseded. (`mesh_stopped_by_user` has no iOS counterpart at all — the notification affordance is Android-only.)
 
-**So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have on both platforms. It takes two reads, because the two events report different things and no single call covers both:
+Three consequences worth designing against:
+
+- **Handlers must be idempotent.** Both mechanisms can deliver the same fact more than once — Android by redelivering a held copy, iOS by restating on each foreground until the transport is re-enabled. Set a flag; do not push a screen or fire a notification per event.
+- **They can arrive late.** Treat them as "this is true", not "this just happened" — reconcile against actual state rather than assuming the event is fresh.
+- **They are not durable.** Neither mechanism survives a process kill, and Android's hold does not survive a JS reload. Persisting would not help: if the process was killed, the event was never generated in the first place.
+
+**So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have on both platforms. It takes three reads, because the events report different things and no single call covers them:
 
 ```ts
 import { ProtocolState } from '@offline-protocol/mesh-sdk';
@@ -169,14 +174,20 @@ if (state !== ProtocolState.Running) {
   setMeshActive(false); // reconcile whatever local "mesh active" flag you keep
 }
 
-if (!(await sdk.isInternetReady())) {
-  setRelayConnected(false); // a transient drop — or a supersede you never heard about
+if (await sdk.isInternetSuperseded()) {
+  // Another device took the relay slot. This will NEVER reconnect on its own.
+  setRelayConnected(false);
+  promptReconnectElsewhere();          // your "connected elsewhere" affordance
+} else if (!(await sdk.isInternetReady())) {
+  setRelayConnected(false);            // an ordinary drop; it reconnects itself
 }
 ```
 
 `getState()` reads the live protocol state, so it stays correct after a notification Stop, after a sticky service restart, and after any teardown the app did not drive — including one that took the whole process with it, where a fresh module reports `Stopped` because there is no protocol yet. It says nothing about the relay: after a supersede the protocol is still `Running`, because only the relay session was displaced.
 
-`isInternetReady()` is that other half, and on iOS it is the **only** cover for a missed `internet_session_superseded`. Note what it cannot tell you: a `false` from an ordinary disconnect — which reconnects itself — and a `false` from a supersede — which will **not** reconnect on its own, ever — look identical. If you stay disconnected across several foregrounds with no `internet_status_changed` reporting `connected: true`, treat it as a possible supersession and offer the user an explicit reconnect: `enableTransport('internet', ...)` is the deliberate re-enable that clears the latch. That re-enable also drops any `internet_session_superseded` still held on Android, so a notice about the session you just replaced cannot arrive after you are reconnected — you will not have to filter one out.
+`isInternetSuperseded()` is the relay half, and it is the read that resolves the ambiguity `isInternetReady()` structurally cannot: a `false` from an ordinary disconnect — which reconnects itself within seconds — and a `false` from a supersede — which will **not** reconnect on its own, ever — are identical there. Check the supersede first and fall back to readiness, as above. Recovery from a supersede is always a deliberate re-enable: `enableTransport('internet', ...)` clears the latch, which stops the iOS restatement and drops any copy Android is still holding, so a notice about the session you just replaced cannot arrive after you are reconnected.
+
+Because `isInternetSuperseded()` reads the latch itself rather than a delivery, it is also the only thing that covers the windows no in-memory delivery reaches — an app that subscribed after the fact, a JS reload, a process restart. **An app that reconciles against it on foreground needs nothing from the event but the prompt**, and that is the shape we recommend.
 
 ### 6.2 Process death, and why the mesh does not resume itself (Android)
 
@@ -199,7 +210,7 @@ if (state !== ProtocolState.Running) {
 Two more things to know if you restart the SDK yourself:
 
 - **Never reuse a `destroy()`ed instance.** `destroy()` removes the event subscriptions, and only the constructor creates them — a destroyed instance that is `start()`ed again will run but deliver zero events. Construct a new `OfflineProtocol`.
-- **Nothing is queued for you while the process is dead.** The one-shot event hold described in §6.1 is in-memory; a process kill loses it. That is not a gap in the hold — if the process was killed, the event was never generated.
+- **Nothing is queued for you while the process is dead.** The one-shot event delivery described in §6.1 is in-memory on both platforms; a process kill loses it. That is not a gap — if the process was killed, the event was never generated. For the relay case there is a durable read regardless: `isInternetSuperseded()` reports the transport's own latch, so a restarted process that re-enables the relay and is displaced again learns it the same way.
 
 ---
 

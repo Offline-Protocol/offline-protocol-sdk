@@ -1952,6 +1952,21 @@ export interface InternetStatusChangedEvent extends BaseEvent {
  * "connected elsewhere" state and reconnect only on explicit user action
  * (re-enabling the internet transport), or on foreground with long jitter.
  * `reason` is the relay-supplied close/notice reason when present.
+ *
+ * **Treat this as state, not as an edge.** Delivery is at-least-once: nothing
+ * else ever restates the fact it reports, so both bridges work to make sure it
+ * is not lost, and the cost is that it can repeat. Android redelivers a copy
+ * held while JS could not take it (on your next subscribe or foreground); iOS
+ * re-derives it from the live latch on every app foreground while the
+ * transport stays superseded. Handlers must therefore be idempotent — setting
+ * a "connected elsewhere" flag is fine, pushing a screen or firing a
+ * notification per event is not. Repeats stop as soon as the transport is
+ * re-enabled.
+ *
+ * The pull-side counterpart is `isInternetSuperseded()`, which answers the
+ * same question on demand and survives the windows no in-memory delivery can
+ * (a late subscribe, a JS reload, a process restart). An app that reconciles
+ * against it on foreground needs nothing from this event but the prompt.
  */
 export interface InternetSessionSupersededEvent extends BaseEvent {
   type: 'internet_session_superseded';
