@@ -1367,18 +1367,31 @@ mod tests {
 
         // Retired claims. Each was false for the same reason: an MLS epoch is
         // read during framing validation, before the sender is authenticated.
-        // Split across `concat!` so the phrases this test bans do not appear
-        // verbatim in the file it also scans.
+        // Split across `concat!` so the banned phrases never appear verbatim in
+        // this file — belt-and-braces on top of the `#[cfg(test)]` truncation
+        // below, so the guard survives either defense being refactored away.
         let retired = [
             concat!("never re-keys on ", "injected garbage"),
             concat!("injected garbage ", "can't drive"),
             concat!("injecting ", "garbage"),
         ];
 
+        // The marker every surface must carry, concat-split for the inverse
+        // reason: written verbatim, this needle alone would satisfy its own
+        // check for config.rs no matter what the rustdoc says.
+        let marker = concat!("re-key trigger is ", "unauthenticated");
+
         for surface in surfaces {
             let path = root.join(surface);
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            // Scan only up to the first `#[cfg(test)]` token — for config.rs,
+            // the non-test source. This test necessarily names the marker (doc
+            // comment, panic message), so scanning its own module would satisfy
+            // the marker check for the file it lives in even after the rustdoc
+            // dropped it. The other surfaces don't contain the token and pass
+            // through whole.
+            let scanned = source.split("#[cfg(test)]").next().unwrap_or(&source);
             // Squeezed so a line wrap inside a phrase cannot hide it, and
             // lowercased so a sentence-initial capital cannot either. Standalone
             // comment/markup continuation tokens (`///`, `//`, `*`, `>`) are
@@ -1386,7 +1399,7 @@ mod tests {
             // comment syntaxes and a reflow would otherwise wedge one into the
             // middle of a phrase — a guard that fails on `cargo fmt` teaches
             // people to delete it.
-            let squeezed = source
+            let squeezed = scanned
                 .split_whitespace()
                 .filter(|tok| !tok.chars().all(|c| matches!(c, '/' | '*' | '>')))
                 .collect::<Vec<_>>()
@@ -1403,7 +1416,7 @@ mod tests {
             }
 
             assert!(
-                squeezed.contains("re-key trigger is unauthenticated"),
+                squeezed.contains(marker),
                 "{surface} documents crypto_recovery_enabled but no longer states \
                  that the re-key trigger is unauthenticated. Say so plainly, or an \
                  integrator will read a sustained SESSION_REKEY_TRIGGERED rate as a \
