@@ -103,6 +103,31 @@ fi
 
 echo "✅ Native module files found"
 echo ""
+
+# The shipped docs (README, docs/UPGRADING.md §12.1, the integration guides) and
+# the runtime linking-error string in src/constants.ts all state that iOS
+# autolinking landed in 0.20.0. Publishing this tree under anything earlier — a
+# 0.19.x patch, say — would ship that claim against a release where it is false,
+# and send consumers to a migration section for a version that never existed.
+# The version is stamped from the git tag at release time, so this is the only
+# place that can catch the mismatch. Pre-release suffixes are stripped, so
+# 0.20.0-rc.1 satisfies it.
+AUTOLINK_MIN_VERSION="0.20.0"
+PKG_VERSION="$(node -p "require('$RN_DIR/package.json').version")"
+PKG_CORE_VERSION="${PKG_VERSION%%-*}"
+LOWEST="$(printf '%s\n%s\n' "$AUTOLINK_MIN_VERSION" "$PKG_CORE_VERSION" | sort -V | head -1)"
+if [ "$LOWEST" != "$AUTOLINK_MIN_VERSION" ]; then
+  echo "❌ Version $PKG_VERSION is below $AUTOLINK_MIN_VERSION"
+  echo "   The docs and the runtime linking-error text state that iOS autolinking"
+  echo "   and the XCFramework landed in $AUTOLINK_MIN_VERSION. Publishing below that"
+  echo "   ships a false claim. Tag $AUTOLINK_MIN_VERSION or later, or update the"
+  echo "   version stated in README.md, docs/UPGRADING.md, docs/react-native-integration.md,"
+  echo "   examples/react-native-app/INTEGRATION_GUIDE.md and src/constants.ts."
+  exit 1
+fi
+echo "✅ Version $PKG_VERSION is consistent with the documented autolinking release"
+echo ""
+
 echo "========================================="
 echo "✅ All required files are present!"
 echo "========================================="
