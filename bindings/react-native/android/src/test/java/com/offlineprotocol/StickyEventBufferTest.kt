@@ -141,6 +141,39 @@ class StickyEventBufferTest {
     }
 
     @Test
+    fun restoredEntriesRedeliverAheadOfEventsThatLandedMidFlight() {
+        // drain() promises oldest-first, and restore is the one path that could
+        // break it: every restored entry was drained before anything now held
+        // was taken, so appending would redeliver older news behind newer.
+        val buffer = StickyEventBuffer()
+        buffer.holdNow("internet_session_superseded", "older")
+        val inFlight = buffer.drain()
+        buffer.holdNow("mesh_stopped_by_user", "newer")
+
+        buffer.restore(inFlight)
+
+        assertEquals(
+            listOf("internet_session_superseded", "mesh_stopped_by_user"),
+            buffer.drain().map { it.key }
+        )
+    }
+
+    @Test
+    fun anOverflowingRestoreDropsTheRestoredEntriesBeforeTheNewerOnes() {
+        // Eviction takes from the head, which after a head-first restore is the
+        // restored (older) entry — the same "newest matters most" rule hold
+        // applies, rather than a reversal smuggled in by the restore path.
+        val buffer = StickyEventBuffer(maxEntries = 1)
+        buffer.holdNow("older", "1")
+        val inFlight = buffer.drain()
+        buffer.holdNow("newer", "2")
+
+        buffer.restore(inFlight)
+
+        assertEquals(listOf("newer"), buffer.drain().map { it.key })
+    }
+
+    @Test
     fun restoringAnEmptyListLeavesTheBufferAlone() {
         // The common case — every entry delivered — must not disturb anything
         // that arrived since.

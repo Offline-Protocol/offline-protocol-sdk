@@ -131,15 +131,30 @@ class StickyEventBuffer(private val maxEntries: Int = DEFAULT_MAX_ENTRIES) {
      * Skips entries from a superseded generation for the reason [hold] refuses
      * them: a flush can be holding entries when the session is torn down under
      * it, and putting those back would quietly undo [invalidateSession].
+     *
+     * Restored entries go back at the *head*, not the tail. Every one of them
+     * was drained before anything now held was taken, so appending would
+     * redeliver older news behind newer and break [drain]'s oldest-first
+     * contract in precisely the race this method exists for — a flush that
+     * could not deliver while a fresh event landed under a different key.
+     * Eviction still takes from the head, so an overflow drops the restored
+     * (older) entries first, which is the same "newest matters most" rule
+     * [hold] applies.
      */
     fun restore(entries: List<Entry>) {
         if (entries.isEmpty()) return
         synchronized(lock) {
-            for (entry in entries) {
-                if (entry.generation != sessionGeneration) continue
-                if (!held.containsKey(entry.key)) {
-                    held[entry.key] = entry
-                }
+            val restorable = entries.filter { entry ->
+                entry.generation == sessionGeneration && !held.containsKey(entry.key)
+            }
+            if (restorable.isEmpty()) return
+            val newer = held.values.toList()
+            held.clear()
+            for (entry in restorable) {
+                held[entry.key] = entry
+            }
+            for (entry in newer) {
+                held[entry.key] = entry
             }
             trimToCapLocked()
         }
