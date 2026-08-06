@@ -226,6 +226,37 @@ class StickyEventDispatcherTest {
         assertTrue("a stale copy outlived the event that superseded it", harness.buffer.isEmpty())
     }
 
+    // MARK: - Superseded inside a live session
+
+    @Test
+    fun discardDropsAHeldEventTheSessionItselfSuperseded() {
+        // internet_session_superseded stops being an unrestated one-shot the
+        // moment enableTransport('internet') clears the supersede latch: the
+        // relay session it reported has been replaced by the one that call just
+        // brought up. Redelivered afterwards it tells an app with a live socket
+        // that it is connected elsewhere, with nothing to correct it. The
+        // generation cannot see this — it is one transition inside one session.
+        val harness = Harness(canEmit = false)
+        harness.dispatcher.send("internet_session_superseded", "{}")
+        assertFalse(harness.buffer.isEmpty())
+
+        harness.dispatcher.discard("internet_session_superseded")
+
+        assertTrue(harness.buffer.isEmpty())
+    }
+
+    @Test
+    fun discardLeavesEveryOtherKeyHeld() {
+        // Re-enabling the internet transport says nothing about a mesh stop.
+        val harness = Harness(canEmit = false)
+        harness.dispatcher.send("internet_session_superseded", "1")
+        harness.dispatcher.send("mesh_stopped_by_user", "2")
+
+        harness.dispatcher.discard("internet_session_superseded")
+
+        assertEquals(listOf("mesh_stopped_by_user"), harness.buffer.drain().map { it.key })
+    }
+
     @Test
     fun theGateIsCheckedBeforeThePayloadIsBuilt() {
         // canEmit guards emit rather than emit checking for itself, so a caller

@@ -176,7 +176,7 @@ if (!(await sdk.isInternetReady())) {
 
 `getState()` reads the live protocol state, so it stays correct after a notification Stop, after a sticky service restart, and after any teardown the app did not drive. It says nothing about the relay: after a supersede the protocol is still `Running`, because only the relay session was displaced.
 
-`isInternetReady()` is that other half, and on iOS it is the **only** cover for a missed `internet_session_superseded`. Note what it cannot tell you: a `false` from an ordinary disconnect — which reconnects itself — and a `false` from a supersede — which will **not** reconnect on its own, ever — look identical. If you stay disconnected across several foregrounds with no `internet_status_changed` reporting `connected: true`, treat it as a possible supersession and offer the user an explicit reconnect: `enableTransport('internet', ...)` is the deliberate re-enable that clears the latch.
+`isInternetReady()` is that other half, and on iOS it is the **only** cover for a missed `internet_session_superseded`. Note what it cannot tell you: a `false` from an ordinary disconnect — which reconnects itself — and a `false` from a supersede — which will **not** reconnect on its own, ever — look identical. If you stay disconnected across several foregrounds with no `internet_status_changed` reporting `connected: true`, treat it as a possible supersession and offer the user an explicit reconnect: `enableTransport('internet', ...)` is the deliberate re-enable that clears the latch. That re-enable also drops any `internet_session_superseded` still held on Android, so a notice about the session you just replaced cannot arrive after you are reconnected — you will not have to filter one out.
 
 ---
 

@@ -1925,6 +1925,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     }
 
                     configureAndStartInternet(manager, config)
+                    // Starting the manager clears its supersede latch, which is
+                    // what makes a held internet_session_superseded stale: the
+                    // event reports a relay session that this call has just
+                    // replaced. Held, it would redeliver on the next subscribe
+                    // or foreground and tell an app with a live relay socket
+                    // that it is connected elsewhere, with nothing to correct
+                    // it — the inverted failure the generation stamp exists to
+                    // prevent, reached through a transition inside one session
+                    // that the generation cannot see.
+                    stickyEvents.discard("internet_session_superseded")
                     emitDiagnostic("info", "Internet transport enabled")
                 }
                 "wifidirect", "wifi_direct" -> {

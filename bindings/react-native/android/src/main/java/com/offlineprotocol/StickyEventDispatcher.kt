@@ -86,6 +86,27 @@ class StickyEventDispatcher(
         }
     }
 
+    /**
+     * Drops any held copy of [key], because something other than an emit has
+     * made it stale.
+     *
+     * The generation stamp keeps redelivery honest across the two *session*
+     * transitions, but an event can also be superseded inside a live session by
+     * the very thing it reported. `internet_session_superseded` is the case:
+     * `InternetManager.start()` clears the supersede latch, so an explicit
+     * `enableTransport('internet')` re-enable turns a held copy from the one
+     * report of a relay session nothing will restate into stale news about a
+     * session that has been replaced — and redelivering it would tell an app
+     * with a live relay socket that it is connected elsewhere, with nothing to
+     * correct it. That is the same inverted failure [endSession] prevents,
+     * reached through a transition the generation cannot see.
+     *
+     * Callers pass the same `type` tag they passed to [send].
+     */
+    fun discard(key: String) {
+        buffer.discard(key, buffer.currentGeneration())
+    }
+
     /** Redelivers held events, if JS looks able to take them now. */
     fun flush() {
         if (buffer.isEmpty()) return
