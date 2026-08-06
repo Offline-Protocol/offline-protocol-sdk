@@ -112,12 +112,6 @@ class NostrManager(
     // Failure tracking for DORS
     private val consecutiveSendFailures = AtomicInteger(0)
 
-    // Metrics
-    private val bytesSent = AtomicLong(0)
-    private val bytesReceived = AtomicLong(0)
-    private val messagesSent = AtomicLong(0)
-    private val messagesReceived = AtomicLong(0)
-
     // MARK: - Helper
 
     private fun <T> runOnMainSync(action: () -> T): T {
@@ -293,21 +287,6 @@ class NostrManager(
         ioHandler?.post { pollAndSendMessages() }
     }
 
-    override fun getMetrics(): Map<String, Any> {
-        val connectedCount = synchronized(relayLock) {
-            relayConnected.values.count { it }
-        }
-        return mapOf(
-            "bytes_sent" to bytesSent.get(),
-            "bytes_received" to bytesReceived.get(),
-            "messages_sent" to messagesSent.get(),
-            "messages_received" to messagesReceived.get(),
-            "is_connected" to isConnected.get(),
-            "connected_relays" to connectedCount,
-            "total_relays" to relayUrls.size
-        )
-    }
-
     // MARK: - Relay Connection Management
 
     private fun connectToRelay(relayUrl: String) {
@@ -327,7 +306,6 @@ class NostrManager(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                bytesReceived.addAndGet(text.length.toLong())
                 processNostrMessage(text)
             }
 
@@ -557,8 +535,6 @@ class NostrManager(
                 // defaults to 0, which Rust ignores for the watermark rather
                 // than treating as receive progress.
                 val createdAt = event.optLong("created_at", 0L)
-
-                messagesReceived.incrementAndGet()
 
                 try {
                     val messageBytes: ByteArray = try {
@@ -855,8 +831,6 @@ class NostrManager(
             val sent = primary.value.send(eventMessage)
             if (sent) {
                 consecutiveSendFailures.set(0)
-                bytesSent.addAndGet(eventMessage.length.toLong())
-                messagesSent.incrementAndGet()
 
                 // Track event_id → message_id so we can confirm/fail
                 // when the relay sends ["OK", event_id, accepted, reason].

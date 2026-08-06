@@ -303,14 +303,22 @@ jobs:
       - name: iOS unit tests
         run: swift test --package-path bindings/react-native/ios
 
-      # The two largest bridge files are on Package.swift's `exclude:` list
-      # (they need CoreBluetooth / React / the generated UniFFI module, none
-      # of which the SwiftPM harness can supply), so `swift test` above
-      # compiles neither and every change to them has historically shipped
-      # with zero compile coverage. They CAN be type-checked directly against
-      # the iphoneos SDK plus the checked-in Generated/ modulemap, which at
-      # least catches API drift and syntax breakage before a release.
+      # The largest bridge files are on Package.swift's `exclude:` list (they
+      # need CoreBluetooth / MultipeerConnectivity / React / the generated
+      # UniFFI module, none of which the SwiftPM harness can supply), so
+      # `swift test` above compiles none of them and every change to them has
+      # historically shipped with zero compile coverage. They CAN be
+      # type-checked directly against the iphoneos SDK plus the checked-in
+      # Generated/ modulemap, which at least catches API drift and syntax
+      # breakage before a release.
       # `-typecheck` emits no binary; warnings do not fail the build.
+      #
+      # BleManager / WifiDirectManager / ReticulumManager joined this list in
+      # #300: only their mesh/ and ble/ collaborators were missing, and adding
+      # those three sources is enough to typecheck all of them. The one file
+      # still uncovered is OfflineProtocolModule.swift, which needs real React
+      # headers — see ios/BRIDGE_MAINTENANCE.md for the local symlink-farm
+      # recipe to check it by hand when you touch it.
       - name: iOS bridge typecheck (files excluded from the SwiftPM harness)
         working-directory: bindings/react-native/ios
         run: |
@@ -320,6 +328,9 @@ jobs:
             -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap \
             -Xcc -IGenerated \
             InternetManager.swift NostrManager.swift TransportManager.swift \
+            BleManager.swift WifiDirectManager.swift ReticulumManager.swift \
+            mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
+            ble/BleDiscoveryBootstrapPolicy.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
             RelayControlOpTranslator.swift RelayGroupSnapshotBridge.swift \
             RelayRateLimiter.swift LegacyRelayMessage.swift MonotonicClock.swift \

@@ -52,17 +52,9 @@ public class WifiDirectManager: NSObject, TransportManager {
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.wifidirect.messages")
     
     // State tracking
-    private var isAdvertising = false
-    private var isBrowsing = false
     private var connectedPeers: [MCPeerID: String] = [:] // MCPeerID -> deviceId
     private var transportStartAt: Date?
-    
-    // Metrics
-    private var bytesSent: UInt64 = 0
-    private var bytesReceived: UInt64 = 0
-    private var messagesSent: UInt64 = 0
-    private var messagesReceived: UInt64 = 0
-    
+
     // MARK: - Initialization
     
     public init(protocol protocolInstance: OfflineProtocol, deviceId: String) {
@@ -111,14 +103,12 @@ public class WifiDirectManager: NSObject, TransportManager {
         )
         advertiser?.delegate = self
         advertiser?.startAdvertisingPeer()
-        isAdvertising = true
-        
+
         // Start browsing
         browser = MCNearbyServiceBrowser(peer: peerId, serviceType: SERVICE_TYPE)
         browser?.delegate = self
         browser?.startBrowsingForPeers()
-        isBrowsing = true
-        
+
         updateState(.running)
         
         // Notify protocol
@@ -137,13 +127,11 @@ public class WifiDirectManager: NSObject, TransportManager {
         // Stop browsing
         browser?.stopBrowsingForPeers()
         browser = nil
-        isBrowsing = false
-        
+
         // Stop advertising
         advertiser?.stopAdvertisingPeer()
         advertiser = nil
-        isAdvertising = false
-        
+
         // Disconnect session
         session?.disconnect()
         session = nil
@@ -158,28 +146,14 @@ public class WifiDirectManager: NSObject, TransportManager {
     
     public func pause() {
         browser?.stopBrowsingForPeers()
-        isBrowsing = false
     }
-    
+
     public func resume() {
         if state == .running {
             browser?.startBrowsingForPeers()
-            isBrowsing = true
             // Drain any messages that accumulated while paused
             drainAndSendMessages()
         }
-    }
-    
-    public func getMetrics() -> [String: Any] {
-        return [
-            "bytes_sent": bytesSent,
-            "bytes_received": bytesReceived,
-            "messages_sent": messagesSent,
-            "messages_received": messagesReceived,
-            "connected_peers": connectedPeers.count,
-            "is_advertising": isAdvertising,
-            "is_browsing": isBrowsing
-        ]
     }
     
     // MARK: - Message Handling (Event-Driven)
@@ -224,9 +198,6 @@ public class WifiDirectManager: NSObject, TransportManager {
             
             do {
                 try session.send(data, toPeers: allPeers, with: .reliable)
-                bytesSent += UInt64(data.count)
-                messagesSent += 1
-                
                 emitDiagnostic("debug", "Message broadcast to all peers", context: [
                     "peerCount": allPeers.count,
                     "dataSize": data.count
@@ -240,9 +211,6 @@ public class WifiDirectManager: NSObject, TransportManager {
             // Send to specific peer
             do {
                 try session.send(data, toPeers: targetPeers, with: .reliable)
-                bytesSent += UInt64(data.count)
-                messagesSent += 1
-                
                 emitDiagnostic("debug", "Message sent to peer", context: [
                     "recipientId": recipientId,
                     "dataSize": data.count
@@ -314,9 +282,6 @@ extension WifiDirectManager: MCSessionDelegate {
     }
     
     public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        bytesReceived += UInt64(data.count)
-        messagesReceived += 1
-        
         let senderId = connectedPeers[peerID] ?? peerID.displayName
         
         messageQueue.async { [weak self] in
@@ -377,7 +342,6 @@ extension WifiDirectManager: MCNearbyServiceAdvertiserDelegate {
         emitDiagnostic("error", "Failed to start advertising", context: [
             "error": error.localizedDescription
         ])
-        isAdvertising = false
     }
 }
 
@@ -414,7 +378,6 @@ extension WifiDirectManager: MCNearbyServiceBrowserDelegate {
         emitDiagnostic("error", "Failed to start browsing", context: [
             "error": error.localizedDescription
         ])
-        isBrowsing = false
     }
 }
 

@@ -91,6 +91,58 @@ Before committing changes:
 - [ ] Build succeeds without warnings
 - [ ] Test the method from JavaScript to ensure it works
 
+## Type-checking `OfflineProtocolModule.swift` locally
+
+**Nothing in CI compiles this file.** It is on `Package.swift`'s `exclude:`
+list (it needs React, which the SwiftPM harness cannot supply) and it is the
+one bridge source the ci.yml `swiftc -typecheck` probe leaves out, for the
+same reason. Every other hand-written Swift file in this directory is covered
+by one or the other. So when you change this file, type-check it by hand.
+
+The trick is to build a symlink farm of the vendored React Native headers and
+give Clang a minimal module map for them:
+
+```bash
+# Absolute, deliberately: `ln -s` targets resolve relative to the LINK's
+# directory, so a relative RN path here silently produces dangling symlinks
+# and a "'React/RCTBridgeModule.h' file not found" from the umbrella.
+RN=$(cd ../node_modules/react-native && pwd)
+OUT=$(mktemp -d)
+mkdir -p "$OUT/React" "$OUT/RCTDeprecation"
+find "$RN/React" "$RN/Libraries" -name '*.h' -exec ln -sf {} "$OUT/React/" \;
+find "$RN" -name 'RCTDeprecation.h' -exec ln -sf {} "$OUT/RCTDeprecation/" \;
+
+# A narrow umbrella: a whole-directory one drags in headers needing
+# ReactCommon/yoga, which are not in the farm.
+cat > "$OUT/React/ReactUmbrella.h" <<'H'
+#import <React/RCTBridgeModule.h>
+#import <React/RCTEventEmitter.h>
+#import <React/RCTBridge.h>
+H
+printf 'module React {\n  header "ReactUmbrella.h"\n  export *\n}\n' > "$OUT/React/module.modulemap"
+printf 'module RCTDeprecation {\n  header "RCTDeprecation.h"\n  export *\n}\n' > "$OUT/RCTDeprecation/module.modulemap"
+
+# Typecheck the whole hand-written source set together.
+xcrun --sdk iphoneos swiftc -typecheck \
+  -target arm64-apple-ios15.1 -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+  -I"$OUT" -Xcc -I"$OUT" \
+  -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap -Xcc -IGenerated \
+  $(ls *.swift | grep -v '^Package.swift$') \
+  mesh/Mesh.swift ble/MeshConnectionRegistry.swift ble/BleDiscoveryBootstrapPolicy.swift \
+  Generated/offline_protocol.swift
+```
+
+**Confirm the harness is not vacuous before trusting a pass.** A shell slip
+(an empty file glob, a failed `cd`) produces a clean exit that proves nothing.
+Introduce a deliberate error — call a method you know does not exist — re-run,
+and check it is reported; then remove it.
+
+Reasoning about React types by hand is unreliable: an `@objc optional`
+protocol member read through the existential gives a *double* optional whose
+`!= nil` is always true, which compiles, reads correctly, and gates on
+nothing. Make the compiler tell you a static type (`let x: Int = expr`, then
+read the "cannot convert value of type ..." error) rather than inferring it.
+
 ## Example: Adding a New Method
 
 ### 1. Add to Swift (`OfflineProtocolModule.swift`):

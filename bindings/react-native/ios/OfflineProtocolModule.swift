@@ -4301,12 +4301,6 @@ extension OfflineProtocolModule: TransportManagerDelegate {
         ])
     }
     
-    func transportManager(_ manager: TransportManager, didUpdateMetrics metrics: [String : Any]) {
-        var context = metrics
-        context["transport"] = manager.transportId
-        emitDiagnostic(level: "info", message: "\(manager.transportName) metrics", context: context)
-    }
-    
     func transportManager(_ manager: TransportManager, didEmitDiagnostic level: String, message: String, context: [String : Any]) {
         var enrichedContext = context
         enrichedContext["transport"] = manager.transportId

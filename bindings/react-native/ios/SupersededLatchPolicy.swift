@@ -54,9 +54,14 @@ final class SupersededLatchPolicy {
     /// nobody receives, with nothing to restate it.
     static let EVENT_TYPE = "internet_session_superseded"
 
-    // Main-owned like the InternetManager flags it replaces (autoReconnect,
-    // the connection bools): written on main, read best-effort off-main
-    // (getMetrics). A plain Bool matches that established pattern.
+    // Main-confined, like the InternetManager flags it replaces
+    // (autoReconnect, currentReconnectDelay). Every touch is on main: the
+    // close funnel and lifecycle entry points write it there, and both public
+    // reads — `isSessionSuperseded()` and `supersedeRestatementJson()`, which
+    // apps reach from RN threads — go through `runOnMainSync`. So a plain Bool
+    // is sufficient, not merely conventional. The Kotlin mirror keeps
+    // `@Volatile` because its `internetIsSuperseded` bridge method reads the
+    // latch directly from the calling thread with no main hop.
     private var latched = false
 
     // The reason carried by the displacement that latched, kept for as long as

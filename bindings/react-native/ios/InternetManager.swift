@@ -100,16 +100,12 @@ public class InternetManager: NSObject, TransportManager {
     private var pingTimer: DispatchSourceTimer?
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.internet.messages")
     
-    // Reconnection. reconnectAttempts is lock-guarded (stateLock): written
-    // on main, read by getMetrics() from the caller's thread — mirrors the
-    // Kotlin bridge's AtomicInteger. currentReconnectDelay stays a plain var:
-    // unlike Kotlin (whose handleAuthenticated runs on the reader thread),
-    // every touch here is on main.
-    private var _reconnectAttempts: Int = 0
-    private var reconnectAttempts: Int {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _reconnectAttempts }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _reconnectAttempts = newValue }
-    }
+    // Reconnection. Both are main-owned plain vars: every touch is on main —
+    // startOnMain and forceReconnect via runOnMainSync, handleAuthenticatedOnMain
+    // and scheduleReconnect only via the main-hopping close funnel. (Kotlin keeps
+    // an AtomicInteger for reconnectAttempts because its handleAuthenticated runs
+    // on the OkHttp reader thread; this bridge has no such path.)
+    private var reconnectAttempts: Int = 0
     private var currentReconnectDelay: TimeInterval = 1.0
     private var reconnectWorkItem: DispatchWorkItem?
     // Auth watchdog (mirrors the Kotlin bridge's authTimeoutRunnable):
@@ -144,7 +140,7 @@ public class InternetManager: NSObject, TransportManager {
     // AtomicBoolean/@Volatile fields: written on main (open/close/lifecycle),
     // read from messageQueue (poll ticks, drains), the URLSession delegate
     // queue (send completions), and RN threads (sendRawCommand,
-    // checkPresence, getMetrics).
+    // checkPresence, isReady).
     private var _isConnected = false
     private var isConnected: Bool {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnected }
@@ -391,9 +387,11 @@ public class InternetManager: NSObject, TransportManager {
     /// The pull half of the supersede contract, and the answer to a question
     /// `isReady()` structurally cannot resolve: a `false` from an ordinary
     /// disconnect (which reconnects itself) and a `false` from a displacement
-    /// (which never will) are identical there. Reads the latch on main, its
-    /// single writer, rather than the best-effort off-main read `getMetrics`
-    /// takes — this one gates whether the app offers the user a reconnect.
+    /// (which never will) are identical there. Hops to main — the latch's only
+    /// writer — rather than reading it from the calling RN thread: this gates
+    /// whether the app offers the user a reconnect, so it must not race a
+    /// close-funnel write. (Kotlin reaches the same result with `@Volatile`;
+    /// see SupersededLatchPolicy on both sides.)
     public func isSessionSuperseded() -> Bool {
         var superseded = false
         runOnMainSync { superseded = supersedeLatch.isSuperseded }
@@ -415,15 +413,6 @@ public class InternetManager: NSObject, TransportManager {
         return json
     }
 
-    // Metrics. Atomic (lock-guarded): send completions mutate on the
-    // URLSession delegate queue, receive paths too, and getMetrics() reads
-    // from the caller's thread — mirrors the Kotlin bridge's AtomicLong
-    // metrics.
-    private let bytesSent = AtomicCounter()
-    private let bytesReceived = AtomicCounter()
-    private let messagesSent = AtomicCounter()
-    private let messagesReceived = AtomicCounter()
-    
     // MARK: - Initialization
     
     public init(protocol protocolInstance: OfflineProtocol, deviceId: String, serverUrl: String? = nil) {
@@ -830,19 +819,6 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
 
-    public func getMetrics() -> [String: Any] {
-        return [
-            "bytes_sent": bytesSent.get(),
-            "bytes_received": bytesReceived.get(),
-            "messages_sent": messagesSent.get(),
-            "messages_received": messagesReceived.get(),
-            "is_connected": isConnected,
-            "is_authenticated": isAuthenticated,
-            "reconnect_attempts": reconnectAttempts,
-            "is_superseded": supersedeLatch.isSuperseded
-        ]
-    }
-    
     // MARK: - Connection Management
 
     /// Runs `action` on main, synchronously. webSocketTask is written only
@@ -1378,8 +1354,6 @@ public class InternetManager: NSObject, TransportManager {
     }
 
     private func processReceivedData(_ data: Data, task: URLSessionWebSocketTask) {
-        bytesReceived.add(Int64(data.count))
-
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let messageType = json["type"] as? String,
               let rawText = String(data: data, encoding: .utf8) else {
@@ -1506,8 +1480,6 @@ public class InternetManager: NSObject, TransportManager {
             let messageId = json["message_id"] as? String
             let timestampStr = json["timestamp"] as? String ?? ""
 
-            messagesReceived.increment()
-            
             messageQueue.async { [weak self] in
                 guard let self = self else { return }
                 
@@ -1954,8 +1926,8 @@ public class InternetManager: NSObject, TransportManager {
         // Timer already runs on messageQueue, no need for extra dispatch
         // Poll for next message from protocol - batch send up to 10 messages per poll
         // to efficiently flush the outbox after reconnection
-        // Batch counter — deliberately NOT the messagesSent metric, which the
-        // send completions own.
+        // Counts this poll's batch only; it bounds the loop and rides the
+        // diagnostic below. Not a lifetime total.
         var batchSent = 0
         let maxBatchSize = 10
 
@@ -2161,8 +2133,6 @@ public class InternetManager: NSObject, TransportManager {
             } else {
                 // Reset failure counter on successful send
                 self.consecutiveSendFailures.set(0)
-                self.bytesSent.add(Int64(jsonData.count))
-                self.messagesSent.increment()
                 self.protocolInstance.internetConfirmSent(messageId: messageId)
 
                 self.emitDiagnostic("debug", "Message sent via relay", context: [
@@ -2300,8 +2270,6 @@ public class InternetManager: NSObject, TransportManager {
                         }
                     } else {
                         self.consecutiveSendFailures.set(0)
-                        self.bytesSent.add(Int64(primaryData.count))
-                        self.messagesSent.increment()
                         self.protocolInstance.internetConfirmSent(messageId: messageId)
                         // Only now, with the primary provably written, may
                         // the deltas chase it and the commit arm — keeping
@@ -2403,7 +2371,6 @@ public class InternetManager: NSObject, TransportManager {
                     self.pendingControlFrames.removeAll()
                     return
                 }
-                self.bytesSent.add(Int64(frameData.count))
                 // The queue may have been cleared (RateLimited) — and even
                 // repopulated by a newer translation — while the write was in
                 // flight. Only the translation that owns the in-flight frame
@@ -2868,10 +2835,9 @@ extension InternetManager: URLSessionWebSocketDelegate {
 
 extension InternetManager: @unchecked Sendable {}
 
-/// Lock-guarded counter mirroring the Kotlin bridge's atomic metrics and
-/// failure counters: send/ping completions mutate on the URLSession delegate
-/// queue, the poll loop on messageQueue, and getMetrics() reads from the
-/// caller's thread.
+/// Lock-guarded counter mirroring the Kotlin bridge's `AtomicInteger` failure
+/// counters: the send and ping completion handlers mutate it on the URLSession
+/// delegate queue, while `handleConnectionOpened` resets it on main.
 final class AtomicCounter {
     private var value: Int64 = 0
     private let lock = NSLock()

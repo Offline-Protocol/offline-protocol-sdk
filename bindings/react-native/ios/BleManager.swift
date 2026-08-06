@@ -166,12 +166,6 @@ public class BleManager: NSObject, TransportManager {
     /// Per-recipient NOTIFY outbound queue, drained by `pumpNotifyOutbound`. Main-queue only.
     private var notifyOutbound: [String: [(data: Data, timestamp: Date)]] = [:]
     private var lastMeshAdvertisement: MeshAdvertisementData?
-    
-    // Metrics
-    private var bytesSent: UInt64 = 0
-    private var bytesReceived: UInt64 = 0
-    private var fragmentsSent: UInt64 = 0
-    private var fragmentsReceived: UInt64 = 0
 
     // Logging & monitoring
     private let logThrottler = LogThrottler()
@@ -519,17 +513,6 @@ public class BleManager: NSObject, TransportManager {
             // Drain any fragments that accumulated while backgrounded
             drainAndSendFragments()
         }
-    }
-    
-    public func getMetrics() -> [String: Any] {
-        return [
-            "bytes_sent": bytesSent,
-            "bytes_received": bytesReceived,
-            "fragments_sent": fragmentsSent,
-            "fragments_received": fragmentsReceived,
-            "connected_peers": connections.connectedPeripheralCount(),
-            "discovered_peers": discoveredPeripherals.count
-        ]
     }
     
     // MARK: - Private Methods
@@ -1361,8 +1344,6 @@ public class BleManager: NSObject, TransportManager {
     private func pumpNotifyOutbound() {
         guard let pm = peripheralManager, let characteristic = messageCharacteristic else { return }
         let now = Date()
-        var sentBytes: UInt64 = 0
-        var sentFragments: UInt64 = 0
         for recipientId in Array(notifyOutbound.keys) {
             guard var queue = notifyOutbound[recipientId] else { continue }
             queue = queue.filter { now.timeIntervalSince($0.timestamp) < PENDING_OUTBOUND_FRAGMENT_TIMEOUT }
@@ -1377,8 +1358,6 @@ public class BleManager: NSObject, TransportManager {
             while let head = queue.first {
                 if pm.updateValue(head.data, for: characteristic, onSubscribedCentrals: [central]) {
                     queue.removeFirst()
-                    sentBytes += UInt64(head.data.count)
-                    sentFragments += 1
                     meshController.markPeerActive(recipientId)
                     meshController.markPeerActive(deviceId)
                 } else {
@@ -1394,15 +1373,6 @@ public class BleManager: NSObject, TransportManager {
             // A `false` return means the shared transmit queue is full for the whole
             // peripheral, not just this central — stop and wait for the ready callback.
             if transmitQueueFull { break }
-        }
-        // Fold the byte/fragment counters on `fragmentQueue`, which owns them
-        // (`sendFragmentData` mutates them there), so this main-queue pump does not
-        // race the drain on the non-atomic counters.
-        if sentBytes > 0 || sentFragments > 0 {
-            fragmentQueue.async { [weak self] in
-                self?.bytesSent += sentBytes
-                self?.fragmentsSent += sentFragments
-            }
         }
     }
 
@@ -1605,8 +1575,6 @@ public class BleManager: NSObject, TransportManager {
         }
         
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-        bytesSent += UInt64(data.count)
-        fragmentsSent += 1
         meshController.markPeerActive(recipientId)
         meshController.markPeerActive(deviceId)
         return true
@@ -1725,9 +1693,6 @@ public class BleManager: NSObject, TransportManager {
                 } else {
                     print("[BleManager] ✅ Processed \(messageCount) complete message(s) from fragments")
                 }
-                
-                self.bytesReceived += UInt64(data.count)
-                self.fragmentsReceived += 1
             } catch {
                 print("[BleManager] ❌ Error processing fragment from \(senderId): \(error)")
                 self.emitDiagnostic("error", "Error processing received fragment", context: [
@@ -1786,8 +1751,6 @@ public class BleManager: NSObject, TransportManager {
                 do {
                     print("[BleManager] 📥 Processing queued fragment from \(deviceId), size: \(data.count)")
                     try self.protocolInstance.bleFragmentReceived(senderId: deviceId, fragment: bytes)
-                    self.bytesReceived += UInt64(data.count)
-                    self.fragmentsReceived += 1
                     self.meshController.markPeerActive(deviceId)
                     self.meshController.markPeerActive(self.deviceId)
                     

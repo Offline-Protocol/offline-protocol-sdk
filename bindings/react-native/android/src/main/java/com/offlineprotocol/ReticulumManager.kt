@@ -90,12 +90,6 @@ class ReticulumManager(
     // Failure tracking for DORS
     private var consecutiveSendFailures = AtomicInteger(0)
 
-    // Metrics (accessed from receive thread + IO thread)
-    private val bytesSent = AtomicLong(0)
-    private val bytesReceived = AtomicLong(0)
-    private val messagesSent = AtomicLong(0)
-    private val messagesReceived = AtomicLong(0)
-
     // MARK: - Helper
 
     private fun <T> runOnMainSync(action: () -> T): T {
@@ -254,17 +248,6 @@ class ReticulumManager(
      */
     fun onMessagesAvailable() {
         ioHandler?.post { pollAndSendMessages() }
-    }
-
-    override fun getMetrics(): Map<String, Any> {
-        return mapOf(
-            "bytes_sent" to bytesSent.get(),
-            "bytes_received" to bytesReceived.get(),
-            "messages_sent" to messagesSent.get(),
-            "messages_received" to messagesReceived.get(),
-            "is_connected" to isConnected.get(),
-            "reconnect_attempts" to reconnectAttempts.get()
-        )
     }
 
     // MARK: - Connection Management
@@ -454,8 +437,6 @@ class ReticulumManager(
     // MARK: - Message Handling
 
     private fun processReceivedData(data: ByteArray) {
-        bytesReceived.addAndGet(data.size.toLong())
-
         val json: org.json.JSONObject
         val messageType: String
 
@@ -481,8 +462,6 @@ class ReticulumManager(
                     emitDiagnostic("warning", "Invalid MessageReceived: missing sender")
                     return
                 }
-
-                messagesReceived.incrementAndGet()
 
                 try {
                     val messageBytes: ByteArray = if (encoding == "base64") {
@@ -611,8 +590,6 @@ class ReticulumManager(
             }
 
             consecutiveSendFailures.set(0)
-            bytesSent.addAndGet(jsonString.length.toLong())
-            messagesSent.incrementAndGet()
             try { protocol.reticulumConfirmSent(messageId) } catch (e: Exception) {
                 Log.e(TAG, "Failed to confirm send for $messageId", e)
             }
