@@ -34,16 +34,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     private val foregroundReconnectPolicy = ForegroundReconnectPolicy()
 
-    init {
-        // Drive the foreground relay-heal from the host activity's lifecycle so
-        // Android matches iOS: both platforms reconnect automatically on
-        // foreground after a background stay long enough to have killed the
-        // socket. See onHostPause/onHostResume and ForegroundReconnectPolicy.
-        // Registered after foregroundReconnectPolicy is initialized above so an
-        // (in practice never synchronous) callback can't race its init.
-        reactContext.addLifecycleEventListener(this)
-    }
-
     private var protocol: OfflineProtocol? = null
     private var meshServices: MeshServices? = null
     private var bleTransport: BleTransportFacade? = null
@@ -85,11 +75,45 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private val listenerCount = AtomicInteger(0)
 
     /**
-     * Holds one-shot events that could not be handed to JS, for redelivery on
-     * the next subscribe or foreground. See [sendStickyEvent] for which events
-     * qualify and why the others must not.
+     * Redelivers one-shot events that could not be handed to JS, on the next
+     * subscribe or foreground. See [sendStickyEvent] for which events qualify
+     * and why the others must not, and [StickyEventDispatcher] for the three
+     * orderings that make redelivery correct.
      */
-    private val stickyEvents = StickyEventBuffer()
+    private val stickyEvents = StickyEventDispatcher(
+        buffer = StickyEventBuffer(),
+        canEmit = { canEmitToJs() },
+        emit = { eventJson -> sendEvent(EVENT_NAME, eventParams(eventJson)) },
+        schedule = { runnable ->
+            try {
+                reactApplicationContext.runOnJSQueueThread(runnable)
+            } catch (e: Exception) {
+                // runOnJSQueueThread asserts the queue threads were
+                // initialized; a context torn down under us throws
+                // (AssertionException, a RuntimeException) rather than
+                // returning false. The events stay held for the next trigger.
+                android.util.Log.w(NAME, "Could not schedule sticky event flush", e)
+                false
+            }
+        },
+    )
+
+    init {
+        // Drive the foreground relay-heal from the host activity's lifecycle so
+        // Android matches iOS: both platforms reconnect automatically on
+        // foreground after a background stay long enough to have killed the
+        // socket. See onHostPause/onHostResume and ForegroundReconnectPolicy.
+        //
+        // Must stay *below* every field onHostResume touches — today
+        // foregroundReconnectPolicy and stickyEvents. `addLifecycleEventListener`
+        // replays onHostResume when the host is already RESUMED, and while it
+        // does so through `runOnUiQueueThread` (which always posts, so it can
+        // never run inline in this constructor), depending on that to keep a
+        // `val` from being read before its initializer is a hazard with no
+        // upside. Declaration order costs nothing and makes it structural.
+        reactContext.addLifecycleEventListener(this)
+    }
+
     private var currentConfig: ProtocolConfig? = null
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
@@ -585,6 +609,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * receiving the event. It means the event was handed over with the instance
      * alive and a subscription registered, which is as much as this layer can
      * know. [flushStickyEvents] is built around that limit.
+     *
+     * It is not even a receipt for *this* event name. React Native's
+     * [addListener] reports the name but [removeListeners] reports only a count,
+     * so the subscription tally cannot be kept per name and [listenerCount] is
+     * shared across [EVENT_NAME] and [TELEMETRY_EVENT_NAME]. A subscription to
+     * one therefore opens the gate for the other. In-tree that cannot bite —
+     * the SDK's constructor subscribes to both together — but it is a real
+     * limit on what a `true` means, and it is the sticky path that leans on
+     * the answer.
      */
     private fun sendEvent(eventName: String, params: Any?): Boolean {
         if (!canEmitToJs()) {
@@ -625,72 +658,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * [key] identifies the event for last-wins collapsing, so a repeated stop
      * cannot accumulate copies. Callers pass the event's `type` tag.
      *
-     * Two orderings this has to get right, both cheap and both load-bearing:
-     *
-     * The session generation is read **before** the emit is attempted, not when
-     * the hold is taken. `mesh_stopped_by_user` is emitted at the end of a
-     * teardown that runs on its own thread for as long as the transports take
-     * to stop, so an app calling `destroy()` in that window would otherwise
-     * have its buffer cleared and *then* refilled — handing a terminal mesh
-     * event to whatever session subscribes next. See StickyEventBuffer's
-     * generation contract.
-     *
-     * A successful hold re-runs [flushStickyEvents]. Between the failed emit
-     * and the hold, a subscribe may have opened the gate and found the buffer
-     * still empty, so nothing would be left to trigger redelivery: with the SDK
-     * subscribing once in its constructor, the next `addListener` never comes
-     * and the event would wait for a foreground that may be hours away.
+     * The orderings that make redelivery correct — generation read before the
+     * emit, a successful hold re-running the flush, and the hop onto the JS
+     * queue — live in [StickyEventDispatcher], where they are unit-tested.
      */
     private fun sendStickyEvent(key: String, eventJson: String) {
-        val generation = stickyEvents.currentGeneration()
-        if (canEmitToJs() && sendEvent(EVENT_NAME, eventParams(eventJson))) {
-            return
-        }
-        if (stickyEvents.hold(key, eventJson, generation)) {
-            flushStickyEvents()
-        }
+        stickyEvents.send(key, eventJson)
     }
 
-    /**
-     * Redelivers held one-shot events, if JS looks able to take them now.
-     *
-     * **The hop onto the JS queue is load-bearing and must not be flattened
-     * into a direct emit.** `NativeEventEmitter.addListener` calls this
-     * module's [addListener] *before* it registers the JS-side listener, so an
-     * emit issued synchronously from there would arrive at an emitter with
-     * nothing subscribed — re-losing the event through a subtler version of the
-     * same hole this exists to close. `runOnJSQueueThread` always posts and
-     * never runs inline, even when the caller is already on the JS thread, so
-     * the flush lands after the current JS task — after that registration —
-     * under both the bridge and the New Architecture. It returns false if the
-     * JS thread has already finished, which leaves the events held.
-     *
-     * Entries are dropped once handed over rather than retained until JS
-     * confirms, because no confirmation exists (see [sendEvent]). The tradeoff
-     * is deliberate: an event redelivered twice is idempotent for an app whose
-     * response is to reconcile against actual state, whereas one that is never
-     * cleared would re-fire on every subscribe for the life of the process.
-     * Anything the emit refuses is restored, and [StickyEventBuffer.restore]
-     * will not overwrite a newer event that landed while the flush was in
-     * flight — nor put back an entry whose session was torn down while this
-     * was carrying it.
-     */
+    /** Redelivers held one-shot events, if JS looks able to take them now. */
     private fun flushStickyEvents() {
-        if (stickyEvents.isEmpty()) return
-        if (!canEmitToJs()) return
-        try {
-            reactApplicationContext.runOnJSQueueThread {
-                val failed = stickyEvents.drain().filterNot { entry ->
-                    sendEvent(EVENT_NAME, eventParams(entry.eventJson))
-                }
-                stickyEvents.restore(failed)
-            }
-        } catch (e: Exception) {
-            // runOnJSQueueThread asserts the queue threads were initialized;
-            // a context torn down under us throws rather than returning false.
-            // The events stay held for the next trigger.
-            android.util.Log.w(NAME, "Could not schedule sticky event flush", e)
-        }
+        stickyEvents.flush()
     }
 
     private fun emitDiagnostic(level: String, message: String, context: Map<String, Any?> = emptyMap()) {
@@ -787,6 +765,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun start(promise: Promise) {
         try {
+            // A one-shot event held from the *previous* mesh session is moot the
+            // moment a new one comes up, and redelivering it would be the bug
+            // this whole mechanism exists to prevent, inverted: an app told
+            // "mesh stopped" or "relay superseded" just after starting has
+            // nothing to restate it. Today `destroy()` is the only path that
+            // shuts the gate, so it is also the only way an event can outlive
+            // its session — which makes this line redundant *right now*. It is
+            // here so the invariant is structural rather than incidental: any
+            // future change that lets the gate shut without a destroy() would
+            // otherwise reintroduce the stale-redelivery hole silently.
+            stickyEvents.endSession()
             emitDiagnostic("info", "Starting protocol")
             protocol?.start()
             emitDiagnostic("info", "Protocol core started")
@@ -1802,7 +1791,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // still be between its failed emit and its hold, and a flush can
             // still be carrying drained entries — both are refused by
             // generation once this has run.
-            stickyEvents.invalidateSession()
+            stickyEvents.endSession()
             currentConfig = null
             promise.resolve(null)
         } catch (e: Exception) {
