@@ -142,6 +142,33 @@ See `docs/dors-configuration.md` and `docs/configuration.md` for full parameters
 - Outbox, retry queue, and ACK tracking use exponential backoff; the native layer calls `process()` periodically.
 - Use `getTransportMetrics('ble')`, `getRetryQueueSize()`, `getPendingAckCount()` to monitor health.
 
+### 6.1 Teardowns your app did not initiate (Android)
+
+On Android the mesh keep-alive notification carries a **Stop** action. When the user taps it, the SDK tears down the transports, the process scheduler, the keep-alive service and the protocol core, then emits `mesh_stopped_by_user`. An app that tracks "mesh active" itself **must** reconcile on this event, or it will keep reporting an active mesh against a protocol that is fully stopped. There is no iOS equivalent — the notification affordance is Android-only.
+
+```ts
+sdk.on('mesh_stopped_by_user', () => {
+  setMeshActive(false); // a teardown you did not ask for; the SDK is already down
+});
+```
+
+**Delivery guarantee.** `mesh_stopped_by_user` and `internet_session_superseded` are *one-shot*: nothing else ever restates them. Both are therefore held natively and redelivered on your next event subscription or app foreground if JS could not take them when they fired. Two limits worth designing against:
+
+- **They can arrive late.** Treat them as "this happened", not "this just happened" — reconcile against actual state rather than assuming the event is fresh.
+- **They are not durable.** The buffer is in-memory and per-React-instance, so a JS reload or a process kill loses a held event. Persisting it would not help: if the process was killed, the event was never generated in the first place.
+
+**So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have, and it covers the process-kill window no event can:
+
+```ts
+// on app foreground (AppState 'active')
+const state = await sdk.getState();
+if (state !== 'Running') {
+  setMeshActive(false); // reconcile whatever local "mesh active" flag you keep
+}
+```
+
+`getState()` reads the live protocol state, so it stays correct after a notification Stop, after a sticky service restart, and after any teardown the app did not drive.
+
 ---
 
 ## 7. Group Messaging (MLS-Encrypted Mesh Groups)
