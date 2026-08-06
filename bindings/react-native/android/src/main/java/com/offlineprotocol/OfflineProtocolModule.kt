@@ -12,6 +12,7 @@ import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 import com.offlineprotocol.ble.BleTransportFacade
 
@@ -81,7 +82,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * A correct read is necessary but not sufficient — see [stickyEvents] for
      * the events that must survive a genuinely shut gate.
      */
-    private val listenerCount = java.util.concurrent.atomic.AtomicInteger(0)
+    private val listenerCount = AtomicInteger(0)
 
     /**
      * Holds one-shot events that could not be handed to JS, for redelivery on
@@ -550,6 +551,21 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
     
     /**
+     * Whether an emit has any chance of reaching JS: something is subscribed,
+     * and there is a live React instance to carry it.
+     *
+     * Shared by [sendEvent] and the paths that want to know the answer *before*
+     * building a `WritableMap` they may not use. Never a delivery guarantee —
+     * see [sendEvent] for why nothing at this layer can offer one.
+     */
+    private fun canEmitToJs(): Boolean =
+        listenerCount.get() > 0 && reactApplicationContext.hasActiveReactInstance()
+
+    /** The one-field payload every event on [EVENT_NAME] travels in. */
+    private fun eventParams(eventJson: String): WritableMap =
+        Arguments.createMap().apply { putString("eventJson", eventJson) }
+
+    /**
      * Hands an event to JavaScript, reporting whether it got that far.
      *
      * Returns false when the gate is shut — no JS subscription, or no live
@@ -571,7 +587,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * know. [flushStickyEvents] is built around that limit.
      */
     private fun sendEvent(eventName: String, params: Any?): Boolean {
-        if (listenerCount.get() <= 0 || !reactApplicationContext.hasActiveReactInstance()) {
+        if (!canEmitToJs()) {
             return false
         }
         return try {
@@ -608,13 +624,30 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      *
      * [key] identifies the event for last-wins collapsing, so a repeated stop
      * cannot accumulate copies. Callers pass the event's `type` tag.
+     *
+     * Two orderings this has to get right, both cheap and both load-bearing:
+     *
+     * The session generation is read **before** the emit is attempted, not when
+     * the hold is taken. `mesh_stopped_by_user` is emitted at the end of a
+     * teardown that runs on its own thread for as long as the transports take
+     * to stop, so an app calling `destroy()` in that window would otherwise
+     * have its buffer cleared and *then* refilled — handing a terminal mesh
+     * event to whatever session subscribes next. See StickyEventBuffer's
+     * generation contract.
+     *
+     * A successful hold re-runs [flushStickyEvents]. Between the failed emit
+     * and the hold, a subscribe may have opened the gate and found the buffer
+     * still empty, so nothing would be left to trigger redelivery: with the SDK
+     * subscribing once in its constructor, the next `addListener` never comes
+     * and the event would wait for a foreground that may be hours away.
      */
     private fun sendStickyEvent(key: String, eventJson: String) {
-        val params = Arguments.createMap().apply {
-            putString("eventJson", eventJson)
+        val generation = stickyEvents.currentGeneration()
+        if (canEmitToJs() && sendEvent(EVENT_NAME, eventParams(eventJson))) {
+            return
         }
-        if (!sendEvent(EVENT_NAME, params)) {
-            stickyEvents.hold(key, eventJson)
+        if (stickyEvents.hold(key, eventJson, generation)) {
+            flushStickyEvents()
         }
     }
 
@@ -639,18 +672,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * cleared would re-fire on every subscribe for the life of the process.
      * Anything the emit refuses is restored, and [StickyEventBuffer.restore]
      * will not overwrite a newer event that landed while the flush was in
-     * flight.
+     * flight — nor put back an entry whose session was torn down while this
+     * was carrying it.
      */
     private fun flushStickyEvents() {
         if (stickyEvents.isEmpty()) return
-        if (listenerCount.get() <= 0 || !reactApplicationContext.hasActiveReactInstance()) return
+        if (!canEmitToJs()) return
         try {
             reactApplicationContext.runOnJSQueueThread {
                 val failed = stickyEvents.drain().filterNot { entry ->
-                    val params = Arguments.createMap().apply {
-                        putString("eventJson", entry.eventJson)
-                    }
-                    sendEvent(EVENT_NAME, params)
+                    sendEvent(EVENT_NAME, eventParams(entry.eventJson))
                 }
                 stickyEvents.restore(failed)
             }
@@ -1766,8 +1797,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             meshServices = null
             listenerCount.set(0)
             // The app tore the SDK down itself, so it is not waiting to be told
-            // about a teardown it did not initiate.
-            stickyEvents.clear()
+            // about a teardown it did not initiate. Ends the session rather
+            // than just emptying the buffer: a stop emitted moments earlier can
+            // still be between its failed emit and its hold, and a flush can
+            // still be carrying drained entries — both are refused by
+            // generation once this has run.
+            stickyEvents.invalidateSession()
             currentConfig = null
             promise.resolve(null)
         } catch (e: Exception) {

@@ -152,12 +152,13 @@ sdk.on('mesh_stopped_by_user', () => {
 });
 ```
 
-**Delivery guarantee.** `mesh_stopped_by_user` and `internet_session_superseded` are *one-shot*: nothing else ever restates them. Both are therefore held natively and redelivered on your next event subscription or app foreground if JS could not take them when they fired. Two limits worth designing against:
+**Delivery, and what it does not promise.** `mesh_stopped_by_user` and `internet_session_superseded` are *one-shot*: nothing else ever restates them. **On Android** both are held natively and redelivered on your next event subscription or app foreground if JS could not take them when they fired. Three limits worth designing against:
 
 - **They can arrive late.** Treat them as "this happened", not "this just happened" — reconcile against actual state rather than assuming the event is fresh.
-- **They are not durable.** The buffer is in-memory and per-React-instance, so a JS reload or a process kill loses a held event. Persisting it would not help: if the process was killed, the event was never generated in the first place.
+- **They are not durable.** The hold is in-memory and per-React-instance, so a JS reload or a process kill loses a held event. Persisting it would not help: if the process was killed, the event was never generated in the first place.
+- **The hold is Android-only.** `mesh_stopped_by_user` has no iOS counterpart at all (the notification affordance is Android-only), but `internet_session_superseded` fires on both platforms and on iOS is emitted best-effort — if nothing is subscribed at that moment it is dropped, with nothing to restate it.
 
-**So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have, and it covers the process-kill window no event can:
+**So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have on both platforms, and it covers the windows no event can:
 
 ```ts
 // on app foreground (AppState 'active')
