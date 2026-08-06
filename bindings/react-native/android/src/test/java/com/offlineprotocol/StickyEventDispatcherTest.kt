@@ -168,6 +168,47 @@ class StickyEventDispatcherTest {
     }
 
     @Test
+    fun aThrowOnTheFirstEmitStillHoldsTheEvent() {
+        // The twin of aThrowMidFlushRestoresEverythingItHadNotDelivered, on the
+        // path that runs first. emit() catches its own exceptions in the module,
+        // but it builds a JNI-backed payload outside that catch and an Error
+        // escapes it regardless — and a throw treated as anything but a failed
+        // attempt drops the one-shot event, which is the hole this class exists
+        // to close.
+        val harness = Harness(canEmit = true)
+        harness.onEmit = { throw OutOfMemoryError("simulated") }
+
+        try {
+            harness.dispatcher.send("mesh_stopped_by_user", """{"type":"mesh_stopped_by_user"}""")
+            throw AssertionError("expected the throwable to propagate")
+        } catch (e: OutOfMemoryError) {
+            // expected: the caller still learns something went wrong
+        }
+
+        assertEquals(
+            listOf("""{"type":"mesh_stopped_by_user"}"""),
+            harness.buffer.drain().map { it.eventJson }
+        )
+    }
+
+    @Test
+    fun aDeliveredEventDropsAStaleCopyHeldUnderTheSameKey() {
+        // A held copy from an earlier failed attempt must not outlive the event
+        // that superseded it: redelivered afterwards it would hand an app that
+        // already reconciled the older news, with nothing to correct it.
+        // canEmit starts false, so the first send short-circuits before emit
+        // and the scripted `true` is still waiting for the second one.
+        val harness = Harness(canEmit = false, emitResults = listOf(true))
+        harness.dispatcher.send("mesh_stopped_by_user", """{"seq":1}""")
+        assertFalse(harness.buffer.isEmpty())
+
+        harness.canEmit = true
+        harness.dispatcher.send("mesh_stopped_by_user", """{"seq":2}""")
+
+        assertTrue("a stale copy outlived the event that superseded it", harness.buffer.isEmpty())
+    }
+
+    @Test
     fun theGateIsCheckedBeforeThePayloadIsBuilt() {
         // canEmit guards emit rather than emit checking for itself, so a caller
         // whose emit builds a JNI-backed WritableMap does not build one it will

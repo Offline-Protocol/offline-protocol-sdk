@@ -161,6 +161,35 @@ class StickyEventBuffer(private val maxEntries: Int = DEFAULT_MAX_ENTRIES) {
     }
 
     /**
+     * Drops whatever is held under [key], because a newer event for that key
+     * has just gone out directly and the held copy is now stale news.
+     *
+     * Without this, a key held from a failed emit outlives a later successful
+     * one and redelivers *after* it — an app that reconciled against the fresh
+     * event is then handed the old one, with nothing to correct it. That is the
+     * stale-one-shot failure [invalidateSession] exists to prevent, arriving
+     * through a different door.
+     *
+     * Deliberately unconditional on content: the point is that the held copy is
+     * *older*, and there is nothing in an event's JSON to establish that. The
+     * cost is a theoretical last-writer-wins race — a concurrent [hold] for the
+     * same key landing between a caller's successful emit and this call would
+     * be discarded — which neither enrolled event can produce (one is emitted
+     * from a single teardown thread with a constant payload; the other is
+     * latch-idempotent at its source). Stale news delivered last is the worse
+     * of the two failures, so this takes the race.
+     *
+     * Refuses for a superseded [generation] like [hold] does, so a caller whose
+     * session ended mid-emit cannot reach into the next one's buffer.
+     */
+    fun discard(key: String, generation: Long) {
+        synchronized(lock) {
+            if (generation != sessionGeneration) return
+            held.remove(key)
+        }
+    }
+
+    /**
      * Removes and returns everything held, oldest first.
      *
      * Drain-and-take rather than peek-then-acknowledge: the caller has no

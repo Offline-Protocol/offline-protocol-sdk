@@ -219,6 +219,45 @@ class StickyEventBufferTest {
     }
 
     @Test
+    fun discardDropsTheHeldCopyOfAKeyThatWentOutDirectly() {
+        // A newer event for the key was delivered without ever being held, so
+        // the older copy is stale news that would redeliver *after* it.
+        val buffer = StickyEventBuffer()
+        buffer.holdNow("mesh_stopped_by_user", """{"seq":1}""")
+        buffer.holdNow("internet_session_superseded", """{"seq":1}""")
+
+        buffer.discard("mesh_stopped_by_user", buffer.currentGeneration())
+
+        assertEquals(listOf("internet_session_superseded"), buffer.drain().map { it.key })
+    }
+
+    @Test
+    fun discardIsRefusedForASessionThatHasSinceEnded() {
+        // Same generation gate as hold and restore: a caller whose session
+        // ended mid-emit must not reach into the next session's buffer.
+        val buffer = StickyEventBuffer()
+        val generation = buffer.currentGeneration()
+        buffer.invalidateSession()
+        buffer.holdNow("mesh_stopped_by_user", """{"seq":2}""")
+
+        buffer.discard("mesh_stopped_by_user", generation)
+
+        assertEquals(1, buffer.size)
+    }
+
+    @Test
+    fun discardingAKeyThatIsNotHeldChangesNothing() {
+        // The common case — every send delivers first time — must not disturb
+        // anything else that is waiting.
+        val buffer = StickyEventBuffer()
+        buffer.holdNow("internet_session_superseded", "1")
+
+        buffer.discard("mesh_stopped_by_user", buffer.currentGeneration())
+
+        assertEquals(1, buffer.size)
+    }
+
+    @Test
     fun invalidateSessionDiscardsEverythingHeld() {
         // destroy() makes redelivery moot: the app tore the SDK down itself.
         val buffer = StickyEventBuffer()
