@@ -254,6 +254,14 @@ jobs:
         working-directory: bindings/react-native
         run: npm run build
 
+      # Behavior, not types: the TypeScript layer is the one part of the bridge
+      # neither the Rust text-guards (which read source as text) nor the
+      # Android/iOS harnesses (which cover the native halves) can exercise.
+      # See bindings/react-native/js-ci-harness/README.md.
+      - name: React Native JS behavior tests
+        working-directory: bindings/react-native
+        run: npm run test:js
+
   android-unit-tests:
     name: Android Unit Tests
     runs-on: ubuntu-latest
