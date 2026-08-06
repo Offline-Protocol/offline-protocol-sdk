@@ -554,6 +554,9 @@ RCT_EXTERN_METHOD(internetSendRawCommand:(NSString *)json
 RCT_EXTERN_METHOD(internetIsReady:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(internetIsSuperseded:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(internetForceReconnect:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

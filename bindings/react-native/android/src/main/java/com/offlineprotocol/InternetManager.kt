@@ -260,7 +260,19 @@ class InternetManager(
      * `internet_status_changed` events.
      */
     fun isReady(): Boolean = isConnected.get() && isAuthenticated.get()
-    
+
+    /**
+     * True while the relay has displaced this session and the transport is
+     * latched stopped — it will not reconnect on its own, ever, until an
+     * explicit start().
+     *
+     * The pull half of the supersede contract, and the answer to a question
+     * [isReady] structurally cannot resolve: a `false` from an ordinary
+     * disconnect (which reconnects itself) and a `false` from a displacement
+     * (which never will) are identical there.
+     */
+    fun isSessionSuperseded(): Boolean = supersedeLatch.isSuperseded
+
     // Metrics. Atomic: send paths mutate on main, receive paths on the
     // OkHttp reader thread, and getMetrics() reads from the caller's thread.
     private val bytesSent = java.util.concurrent.atomic.AtomicLong(0)
@@ -895,7 +907,11 @@ class InternetManager(
      * paths reach here for one displacement. Main-thread only.
      */
     private fun markSuperseded(reason: String?) {
-        if (!supersedeLatch.mark()) return
+        // The reason goes to the latch, not just the emitter: it has to outlive
+        // this call so the report can be re-derived from state (see
+        // SupersededLatchPolicy.restatementEventJson) rather than existing only
+        // as an argument to an emit that may not land.
+        if (!supersedeLatch.mark(reason)) return
         reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
         reconnectRunnable = null
         emitDiagnostic("warning", "Relay superseded this session; not auto-reconnecting", mapOf(

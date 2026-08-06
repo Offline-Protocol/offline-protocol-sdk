@@ -70,15 +70,34 @@ package com.offlineprotocol
  * that must be right across those windows reconcile with `getState()` on
  * foreground; see docs/react-native-integration.md.
  *
- * No iOS twin **for the hold**, deliberately: the notification Stop action that
- * produces `mesh_stopped_by_user` is Android-only, so mirroring a buffer there
- * would leave it with one caller. The *other* half of this fix did land on both
- * — `internet_session_superseded` fires on iOS too, and its listener flag is
- * lock-guarded there for the same stale-read hazard Android's `listenerCount`
- * AtomicInteger closes. Read that asymmetry as scope, not as iOS being exempt:
- * the iOS race was missed on the first pass precisely because the work was
- * framed as "Android", and an event's fix is scoped by where the event *fires*.
- * docs/react-native-integration.md §6.1 states what iOS does and does not get.
+ * No iOS twin, and after review that is a design conclusion rather than the
+ * scope note it started as. iOS solves the same problem for the same event by
+ * **re-deriving** the report instead of replaying it: `SupersededLatchPolicy`
+ * already holds the authoritative fact (and now the reason with it), so the
+ * bridge re-emits from that state on every app foreground while the transport
+ * is superseded. Where the two approaches differ is instructive, and the
+ * reasons are platform-specific enough that neither should be ported over the
+ * other without re-deriving:
+ *
+ *  - **Re-deriving needs backing state; this buffer exists because
+ *    `mesh_stopped_by_user` has none.** It is emitted after the transports,
+ *    the scheduler and the core are already down — there is nothing left to
+ *    ask. That is exactly why a buffer is the only option here, and why the
+ *    iOS-style restatement could not serve it.
+ *  - **Re-deriving has no staleness class**, so it needs no generation stamp,
+ *    no [endSession]/[beginSession] pair and no [discard] site: a restatement
+ *    is true when it is delivered rather than being a replay of a past edge.
+ *    The cost is that it repeats, which is fine for a state report and would
+ *    not be for a terminal one.
+ *  - **A buffer only sees the losses the module itself can observe.** It takes
+ *    a hold on the `canEmitToJs` false branch; an emit that passes that gate
+ *    and then dies downstream (React re-checking its own listener count, an
+ *    invalidated instance, a JS-side unsubscribe racing the native
+ *    `removeListeners`) leaves nothing held. Re-deriving covers those too,
+ *    because it never depends on having noticed the failure.
+ *
+ * docs/react-native-integration.md §6.1 states the resulting contract for both
+ * platforms: at-least-once, state rather than edge, idempotent handlers.
  */
 class StickyEventBuffer(private val maxEntries: Int = DEFAULT_MAX_ENTRIES) {
 

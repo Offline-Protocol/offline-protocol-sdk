@@ -3051,12 +3051,50 @@ export class OfflineProtocol {
    * limiter) — `sendRawServerCommand` returning false while ready means
    * retry after a short delay.
    *
+   * Cannot tell you *why* it is false. An ordinary disconnect (which
+   * reconnects itself) and a relay displacement (which never will) both read
+   * false here — use {@link isInternetSuperseded} to tell them apart.
+   *
    * @returns true when connected and authenticated; false otherwise,
    *          including when the internet transport was never initialized
    *          (never throws)
    */
   async isInternetReady(): Promise<boolean> {
     return await OfflineProtocolNativeModule.internetIsReady();
+  }
+
+  /**
+   * Whether the relay displaced this session — another device registered the
+   * same identity and took over the relay slot — and the SDK latched the
+   * internet transport stopped.
+   *
+   * This is the question {@link isInternetReady} structurally cannot answer.
+   * A `false` from it means "not usable right now" and nothing more: an
+   * ordinary disconnect reconnects itself within seconds, while a displaced
+   * session **will never reconnect on its own**, because a blind reconnect
+   * would just re-displace the other device in a loop. The two are
+   * indistinguishable from readiness alone.
+   *
+   * True here means the only recovery is a deliberate re-enable:
+   *
+   * ```ts
+   * if (await sdk.isInternetSuperseded()) {
+   *   // Surface "connected elsewhere" and let the user decide.
+   *   await sdk.enableTransport('internet', { serverAddress });  // clears the latch
+   * }
+   * ```
+   *
+   * Complements the `internet_session_superseded` event rather than replacing
+   * it. The event tells an app that is listening at that instant; this answers
+   * an app that asks — including one that subscribed later, or whose process
+   * was killed and restarted, which no in-memory event hold survives. A
+   * foreground reconcile against this is the most robust shape.
+   *
+   * @returns true while the session is superseded; false otherwise, including
+   *          when the internet transport was never initialized (never throws)
+   */
+  async isInternetSuperseded(): Promise<boolean> {
+    return await OfflineProtocolNativeModule.internetIsSuperseded();
   }
 
   /**

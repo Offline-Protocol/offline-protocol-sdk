@@ -43,9 +43,18 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// coming back. Mirrors the Android module's `listenerCount` AtomicInteger,
     /// which exists for the identical hazard.
     ///
-    /// A correct read is all iOS does here — there is no sticky hold, because
-    /// `mesh_stopped_by_user` (the event that motivated one) has no iOS
-    /// counterpart. See docs/react-native-integration.md §6.1.
+    /// A correct read is necessary but not sufficient, and deliberately not
+    /// where the supersede fix lives. This flag can only ever describe *this*
+    /// module's view: React Native re-checks its own listener count and its JS
+    /// handle inside `sendEvent` and drops with a warning, an invalidated
+    /// instance drops silently, and a JS-side `subscription.remove()`
+    /// deregisters synchronously while the native `removeListeners` is still in
+    /// flight — so a true read here is not evidence of delivery, and buffering
+    /// the emits it *does* catch would still miss the ones it does not. iOS
+    /// therefore recovers `internet_session_superseded` by re-deriving it from
+    /// the transport latch on foreground rather than by holding a copy — see
+    /// `restateInternetSupersededIfNeeded`, and
+    /// docs/react-native-integration.md §6.1 for the resulting contract.
     private let listenerLock = NSLock()
     private var _hasListeners = false
     private var hasListeners: Bool {
@@ -204,6 +213,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         if foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs: MonotonicClock.nowMs()) {
             internetManager?.forceReconnect()
         }
+
+        restateInternetSupersededIfNeeded()
 
         guard let proto = protocolInstance else { return }
         // Same hop as the background side, for the same reason (the global
@@ -715,16 +726,60 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// code 4000 because a newer registration for the same identity took over;
     /// the SDK will NOT auto-reconnect. The app surfaces "connected elsewhere"
     /// and reconnects only on explicit user action (re-enabling the transport).
+    ///
+    /// Best-effort, and deliberately so: `sendEventToJS` owns the single
+    /// listener gate, and a drop here is no longer terminal because
+    /// `restateInternetSupersededIfNeeded` re-derives this same report from the
+    /// latch on the next app foreground. The tag and payload shape come from
+    /// SupersededLatchPolicy so this site and that one cannot disagree — and so
+    /// they are pinned by a test, which nothing in this file can be.
     fileprivate func emitInternetSupersededEvent(reason: String?) {
-        guard hasListeners else { return }
-        var payload: [String: Any] = [
-            "type": "internet_session_superseded"
-        ]
-        if let reason = reason { payload["reason"] = reason }
-        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
-           let jsonString = String(data: data, encoding: .utf8) {
-            sendEventToJS(Events.onEvent, body: ["eventJson": jsonString])
-        }
+        sendEventToJS(
+            Events.onEvent,
+            body: ["eventJson": SupersededLatchPolicy.eventJson(reason: reason)]
+        )
+    }
+
+    /// Re-emits `internet_session_superseded` if the internet transport is
+    /// *currently* superseded. Called on app foreground.
+    ///
+    /// This is what makes the one-shot report recoverable. The event reports a
+    /// state that nothing else ever restates — every reconnect route refuses
+    /// while the latch is set — so the original emit was the app's only chance
+    /// to learn it, and any drop left the app showing a relay connection that
+    /// was never coming back. Re-deriving from the latch converts *every* way
+    /// that emit can be lost into "healed on the next foreground", including
+    /// the ones this module cannot see: React Native re-checks its own listener
+    /// count and its JS-module handle inside `sendEvent` and drops with only a
+    /// warning, an invalidated bridge drops silently, and a JS-side
+    /// `subscription.remove()` deregisters synchronously while the native
+    /// `removeListeners` is still in flight — so `hasListeners` can read true
+    /// while the emit lands nowhere. A buffer of the failed emit would be blind
+    /// to all of those; the latch is not.
+    ///
+    /// Two deliberate absences, both re-derived for iOS rather than copied from
+    /// Android's sticky-buffer flush — see docs/react-native-integration.md §6.1:
+    ///
+    /// - **No subscribe-time trigger.** `startObserving` fires only on the 0→1
+    ///   listener transition, and the SDK subscribes once in its constructor,
+    ///   before `create()` — so it runs exactly once per module lifetime, at a
+    ///   point where no `InternetManager` exists yet and no supersede can have
+    ///   happened. A flush there would be dead code.
+    /// - **No queue hop.** Android's flush must hop because its
+    ///   `runOnJSQueueThread` is what orders the emit after JS registers its
+    ///   listener. On iOS `sendEvent(withName:body:)` can never deliver inline:
+    ///   it hands off through RCTCallableJSModules, which posts to the JS thread
+    ///   on both the bridge and bridgeless paths. The RN emit path *is* the hop;
+    ///   adding another would only delay delivery and add a failure mode.
+    ///
+    /// Cost of this design, stated: the event is level-triggered, not
+    /// edge-triggered — it repeats on each foreground while the transport stays
+    /// superseded. Apps treat it as state ("connected elsewhere"), which is
+    /// idempotent, and the alternative was a single delivery that could be lost
+    /// for good.
+    private func restateInternetSupersededIfNeeded() {
+        guard let eventJson = internetManager?.supersedeRestatementJson() else { return }
+        sendEventToJS(Events.onEvent, body: ["eventJson": eventJson])
     }
 
     /// Forwards a raw relay frame apps need outside or in addition to SDK-owned
@@ -3861,6 +3916,26 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func internetIsReady(_ resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
         resolver(internetManager?.isReady() ?? false)
+    }
+
+    /// Whether the relay displaced this session ("connected elsewhere") and
+    /// latched the transport stopped. Resolves false (never rejects) when the
+    /// internet transport isn't initialized.
+    ///
+    /// The pull half of the supersede contract, and the disambiguation
+    /// `internetIsReady` cannot offer: a `false` there from an ordinary
+    /// disconnect — which reconnects itself — and a `false` from a displacement
+    /// — which will not reconnect on its own, ever — are indistinguishable.
+    /// True here means the only recovery is a deliberate re-enable
+    /// (`enableTransport('internet', …)`), which clears the latch.
+    ///
+    /// Complements the `internet_session_superseded` event rather than
+    /// replacing it: the event tells an app that is listening, this answers an
+    /// app that asks — including one that started listening after the fact, or
+    /// whose process died and came back.
+    @objc func internetIsSuperseded(_ resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        resolver(internetManager?.isSessionSuperseded() ?? false)
     }
 
     /// Forces an immediate teardown + reconnect + re-authenticate of the

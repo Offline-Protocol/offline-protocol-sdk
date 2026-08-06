@@ -9100,4 +9100,154 @@ mod tests {
             "OfflineProtocolModule.swift getState must fall back to \"Stopped\", matching Android"
         );
     }
+
+    /// The `internet_session_superseded` recovery wiring is present on both
+    /// bridges, and the event tag has exactly one definition.
+    ///
+    /// `internet_session_superseded` is the only strictly *one-shot* event the
+    /// bridges emit: `InternetManager` latches the transport stopped on relay
+    /// displacement and refuses auto- and force-reconnect until an explicit
+    /// `start()`, so nothing ever restates it. An emit JS could not take used
+    /// to leave the app showing a relay connection that was never coming back.
+    /// iOS closes that by re-deriving the report from the latch on every app
+    /// foreground (`restateInternetSupersededIfNeeded`) and by answering it on
+    /// demand (`internetIsSuperseded`).
+    ///
+    /// Both of those live in `ios/OfflineProtocolModule.swift`, which **nothing
+    /// in CI compiles** — it is on `Package.swift`'s `exclude:` list, so
+    /// `swift test` skips it, and it is absent from the ci.yml `swiftc
+    /// -typecheck` probe. Deleting either call would be invisible: the feature
+    /// is a silent no-op, and the only symptom is the original bug returning.
+    /// This is the same argument, and the same shape, as
+    /// [`react_native_protocol_state_members_match_the_wire`] above — read the
+    /// files, assert the wiring is where it has to be.
+    ///
+    /// Presence assertions only. An absence assertion would trip over the prose
+    /// that explains the mechanism, which is deliberately extensive here.
+    #[test]
+    fn react_native_supersede_restatement_wiring_is_present() {
+        /// Drops comment lines and collapses whitespace, so an assertion
+        /// matches code rather than the prose describing it — and so a call
+        /// split across lines still matches.
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*'))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        /// The region between two anchors, so an assertion cannot satisfy
+        /// itself somewhere else in the file — the definition of a method,
+        /// say, standing in for the call site that actually matters.
+        fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let after = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1;
+            after
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        const TAG: &str = "internet_session_superseded";
+
+        // --- The tag: one definition per platform, both spelled the same ----
+        // Apps switch on this string (types.ts InternetSessionSupersededEvent)
+        // and Android uses it as its sticky-buffer collapsing key. It lives in
+        // the policy classes because those ARE compiled and unit-tested on both
+        // platforms; the modules alias it.
+        let swift_policy = code_only(&read("ios/SupersededLatchPolicy.swift"));
+        assert!(
+            swift_policy.contains(&format!("static let EVENT_TYPE = \"{TAG}\"")),
+            "ios/SupersededLatchPolicy.swift must define EVENT_TYPE = \"{TAG}\" — \
+             the emit sites are in a file CI never compiles, so this is the tag's only home"
+        );
+
+        let kotlin_policy = code_only(&read(
+            "android/src/main/java/com/offlineprotocol/SupersededLatchPolicy.kt",
+        ));
+        assert!(
+            kotlin_policy.contains(&format!("const val EVENT_TYPE = \"{TAG}\"")),
+            "SupersededLatchPolicy.kt must define EVENT_TYPE = \"{TAG}\", matching iOS"
+        );
+
+        // Both policies must be able to restate from state, which is what
+        // makes the report recoverable without buffering the emit.
+        assert!(
+            swift_policy.contains("func restatementEventJson()"),
+            "ios/SupersededLatchPolicy.swift must expose restatementEventJson()"
+        );
+        assert!(
+            kotlin_policy.contains("fun restatementEventJson()"),
+            "SupersededLatchPolicy.kt must expose restatementEventJson(), mirroring iOS"
+        );
+
+        // --- iOS module: the foreground restatement -------------------------
+        let swift_module = read("ios/OfflineProtocolModule.swift");
+        let foreground = code_only(slice_between(
+            &swift_module,
+            "func applicationWillEnterForeground()",
+            "guard let proto = protocolInstance",
+        ));
+        assert!(
+            foreground.contains("restateInternetSupersededIfNeeded()"),
+            "OfflineProtocolModule.swift applicationWillEnterForeground must call \
+             restateInternetSupersededIfNeeded() — it is the ONLY trigger that redelivers a \
+             dropped internet_session_superseded on iOS (startObserving fires once per module \
+             lifetime, before any InternetManager exists). Nothing in CI compiles this file"
+        );
+
+        let swift_all = code_only(&swift_module);
+        assert!(
+            swift_all.contains("internetManager?.supersedeRestatementJson()"),
+            "OfflineProtocolModule.swift must re-derive the report from the latch via \
+             InternetManager.supersedeRestatementJson(), not from a buffered copy of the emit"
+        );
+        assert!(
+            swift_all.contains("SupersededLatchPolicy.eventJson(reason: reason)"),
+            "OfflineProtocolModule.swift emitInternetSupersededEvent must build its payload via \
+             SupersededLatchPolicy.eventJson, so the first emit and the restatement cannot \
+             disagree on the tag or the shape"
+        );
+
+        // --- The pull API, on all four surfaces it has to exist on ----------
+        assert!(
+            swift_all.contains("func internetIsSuperseded("),
+            "OfflineProtocolModule.swift must expose internetIsSuperseded"
+        );
+        assert!(
+            code_only(&read("ios/OfflineProtocolModule.m"))
+                .contains("RCT_EXTERN_METHOD(internetIsSuperseded:"),
+            "OfflineProtocolModule.m must export internetIsSuperseded — a Swift @objc method \
+             with no RCT_EXTERN_METHOD is invisible to JS, and neither file is compiled by CI"
+        );
+        assert!(
+            code_only(&read(
+                "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"
+            ))
+            .contains("fun internetIsSuperseded(promise: Promise)"),
+            "OfflineProtocolModule.kt must expose internetIsSuperseded, matching iOS — \
+             a bridge method on one platform only is worse than none"
+        );
+        let index_ts = code_only(&read("src/index.ts"));
+        assert!(
+            index_ts.contains("async isInternetSuperseded(): Promise<boolean>")
+                && index_ts.contains("OfflineProtocolNativeModule.internetIsSuperseded()"),
+            "src/index.ts must expose isInternetSuperseded() calling internetIsSuperseded"
+        );
+    }
 }
