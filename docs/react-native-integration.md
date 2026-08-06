@@ -152,16 +152,20 @@ sdk.on('mesh_stopped_by_user', () => {
 });
 ```
 
-**Delivery, and what it does not promise.** `mesh_stopped_by_user` and `internet_session_superseded` are *one-shot*: nothing else ever restates them, so both bridges work to keep them from being lost. **Delivery is at-least-once, and the events are state, not edges.**
+**Delivery, and what it does not promise.** `mesh_stopped_by_user` and `internet_session_superseded` are *one-shot*: nothing else ever restates them, so all three layers work to keep them from being lost. **Delivery is at-least-once, and the events are state, not edges.**
 
 - **Android** holds a copy of an emit JS could not take and redelivers it on your next event subscription or app foreground.
 - **iOS** re-derives `internet_session_superseded` from the live transport latch on every app foreground, for as long as the session stays superseded. (`mesh_stopped_by_user` has no iOS counterpart at all — the notification affordance is Android-only.)
+- **The JS layer, on both platforms,** holds a one-shot event that arrived before you had a listener for it, and delivers it to the first `on(...)` that registers. This is a separate gap from the two above and only the SDK can see it: the SDK subscribes to the native emitter inside its own constructor, so between `new OfflineProtocol(...)` and your first `on(...)` there is a window where events arrive with nothing registered — and Android's redelivery lands in exactly that window, because it fires on that constructor-time subscribe. Replay is asynchronous (a microtask), so a handler never runs before the `on(...)` that registered it returns.
 
-Three consequences worth designing against:
+Four consequences worth designing against:
 
-- **Handlers must be idempotent.** Both mechanisms can deliver the same fact more than once — Android by redelivering a held copy, iOS by restating on each foreground until the transport is re-enabled. Set a flag; do not push a screen or fire a notification per event.
+- **Handlers must be idempotent.** Every one of these mechanisms can deliver the same fact more than once — Android by redelivering a held copy, iOS by restating on each foreground until the transport is re-enabled, the JS layer by replaying to a late listener. Set a flag; do not push a screen or fire a notification per event.
 - **They can arrive late.** Treat them as "this is true", not "this just happened" — reconcile against actual state rather than assuming the event is fresh.
-- **They are not durable.** Neither mechanism survives a process kill, and Android's hold does not survive a JS reload. Persisting would not help: if the process was killed, the event was never generated in the first place.
+- **Register listeners before `start()`.** The JS hold makes an `await` between construction and your first `on(...)` survivable, but only for these two tags — every other event in that window is dropped, correctly, because it is periodic or re-derivable. Registering synchronously right after construction keeps the window at zero and is still the right habit. (The SDK warns once per event type if events arrive while you have registered no listeners at all.)
+- **They are not durable.** No mechanism survives a process kill, and neither the Android hold nor the JS hold survives a JS reload. Persisting would not help: if the process was killed, the event was never generated in the first place.
+
+The JS hold is also cleared where continuing to hold would be *worse* than dropping — redelivering a stale one-shot is the same failure inverted, not a milder one. A held `mesh_stopped_by_user` replayed after you called `start()` would report a mesh that is coming up as down, with nothing to correct it, so `start()` discards anything no listener has claimed by then; `enableTransport('internet', ...)` discards a held `internet_session_superseded`, because that call is what clears the latch the event reports; and `destroy()` discards whatever is left, so an instance you destroy and start again cannot hand the previous session's event to the next session's first listener.
 
 **So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have on both platforms. It takes three reads, because the events report different things and no single call covers them:
 
@@ -187,7 +191,7 @@ if (await sdk.isInternetSuperseded()) {
 
 `isInternetSuperseded()` is the relay half, and it is the read that resolves the ambiguity `isInternetReady()` structurally cannot: a `false` from an ordinary disconnect — which reconnects itself within seconds — and a `false` from a supersede — which will **not** reconnect on its own, ever — are identical there. Check the supersede first and fall back to readiness, as above. Recovery from a supersede is always a deliberate re-enable: `enableTransport('internet', ...)` clears the latch, which stops the iOS restatement and drops any copy Android is still holding, so a notice about the session you just replaced cannot arrive after you are reconnected.
 
-Because `isInternetSuperseded()` reads the latch itself rather than a delivery, it is also the only thing that covers the windows no in-memory delivery reaches — an app that subscribed after the fact, a JS reload, a process restart. **An app that reconciles against it on foreground needs nothing from the event but the prompt**, and that is the shape we recommend.
+Because `isInternetSuperseded()` reads the latch itself rather than a delivery, it is also the only thing that covers the windows no in-memory delivery reaches — a JS reload, a process restart, or an instance whose hold `start()` has since swept. **An app that reconciles against it on foreground needs nothing from the event but the prompt**, and that is the shape we recommend.
 
 ### 6.2 Process death, and why the mesh does not resume itself (Android)
 

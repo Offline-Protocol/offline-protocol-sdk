@@ -50,7 +50,7 @@ import type {
   TransportMetrics,
 } from './types';
 import { ContentType, MessagePriority } from './types';
-import { LINKING_ERROR } from './constants';
+import { LINKING_ERROR, ONE_SHOT_EVENT_TYPES } from './constants';
 
 export * from './types';
 export * from './constants';
@@ -67,6 +67,15 @@ const OfflineProtocolNativeModule = (NativeModules.OfflineProtocolModule
     )) as any; // Type assertion to allow all native module methods including group management
 
 type NativeRelayPriority = 'low' | 'medium' | 'high';
+
+/**
+ * Membership test for {@link ONE_SHOT_EVENT_TYPES}, built once rather than
+ * scanned per event: `emitEvent` is on the path of every event that crosses
+ * this bridge.
+ */
+const ONE_SHOT_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
+  ONE_SHOT_EVENT_TYPES
+);
 
 interface InitialRuntimeConfig {
   dors?: {
@@ -247,6 +256,22 @@ export class OfflineProtocol {
   private telemetryListeners: Set<TelemetryListener> = new Set();
   private eventListeners: Map<EventType | "all", Set<EventListener>> =
     new Map();
+  /**
+   * One-shot events that reached this instance while no listener was
+   * registered for them, held for the first listener that is.
+   *
+   * Keyed by event type, so a repeat collapses last-wins and the map is
+   * bounded by {@link ONE_SHOT_EVENT_TYPES} — two entries — by construction.
+   * See {@link OfflineProtocol.on} for the window this closes and why the
+   * native Android buffer cannot close it.
+   */
+  private pendingOneShotEvents: Map<EventType, ProtocolEvent> = new Map();
+  /**
+   * Event types already reported as dropped-with-no-listeners, so the warning
+   * in {@link OfflineProtocol.emitEvent} fires once per type rather than once
+   * per event. A misconfigured integration produces a steady stream of these.
+   */
+  private droppedEventTypesWarned: Set<string> = new Set();
   private config: ProtocolConfig;
   private isCreated: boolean = false;
   private initialRuntimeConfig: InitialRuntimeConfig | null = null;
@@ -602,13 +627,26 @@ export class OfflineProtocol {
   }
 
   /**
-   * Emits an event to all registered listeners
+   * Emits an event to all registered listeners, holding it for redelivery if
+   * it is *one-shot* and nothing was listening.
+   *
+   * This is the only place in the SDK that can tell whether an event reached
+   * the **app**. Everything upstream — the native `canEmitToJs` gate, the
+   * Android sticky buffer's redelivery, the iOS latch restatement — answers
+   * the narrower question of whether the event reached *JavaScript*, which is
+   * a different registration: the SDK subscribes to the native emitter in its
+   * own constructor, before the app can possibly have called {@link on}. So
+   * an event can pass every native check, arrive here intact, and be dropped
+   * with both listener maps empty. See {@link on} for the redelivery half.
    */
   private emitEvent(event: ProtocolEvent): void {
+    let delivered = false;
+
     // Call event-specific listeners
     const specificListeners = this.eventListeners.get(event.type);
     if (specificListeners) {
       specificListeners.forEach((listener) => {
+        delivered = true;
         try {
           listener(event);
         } catch (error) {
@@ -621,6 +659,7 @@ export class OfflineProtocol {
     const allListeners = this.eventListeners.get("all");
     if (allListeners) {
       allListeners.forEach((listener) => {
+        delivered = true;
         try {
           listener(event);
         } catch (error) {
@@ -628,10 +667,75 @@ export class OfflineProtocol {
         }
       });
     }
+
+    // A listener that *threw* still counts as delivered: the event was handed
+    // to the app, and holding it for redelivery would hand a throwing handler
+    // the same event again on the next registration. This mirrors the native
+    // dispatcher, where the emit — not the outcome — is what discards the
+    // hold.
+    if (delivered) {
+      // Anything held for this type is now stale news; left behind it would
+      // redeliver after the event that superseded it.
+      this.pendingOneShotEvents.delete(event.type);
+      return;
+    }
+
+    if (ONE_SHOT_EVENT_TYPE_SET.has(event.type)) {
+      // Delete first so a re-hold moves to the tail: replay order should be
+      // the order the events were emitted, and the newest information about a
+      // type is also the newest information overall.
+      this.pendingOneShotEvents.delete(event.type);
+      this.pendingOneShotEvents.set(event.type, event);
+      return;
+    }
+
+    // Everything else is periodic, re-derivable, or followed by another event
+    // carrying the same state, so dropping it is correct — but dropping it
+    // *silently* while the app has registered nothing at all is
+    // indistinguishable from no event having arrived, which is the failure
+    // this warning exists to make visible. Only fires while the app has no
+    // listeners whatsoever; an app that listens selectively is making a
+    // choice, not a mistake.
+    if (
+      this.eventListeners.size === 0 &&
+      !this.droppedEventTypesWarned.has(event.type)
+    ) {
+      this.droppedEventTypesWarned.add(event.type);
+      console.warn(
+        `[OfflineProtocol] Dropped a '${event.type}' event: it arrived before ` +
+          `any listener was registered. Register listeners with on(...) ` +
+          `immediately after construction, before calling start(). ` +
+          `(Further drops of this type are not reported.)`
+      );
+    }
   }
 
   /**
    * Registers an event listener
+   *
+   * **One-shot events registered for late are replayed.** An event that
+   * reached the SDK before any listener for it existed is held and delivered
+   * to the first listener that registers — but only for the *one-shot* tags
+   * (`internet_session_superseded`, `mesh_stopped_by_user`), which nothing
+   * else ever restates. Everything else is dropped, as it should be: a
+   * periodic event replayed after the fact would report a state that has
+   * since changed.
+   *
+   * That window is not an edge case, it is the default. The SDK subscribes to
+   * the native emitter inside its own constructor, so between
+   * `new OfflineProtocol(...)` and your first `on(...)` there is a stretch in
+   * which events arrive with nothing registered — and Android's native
+   * redelivery of held one-shot events fires on exactly that constructor-time
+   * subscribe, landing squarely inside it. Registering synchronously right
+   * after construction keeps the window at zero and is still the right habit;
+   * this hold is what makes an `await` in between survivable.
+   *
+   * Replay is **asynchronous** (a microtask), so a handler never runs before
+   * the `on(...)` call that registered it has returned, and every listener
+   * registered in the same tick — including an `'all'` listener added after a
+   * specific one — receives it. Delivery stays **at-least-once**: these events
+   * are state, not edges, and handlers must be idempotent. See
+   * `docs/react-native-integration.md` §6.1.
    *
    * @param eventType - Event type to listen for, or 'all' for all events
    * @param listener - Callback function
@@ -656,7 +760,55 @@ export class OfflineProtocol {
       this.eventListeners.set(eventType, new Set());
     }
     this.eventListeners.get(eventType)!.add(listener as EventListener);
+    this.replayHeldOneShotEvents(eventType);
     return this;
+  }
+
+  /**
+   * Hands any held one-shot event matching [eventType] to the listeners
+   * registered for it, on the next microtask.
+   *
+   * Entries are removed from the hold *now*, when the replay is scheduled,
+   * rather than when it runs: several `on(...)` calls in the same tick would
+   * otherwise each schedule a replay of the same entry and the app would see
+   * it once per registration.
+   *
+   * Delivery goes back through {@link emitEvent} rather than calling the new
+   * listener directly, which buys two things. Every listener registered by
+   * the time the microtask runs is served, not just this one — so the common
+   * `on('mesh_stopped_by_user', ...)` followed by `on('all', ...)` does not
+   * leave the second one short. And if the app removed its listeners again in
+   * the interim, `emitEvent` simply re-holds the event instead of losing it,
+   * which is the property that makes scheduling-time removal safe.
+   */
+  private replayHeldOneShotEvents(eventType: EventType | "all"): void {
+    if (this.pendingOneShotEvents.size === 0) {
+      return;
+    }
+
+    const replay: ProtocolEvent[] = [];
+    if (eventType === "all") {
+      replay.push(...this.pendingOneShotEvents.values());
+      this.pendingOneShotEvents.clear();
+    } else {
+      const held = this.pendingOneShotEvents.get(eventType);
+      if (held) {
+        replay.push(held);
+        this.pendingOneShotEvents.delete(eventType);
+      }
+    }
+
+    if (replay.length === 0) {
+      return;
+    }
+
+    // A microtask rather than a timer: it runs after the current synchronous
+    // block — so a listener never fires before the `on(...)` that registered
+    // it returns, and same-tick registrations all land first — while still
+    // being the earliest point at which that is true.
+    Promise.resolve().then(() => {
+      replay.forEach((event) => this.emitEvent(event));
+    });
   }
 
   /**
@@ -764,6 +916,25 @@ export class OfflineProtocol {
     }
 
     await OfflineProtocolNativeModule.start();
+
+    // A session is starting, so nothing held from before it can still be
+    // true. Redelivering a stale one-shot event is not a milder version of
+    // dropping it — it is the same failure inverted: `mesh_stopped_by_user`
+    // handed to a listener that registers after this call tells the app the
+    // mesh is down while it is coming up, and being one-shot, nothing will
+    // ever correct it. This is the TypeScript half of the native
+    // `beginSession()`; the native buffer's generation stamp cannot see this
+    // window because by here the event has already left it.
+    //
+    // Nothing legitimate is swallowed. Anything an app *did* claim is gone
+    // from the hold already — `replayHeldOneShotEvents` removes at scheduling
+    // time, and a replay scheduled by a synchronous `on(...)` before this call
+    // runs during the first `await` above. What remains is only what no
+    // listener ever asked for. And neither enrolled event can be produced
+    // ahead of this point in a fresh session: both need a transport that
+    // `start()` is what brings up (the relay auto-enable below included, which
+    // is why this sits above it).
+    this.pendingOneShotEvents.clear();
 
     if (encryptionEnabled) {
       const mlsReady = await OfflineProtocolNativeModule.isMlsInitialized();
@@ -1049,6 +1220,13 @@ export class OfflineProtocol {
   /**
    * Enables a transport with optional configuration
    *
+   * Re-enabling `'internet'` is also the recovery from a relay supersede: it
+   * clears the transport's latch, so any `internet_session_superseded` this
+   * instance is still holding for a late listener is dropped here. Held, it
+   * would tell an app with a freshly reconnected relay socket that it is
+   * connected elsewhere, with nothing to correct it. Mirrors the same discard
+   * on the native side.
+   *
    * @param type - Transport type to enable
    * @param config - Optional transport configuration
    * @throws Error if transport fails to enable
@@ -1057,7 +1235,16 @@ export class OfflineProtocol {
     type: TransportType,
     config?: InternetTransportConfig | WifiDirectTransportConfig | NostrTransportConfig | ReticulumTransportConfig
   ): Promise<void> {
-    return await OfflineProtocolNativeModule.enableTransport(type, config);
+    const result = await OfflineProtocolNativeModule.enableTransport(
+      type,
+      config
+    );
+    // Only on the success path: a failed enable leaves the latch set, so the
+    // held event is still the truth.
+    if (type === "internet") {
+      this.pendingOneShotEvents.delete("internet_session_superseded");
+    }
+    return result;
   }
 
   /**
@@ -2868,6 +3055,7 @@ export class OfflineProtocol {
     // Remove all event listeners
     this.removeAllListeners();
     this.telemetryListeners.clear();
+    this.droppedEventTypesWarned.clear();
 
     // Remove native event subscription
     if (this.eventSubscription) {
@@ -2886,6 +3074,25 @@ export class OfflineProtocol {
     }
 
     this.initialRuntimeConfigApplied = false;
+
+    // The session these held one-shot events belong to is over, so there is
+    // nobody left to redeliver them to — and an instance can be started again
+    // (`start()` re-creates), where a survivor would be handed to the next
+    // session's first `on(...)`, which the documented order puts *before*
+    // `start()` and its sweep. That is the stale redelivery this mechanism
+    // exists to prevent, arriving by the one route `start()` cannot see.
+    //
+    // The yield is what makes the clear reach it. `removeAllListeners` above
+    // empties the map, so a replay scheduled by an `on(...)` in the same tick
+    // as this call finds nothing listening and re-holds its event — that is
+    // `emitEvent` refusing to lose what it could not deliver, correct in
+    // general and unwanted only here. Microtasks run in order, so awaiting
+    // one queued now resumes strictly after that replay and the clear sees
+    // what it left behind. Nothing can be held past this point: the native
+    // subscription is gone. Awaiting unconditionally rather than leaning on
+    // the native `destroy()` above, which an uncreated instance skips.
+    await Promise.resolve();
+    this.pendingOneShotEvents.clear();
   }
 
   /**

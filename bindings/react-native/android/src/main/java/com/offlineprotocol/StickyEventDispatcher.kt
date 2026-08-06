@@ -36,6 +36,18 @@ package com.offlineprotocol
  * inline, even from the JS thread, so the flush lands after that registration
  * under both the bridge and the New Architecture.
  *
+ * That ordering is necessary and **not sufficient**, and the difference is not
+ * this class's to fix. Landing after the JS-side registration gets the event
+ * to the SDK; getting it to the *app* is a second registration this layer
+ * cannot see, because the SDK subscribes in its own constructor and the app
+ * cannot have called `on(...)` yet. A flush aimed at that subscribe therefore
+ * lands, by construction, in the one window where the app is listening to
+ * nothing. The SDK's TypeScript layer holds one-shot events across that
+ * window and replays them on the first matching `on(...)`
+ * (`src/index.ts`, `ONE_SHOT_EVENT_TYPES`); without it this whole mechanism
+ * is decorative in the common case. See also [StickyEventBuffer]'s note on
+ * the losses a buffer cannot observe — this is one of them.
+ *
  * @param buffer where undeliverable events wait.
  * @param canEmit whether an emit has any chance of reaching JS. Checked on the
  *   two paths where the answer saves real work: before [send]'s emit, so a

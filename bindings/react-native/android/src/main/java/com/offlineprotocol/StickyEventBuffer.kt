@@ -96,6 +96,17 @@ package com.offlineprotocol
  *    `removeListeners`) leaves nothing held. Re-deriving covers those too,
  *    because it never depends on having noticed the failure.
  *
+ * The most common downstream loss is not on that list because it is not the
+ * bridge's to catch: an event that reaches JavaScript intact and finds the
+ * *app* has not registered a handler yet. The SDK subscribes to the emitter in
+ * its own constructor, so a flush triggered by that subscribe (the usual one)
+ * arrives while the app necessarily has nothing bound. Held entries are
+ * dropped once handed over — an emit is not a delivery receipt — so nothing
+ * here can recover it afterwards. The SDK's TypeScript layer holds one-shot
+ * events across that second gap and replays them on the first matching
+ * `on(...)`; see `src/index.ts` and `ONE_SHOT_EVENT_TYPES`, whose set must
+ * stay equal to the tags enrolled here.
+ *
  * docs/react-native-integration.md §6.1 states the resulting contract for both
  * platforms: at-least-once, state rather than edge, idempotent handlers.
  */
