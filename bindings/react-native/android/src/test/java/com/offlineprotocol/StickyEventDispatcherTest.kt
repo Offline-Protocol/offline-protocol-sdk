@@ -227,6 +227,28 @@ class StickyEventDispatcherTest {
     }
 
     @Test
+    fun twoScheduledFlushesDeliverTheEventExactlyOnce() {
+        // addListener fires twice per SDK instance (the event and telemetry
+        // subscriptions) and onHostResume calls flush too, so several runnables
+        // can be queued against one held event. drain() removes on read, which
+        // is what makes the second a no-op — but nothing else enforces it, and
+        // a redelivered one-shot is a second "mesh stopped" for a mesh that
+        // stopped once.
+        val harness = Harness(canEmit = false, emitResults = listOf(true))
+        harness.dispatcher.send("mesh_stopped_by_user", "{}")
+        harness.canEmit = true
+
+        harness.dispatcher.flush()
+        harness.dispatcher.flush()
+        val posted = harness.scheduled.size
+        harness.runScheduled()
+
+        assertEquals("both triggers posted", 2, posted)
+        assertEquals(listOf("{}"), harness.emitted)
+        assertTrue(harness.buffer.isEmpty())
+    }
+
+    @Test
     fun aFlushThatThrowsDoesNotReplaceTheEmitThatFailed() {
         // The retry a successful hold runs reads the gate and posts to the JS
         // queue, either of which can throw — and out of a `finally` that second
