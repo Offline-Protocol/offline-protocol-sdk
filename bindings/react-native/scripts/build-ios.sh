@@ -10,6 +10,8 @@ echo "Building iOS universal library..."
 # Navigate to the Rust project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# shellcheck source=shared/xcframework.sh
+source "$SCRIPT_DIR/shared/xcframework.sh"
 OUTPUT_DIR="$SCRIPT_DIR/../ios/libs"
 XCFRAMEWORK="$OUTPUT_DIR/offline_protocol_uniffi.xcframework"
 
@@ -40,44 +42,15 @@ mkdir -p "$OUTPUT_DIR"
 
 echo "Packaging the XCFramework..."
 
-# Device and simulator arm64 cannot coexist in one `lipo` archive, so this ships
-# two slices inside an XCFramework and lets Xcode/CocoaPods pick per build SDK.
-# Both slices deliberately carry the SAME archive basename — CocoaPods derives a
-# single `-l<name>` flag for the whole bundle and applies it to whichever slice
-# it copied. See scripts/build-uniffi-ios.sh for the long-form rationale.
-STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/device" "$STAGE/simulator"
-
-echo "Staging device slice (aarch64-apple-ios)..."
-cp "$PROJECT_ROOT/target/aarch64-apple-ios/release/liboffline_protocol_uniffi.a" \
-   "$STAGE/device/liboffline_protocol_uniffi.a"
-
-echo "Staging simulator slice (Intel + Apple Silicon)..."
-lipo -create \
+# Why an XCFramework, and why both slices share one archive basename: see
+# scripts/shared/xcframework.sh.
+package_xcframework \
+  "$OUTPUT_DIR" \
+  "$PROJECT_ROOT/target/aarch64-apple-ios/release/liboffline_protocol_uniffi.a" \
   "$PROJECT_ROOT/target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a" \
-  "$PROJECT_ROOT/target/x86_64-apple-ios/release/liboffline_protocol_uniffi.a" \
-  -output "$STAGE/simulator/liboffline_protocol_uniffi.a"
+  "$PROJECT_ROOT/target/x86_64-apple-ios/release/liboffline_protocol_uniffi.a"
 
-# -create-xcframework refuses to write over an existing bundle.
-rm -rf "$XCFRAMEWORK"
-xcodebuild -create-xcframework \
-  -library "$STAGE/device/liboffline_protocol_uniffi.a" \
-  -library "$STAGE/simulator/liboffline_protocol_uniffi.a" \
-  -output "$XCFRAMEWORK"
-
-# Remove the superseded loose archives so a stale Podfile cannot pick one up.
-rm -f "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a" \
-      "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
-
-echo "iOS XCFramework created: $XCFRAMEWORK"
-
-# Print slice info
-echo ""
-echo "XCFramework slices:"
-for slice in "$XCFRAMEWORK"/*/; do
-  echo "  $(basename "$slice"): $(lipo -info "$slice/liboffline_protocol_uniffi.a" | sed 's/.*: //')"
-done
+print_xcframework_slices "$XCFRAMEWORK"
 
 echo ""
 echo "✅ iOS build complete!"
