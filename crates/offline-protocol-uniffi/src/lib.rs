@@ -8921,4 +8921,66 @@ mod tests {
         assert_eq!(fwd.original_sender.as_str(), "dave");
         assert_eq!(fwd.forward_count, 1);
     }
+
+    /// `getState()` crosses the bridge as the variant *name*: both native
+    /// modules build the string and neither `getState()` nor anything below it
+    /// maps it. The TypeScript enum was numeric through v0.19.0, which made
+    /// `state === ProtocolState.Running` compare `"Running"` to `1` — never
+    /// true, so a running protocol silently read as stopped — while the
+    /// spelling that worked at runtime failed `tsc`.
+    ///
+    /// Nothing else guards this: the values are not part of the UDL, so a
+    /// bindings regen would not catch a drift, and the repo's other types.ts
+    /// guard covers event *tags* only. Follows that guard's shape — read the
+    /// file, compare against the Rust source of truth.
+    #[test]
+    fn react_native_protocol_state_members_match_the_wire() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let types_ts_path = manifest_dir.join("../../bindings/react-native/src/types.ts");
+        let types_ts = std::fs::read_to_string(&types_ts_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", types_ts_path.display()));
+
+        let body = types_ts
+            .split_once("export enum ProtocolState {")
+            .expect("types.ts must export a ProtocolState enum")
+            .1
+            .split_once('}')
+            .expect("unterminated ProtocolState enum")
+            .0;
+
+        let members: Vec<(String, String)> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .map(|l| {
+                let (name, value) = l
+                    .trim_end_matches(',')
+                    .split_once(" = ")
+                    .unwrap_or_else(|| panic!("ProtocolState member has no initializer: {l:?}"));
+                (name.to_string(), value.trim().to_string())
+            })
+            .collect();
+
+        // The names the native modules resolve. Both must map every variant to
+        // its own name, and both must fall back to "Stopped" on an unknown one
+        // — an "Unknown" that is not a member would make the declared return
+        // type `Promise<ProtocolState>` unsound.
+        let expected: Vec<(String, String)> = [ProtocolState::Stopped, ProtocolState::Running]
+            .iter()
+            .chain(std::iter::once(&ProtocolState::Paused))
+            .map(|s| {
+                let name = format!("{s:?}");
+                let value = format!("\"{name}\"");
+                (name, value)
+            })
+            .collect();
+
+        assert_eq!(
+            members, expected,
+            "bindings/react-native/src/types.ts ProtocolState must be string-valued and match \
+             the variant names both native modules resolve (see getState in \
+             OfflineProtocolModule.kt / .swift). Numeric members make every comparison against \
+             getState() silently false."
+        );
+    }
 }

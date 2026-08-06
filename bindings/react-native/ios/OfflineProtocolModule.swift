@@ -2222,7 +2222,13 @@ class OfflineProtocolModule: RCTEventEmitter {
         case .paused:
             stateString = "Paused"
         @unknown default:
-            stateString = "Unknown"
+            // "Stopped", matching Android's `else ->` branch, rather than an
+            // "Unknown" that is not a member of the exported `ProtocolState`
+            // enum — resolving one would make `getState(): Promise<ProtocolState>`
+            // unsound and put the two modules' fallbacks out of step. Treating
+            // an unrecognised state as stopped is also the safe direction for
+            // the reconcile pattern the integration guide documents.
+            stateString = "Stopped"
         }
         resolver(stateString)
     }
