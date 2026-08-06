@@ -398,6 +398,19 @@ impl MlsManager {
     /// still be about to use — costs session establishment, which is worse than
     /// the weakened forward secrecy it would buy.
     ///
+    /// Only step 3 is gated by the ceiling, because only minting grows the
+    /// pool: claiming an unclaimed package relabels one that already exists, so
+    /// degrading to a shared package while a claimable one sits idle would buy
+    /// nothing. A corollary is that the shared package is always assigned to
+    /// *another* peer — reaching that branch means neither an own nor an
+    /// unclaimed package was found — and "newest" makes it the most recently
+    /// assigned one, which has the most lifetime left but is also the peer most
+    /// likely to be mid-establishment. If the over-ceiling peer's Welcome lands
+    /// first, that peer's held advertisement becomes unprocessable until the
+    /// next push to it mints a successor. Sharing the oldest instead would
+    /// trade that for the shortest remaining lifetime; neither is free, and the
+    /// exhaustion report is what makes the condition visible either way.
+    ///
     /// Consumption is what rotates a peer's key: a Welcome built against the
     /// package removes its init key from provider storage, the loader then
     /// reports the package gone, and the next push to that peer mints a fresh
@@ -444,11 +457,22 @@ impl MlsManager {
             });
         }
 
+        // Before the ceiling check, not after: claiming relabels a package that
+        // already exists, so it cannot breach a bound on how many exist.
+        if let Some(bundle) = unclaimed {
+            return Ok(PushKeyPackage {
+                bundle: self.claim_key_package(bundle, peer_id)?,
+                pool_exhausted: false,
+            });
+        }
+
+        // Minting is the only thing left that would grow the pool, so it is the
+        // only thing the ceiling gates.
         if live >= MAX_PUSH_KEY_PACKAGES {
             // `live` is non-zero here, so `newest` is `Some`; minting on the
             // unreachable branch keeps this total without an unwrap.
             if let Some(bundle) = newest {
-                warn!(
+                debug!(
                     peer_id = %peer_id,
                     live = live,
                     "Push key-package pool at capacity; reusing an existing package"
@@ -460,11 +484,7 @@ impl MlsManager {
             }
         }
 
-        let bundle = match unclaimed {
-            Some(bundle) => bundle,
-            None => self.generate_key_package()?,
-        };
-        let bundle = self.claim_key_package(bundle, peer_id)?;
+        let bundle = self.claim_key_package(self.generate_key_package()?, peer_id)?;
 
         Ok(PushKeyPackage {
             bundle,
@@ -518,19 +538,30 @@ impl MlsManager {
     /// key too: deleting the bundle record alone leaves the material OpenMLS
     /// holds in place with nothing left pointing at it.
     pub fn delete_key_package(&self, package_id: &str) -> Result<()> {
-        let bundle = self
+        let Some(data) = self
             .storage
             .load(StorageKeyType::KeyPackage.as_str(), package_id)?
-            .and_then(|data| serde_json::from_slice::<KeyPackageBundle>(&data).ok());
+        else {
+            return Ok(());
+        };
 
-        match bundle {
-            Some(bundle) => self.purge_key_package_material(package_id, &bundle),
-            // No readable record: nothing names the material any more, so the
-            // record delete is all that is left to do.
-            None => {
-                self.storage
-                    .delete(StorageKeyType::KeyPackage.as_str(), package_id)?;
-                Ok(())
+        match serde_json::from_slice::<KeyPackageBundle>(&data) {
+            Ok(bundle) => self.purge_key_package_material(package_id, &bundle),
+            // Legacy raw storage: the record *is* the serialized key package,
+            // the same reading `load_stored_key_package` applies when it
+            // upgrades one. Wrapping it lets the purge derive the provider ref
+            // and destroy the init key instead of stranding it — and if the
+            // bytes are not a key package at all, the purge finds no ref and
+            // falls back to deleting the record, which is all that is left to
+            // do for a record that names nothing.
+            Err(_) => {
+                let legacy = KeyPackageBundle::new(
+                    package_id.to_string(),
+                    self.user_id.clone(),
+                    data,
+                    DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
+                );
+                self.purge_key_package_material(package_id, &legacy)
             }
         }
     }
@@ -1521,12 +1552,18 @@ impl MlsManager {
     ///
     /// # Arguments
     ///
-    /// * `min` - Minimum number of key packages to maintain
+    /// * `min` - Minimum number of key packages to maintain, capped at
+    ///   [`MAX_PUSH_KEY_PACKAGES`]. The packages this mints are unclaimed, so
+    ///   [`Self::take_push_key_package`] draws them down one per peer; asking
+    ///   for more than the pool ceiling would only mint key material that
+    ///   ceiling stops it ever handing out, while holding the pool at capacity
+    ///   so every peer past the last claim is advertised a shared package.
     ///
     /// # Returns
     ///
     /// Returns the total number of valid key packages after ensuring minimum.
     pub fn ensure_min_key_packages(&self, min: usize) -> Result<usize> {
+        let min = min.min(MAX_PUSH_KEY_PACKAGES);
         let key_type = StorageKeyType::KeyPackage.as_str();
         let package_ids = self.storage.list_keys(key_type)?;
 
@@ -1884,6 +1921,81 @@ mod tests {
         );
     }
 
+    /// A legacy record — raw key package bytes rather than a serialized bundle,
+    /// which `load_stored_key_package` still upgrades in place — must have its
+    /// init key destroyed too. Reading the record as unparseable and deleting
+    /// only the record is what strands key material.
+    #[test]
+    fn test_delete_key_package_destroys_the_init_key_of_a_legacy_record() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        let bundle = manager.generate_publication_key_package().unwrap();
+        // Rewrite the record the way a build predating the bundle wrote it.
+        storage
+            .store(
+                StorageKeyType::KeyPackage.as_str(),
+                &bundle.package_id,
+                &bundle.key_package_data,
+            )
+            .unwrap();
+
+        manager.delete_key_package(&bundle.package_id).unwrap();
+
+        assert!(
+            !init_key_present(&manager, &bundle),
+            "a legacy record's private init key survived its deletion"
+        );
+        assert!(
+            storage
+                .load(StorageKeyType::KeyPackage.as_str(), &bundle.package_id)
+                .unwrap()
+                .is_none(),
+            "the legacy record outlived its key material"
+        );
+    }
+
+    /// A record whose bytes name no key package at all still gets deleted —
+    /// there is no material to destroy, and leaving it would make the pool scan
+    /// carry it forever.
+    #[test]
+    fn test_delete_key_package_removes_an_unreadable_record() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        storage
+            .store(
+                StorageKeyType::KeyPackage.as_str(),
+                "junk",
+                b"not a package",
+            )
+            .unwrap();
+
+        manager.delete_key_package("junk").unwrap();
+
+        assert!(storage
+            .load(StorageKeyType::KeyPackage.as_str(), "junk")
+            .unwrap()
+            .is_none());
+    }
+
+    /// `ensure_min_key_packages` mints *unclaimed* packages, which the push
+    /// path draws down one per peer. Minting past the pool ceiling would put
+    /// material in storage that the ceiling then stops it ever handing out,
+    /// while pinning the pool at capacity so every peer past the last claim is
+    /// advertised a shared init key.
+    #[test]
+    fn test_ensure_min_key_packages_is_capped_at_the_pool_ceiling() {
+        let manager = create_test_manager("alice");
+
+        let count = manager
+            .ensure_min_key_packages(MAX_PUSH_KEY_PACKAGES + 50)
+            .unwrap();
+
+        assert_eq!(count, MAX_PUSH_KEY_PACKAGES);
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            MAX_PUSH_KEY_PACKAGES,
+            "pre-filling minted past the ceiling the push path enforces"
+        );
+    }
+
     #[test]
     fn test_manager_creation() {
         let manager = create_test_manager("alice");
@@ -2155,6 +2267,49 @@ mod tests {
         let established = manager.take_push_key_package("peer0").unwrap();
         assert!(!established.pool_exhausted);
         assert_eq!(established.bundle.assigned_peer.as_deref(), Some("peer0"));
+    }
+
+    /// The ceiling bounds how many packages *exist*, so it must gate minting
+    /// and nothing else. A full pool holding an unclaimed package has one to
+    /// give: claiming it relabels a package rather than adding one, and
+    /// degrading to a shared init key while it sat idle would weaken forward
+    /// secrecy to stay under a bound the claim never approaches.
+    #[test]
+    fn test_ceiling_claims_an_unclaimed_package_rather_than_sharing() {
+        let manager = create_test_manager("alice");
+
+        for i in 0..(MAX_PUSH_KEY_PACKAGES - 1) {
+            manager.take_push_key_package(&format!("peer{i}")).unwrap();
+        }
+        // The last live slot is an unclaimed package — as the peer-less entry
+        // point, `ensure_min_key_packages`, or a pre-upgrade record leaves one.
+        let unclaimed = manager.get_or_create_key_package().unwrap();
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            MAX_PUSH_KEY_PACKAGES,
+            "test premise: the pool is at the ceiling"
+        );
+
+        let taken = manager.take_push_key_package("late-arrival").unwrap();
+        assert!(
+            !taken.pool_exhausted,
+            "shared a package while a claimable one was in the pool"
+        );
+        assert_eq!(
+            taken.bundle.package_id, unclaimed.package_id,
+            "the claimable package was passed over"
+        );
+        assert_eq!(taken.bundle.assigned_peer.as_deref(), Some("late-arrival"));
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            MAX_PUSH_KEY_PACKAGES,
+            "claiming grew the pool"
+        );
+
+        // With the last unclaimed package now spoken for, the next new peer has
+        // nothing left to claim and does take the shared-package degradation.
+        let over = manager.take_push_key_package("one-peer-too-many").unwrap();
+        assert!(over.pool_exhausted);
     }
 
     #[test]

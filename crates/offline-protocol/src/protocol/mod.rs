@@ -522,7 +522,7 @@ pub struct OfflineProtocol {
     /// Suppressed for the same reason the slot warning is: the condition is a
     /// pool at its ceiling, which persists until packages are consumed or
     /// expire, and every push while it holds would otherwise emit.
-    pub(crate) last_push_key_package_warning: Option<Instant>,
+    last_push_key_package_warning: Option<Instant>,
 }
 
 impl Drop for OfflineProtocol {
