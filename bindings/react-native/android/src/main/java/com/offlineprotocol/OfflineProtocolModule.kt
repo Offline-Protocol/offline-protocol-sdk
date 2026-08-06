@@ -122,6 +122,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         const val EVENT_NAME = "OfflineProtocol_Event"
         const val TELEMETRY_EVENT_NAME = "OfflineProtocol_Telemetry"
 
+        /**
+         * The two *one-shot* event tags, which double as their
+         * [StickyEventBuffer] keys — see [sendStickyEvent] for why only these
+         * two qualify.
+         *
+         * Named rather than spelled out at each site because the tag and the
+         * key have to agree across sites that are nowhere near each other:
+         * [EVENT_INTERNET_SESSION_SUPERSEDED] is emitted in
+         * [emitInternetSupersededEvent] and discarded in [enableTransport],
+         * over a thousand lines apart. A typo in either would compile, pass
+         * every check in CI, and silently drop half the mechanism — this module
+         * cannot be unit-tested (`react-android` is `compileOnly` in the test
+         * harness), and `StickyEventDispatcherTest` necessarily uses its own
+         * literals, so nothing else is watching. A constant makes the
+         * key-equals-tag invariant the compiler's problem.
+         */
+        private const val EVENT_MESH_STOPPED_BY_USER = "mesh_stopped_by_user"
+
+        /** @see EVENT_MESH_STOPPED_BY_USER */
+        private const val EVENT_INTERNET_SESSION_SUPERSEDED = "internet_session_superseded"
+
         /** How long `destroy` waits for an in-flight process tick to finish. */
         private const val PROCESS_SHUTDOWN_TIMEOUT_MS = 2_000L
     }
@@ -734,9 +755,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun emitInternetSupersededEvent(reason: String?) {
         try {
             val json = JSONObject()
-            json.put("type", "internet_session_superseded")
+            json.put("type", EVENT_INTERNET_SESSION_SUPERSEDED)
             if (reason != null) json.put("reason", reason)
-            sendStickyEvent("internet_session_superseded", json.toString())
+            sendStickyEvent(EVENT_INTERNET_SESSION_SUPERSEDED, json.toString())
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Failed to emit internet superseded event", e)
         }
@@ -1367,8 +1388,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun emitMeshStoppedByUserEvent() {
         try {
             val json = JSONObject()
-            json.put("type", "mesh_stopped_by_user")
-            sendStickyEvent("mesh_stopped_by_user", json.toString())
+            json.put("type", EVENT_MESH_STOPPED_BY_USER)
+            sendStickyEvent(EVENT_MESH_STOPPED_BY_USER, json.toString())
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Failed to emit mesh stopped event", e)
         }
@@ -1956,7 +1977,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     // it — the inverted failure the generation stamp exists to
                     // prevent, reached through a transition inside one session
                     // that the generation cannot see.
-                    stickyEvents.discard("internet_session_superseded")
+                    stickyEvents.discard(EVENT_INTERNET_SESSION_SUPERSEDED)
                     emitDiagnostic("info", "Internet transport enabled")
                 }
                 "wifidirect", "wifi_direct" -> {
