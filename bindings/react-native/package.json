@@ -12,7 +12,7 @@
     "ios/mesh/",
     "ios/*.swift",
     "ios/*.m",
-    "ios/*.podspec",
+    "MeshSdk.podspec",
     "android/build.gradle",
     "android/consumer-rules.pro",
     "android/src/main/",

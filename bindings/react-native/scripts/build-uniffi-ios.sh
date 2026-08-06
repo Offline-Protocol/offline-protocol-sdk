@@ -13,6 +13,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 UNIFFI_DIR="$PROJECT_ROOT/crates/offline-protocol-uniffi"
 OUTPUT_DIR="$SCRIPT_DIR/../ios/libs"
 GENERATED_DIR="$SCRIPT_DIR/../ios/Generated"
+XCFRAMEWORK="$OUTPUT_DIR/offline_protocol_uniffi.xcframework"
 
 cd "$PROJECT_ROOT"
 
@@ -51,23 +52,49 @@ static_lib_for() {
   fi
 }
 
-echo "Creating universal libraries..."
+echo "Packaging the XCFramework..."
 
-# Create universal library for devices
-echo "Creating device library..."
+# Device and simulator arm64 cannot coexist in one `lipo` archive, which is why
+# this ships two slices. They go into an XCFramework rather than two loose `.a`
+# files so that Xcode/CocoaPods select the slice per build SDK: a flat directory
+# of archives forces every consumer to hand-write sdk-conditional linker flags,
+# and those flags have to live on the *app* target to take effect, somewhere a
+# podspec cannot reach.
+#
+# Both slices deliberately carry the SAME archive basename. CocoaPods derives a
+# single `-l<name>` flag for the whole XCFramework and applies it to whichever
+# slice it copied, so distinct names (the old _device/_sim suffixes, which
+# existed only so both could sit in one flat directory) would leave that flag
+# pointing at nothing for one of the two platforms.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE/device" "$STAGE/simulator"
+
+echo "Staging device slice..."
 cp "$(static_lib_for aarch64-apple-ios)" \
-   "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
+   "$STAGE/device/liboffline_protocol_uniffi.a"
 
-# Create universal library for simulators (both Intel and Apple Silicon)
-echo "Creating simulator library..."
+echo "Staging simulator slice (Intel + Apple Silicon)..."
 lipo -create \
   "$(static_lib_for aarch64-apple-ios-sim)" \
   "$(static_lib_for x86_64-apple-ios)" \
-  -output "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+  -output "$STAGE/simulator/liboffline_protocol_uniffi.a"
 
-echo "iOS libraries created:"
-echo "  Device: $OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-echo "  Simulator: $OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+# -create-xcframework refuses to write over an existing bundle.
+rm -rf "$XCFRAMEWORK"
+xcodebuild -create-xcframework \
+  -library "$STAGE/device/liboffline_protocol_uniffi.a" \
+  -library "$STAGE/simulator/liboffline_protocol_uniffi.a" \
+  -output "$XCFRAMEWORK"
+
+# No -headers: the FFI header and modulemap stay in ios/Generated/ and reach
+# Swift via the podspec's SWIFT_INCLUDE_PATHS / HEADER_SEARCH_PATHS, unchanged.
+
+# Remove the superseded loose archives so a stale Podfile cannot pick one up.
+rm -f "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a" \
+      "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+
+echo "iOS XCFramework created: $XCFRAMEWORK"
 
 # Generate Swift bindings
 echo ""
@@ -94,13 +121,12 @@ else
   echo "  uniffi-bindgen generate src/offline_protocol.udl --language swift --out-dir $GENERATED_DIR"
 fi
 
-# Print library info
+# Print slice info
 echo ""
-echo "Library info:"
-echo "Device library:"
-lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-echo "Simulator library:"
-lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+echo "XCFramework slices:"
+for slice in "$XCFRAMEWORK"/*/; do
+  echo "  $(basename "$slice"): $(lipo -info "$slice/liboffline_protocol_uniffi.a" | sed 's/.*: //')"
+done
 
 echo ""
 echo "✅ iOS UniFFI build complete!"

@@ -44,13 +44,21 @@ regenerates the UniFFI Swift bindings:
 
 It produces, under `bindings/react-native/ios/`:
 
-- `liboffline_protocol_uniffi_device.a` (device)
-- `liboffline_protocol_uniffi_sim.a` (simulator, fat)
+- `libs/offline_protocol_uniffi.xcframework`, holding two slices: `ios-arm64`
+  (device) and `ios-arm64_x86_64-simulator` (simulator, fat)
 - `Generated/offline_protocol.swift` and `Generated/offline_protocolFFI.modulemap`
 
-Add the `.a` for your build target plus `offline_protocol.swift` to your Xcode project. To
-do it by hand instead, `lipo`-combine the per-arch `liboffline_protocol_uniffi.a` outputs
-and run `uniffi-bindgen generate --language swift` to produce the Swift bindings.
+Add the XCFramework plus `offline_protocol.swift` to your Xcode project. Xcode
+selects the slice matching the SDK you build against, so the same project
+configuration serves device and simulator with no per-target linker flags —
+device and simulator `arm64` cannot coexist in one `lipo` archive, which is why
+this is an XCFramework rather than a single fat `.a`.
+
+To do it by hand instead: `lipo`-combine the two simulator per-arch
+`liboffline_protocol_uniffi.a` outputs, leave the device one alone, give both
+files the *same* basename in separate staging directories, and pass each with
+`-library` to `xcodebuild -create-xcframework`. Then run
+`uniffi-bindgen generate --language swift` for the Swift bindings.
 
 ### 4. Use in Swift
 

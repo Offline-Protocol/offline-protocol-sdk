@@ -44,6 +44,11 @@ android/src/main/java/com/offlineprotocol/Generated/
 
 package-lock.json
 
+# Build output. The root .gitignore already covers *.a, but the iOS XCFramework
+# also carries an Info.plist, so the bundle needs ignoring as a whole — otherwise
+# the artifact directory shows up as untracked after every native build.
+ios/libs/
+
 # Optional: If using git-lfs for binaries, don't ignore them
 # If not using git-lfs and binaries are large, you can ignore them:
 # ios/libs/*.a

@@ -11,6 +11,7 @@ echo "Building iOS universal library..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 OUTPUT_DIR="$SCRIPT_DIR/../ios/libs"
+XCFRAMEWORK="$OUTPUT_DIR/offline_protocol_uniffi.xcframework"
 
 cd "$PROJECT_ROOT"
 
@@ -37,38 +38,46 @@ done
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-echo "Copying iOS libraries..."
+echo "Packaging the XCFramework..."
 
-# Note: We can't create a fat binary with both device and simulator arm64 architectures
-# Modern Xcode handles this automatically with XCFrameworks or separate binaries
-# For now, we'll just copy the device library which works for both
+# Device and simulator arm64 cannot coexist in one `lipo` archive, so this ships
+# two slices inside an XCFramework and lets Xcode/CocoaPods pick per build SDK.
+# Both slices deliberately carry the SAME archive basename — CocoaPods derives a
+# single `-l<name>` flag for the whole bundle and applies it to whichever slice
+# it copied. See scripts/build-uniffi-ios.sh for the long-form rationale.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE/device" "$STAGE/simulator"
 
-# Create universal libraries
-echo "Creating universal libraries..."
-
-# Device library
-echo "Copying device library (aarch64-apple-ios)..."
+echo "Staging device slice (aarch64-apple-ios)..."
 cp "$PROJECT_ROOT/target/aarch64-apple-ios/release/liboffline_protocol_uniffi.a" \
-   "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
+   "$STAGE/device/liboffline_protocol_uniffi.a"
 
-# Simulator library (universal for Intel and Apple Silicon)
-echo "Creating simulator library..."
+echo "Staging simulator slice (Intel + Apple Silicon)..."
 lipo -create \
   "$PROJECT_ROOT/target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a" \
   "$PROJECT_ROOT/target/x86_64-apple-ios/release/liboffline_protocol_uniffi.a" \
-  -output "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+  -output "$STAGE/simulator/liboffline_protocol_uniffi.a"
 
-echo "iOS libraries created:"
-echo "  Device: $OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-echo "  Simulator: $OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+# -create-xcframework refuses to write over an existing bundle.
+rm -rf "$XCFRAMEWORK"
+xcodebuild -create-xcframework \
+  -library "$STAGE/device/liboffline_protocol_uniffi.a" \
+  -library "$STAGE/simulator/liboffline_protocol_uniffi.a" \
+  -output "$XCFRAMEWORK"
 
-# Print library info
+# Remove the superseded loose archives so a stale Podfile cannot pick one up.
+rm -f "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a" \
+      "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+
+echo "iOS XCFramework created: $XCFRAMEWORK"
+
+# Print slice info
 echo ""
-echo "Library info:"
-echo "Device:"
-lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-echo "Simulator:"
-lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+echo "XCFramework slices:"
+for slice in "$XCFRAMEWORK"/*/; do
+  echo "  $(basename "$slice"): $(lipo -info "$slice/liboffline_protocol_uniffi.a" | sed 's/.*: //')"
+done
 
 echo ""
 echo "✅ iOS build complete!"

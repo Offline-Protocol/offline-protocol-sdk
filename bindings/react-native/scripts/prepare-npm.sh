@@ -11,25 +11,37 @@ RN_DIR="$SCRIPT_DIR/.."
 echo "Validating pre-built binaries for npm package..."
 echo ""
 
-# Check iOS library
-IOS_LIB="$RN_DIR/ios/libs/liboffline_protocol_uniffi_device.a"
-IOS_SIM_LIB="$RN_DIR/ios/libs/liboffline_protocol_uniffi_sim.a"
-if [ -f "$IOS_LIB" ]; then
-  echo "✅ iOS library found: $IOS_LIB"
-  echo "   Size: $(du -h "$IOS_LIB" | cut -f1)"
-  echo "   Architectures: $(lipo -info "$IOS_LIB" | cut -d: -f3)"
+# Check the iOS XCFramework. Both slices are validated individually: a bundle
+# carrying only the device slice still installs and still builds for a device,
+# so a missing simulator slice would otherwise ship silently and read to
+# consumers as "this SDK doesn't support the simulator".
+IOS_XCFRAMEWORK="$RN_DIR/ios/libs/offline_protocol_uniffi.xcframework"
+IOS_DEVICE_SLICE="$IOS_XCFRAMEWORK/ios-arm64/liboffline_protocol_uniffi.a"
+IOS_SIM_SLICE="$IOS_XCFRAMEWORK/ios-arm64_x86_64-simulator/liboffline_protocol_uniffi.a"
+
+if [ -f "$IOS_XCFRAMEWORK/Info.plist" ]; then
+  echo "✅ iOS XCFramework found: $IOS_XCFRAMEWORK"
+  echo "   Size: $(du -sh "$IOS_XCFRAMEWORK" | cut -f1)"
 else
-  echo "❌ iOS library missing: $IOS_LIB"
+  echo "❌ iOS XCFramework missing: $IOS_XCFRAMEWORK"
   echo "   Run: npm run build:ios"
   exit 1
 fi
 
-if [ -f "$IOS_SIM_LIB" ]; then
-  echo "✅ iOS simulator library found: $IOS_SIM_LIB"
-  echo "   Size: $(du -h "$IOS_SIM_LIB" | cut -f1)"
-  echo "   Architectures: $(lipo -info "$IOS_SIM_LIB" | cut -d: -f3)"
+if [ -f "$IOS_DEVICE_SLICE" ]; then
+  echo "✅ iOS device slice found"
+  echo "   Architectures: $(lipo -info "$IOS_DEVICE_SLICE" | sed 's/.*: //')"
 else
-  echo "❌ iOS simulator library missing: $IOS_SIM_LIB"
+  echo "❌ iOS device slice missing: $IOS_DEVICE_SLICE"
+  echo "   Run: npm run build:ios"
+  exit 1
+fi
+
+if [ -f "$IOS_SIM_SLICE" ]; then
+  echo "✅ iOS simulator slice found"
+  echo "   Architectures: $(lipo -info "$IOS_SIM_SLICE" | sed 's/.*: //')"
+else
+  echo "❌ iOS simulator slice missing: $IOS_SIM_SLICE"
   echo "   Run: npm run build:ios"
   exit 1
 fi
@@ -78,6 +90,14 @@ fi
 
 if [ ! -f "$RN_DIR/android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt" ]; then
   echo "❌ Android native module missing"
+  exit 1
+fi
+
+# The podspec must be at the package root or iOS autolinking silently skips this
+# dependency: React Native globs "*.podspec" in the package root only.
+if [ ! -f "$RN_DIR/MeshSdk.podspec" ]; then
+  echo "❌ MeshSdk.podspec missing from the package root"
+  echo "   iOS autolinking cannot find a podspec under ios/ — it must stay at the root"
   exit 1
 fi
 

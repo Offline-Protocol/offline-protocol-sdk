@@ -9,7 +9,10 @@ export const LINKING_ERROR =
   `The package '@offline-protocol/mesh-sdk' doesn't seem to be linked. Make sure: \n\n` +
   '- You have run pod install (iOS)\n' +
   '- You rebuilt the app after installing the package\n' +
-  '- You are not using Expo Go\n';
+  '- You are not using Expo Go\n' +
+  '- Your Podfile has no leftover manual "pod \'MeshSdk\'" line (iOS autolinking\n' +
+  '  handles it as of 0.20.0; a stale line pointing into ios/ makes pod install\n' +
+  '  fail outright, and one pointing elsewhere can shadow the autolinked pod)\n';
 
 /**
  * Default delay in milliseconds before refreshing runtime state after protocol start.
