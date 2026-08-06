@@ -27,7 +27,40 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var wifiDirectManager: WifiDirectManager?
     private var reticulumManager: ReticulumManager?
     private var nostrManager: NostrManager?
-    private var hasListeners = false
+
+    /// Whether React Native currently has a JS subscription on this module.
+    ///
+    /// Lock-guarded rather than a plain `Bool` because it is written from
+    /// `startObserving`/`stopObserving` — delivered on RCTEventEmitter's queue —
+    /// and read from wherever an event happens to originate, which for
+    /// `emitInternetSupersededEvent` is InternetManager's socket callback. Those
+    /// share no lock and no happens-before edge, so an unguarded `Bool` may be
+    /// held in a register and read stale, dropping the emit on a `false` that
+    /// was never true. That matters here because `internet_session_superseded`
+    /// is *one-shot*: InternetManager latches the transport stopped and refuses
+    /// auto- and force-reconnect until an explicit `start()`, so nothing ever
+    /// restates it and the app is left showing a relay connection that is never
+    /// coming back. Mirrors the Android module's `listenerCount` AtomicInteger,
+    /// which exists for the identical hazard.
+    ///
+    /// A correct read is all iOS does here — there is no sticky hold, because
+    /// `mesh_stopped_by_user` (the event that motivated one) has no iOS
+    /// counterpart. See docs/react-native-integration.md §6.1.
+    private let listenerLock = NSLock()
+    private var _hasListeners = false
+    private var hasListeners: Bool {
+        get {
+            listenerLock.lock()
+            defer { listenerLock.unlock() }
+            return _hasListeners
+        }
+        set {
+            listenerLock.lock()
+            defer { listenerLock.unlock() }
+            _hasListeners = newValue
+        }
+    }
+
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
     private var processTimer: DispatchSourceTimer?
     /// The deferred `bleStatusChanged(true)` backup call, held so `destroy` can
@@ -2189,7 +2222,13 @@ class OfflineProtocolModule: RCTEventEmitter {
         case .paused:
             stateString = "Paused"
         @unknown default:
-            stateString = "Unknown"
+            // "Stopped", matching Android's `else ->` branch, rather than an
+            // "Unknown" that is not a member of the exported `ProtocolState`
+            // enum — resolving one would make `getState(): Promise<ProtocolState>`
+            // unsound and put the two modules' fallbacks out of step. Treating
+            // an unrecognised state as stopped is also the safe direction for
+            // the reconcile pattern the integration guide documents.
+            stateString = "Stopped"
         }
         resolver(stateString)
     }

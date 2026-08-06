@@ -142,6 +142,42 @@ See `docs/dors-configuration.md` and `docs/configuration.md` for full parameters
 - Outbox, retry queue, and ACK tracking use exponential backoff; the native layer calls `process()` periodically.
 - Use `getTransportMetrics('ble')`, `getRetryQueueSize()`, `getPendingAckCount()` to monitor health.
 
+### 6.1 Teardowns your app did not initiate (Android)
+
+On Android the mesh keep-alive notification carries a **Stop** action. When the user taps it, the SDK tears down the transports, the process scheduler, the keep-alive service and the protocol core, then emits `mesh_stopped_by_user`. An app that tracks "mesh active" itself **must** reconcile on this event, or it will keep reporting an active mesh against a protocol that is fully stopped. There is no iOS equivalent — the notification affordance is Android-only.
+
+```ts
+sdk.on('mesh_stopped_by_user', () => {
+  setMeshActive(false); // a teardown you did not ask for; the SDK is already down
+});
+```
+
+**Delivery, and what it does not promise.** `mesh_stopped_by_user` and `internet_session_superseded` are *one-shot*: nothing else ever restates them. **On Android** both are held natively and redelivered on your next event subscription or app foreground if JS could not take them when they fired. Three limits worth designing against:
+
+- **They can arrive late.** Treat them as "this happened", not "this just happened" — reconcile against actual state rather than assuming the event is fresh.
+- **They are not durable.** The hold is in-memory and per-React-instance, so a JS reload or a process kill loses a held event. Persisting it would not help: if the process was killed, the event was never generated in the first place.
+- **The hold is Android-only.** `mesh_stopped_by_user` has no iOS counterpart at all (the notification affordance is Android-only), but `internet_session_superseded` fires on both platforms and on iOS is emitted best-effort — if nothing is subscribed at that moment it is dropped, with nothing to restate it.
+
+**So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have on both platforms. It takes two reads, because the two events report different things and no single call covers both:
+
+```ts
+import { ProtocolState } from '@offline-protocol/mesh-sdk';
+
+// on app foreground (AppState 'active')
+const state = await sdk.getState();
+if (state !== ProtocolState.Running) {
+  setMeshActive(false); // reconcile whatever local "mesh active" flag you keep
+}
+
+if (!(await sdk.isInternetReady())) {
+  setRelayConnected(false); // a transient drop — or a supersede you never heard about
+}
+```
+
+`getState()` reads the live protocol state, so it stays correct after a notification Stop, after a sticky service restart, and after any teardown the app did not drive. It says nothing about the relay: after a supersede the protocol is still `Running`, because only the relay session was displaced.
+
+`isInternetReady()` is that other half, and on iOS it is the **only** cover for a missed `internet_session_superseded`. Note what it cannot tell you: a `false` from an ordinary disconnect — which reconnects itself — and a `false` from a supersede — which will **not** reconnect on its own, ever — look identical. If you stay disconnected across several foregrounds with no `internet_status_changed` reporting `connected: true`, treat it as a possible supersession and offer the user an explicit reconnect: `enableTransport('internet', ...)` is the deliberate re-enable that clears the latch. That re-enable also drops any `internet_session_superseded` still held on Android, so a notice about the session you just replaced cannot arrive after you are reconnected — you will not have to filter one out.
+
 ---
 
 ## 7. Group Messaging (MLS-Encrypted Mesh Groups)

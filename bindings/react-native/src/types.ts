@@ -13,12 +13,20 @@ export enum MessagePriority {
 }
 
 /**
- * Protocol state
+ * Protocol state, as returned by `getState()`.
+ *
+ * String-valued because that is what crosses the bridge: both native modules
+ * resolve the name ("Stopped" / "Running" / "Paused") and `getState()` passes
+ * it through unmapped. The members were numeric through v0.19.0, which made
+ * every comparison wrong in one direction or the other — `state === ProtocolState.Running`
+ * compared "Running" to `1` and was never true, while `state === 'Running'`
+ * worked at runtime but failed to typecheck. Nothing can have depended on the
+ * numbers, since no code path ever produced them.
  */
 export enum ProtocolState {
-  Stopped = 0,
-  Running = 1,
-  Paused = 2,
+  Stopped = "Stopped",
+  Running = "Running",
+  Paused = "Paused",
 }
 
 export interface AckConfig {
