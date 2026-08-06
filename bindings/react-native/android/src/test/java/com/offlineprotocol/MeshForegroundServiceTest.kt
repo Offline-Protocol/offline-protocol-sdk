@@ -3,6 +3,9 @@ package com.offlineprotocol
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
+import android.os.Looper
+import java.time.Duration
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -64,6 +67,11 @@ class MeshForegroundServiceTest {
         const val ACTION_STOP_FROM_NOTIFICATION =
             "com.offlineprotocol.action.STOP_MESH_FROM_NOTIFICATION"
         const val ACTION_START = "com.offlineprotocol.action.START_MESH"
+
+        /** Kept at the policy floor so the watchdog assertions stay legible. */
+        const val WAKE_TIMEOUT_SECONDS = 10
+        const val WAKE_TIMEOUT_MS = WAKE_TIMEOUT_SECONDS * 1_000L
+        const val WATCHDOG_GRACE_MS = 15_000L
     }
 
     private val context: Context
@@ -121,6 +129,33 @@ class MeshForegroundServiceTest {
         while (shadowOf(RuntimeEnvironment.getApplication()).nextStartedService != null) {
             // discard
         }
+    }
+
+    private fun nextStartedService(): Intent? =
+        shadowOf(RuntimeEnvironment.getApplication()).nextStartedService
+
+    /**
+     * Writes the manifest opt-in the way an app would, with the shortest budget
+     * the policy accepts so the watchdog assertions stay legible.
+     */
+    private fun optInToWake() {
+        val application = RuntimeEnvironment.getApplication()
+        val info = shadowOf(application.packageManager)
+            .getInternalMutablePackageInfo(application.packageName)
+            .applicationInfo!!
+        info.metaData = (info.metaData ?: Bundle()).apply {
+            putBoolean("com.offlineprotocol.MESH_WAKE_ENABLED", true)
+            putInt("com.offlineprotocol.MESH_WAKE_TIMEOUT_SECONDS", WAKE_TIMEOUT_SECONDS)
+        }
+    }
+
+    /**
+     * Advances virtual time past the watchdog, which is armed at the wake budget
+     * plus a grace so it can never reap a task still inside its own deadline.
+     */
+    private fun idlePastWatchdog() {
+        shadowOf(Looper.getMainLooper())
+            .idleFor(Duration.ofMillis(WAKE_TIMEOUT_MS + WATCHDOG_GRACE_MS + 1_000L))
     }
 
     @Test
@@ -309,6 +344,124 @@ class MeshForegroundServiceTest {
 
         registerHost { }
         assertEquals(Service.START_STICKY, service.onStartCommand(null, 0, 2))
+    }
+
+    // --- The Headless JS wake (issue #307) ---------------------------------
+
+    @Test
+    fun `sticky restart with no host wakes javascript when the app opted in`() {
+        optInToWake()
+        assertNull("no host registered is the precondition for a wake", MeshForegroundService.onStopRequestedByUser)
+
+        val service = createService()
+        val result = service.onStartCommand(null, 0, 1)
+
+        // The target is asserted as a string, deliberately and for the same
+        // reason production names it as one: MeshHeadlessWakeService extends a
+        // React class, react-android is compileOnly here, and resolving the
+        // class would NoClassDefFoundError this whole suite. That the named
+        // class exists and is declared in the manifest is pinned by
+        // `react_native_mesh_wake_wiring_is_present` in the uniffi crate.
+        val wake = nextStartedService()
+        assertEquals(
+            "com.offlineprotocol.MeshHeadlessWakeService",
+            wake?.component?.className
+        )
+        assertEquals(
+            WAKE_TIMEOUT_MS,
+            wake?.getLongExtra("com.offlineprotocol.extra.WAKE_TIMEOUT_MS", 0L)
+        )
+        assertEquals(
+            "sticky_restart",
+            wake?.getStringExtra("com.offlineprotocol.extra.WAKE_REASON")
+        )
+
+        // START_STICKY on a bet rather than an observation — which is only
+        // honest because the watchdog below settles it either way.
+        assertEquals(Service.START_STICKY, result)
+        assertFalse(shadowOf(service).isStoppedBySelf)
+    }
+
+    @Test
+    fun `the wake watchdog stops the keep-alive when no host arrives`() {
+        optInToWake()
+
+        val service = createService()
+        service.onStartCommand(null, 0, 1)
+        drainStartedServices()
+
+        // Nothing registered a host: the task was never registered, JavaScript
+        // failed to boot, or the app looked at its own state and declined. All
+        // three have to end the same way, or "Mesh Active" outlives the mesh
+        // again — the exact regression #294 removed.
+        idlePastWatchdog()
+
+        assertTrue(shadowOf(service).isForegroundStopped)
+        assertTrue(shadowOf(service).isStoppedBySelf)
+        assertFalse(MeshForegroundService.isRunning)
+    }
+
+    @Test
+    fun `the wake watchdog leaves the keep-alive up when the wake landed`() {
+        optInToWake()
+
+        val service = createService()
+        service.onStartCommand(null, 0, 1)
+        drainStartedServices()
+
+        // What a successful wake looks like from here: the woken JavaScript ran
+        // start(), and the module registered its stop callback on the way. The
+        // watchdog re-reads that slot rather than trusting anything captured
+        // when it was armed.
+        registerHost { }
+        idlePastWatchdog()
+
+        assertFalse(shadowOf(service).isStoppedBySelf)
+        assertTrue(MeshForegroundService.isRunning)
+    }
+
+    @Test
+    fun `a mesh start disarms the wake watchdog`() {
+        optInToWake()
+
+        val service = createService()
+        service.onStartCommand(null, 0, 1)
+        drainStartedServices()
+
+        // ACTION_START is the module telling us a mesh is up. Deliberately with
+        // no host registered here, so the only thing that can save the service
+        // from the watchdog is the disarm itself — if cancellation regressed,
+        // the fallback host check would hide it.
+        deliver(ACTION_START)
+        idlePastWatchdog()
+
+        assertFalse(shadowOf(service).isStoppedBySelf)
+    }
+
+    @Test
+    fun `sticky restart does not wake an app that did not opt in`() {
+        val service = createService()
+        val result = service.onStartCommand(null, 0, 1)
+
+        assertNull("no opt-in must mean no wake service", nextStartedService())
+        assertEquals(Service.START_NOT_STICKY, result)
+        assertTrue(shadowOf(service).isStoppedBySelf)
+    }
+
+    @Test
+    fun `sticky restart does not wake when a host is already up`() {
+        optInToWake()
+        // An app that boots React Native from Application.onCreate can beat the
+        // re-delivered intent. The mesh is already back; a wake would be a
+        // second one.
+        registerHost { }
+
+        val service = createService()
+        val result = service.onStartCommand(null, 0, 1)
+
+        assertNull("a live host must not be woken again", nextStartedService())
+        assertEquals(Service.START_STICKY, result)
+        assertFalse(shadowOf(service).isStoppedBySelf)
     }
 
     @Test

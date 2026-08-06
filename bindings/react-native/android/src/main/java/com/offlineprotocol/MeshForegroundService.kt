@@ -7,9 +7,13 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 
@@ -22,7 +26,8 @@ import androidx.core.app.NotificationCompat
  *   - Stopped when protocol.stop() is called or the user explicitly disables mesh.
  *   - Uses START_STICKY so the system hands the service back after a process
  *     kill, but that restart only survives if a host has a mesh running again
- *     by the time it lands — see [handleStickyRestart].
+ *     by the time it lands, or the app opted in to having JavaScript woken so
+ *     one can be — see [handleStickyRestart].
  *
  * The service itself does NOT own the protocol or transport instances.
  * It exists solely to prevent the OS from killing the process while mesh
@@ -176,6 +181,16 @@ class MeshForegroundService : Service() {
 
     private val binder = LocalBinder()
 
+    /**
+     * Posts the wake watchdog. Main looper, because every other member of this
+     * class is main-confined and the watchdog reads [onStopRequestedByUser]
+     * against writes the host makes from its own start path.
+     */
+    private val watchdogHandler = Handler(Looper.getMainLooper())
+
+    /** The armed watchdog, or null when no wake is outstanding. */
+    private var wakeWatchdog: Runnable? = null
+
     inner class LocalBinder : Binder() {
         fun getService(): MeshForegroundService = this@MeshForegroundService
     }
@@ -202,15 +217,23 @@ class MeshForegroundService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 Log.i(TAG, "Stopping mesh foreground service")
+                cancelWakeWatchdog()
                 stopForegroundAndSelf()
                 return START_NOT_STICKY
             }
             ACTION_STOP_FROM_NOTIFICATION -> {
                 Log.i(TAG, "User requested mesh stop from the notification")
+                cancelWakeWatchdog()
                 return handleUserStopRequest()
             }
             ACTION_START -> {
                 Log.i(TAG, "Starting mesh foreground service")
+                // A host has brought a mesh up — which is the outcome a pending
+                // wake was waiting for, whether or not the wake is what produced
+                // it. Disarming here rather than leaving the watchdog to observe
+                // the registered slot keeps the success path from depending on
+                // timer ordering.
+                cancelWakeWatchdog()
                 promoteToForeground()
             }
             null -> return handleStickyRestart()
@@ -234,16 +257,25 @@ class MeshForegroundService : Service() {
      * does happen — an app that boots React Native from Application.onCreate
      * can have re-started the mesh before this re-delivered intent lands.
      *
-     * With no host, staying up is strictly worse than dying. The notification
-     * claims "Mesh Active" over a protocol nothing can rebuild, and survives
-     * until the user taps Stop or the OS reaps us. Worse where the promotion is
-     * refused outright: on targetSdk 31+ entering the foreground from the
-     * background is only allowed under a fixed set of exemptions, and a sticky
-     * restart is not one of them, so [promoteToForeground] swallows a
-     * ForegroundServiceStartNotAllowedException and what is left is an empty
-     * process squatting with no notification at all. Stopping is the honest
-     * outcome for both, and START_NOT_STICKY keeps the system from handing the
-     * same restart straight back — an exit, not a loop.
+     * With no host and no opted-in wake, staying up is strictly worse than
+     * dying. The notification claims "Mesh Active" over a protocol nothing is
+     * going to rebuild, and survives until the user taps Stop or the OS reaps
+     * us. Worse still where the promotion in [onCreate] did not take: what is
+     * left is an empty process squatting with no notification at all. Stopping
+     * is the honest outcome for both, and START_NOT_STICKY keeps the system from
+     * handing the same restart straight back — an exit, not a loop.
+     *
+     * That promotion is normally allowed, and the earlier version of this
+     * comment was wrong to say otherwise. The API 31+ ban on entering the
+     * foreground from the background carves out exactly this case: per the
+     * `Service.START_STICKY` reference, "the restriction doesn't impact restarts
+     * of a sticky foreground service" — we were foreground when the process
+     * died, so the system's own restart may promote. [promoteToForeground] still
+     * swallows what it catches, because a `connectedDevice` promotion can fail
+     * for unrelated reasons (revoked Nearby-Devices permissions raise
+     * SecurityException on targetSdk 34) and OEM behaviour varies. So a refused
+     * promotion is the uncommon case rather than the expected one — but it is
+     * still a case, and [isRunning] is what tells the two apart below.
      *
      * Stopping without a successful promotion is legal here: the five-second
      * startForeground() obligation attaches to Context.startForegroundService()
@@ -278,28 +310,135 @@ class MeshForegroundService : Service() {
      * — versus permanent silent loss under a delivery receipt. Stopping is the
      * cheaper of the two by a wide margin.
      *
-     * That leaves waking JS as the only sound direction, because it puts a
-     * receiver in place *before* the protocol exists rather than after. It
-     * needs React Native's Headless JS, an opt-in from the app (the config,
-     * including relay credentials, is the app's and must stay there), and a
-     * watchdog to stop this service when the wake does not arrive — or the
-     * "Mesh Active" lie #294 removed comes straight back. That is a feature,
-     * not a fix, and it is deliberately not built here.
+     * **Waking JavaScript is the sound direction, and is built** — issue #307,
+     * opt-in only. It is not an exception to the refusal above but the reason
+     * the refusal is affordable: it puts a receiver in place *before* the
+     * protocol exists rather than after. Nothing here re-creates anything. The
+     * app declares [MeshWakePolicy.META_DATA_ENABLED] in its manifest and
+     * registers a wake task with `registerMeshWakeTask`; this branch starts
+     * [MeshHeadlessWakeService], which boots React Native and hands over; the
+     * task runs the app's ordinary `start()` with the app's own config and
+     * credentials, which is what registers [onStopRequestedByUser] again.
+     *
+     * So the same slot that gates this branch is also what reports the wake
+     * landed, and no new state is needed to track one. A wake that never lands —
+     * no task registered, JavaScript failed to boot, or the app looked at its
+     * own state and declined — leaves the slot empty, and the watchdog armed
+     * alongside the wake ([armWakeWatchdog]) stops the service. Without it the
+     * "Mesh Active" lie #294 removed would come straight back, since this branch
+     * now returns START_STICKY on a bet rather than on an observation.
      */
     private fun handleStickyRestart(): Int {
-        if (onStopRequestedByUser == null) {
-            Log.i(TAG, "Service restarted after process kill with no mesh host; stopping")
-            stopForegroundAndSelf()
-            return START_NOT_STICKY
+        val hostPresent = onStopRequestedByUser != null
+        val settings = MeshWakePolicy.settingsFrom(readWakeMetaData())
+        // isRunning is the onCreate promotion's verdict: it ran before any
+        // onStartCommand dispatch, so by here it says whether this service is
+        // actually in the foreground.
+        return when (MeshWakePolicy.decideRestart(hostPresent, settings.enabled, isRunning)) {
+            MeshRestartAction.KEEP_ALIVE -> {
+                Log.i(TAG, "Service restarted after process kill; host present")
+                promoteToForeground()
+                START_STICKY
+            }
+            MeshRestartAction.WAKE -> {
+                Log.i(TAG, "Service restarted after process kill; waking JavaScript")
+                if (dispatchWake(settings)) {
+                    START_STICKY
+                } else {
+                    stopForegroundAndSelf()
+                    START_NOT_STICKY
+                }
+            }
+            MeshRestartAction.STOP -> {
+                Log.i(TAG, "Service restarted after process kill with no mesh host; stopping")
+                stopForegroundAndSelf()
+                START_NOT_STICKY
+            }
         }
-        Log.i(TAG, "Service restarted after process kill; host present")
-        promoteToForeground()
-        return START_STICKY
+    }
+
+    /**
+     * Starts the wake service and arms the watchdog, reporting whether the wake
+     * is genuinely under way. A false return means the caller must fall back to
+     * stopping — an armed START_STICKY with no wake behind it is the failure
+     * this whole gate exists to prevent.
+     *
+     * A plain `startService` is correct and deliberate. This process hosts a
+     * foreground service that [MeshWakePolicy.decideRestart] has just confirmed
+     * is promoted, which is what makes the start legal; and
+     * `HeadlessJsTaskService` never promotes itself, so a `startForegroundService`
+     * here would arm the five-second `startForeground` deadline against a
+     * service that will never satisfy it.
+     *
+     * The target is named as a string rather than a class reference — see
+     * [MeshWakePolicy.WAKE_SERVICE_CLASS] for why that is load-bearing rather
+     * than stylistic.
+     */
+    private fun dispatchWake(settings: MeshWakeSettings): Boolean = try {
+        val intent = Intent().apply {
+            setClassName(packageName, MeshWakePolicy.WAKE_SERVICE_CLASS)
+            putExtra(MeshWakePolicy.EXTRA_TIMEOUT_MS, settings.timeoutMs)
+            putExtra(MeshWakePolicy.EXTRA_REASON, MeshWakePolicy.REASON_STICKY_RESTART)
+        }
+        startService(intent)
+        armWakeWatchdog(MeshWakePolicy.watchdogDelayMs(settings))
+        true
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not start the mesh wake service: ${e.message}", e)
+        false
+    }
+
+    /**
+     * Schedules the check that keeps a failed wake from leaving a notification
+     * over a mesh that never came back.
+     *
+     * Fires strictly after the wake task's own deadline
+     * ([MeshWakePolicy.WATCHDOG_GRACE_MS]), so a task still inside its budget is
+     * never reaped, and re-reads [onStopRequestedByUser] at that moment rather
+     * than trusting anything captured now.
+     */
+    private fun armWakeWatchdog(delayMs: Long) {
+        cancelWakeWatchdog()
+        val runnable = Runnable {
+            wakeWatchdog = null
+            if (MeshWakePolicy.shouldStopOnWatchdog(onStopRequestedByUser != null)) {
+                Log.w(TAG, "Mesh wake did not land within its budget; stopping the keep-alive")
+                stopForegroundAndSelf()
+            } else {
+                Log.i(TAG, "Mesh wake landed; keeping the service up")
+            }
+        }
+        wakeWatchdog = runnable
+        watchdogHandler.postDelayed(runnable, delayMs)
+    }
+
+    /** Disarms the watchdog. Idempotent, and safe with none armed. */
+    private fun cancelWakeWatchdog() {
+        wakeWatchdog?.let { watchdogHandler.removeCallbacks(it) }
+        wakeWatchdog = null
+    }
+
+    /**
+     * Reads the app's `<application>` meta-data, or null when it cannot be read.
+     *
+     * Null is treated as "not opted in" by [MeshWakePolicy.settingsFrom], which
+     * is the safe direction: an unreadable manifest must not be the reason a
+     * notification outlives its mesh.
+     */
+    @Suppress("DEPRECATION") // The ApplicationInfoFlags overload is API 33+ only.
+    private fun readWakeMetaData(): Bundle? = try {
+        packageManager.getApplicationInfo(packageName, PackageManager.GET_META_DATA).metaData
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not read mesh wake meta-data: ${e.message}", e)
+        null
     }
 
     override fun onDestroy() {
         isRunning = false
         startRequested = false
+        // The handler outlives this instance and its Runnable captures it, so a
+        // watchdog left armed here both leaks and fires against a dead service.
+        cancelWakeWatchdog()
         Log.i(TAG, "Mesh foreground service destroyed")
         super.onDestroy()
     }

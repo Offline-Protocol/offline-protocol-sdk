@@ -195,9 +195,11 @@ Because `isInternetSuperseded()` reads the latch itself rather than a delivery, 
 
 ### 6.2 Process death, and why the mesh does not resume itself (Android)
 
-Android can kill your process while mesh is running — memory pressure is the usual reason, and a foreground service makes it less likely, not impossible. The keep-alive service is `START_STICKY`, so the system hands the service back afterwards, **but the SDK deliberately does not restart the mesh from there.** If nothing in the new process has brought a mesh back up by the time the re-delivered intent lands, the service stops itself, so no "Mesh Active" notification outlives the protocol it advertises. (An app that boots React Native from `Application.onCreate` can win that race and have a mesh running already — then the service keeps the notification it is holding for the mesh *your app* started. Either way nothing native re-creates the protocol.)
+Android can kill your process while mesh is running — memory pressure is the usual reason, and a foreground service makes it less likely, not impossible. The keep-alive service is `START_STICKY`, so the system hands the service back afterwards, **but the SDK never re-creates the protocol from there.** By default, if nothing in the new process has brought a mesh back up by the time the re-delivered intent lands, the service stops itself, so no "Mesh Active" notification outlives the protocol it advertises. (An app that boots React Native from `Application.onCreate` can win that race and have a mesh running already — then the service keeps the notification it is holding for the mesh *your app* started.)
 
 This is a decision, not a missing feature. A protocol re-created with no JavaScript context behind it is worse than one that is simply down: the receive path sends a delivery ACK *before* it emits `message_received`, that ACK makes the sender retire the message from its outbox, and the event is then dropped because nothing is subscribed. The message is gone, and its sender was told it arrived. Staying down keeps the failure recoverable — the sender's outbox holds for up to seven days, retries, parks, and pushes, and delivers once this device is genuinely running again.
+
+**You can opt in to having the mesh come back on its own** — see §6.3. It does not weaken any of the above: nothing native re-creates the protocol there either. It starts *JavaScript* first, so a receiver exists before a protocol does, and your own code decides what happens next.
 
 **What your app should do.** Nothing on Android's behalf, but treat mesh state as something to reconcile at launch rather than assume:
 
@@ -215,6 +217,54 @@ Two more things to know if you restart the SDK yourself:
 
 - **Never reuse a `destroy()`ed instance.** `destroy()` removes the event subscriptions, and only the constructor creates them — a destroyed instance that is `start()`ed again will run but deliver zero events. Construct a new `OfflineProtocol`.
 - **Nothing is queued for you while the process is dead.** The one-shot event delivery described in §6.1 is in-memory on both platforms; a process kill loses it. That is not a gap — if the process was killed, the event was never generated. For the relay case there is a durable read regardless: `isInternetSuperseded()` reports the transport's own latch, so a restarted process that re-enables the relay and is displaced again learns it the same way.
+
+### 6.3 Restoring the mesh automatically after a process kill (Android, opt-in)
+
+Reconciling on foreground (§6.2) closes the window as soon as the user opens your app. For an always-on app that is not always soon enough — the device is off the mesh for the whole interval. If you want it back sooner, the SDK can wake JavaScript when the keep-alive service is restarted, and let *your code* bring the mesh up.
+
+**This is opt-in, and the reason is the obligation in step 3 below.** Waking JavaScript is only safe for an app that durably stores what it receives, and only you know whether yours does.
+
+**1. Declare the flag** in your app's `AndroidManifest.xml`, inside `<application>`:
+
+```xml
+<meta-data android:name="com.offlineprotocol.MESH_WAKE_ENABLED" android:value="true" />
+<!-- Optional; default 60, clamped to 10–300. -->
+<meta-data android:name="com.offlineprotocol.MESH_WAKE_TIMEOUT_SECONDS" android:value="60" />
+```
+
+**2. Register the task at module scope** in `index.js` — next to `AppRegistry.registerComponent`, not inside a component, which will not have mounted:
+
+```js
+import { AppRegistry } from 'react-native';
+import { registerMeshWakeTask } from '@offline-protocol/mesh-sdk';
+import App from './App';
+
+AppRegistry.registerComponent('MyApp', () => App);
+
+registerMeshWakeTask(async () => {
+  if (getLiveProtocol()) return;             // already running — nothing to do
+  const config = await loadSavedConfig();    // your storage, your credentials
+  if (!config) return;                       // logged out — stay down
+  const protocol = new OfflineProtocol(config);
+  protocol.on('message_received', persistMessage);   // BEFORE start()
+  await protocol.start();
+  await protocol.enableTransport('internet', { serverAddress, authToken });
+});
+```
+
+**3. Store what you receive, durably, before `start()`.** The core never persists inbound content, and the receive path ACKs a message before it emits it. A handler registered after `start()`, or one that only sets React state, loses the message *and* has already told its sender it arrived. This is the same trap §6.2 describes, and opting in is you taking responsibility for not walking into it.
+
+Three more things the task has to get right:
+
+- **Be idempotent.** The task is allowed to run while your app is in the foreground — the alternative is React Native crashing the process when the user opens the app mid-wake — so it can find a protocol already live. Return early instead of building a second one.
+- **Re-issue what `start()` does not restore.** Wi‑Fi Direct always, and the relay whenever its `serverAddress`/`authToken` arrive through `enableTransport('internet', ...)`. Same list as §6.2.
+- **Resolve promptly.** The keep-alive holds the process; the task does not need to. Past its budget React Native terminates it.
+
+**If the wake does not land, the keep-alive stops itself.** A task that was never registered, failed to boot, threw, or simply declined all end the same way: a watchdog brings the service down rather than leave a "Mesh Active" notification over a mesh that is not running. Declining is a legitimate outcome — return early and the device goes back to the §6.2 behaviour.
+
+**What it does not cover.** The wake rides the service restart, so it reaches process kills the system chooses to recover from — memory pressure, the usual case. It does not fire after a force-stop from Settings, after the user swipes the app away on OEMs that treat that as a force-stop, or after a reboot; those need the user to open the app, exactly as before. It also requires a foreground promotion to have succeeded on restart, and stops rather than waking if one was refused.
+
+**Version requirement:** React Native **0.76.5+** when the New Architecture is enabled. Headless tasks did not work under bridgeless before 0.76 and were patchy until 0.76.5. On RN 0.84 and 0.85 a core bug (fixed in 0.86) can leave the wake service running after the task finishes; the SDK's timeout bounds it, but 0.86+ is the cleaner target.
 
 ---
 

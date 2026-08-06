@@ -56,3 +56,16 @@ export const ONE_SHOT_EVENT_TYPES = [
   'mesh_stopped_by_user',
 ] as const;
 
+/**
+ * The Headless JS task key the Android keep-alive uses to wake JavaScript after
+ * a process kill (Android only; see `registerMeshWakeTask`).
+ *
+ * Must match `MeshWakePolicy.TASK_KEY` in the Kotlin bindings. A drift fails
+ * silently and in the worst possible way — React Native logs "No task
+ * registered for key" to the device log, the app sees an opt-in that does
+ * nothing, and both sides still compile — so it is pinned by a Rust guard
+ * (`react_native_mesh_wake_task_key_matches_native` in
+ * `crates/offline-protocol-uniffi`).
+ */
+export const MESH_WAKE_TASK_KEY = 'OfflineProtocolMeshWake';
+
