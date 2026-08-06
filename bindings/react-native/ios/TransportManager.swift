@@ -24,9 +24,6 @@ public protocol TransportManagerDelegate: AnyObject {
     
     /// Called when transport encounters an error
     func transportManager(_ manager: TransportManager, didEncounterError error: Error)
-    
-    /// Called when transport metrics are updated
-    func transportManager(_ manager: TransportManager, didUpdateMetrics metrics: [String: Any])
 
     /// Called when the transport emits a diagnostic message
     func transportManager(_ manager: TransportManager, didEmitDiagnostic level: String, message: String, context: [String: Any])
@@ -63,10 +60,6 @@ public protocol TransportManager: AnyObject {
     
     /// Resumes the transport from paused state
     func resume()
-    
-    /// Gets current transport metrics
-    /// - Returns: Dictionary of metric name to value
-    func getMetrics() -> [String: Any]
 }
 
 /// Transport-specific errors
@@ -109,11 +102,6 @@ extension TransportManager {
     public func resume() {
         // Default implementation: try to start the transport
         try? start()
-    }
-    
-    public func getMetrics() -> [String: Any] {
-        // Default implementation: return empty metrics
-        return [:]
     }
 }
 

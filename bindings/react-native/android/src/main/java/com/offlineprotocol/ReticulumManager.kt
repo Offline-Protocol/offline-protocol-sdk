@@ -256,17 +256,6 @@ class ReticulumManager(
         ioHandler?.post { pollAndSendMessages() }
     }
 
-    override fun getMetrics(): Map<String, Any> {
-        return mapOf(
-            "bytes_sent" to bytesSent.get(),
-            "bytes_received" to bytesReceived.get(),
-            "messages_sent" to messagesSent.get(),
-            "messages_received" to messagesReceived.get(),
-            "is_connected" to isConnected.get(),
-            "reconnect_attempts" to reconnectAttempts.get()
-        )
-    }
-
     // MARK: - Connection Management
 
     private fun connect() {

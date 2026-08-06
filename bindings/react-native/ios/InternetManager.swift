@@ -830,19 +830,6 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
 
-    public func getMetrics() -> [String: Any] {
-        return [
-            "bytes_sent": bytesSent.get(),
-            "bytes_received": bytesReceived.get(),
-            "messages_sent": messagesSent.get(),
-            "messages_received": messagesReceived.get(),
-            "is_connected": isConnected,
-            "is_authenticated": isAuthenticated,
-            "reconnect_attempts": reconnectAttempts,
-            "is_superseded": supersedeLatch.isSuperseded
-        ]
-    }
-    
     // MARK: - Connection Management
 
     /// Runs `action` on main, synchronously. webSocketTask is written only

@@ -25,11 +25,6 @@ interface TransportManagerListener {
      * Called when transport encounters an error
      */
     fun onTransportError(manager: TransportManager, error: Throwable)
-    
-    /**
-     * Called when transport metrics are updated
-     */
-    fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>)
 
     /**
      * Called when the transport emits a diagnostic message
@@ -97,15 +92,6 @@ interface TransportManager {
         } catch (e: Exception) {
             // Ignore errors on resume
         }
-    }
-    
-    /**
-     * Gets current transport metrics
-     * @return Map of metric name to value
-     */
-    fun getMetrics(): Map<String, Any> {
-        // Default implementation: return empty metrics
-        return emptyMap()
     }
 }
 

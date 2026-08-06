@@ -269,19 +269,6 @@ public class NostrManager: NSObject, TransportManager {
         }
     }
 
-    public func getMetrics() -> [String: Any] {
-        let connectedCount = relayConnected.values.filter { $0 }.count
-        return [
-            "bytes_sent": bytesSent,
-            "bytes_received": bytesReceived,
-            "messages_sent": messagesSent,
-            "messages_received": messagesReceived,
-            "is_connected": isConnected,
-            "connected_relays": connectedCount,
-            "total_relays": relayUrls.count
-        ]
-    }
-
     // MARK: - Event-Driven Sending
 
     /// Called by the Rust transport callback when new outgoing messages are available.

@@ -521,17 +521,6 @@ public class BleManager: NSObject, TransportManager {
         }
     }
     
-    public func getMetrics() -> [String: Any] {
-        return [
-            "bytes_sent": bytesSent,
-            "bytes_received": bytesReceived,
-            "fragments_sent": fragmentsSent,
-            "fragments_received": fragmentsReceived,
-            "connected_peers": connections.connectedPeripheralCount(),
-            "discovered_peers": discoveredPeripherals.count
-        ]
-    }
-    
     // MARK: - Private Methods
     
     private func updateState(_ newState: TransportState) {

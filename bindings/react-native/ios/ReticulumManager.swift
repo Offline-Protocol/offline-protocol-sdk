@@ -218,17 +218,6 @@ public class ReticulumManager: NSObject, TransportManager {
         }
     }
 
-    public func getMetrics() -> [String: Any] {
-        return [
-            "bytes_sent": bytesSent,
-            "bytes_received": bytesReceived,
-            "messages_sent": messagesSent,
-            "messages_received": messagesReceived,
-            "is_connected": isConnected,
-            "reconnect_attempts": reconnectAttempts
-        ]
-    }
-
     // MARK: - Connection Management
 
     private func connect() {

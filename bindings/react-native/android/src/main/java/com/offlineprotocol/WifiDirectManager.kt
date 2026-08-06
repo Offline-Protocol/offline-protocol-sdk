@@ -239,19 +239,6 @@ class WifiDirectManager(
         }
     }
 
-    override fun getMetrics(): Map<String, Any> {
-        return mapOf(
-            "bytes_sent" to bytesSent,
-            "bytes_received" to bytesReceived,
-            "messages_sent" to messagesSent,
-            "messages_received" to messagesReceived,
-            "connected_peers" to connectedPeers.size,
-            "discovered_peers" to discoveredPeers.size,
-            "is_group_owner" to isGroupOwner,
-            "is_discovering" to isDiscovering
-        )
-    }
-
     // MARK: - Permission Helpers
 
     private fun hasRequiredPermissions(): Boolean {

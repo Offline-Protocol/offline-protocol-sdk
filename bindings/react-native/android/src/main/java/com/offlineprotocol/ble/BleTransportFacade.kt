@@ -1315,17 +1315,6 @@ class BleTransportFacade(
         }
     }
     
-    override fun getMetrics(): Map<String, Any> {
-        return mapOf(
-            "bytes_sent" to bytesSent,
-            "bytes_received" to bytesReceived,
-            "fragments_sent" to fragmentsSent,
-            "fragments_received" to fragmentsReceived,
-            "connected_peers" to connections.connectionCount(),
-            "discovered_peers" to connections.discoveredPeerCount()
-        )
-    }
-    
     // MARK: - Private Methods
     
     private fun updateState(newState: TransportState) {

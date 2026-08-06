@@ -573,19 +573,6 @@ class InternetManager(
         }
     }
 
-    override fun getMetrics(): Map<String, Any> {
-        return mapOf(
-            "bytes_sent" to bytesSent.get(),
-            "bytes_received" to bytesReceived.get(),
-            "messages_sent" to messagesSent.get(),
-            "messages_received" to messagesReceived.get(),
-            "is_connected" to isConnected.get(),
-            "is_authenticated" to isAuthenticated.get(),
-            "reconnect_attempts" to reconnectAttempts.get(),
-            "is_superseded" to supersedeLatch.isSuperseded
-        )
-    }
-    
     // MARK: - Connection Management
     
     private fun connect() {

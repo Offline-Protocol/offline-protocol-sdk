@@ -293,21 +293,6 @@ class NostrManager(
         ioHandler?.post { pollAndSendMessages() }
     }
 
-    override fun getMetrics(): Map<String, Any> {
-        val connectedCount = synchronized(relayLock) {
-            relayConnected.values.count { it }
-        }
-        return mapOf(
-            "bytes_sent" to bytesSent.get(),
-            "bytes_received" to bytesReceived.get(),
-            "messages_sent" to messagesSent.get(),
-            "messages_received" to messagesReceived.get(),
-            "is_connected" to isConnected.get(),
-            "connected_relays" to connectedCount,
-            "total_relays" to relayUrls.size
-        )
-    }
-
     // MARK: - Relay Connection Management
 
     private fun connectToRelay(relayUrl: String) {

@@ -170,18 +170,6 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
     }
     
-    public func getMetrics() -> [String: Any] {
-        return [
-            "bytes_sent": bytesSent,
-            "bytes_received": bytesReceived,
-            "messages_sent": messagesSent,
-            "messages_received": messagesReceived,
-            "connected_peers": connectedPeers.count,
-            "is_advertising": isAdvertising,
-            "is_browsing": isBrowsing
-        ]
-    }
-    
     // MARK: - Message Handling (Event-Driven)
     
     /// Called by the Rust transport callback when new outgoing messages are available.

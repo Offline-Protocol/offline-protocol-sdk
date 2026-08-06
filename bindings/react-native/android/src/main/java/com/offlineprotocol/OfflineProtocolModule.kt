@@ -477,10 +477,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                             ))
                         }
 
-                        override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
-                            emitDiagnostic("info", "BLE transport metrics", metrics.mapValues { it.value })
-                        }
-
                         override fun onTransportDiagnostic(
                             manager: TransportManager,
                             level: String,
@@ -525,12 +521,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                                 "message" to (error.message ?: "unknown"),
                                 "exception" to error.javaClass.simpleName
                             ))
-                        }
-
-                        override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
-                            val enrichedMetrics = metrics.toMutableMap()
-                            enrichedMetrics["transport"] = manager.transportId
-                            emitDiagnostic("info", "Internet transport metrics", enrichedMetrics)
                         }
 
                         override fun onTransportDiagnostic(
@@ -2146,12 +2136,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     ))
                 }
 
-                override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
-                    val enrichedMetrics = metrics.toMutableMap()
-                    enrichedMetrics["transport"] = manager.transportId
-                    emitDiagnostic("info", "Reticulum transport metrics", enrichedMetrics)
-                }
-
                 override fun onTransportDiagnostic(
                     manager: TransportManager,
                     level: String,
@@ -2209,12 +2193,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         "message" to (error.message ?: "unknown"),
                         "exception" to error.javaClass.simpleName
                     ))
-                }
-
-                override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
-                    val enrichedMetrics = metrics.toMutableMap()
-                    enrichedMetrics["transport"] = manager.transportId
-                    emitDiagnostic("info", "Nostr transport metrics", enrichedMetrics)
                 }
 
                 override fun onTransportDiagnostic(
