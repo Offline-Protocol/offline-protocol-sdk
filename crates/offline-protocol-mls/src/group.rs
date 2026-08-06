@@ -299,8 +299,17 @@ impl GroupManager {
                 // than silently drop. AEAD/corrupt failures, ratchet-generation
                 // failures (a discarded past generation — the session is
                 // healthy, so re-keying would not help), and everything else
-                // stay `Decryption`; classifying forged ciphertext as
-                // recoverable would open a re-key-storm vector.
+                // stay `Decryption`; widening the recoverable arm to cover them
+                // would open a second, unbounded re-key-storm vector.
+                //
+                // It does NOT make the recoverable arm authenticated. OpenMLS
+                // validates framing — group id, then epoch — before any AEAD,
+                // sender-data or signature check, so `WrongEpoch` is produced
+                // with the sender still entirely unverified and a frame forged
+                // from nothing reaches this arm (see, in `manager.rs`,
+                // `test_forged_frame_reaches_session_desync_without_any_key_material`).
+                // `SessionDesync` is an unauthenticated hint by construction;
+                // the mitigation lives in what the protocol layer hangs off it.
                 match &e {
                     ProcessMessageError::ValidationError(ValidationError::WrongEpoch)
                     | ProcessMessageError::ValidationError(ValidationError::NoPastEpochData) => {

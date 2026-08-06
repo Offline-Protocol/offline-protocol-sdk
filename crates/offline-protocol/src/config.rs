@@ -166,10 +166,33 @@ pub struct EncryptionConfig {
     /// mismatch is not delivery-ACKed — so the sender keeps retrying instead of
     /// marking it delivered — and a rate-limited session re-key (the
     /// `session_reset` key-package exchange) is triggered to rebuild the
-    /// channel. Genuine decrypt failures (corrupt/forged ciphertext, discarded
-    /// ratchet generations) are unaffected and still fail closed as before, so
-    /// this never re-keys on injected garbage. When disabled, an epoch-mismatch
-    /// failure falls back to the legacy drop-and-ACK behavior.
+    /// channel. Failures that are *not* an epoch mismatch — an AEAD /
+    /// authentication failure, a discarded past ratchet generation, a malformed
+    /// frame — stay classified as plain decrypt failures and still fail closed
+    /// as before. When disabled, an epoch-mismatch failure falls back to the
+    /// legacy drop-and-ACK behavior.
+    ///
+    /// **The re-key trigger is unauthenticated, by construction — do not read
+    /// this switch as "only genuine peers can cause a re-key".** An MLS epoch is
+    /// checked during *framing* validation, which happens before any AEAD,
+    /// sender-data, or signature check, and a 1:1 session slot id is derivable
+    /// from two public user ids. A hand-built frame carrying a wrong epoch
+    /// therefore reaches the recoverable classification with its sender still
+    /// entirely unverified: any party who can inject a frame can drive a re-key,
+    /// with no key material, no captured ciphertext and no session
+    /// (`test_forged_frame_reaches_session_desync_without_any_key_material`
+    /// builds one from scratch). This is inherent to MLS framing, not a defect,
+    /// and cannot be authenticated away — the credential a sender check would
+    /// compare against only exists once decrypt *succeeds*.
+    ///
+    /// What makes that safe is that acting on the trigger is **harmless**, not
+    /// that it is trusted: the re-key is confined to the claimed sender's own
+    /// session slot (so one derivable id cannot be aimed at other peers), is
+    /// rate-limited to one per peer per 30 s, discards no queued message, and
+    /// emits a `SESSION_REKEY_TRIGGERED` security warning so a sustained rate —
+    /// injection rather than a real fork — is visible to the app. The residual
+    /// is bounded re-key churn on a single pair: delivery delayed, never lost.
+    /// `OfflineProtocol::schedule_session_rekey` carries the full analysis.
     pub crypto_recovery_enabled: bool,
 }
 
@@ -1311,6 +1334,80 @@ mod tests {
                 "RN pending-queue TTL fallback drifted from DEFAULT_PENDING_TTL_MS: \
                  expected `{fallback}` in {}",
                 path.display()
+            );
+        }
+    }
+
+    /// Drift guard: every public surface that documents
+    /// [`EncryptionConfig::crypto_recovery_enabled`] must state that the re-key
+    /// trigger is unauthenticated, and must not carry the retired claim that it
+    /// re-keys only on genuine peer traffic.
+    ///
+    /// This is guarded because it has already drifted once. The trigger was
+    /// hardened and honestly documented in-code, but that pass corrected only
+    /// `session.rs` and the internal architecture notes — six integrator-facing
+    /// surfaces kept promising that an injected frame could never drive a
+    /// re-key, and framed the residual as replay-only, while
+    /// `test_forged_frame_reaches_session_desync_without_any_key_material` in
+    /// `offline-protocol-mls` proved the opposite in the same workspace. Nothing
+    /// else fails when these lag: the code stays correct and the docs quietly
+    /// promise a guarantee it does not make, which is the worst shape for a
+    /// security claim to fail in.
+    #[test]
+    fn crypto_recovery_docs_state_the_unauthenticated_trigger() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let surfaces = [
+            "crates/offline-protocol/src/config.rs",
+            "crates/offline-protocol-uniffi/src/offline_protocol.udl",
+            "bindings/react-native/src/types.ts",
+            "docs/mls-integration.md",
+            "docs/configuration.md",
+            "docs/api-reference.md",
+        ];
+
+        // Retired claims. Each was false for the same reason: an MLS epoch is
+        // read during framing validation, before the sender is authenticated.
+        // Split across `concat!` so the phrases this test bans do not appear
+        // verbatim in the file it also scans.
+        let retired = [
+            concat!("never re-keys on ", "injected garbage"),
+            concat!("injected garbage ", "can't drive"),
+            concat!("injecting ", "garbage"),
+        ];
+
+        for surface in surfaces {
+            let path = root.join(surface);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            // Squeezed so a line wrap inside a phrase cannot hide it, and
+            // lowercased so a sentence-initial capital cannot either. Standalone
+            // comment/markup continuation tokens (`///`, `//`, `*`, `>`) are
+            // dropped, because these six surfaces wrap prose in four different
+            // comment syntaxes and a reflow would otherwise wedge one into the
+            // middle of a phrase — a guard that fails on `cargo fmt` teaches
+            // people to delete it.
+            let squeezed = source
+                .split_whitespace()
+                .filter(|tok| !tok.chars().all(|c| matches!(c, '/' | '*' | '>')))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+
+            for claim in retired {
+                assert!(
+                    !squeezed.contains(claim),
+                    "{surface} carries the retired claim `{claim}`. The re-key \
+                     trigger is reachable by anyone who can inject a frame — see \
+                     test_forged_frame_reaches_session_desync_without_any_key_material"
+                );
+            }
+
+            assert!(
+                squeezed.contains("re-key trigger is unauthenticated"),
+                "{surface} documents crypto_recovery_enabled but no longer states \
+                 that the re-key trigger is unauthenticated. Say so plainly, or an \
+                 integrator will read a sustained SESSION_REKEY_TRIGGERED rate as a \
+                 bug rather than as the injection signal it exists to surface."
             );
         }
     }

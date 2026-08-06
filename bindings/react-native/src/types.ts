@@ -392,9 +392,19 @@ export interface EncryptionConfig {
    * Kill switch for 1:1 MLS crypto-failure recovery (default: true). When a
    * 1:1 session falls out of epoch sync with the peer, an undecryptable DM is
    * not delivery-ACKed and a rate-limited session re-key heals the channel,
-   * instead of silently dropping it. Genuine decrypt failures (corrupt/forged
-   * ciphertext, discarded ratchet generations) are unaffected and still fail
-   * closed. Disabling reverts to the legacy drop-and-ACK behavior.
+   * instead of silently dropping it. Failures that are *not* an epoch mismatch
+   * (AEAD/authentication failures, discarded ratchet generations, malformed
+   * frames) are unaffected and still fail closed. Disabling reverts to the
+   * legacy drop-and-ACK behavior.
+   *
+   * The re-key trigger is unauthenticated by construction: an MLS epoch is
+   * checked during framing validation, before the sender is verified, so any
+   * party able to inject a frame can drive a re-key — no key material or
+   * captured ciphertext needed. It is safe because it is bounded, not because
+   * it is trusted: the re-key is confined to that peer's own session slot,
+   * limited to one per peer per 30s, discards no queued message, and raises a
+   * `SESSION_REKEY_TRIGGERED` security warning — so a sustained rate (injection
+   * rather than a real fork) is visible to your app.
    */
   cryptoRecoveryEnabled?: boolean;
   /**
