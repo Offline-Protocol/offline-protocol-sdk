@@ -9250,4 +9250,119 @@ mod tests {
             "src/index.ts must expose isInternetSuperseded() calling internetIsSuperseded"
         );
     }
+
+    /// The iOS emit gate must check *both* of the conditions React Native
+    /// itself checks, and report whether the event was handed over.
+    ///
+    /// Android gates on `listenerCount > 0 && hasActiveReactInstance()`. iOS
+    /// long gated on the listener flag alone, because the second condition —
+    /// a live `callableJSModules` handle — is an `@optional` requirement of
+    /// `RCTBridgeModule` that `RCTEventEmitter` satisfies with a private
+    /// `@synthesize`, so it never appears in a header a subclass author reads.
+    ///
+    /// Two ways to get this wrong are both silent, which is why they are
+    /// pinned here rather than left to review:
+    ///
+    /// - Reading the handle through the protocol existential
+    ///   (`(self as RCTBridgeModule).callableJSModules`) yields a *double*
+    ///   optional whose outer level means "does this class implement the
+    ///   requirement" — always true for `RCTEventEmitter`. A `!= nil` on it
+    ///   typechecks, reads correctly, and gates on nothing.
+    /// - Declaring `callableJSModules` on the subclass — which React Native's
+    ///   own header comment recommends for Swift modules, and which is right
+    ///   for a direct adopter — shadows the parent's storage, leaves the
+    ///   parent ivar nil forever, and silences every emit the module makes.
+    ///
+    /// As with [`react_native_supersede_restatement_wiring_is_present`] above,
+    /// this lives in Rust because **nothing in CI compiles the Swift module**:
+    /// it is on `Package.swift`'s `exclude:` list and absent from the ci.yml
+    /// `swiftc -typecheck` probe. Either mistake would ship green.
+    #[test]
+    fn react_native_ios_emit_gate_has_live_instance_precondition() {
+        /// Drops comment lines and collapses whitespace, so an assertion
+        /// matches code rather than the prose describing it — which here also
+        /// keeps the absence assertions off the doc comments that name the
+        /// very hazards they guard against.
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*'))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        let swift = code_only(&read("ios/OfflineProtocolModule.swift"));
+
+        // --- The precondition exists, and is composed with the listener flag -
+        assert!(
+            swift.contains("private var jsInstanceLive: Bool { self.callableJSModules != nil }"),
+            "OfflineProtocolModule.swift must read callableJSModules directly off self — \
+             that single optional is the value. Nothing in CI compiles this file"
+        );
+        assert!(
+            swift.contains("private var canEmitToJs: Bool { hasListeners && jsInstanceLive }"),
+            "OfflineProtocolModule.swift must gate emits on BOTH a subscription and a live \
+             React instance, mirroring Android's canEmitToJs()"
+        );
+
+        // --- The always-true existential read, which typechecks and gates on
+        // --- nothing, must never come back.
+        assert!(
+            !swift.contains("as RCTBridgeModule).callableJSModules"),
+            "OfflineProtocolModule.swift must NOT read callableJSModules through the protocol \
+             existential: that yields RCTCallableJSModules?? whose outer optional is \
+             \"does the class implement this requirement\" — always true for RCTEventEmitter — \
+             so `!= nil` on it silently gates on nothing"
+        );
+
+        // --- The shadow declaration RN's own header comment invites ----------
+        assert!(
+            !swift.contains("var callableJSModules"),
+            "OfflineProtocolModule.swift must NOT declare callableJSModules. RCTEventEmitter \
+             synthesizes it; a subclass declaration shadows that storage, leaves the parent's \
+             ivar nil forever and silences every emit (RCTEventEmitter.m asserts on exactly this)"
+        );
+
+        // --- The emit funnel reports hand-over, as Android's does ------------
+        assert!(
+            swift.contains(
+                "fileprivate func sendEventToJS(_ eventName: String, body: Any?) -> Bool"
+            ),
+            "sendEventToJS must return Bool, mirroring Android's sendEvent — RN's \
+             sendEvent(withName:body:) returns Void, so without this the module cannot \
+             distinguish \"handed over\" from \"dropped\""
+        );
+        assert!(
+            swift.contains("guard canEmitToJs else"),
+            "sendEventToJS must gate on canEmitToJs, not on hasListeners alone"
+        );
+
+        // --- Android parity: the shape iOS is mirroring ----------------------
+        let kotlin = code_only(&read(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        ));
+        assert!(
+            kotlin.contains("private fun canEmitToJs(): Boolean =")
+                && kotlin.contains("reactApplicationContext.hasActiveReactInstance()"),
+            "OfflineProtocolModule.kt must keep canEmitToJs() gating on hasActiveReactInstance() \
+             — it is the contract iOS's jsInstanceLive mirrors"
+        );
+        assert!(
+            kotlin.contains("private fun sendEvent(eventName: String, params: Any?): Boolean"),
+            "OfflineProtocolModule.kt sendEvent must keep returning Boolean — the two platforms \
+             report hand-over the same way or neither claim means anything"
+        );
+    }
 }

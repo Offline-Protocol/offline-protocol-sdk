@@ -45,12 +45,15 @@ class OfflineProtocolModule: RCTEventEmitter {
     ///
     /// A correct read is necessary but not sufficient, and deliberately not
     /// where the supersede fix lives. This flag can only ever describe *this*
-    /// module's view: React Native re-checks its own listener count and its JS
-    /// handle inside `sendEvent` and drops with a warning, an invalidated
-    /// instance drops silently, and a JS-side `subscription.remove()`
-    /// deregisters synchronously while the native `removeListeners` is still in
-    /// flight — so a true read here is not evidence of delivery, and buffering
-    /// the emits it *does* catch would still miss the ones it does not. iOS
+    /// module's view of the subscription; it says nothing about whether a live
+    /// React instance exists to carry the emit. That second half is
+    /// `jsInstanceLive`, and only `canEmitToJs` — never this flag alone — gates
+    /// an emit. Even both together are not a delivery receipt: a JS-side
+    /// `subscription.remove()` deregisters synchronously while the native
+    /// `removeListeners` is still in flight, so this can read stale-true, and
+    /// React Native re-checks both conditions itself one frame later and drops
+    /// with only a warning if either changed in between. So buffering the emits
+    /// the gate *does* catch would still miss the ones it does not. iOS
     /// therefore recovers `internet_session_superseded` by re-deriving it from
     /// the transport latch on foreground rather than by holding a copy — see
     /// `restateInternetSupersededIfNeeded`, and
@@ -68,6 +71,56 @@ class OfflineProtocolModule: RCTEventEmitter {
             defer { listenerLock.unlock() }
             _hasListeners = newValue
         }
+    }
+
+    /// Whether a live React instance exists to carry an emit — iOS's answer to
+    /// Android's `ReactContext.hasActiveReactInstance()`.
+    ///
+    /// `callableJSModules` is the handle React Native itself hands the event to,
+    /// and the very thing `RCTEventEmitter.sendEventWithName:body:` checks
+    /// before invoking `RCTDeviceEventEmitter.emit`. It is declared `weak` on
+    /// `RCTBridgeModule` and owned strongly by `RCTBridgeModuleDecorator` (one
+    /// per React instance — `RCTInstance` creates it on bridgeless,
+    /// `RCTModuleData` under the bridge), so tearing that instance down releases
+    /// the object and this read goes nil. That is the same event the Android
+    /// precondition observes, reached by the only route iOS offers.
+    ///
+    /// **Read it directly off `self`, never through the protocol.** The
+    /// property is an `@optional` requirement of `RCTBridgeModule` that
+    /// `RCTEventEmitter` satisfies with a private `@synthesize` — so it is
+    /// absent from `RCTEventEmitter.h` but still inherited, and `self` sees it
+    /// as `RCTCallableJSModules?`, the same shape as the openly declared
+    /// `self.bridge`. That single optional *is* the value.
+    ///
+    /// Reached through the existential instead — `(self as RCTBridgeModule)` —
+    /// the same property comes back as `RCTCallableJSModules??`, where the
+    /// outer optional means "does the class implement this requirement" and
+    /// only the inner one is the value. `RCTEventEmitter` always implements it,
+    /// so a `!= nil` on that expression is **always true**: it compiles, reads
+    /// naturally, and silently gates on nothing. Both forms typecheck; only
+    /// this one answers the question.
+    ///
+    /// **Never declare `callableJSModules` on this class.** React Native's own
+    /// header comment suggests exactly that for Swift modules, and for a direct
+    /// `RCTBridgeModule` adopter it is right — but for an `RCTEventEmitter`
+    /// subclass the new storage shadows the parent's, leaves the parent's ivar
+    /// nil forever, and silences *every* emit this module makes. RN asserts on
+    /// precisely that mistake (`RCTEventEmitter.m`, "you've explicitly
+    /// synthesized the RCTCallableJSModules ... even though it's inherited").
+    /// Read it here; do not own it.
+    private var jsInstanceLive: Bool {
+        self.callableJSModules != nil
+    }
+
+    /// Whether an emit has any chance of reaching JS: something is subscribed,
+    /// and there is a live React instance to carry it. Mirrors the Android
+    /// module's `canEmitToJs()`, condition for condition.
+    ///
+    /// Shared by `sendEventToJS` and the paths that want the answer *before*
+    /// building a payload they may not use. Never a delivery guarantee — see
+    /// `sendEventToJS` for the three windows nothing at this layer can close.
+    private var canEmitToJs: Bool {
+        hasListeners && jsInstanceLive
     }
 
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
@@ -664,14 +717,54 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     // MARK: - Event Handling
     
-    fileprivate func sendEventToJS(_ eventName: String, body: Any?) {
-        if hasListeners {
-            sendEvent(withName: eventName, body: body)
+    /// Hands an event to JavaScript, reporting whether it got that far.
+    ///
+    /// Returns false when the gate is shut — no JS subscription, or no live
+    /// React instance. Every caller currently ignores the result: their events
+    /// are periodic, re-derivable, or followed by another carrying the same
+    /// state, so a drop costs nothing. The one event that is genuinely one-shot,
+    /// `internet_session_superseded`, deliberately does *not* build on this
+    /// return — it re-derives itself from the transport latch on foreground
+    /// precisely because it must survive the drops this precondition cannot see
+    /// (see `restateInternetSupersededIfNeeded`). The value is returned anyway
+    /// so the abstraction can answer the question at all, and so this side
+    /// matches Android's `sendEvent`, which returns `Boolean` for its sticky
+    /// dispatcher. iOS enrols nothing in a sticky path — there is no iOS
+    /// counterpart to `mesh_stopped_by_user`, and the relay event is covered.
+    ///
+    /// The instance check is a *precondition*, not belt-and-braces: RN's
+    /// `sendEvent(withName:body:)` returns `Void` and reports a failed emit only
+    /// by logging a warning, so "did not throw" was never evidence of delivery
+    /// here any more than it was on bridgeless Android. Checking first also
+    /// keeps the common teardown case away from RN's DEBUG-only assertion on a
+    /// nil handle, which raises an Objective-C exception through a Swift frame
+    /// and so cannot be caught on this side.
+    ///
+    /// A true return is still not a delivery receipt. Nothing here observes JS
+    /// receiving the event; it means the event was handed over with a
+    /// subscription registered and the instance alive, which is as much as this
+    /// layer can know. Three windows stay open behind it: `hasListeners` reads
+    /// stale-true across a JS-side `subscription.remove()` (the native
+    /// `removeListeners` is dispatched async behind it), the instance can be
+    /// torn down between this check and RN's own, and under the legacy bridge
+    /// an invalidated `RCTBridge` swallows the call silently.
+    @discardableResult
+    fileprivate func sendEventToJS(_ eventName: String, body: Any?) -> Bool {
+        guard canEmitToJs else {
+            // Only the instance-dead case is worth a line. A listener-less drop
+            // is the ordinary pre-subscribe state and would log on every emit
+            // before the SDK's constructor subscribes.
+            if hasListeners {
+                print("[OfflineProtocolModule] dropped \(eventName): no live React instance")
+            }
+            return false
         }
+        sendEvent(withName: eventName, body: body)
+        return true
     }
     
     fileprivate func emitDiagnostic(level: String, message: String, context: [String: Any]? = nil) {
-        guard hasListeners else { return }
+        guard canEmitToJs else { return }
 
         var payload: [String: Any] = [
             "type": "diagnostic",
@@ -709,7 +802,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// positive gate for raw server commands (replaces app-side
     /// `relayStatus === 'authenticated'` tracking).
     fileprivate func emitInternetStatusEvent(connected: Bool, authenticated: Bool) {
-        guard hasListeners else { return }
+        guard canEmitToJs else { return }
         let payload: [String: Any] = [
             "type": "internet_status_changed",
             "connected": connected,
@@ -749,13 +842,15 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// to learn it, and any drop left the app showing a relay connection that
     /// was never coming back. Re-deriving from the latch converts *every* way
     /// that emit can be lost into "healed on the next foreground", including
-    /// the ones this module cannot see: React Native re-checks its own listener
-    /// count and its JS-module handle inside `sendEvent` and drops with only a
-    /// warning, an invalidated bridge drops silently, and a JS-side
+    /// the ones this module cannot see. `canEmitToJs` now checks both of the
+    /// conditions React Native checks, which narrows that set but does not
+    /// close it: the instance can die between our read and RN's, an invalidated
+    /// legacy bridge drops silently below both, and a JS-side
     /// `subscription.remove()` deregisters synchronously while the native
-    /// `removeListeners` is still in flight — so `hasListeners` can read true
-    /// while the emit lands nowhere. A buffer of the failed emit would be blind
-    /// to all of those; the latch is not.
+    /// `removeListeners` is still in flight — so the gate can read true while
+    /// the emit lands nowhere. A buffer of the failed emit would be blind to
+    /// all of those, because it would only ever hold what the gate refused; the
+    /// latch is blind to none of them, because it never looks at the emit.
     ///
     /// Two deliberate absences, both re-derived for iOS rather than copied from
     /// Android's sticky-buffer flush — see docs/react-native-integration.md §6.1:
@@ -786,7 +881,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// processing (group snapshot extensions, invite links, role changes,
     /// rate limiting, unknown types) as the `internet_server_message` event.
     fileprivate func emitServerMessageEvent(_ rawJson: String) {
-        guard hasListeners else { return }
+        guard canEmitToJs else { return }
         let payload: [String: Any] = [
             "type": "internet_server_message",
             "json": rawJson
