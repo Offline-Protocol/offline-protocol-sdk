@@ -598,10 +598,16 @@ dictionary ProtocolConfig {
     // Kill switch for 1:1 MLS crypto-failure recovery (default on): when a
     // 1:1 session falls out of epoch sync with the peer, an undecryptable DM
     // is not delivery-ACKed and a rate-limited session re-key heals the
-    // channel, instead of silently dropping it. Genuine decrypt failures
-    // (corrupt/forged ciphertext, discarded ratchet generations) are
-    // unaffected and still fail closed. Disabling reverts to the legacy
-    // drop-and-ACK behavior. Defaulted so existing callers keep compiling.
+    // channel, instead of silently dropping it. Failures that are not an
+    // epoch mismatch (AEAD/authentication, discarded ratchet generations,
+    // malformed frames) are unaffected and still fail closed. Note the re-key
+    // trigger is unauthenticated by construction: the epoch is checked during
+    // MLS framing validation, before the sender is verified, so anyone able to
+    // inject a frame can drive a re-key. It is made safe by being bounded, not
+    // by being trusted — confined to that peer's session slot, one per peer per
+    // 30s, destroys no queued message, and reported as SESSION_REKEY_TRIGGERED.
+    // Disabling reverts to the legacy drop-and-ACK behavior. Defaulted so
+    // existing callers keep compiling.
     boolean crypto_recovery_enabled = true;
 };
 

@@ -404,9 +404,18 @@ claimed delivery. With the switch on:
 - the sender **re-seals each resend** against the peer's current session, so the
   message is delivered rather than merely retried.
 
-Genuine decrypt failures — corrupt or forged ciphertext, discarded ratchet
-generations — are deliberately excluded and still fail closed. Re-keying on
-those would be a re-key-storm vector.
+Failures that are *not* an epoch mismatch — AEAD/authentication failures,
+discarded ratchet generations, malformed frames — are deliberately excluded and
+still fail closed.
+
+**The re-key trigger is unauthenticated by construction**: an MLS epoch is
+checked during framing validation, before the sender is verified, so any party
+able to inject a frame can drive a re-key without key material or captured
+ciphertext. It is safe because it is bounded — confined to that peer's own
+session slot, one per peer per 30 s, destroying no queued message, and reported
+as a `SESSION_REKEY_TRIGGERED` security warning. See
+[MLS Integration](./mls-integration.md#crypto-failure-recovery) for the full
+threat model and the residual.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

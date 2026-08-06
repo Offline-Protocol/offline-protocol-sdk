@@ -898,12 +898,46 @@ re-sealed against the peer's *current* session while preserving the message id
 for dedup and ACK correlation. Tier 1 makes the failure honest; Tier 2 is what
 makes the message actually arrive.
 
-What is deliberately **excluded**: genuine decrypt failures — corrupt or forged
-ciphertext, discarded ratchet generations — are classified separately and still
-fail closed. Re-keying on those would let anyone force session teardowns by
-injecting garbage. The rate limit is the mitigation for the residual case: an
-attacker replaying a genuine peer's captured old-epoch ciphertext can force one
-teardown and re-establishment per window.
+What is deliberately **excluded**: failures that are *not* an epoch mismatch —
+an AEAD/authentication failure, a discarded past ratchet generation, a malformed
+frame — are classified separately and still fail closed. Widening the recoverable
+classification to cover them would add an unbounded teardown vector.
+
+> **The re-key trigger is unauthenticated, and cannot be made otherwise.** Do not
+> read the paragraph above as "only a genuine peer can cause a re-key". An MLS
+> epoch is checked during *framing* validation, which OpenMLS performs before any
+> AEAD, sender-data or signature check; `__MLS_ENC__` is a data-plane prefix,
+> deliberately exempt from the signed control-message gate; and a 1:1 slot id is
+> `session:<a>:<b>` over two public user ids. Those three compose: a hand-built
+> frame carrying a wrong epoch reaches the recoverable classification with its
+> sender still entirely unverified. **Anyone who can inject a frame can drive a
+> rate-limited re-key** — no key material, no captured ciphertext, no session, no
+> replay. The SDK's own
+> `test_forged_frame_reaches_session_desync_without_any_key_material` builds such
+> a frame from scratch to keep this statement honest. It is inherent to MLS
+> framing, not an OpenMLS defect, so no upgrade changes it, and a sender check
+> structurally cannot help — the MLS credential it would compare against only
+> exists once decrypt *succeeds*.
+
+The mitigation is therefore that acting on the trigger is **harmless**, not that
+it is trusted:
+
+- the re-key is confined to the claimed sender's own session slot, so one
+  derivable session id cannot be aimed at other peers;
+- the 30 s per-peer floor bounds the churn, and is never reset early by a
+  successful decrypt;
+- the heal destroys nothing — queued outbound plaintext survives a reset and
+  seals against the rebuilt session, and Tier 2 re-seals in-flight resends;
+- every re-key raises a `SESSION_REKEY_TRIGGERED` security warning, so a
+  sustained rate (injection rather than a real fork) is visible to the app.
+
+**Residual, stated plainly:** an injector can hold one pair in bounded re-key
+churn — delivery is delayed, never lost. Closing it outright needs a signed
+epoch-corroboration exchange before teardown (a liveness-only probe does not
+work: a healthy peer answers and the session is torn down anyway). That is future
+work. Apps that want the old behaviour instead can set
+`cryptoRecoveryEnabled: false`, which trades this residual back for the silent
+drop it replaced.
 
 Media has no Tier 2 — chunks are re-encoded rather than replayed, so an
 interrupted transfer recovers through the descriptor-based

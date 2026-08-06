@@ -150,9 +150,11 @@ pub struct EncryptionConfig {
     /// Heal a 1:1 session that has fallen out of epoch sync with the peer
     /// rather than dropping the undecryptable message: the delivery ACK is
     /// withheld and a rate-limited session re-key rebuilds the channel.
-    /// Genuine decrypt failures (corrupt/forged ciphertext, discarded
-    /// ratchet generations) are unaffected and still fail closed.
-    /// (default: true)
+    /// Failures that are not an epoch mismatch (AEAD/authentication,
+    /// discarded ratchet generations, malformed frames) are unaffected and
+    /// still fail closed. The re-key trigger is unauthenticated by
+    /// construction — safe because it is bounded, not because it is
+    /// trusted; see Crypto-Failure Recovery. (default: true)
     pub crypto_recovery_enabled: bool,
 }
 ```
