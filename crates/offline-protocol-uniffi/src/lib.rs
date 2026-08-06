@@ -9251,6 +9251,203 @@ mod tests {
         );
     }
 
+    /// The JS layer holds one-shot events past the window in which the app has
+    /// no listener yet, and its set of one-shot tags agrees with the native
+    /// ones.
+    ///
+    /// There are two listener registrations between a native emit and an app
+    /// callback, and only the first is the one the native modules can see: the
+    /// SDK subscribes to the native emitter in its own **constructor**, while
+    /// `emitEvent` fans out through a map only `on(...)` populates — which the
+    /// app cannot have called yet, because it does not have the constructed
+    /// object until the constructor returns. An event that reaches JS in that
+    /// window used to be discarded with no warning and no record, both maps
+    /// empty, indistinguishable from no event having arrived.
+    ///
+    /// That window is where Android's sticky redelivery lands *by
+    /// construction*: `flushStickyEvents()` runs from the native `addListener`,
+    /// which `NativeEventEmitter.addListener` invokes — from inside that same
+    /// constructor. The native buffer drops entries once handed over (an emit
+    /// is never a delivery receipt), so nothing on that side can recover the
+    /// event afterwards; `StickyEventBuffer`'s own KDoc names this class of
+    /// loss as one it cannot see. Without the JS-side hold the whole
+    /// mechanism is decorative in the common case.
+    ///
+    /// Pinned here rather than left to review because every half of it fails
+    /// silently and the package has no TypeScript test harness — the same
+    /// argument as [`react_native_supersede_restatement_wiring_is_present`]
+    /// above. A tag that drifts from the native spelling, a hold with no
+    /// replay, or a replay with no hold all compile, pass `tsc`, and ship a
+    /// no-op.
+    #[test]
+    fn react_native_one_shot_event_set_matches_native() {
+        /// Drops comment lines and collapses whitespace, so an assertion
+        /// matches code rather than the prose describing it — and so a call
+        /// split across lines still matches.
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*'))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        /// The region between two anchors, so an assertion cannot satisfy
+        /// itself somewhere else in the file.
+        fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let after = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1;
+            after
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        /// Every tag enrolled as one-shot, and nothing else.
+        ///
+        /// Enrolling a *periodic* event here would be actively wrong: a held
+        /// `internet_status_changed` replayed later reports a link state that
+        /// has since changed, which is worse than the drop it replaced. So the
+        /// set is asserted exactly, not by containment — an addition has to
+        /// come here and be argued for.
+        const ONE_SHOT_TAGS: [&str; 2] = ["internet_session_superseded", "mesh_stopped_by_user"];
+
+        // --- The TypeScript set: exactly these tags, in this order ----------
+        let constants_ts = read("src/constants.ts");
+        let declared = slice_between(
+            &constants_ts,
+            "export const ONE_SHOT_EVENT_TYPES = [",
+            "] as const;",
+        );
+        let declared: Vec<String> = declared
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .map(|l| l.trim_end_matches(',').trim_matches('\'').to_string())
+            .collect();
+        assert_eq!(
+            declared,
+            ONE_SHOT_TAGS.to_vec(),
+            "bindings/react-native/src/constants.ts ONE_SHOT_EVENT_TYPES must hold exactly the \
+             one-shot tags. A tag missing here is silently dropped by emitEvent before any app \
+             listener exists; a periodic tag added here is replayed stale"
+        );
+
+        // --- The native definitions the TypeScript set mirrors --------------
+        let kotlin_module = code_only(&read(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        ));
+        assert!(
+            kotlin_module.contains(
+                "private const val EVENT_MESH_STOPPED_BY_USER = \"mesh_stopped_by_user\""
+            ),
+            "OfflineProtocolModule.kt must define EVENT_MESH_STOPPED_BY_USER = \
+             \"mesh_stopped_by_user\" — it is both the event tag apps switch on and the sticky \
+             buffer's collapsing key, and the JS-side hold keys off the same string"
+        );
+        // The supersede tag's own home is asserted in
+        // react_native_supersede_restatement_wiring_is_present above; here it
+        // only has to agree with what TypeScript declares.
+        assert!(
+            code_only(&read(
+                "android/src/main/java/com/offlineprotocol/SupersededLatchPolicy.kt"
+            ))
+            .contains("const val EVENT_TYPE = \"internet_session_superseded\""),
+            "SupersededLatchPolicy.kt EVENT_TYPE must match ONE_SHOT_EVENT_TYPES"
+        );
+        assert!(
+            code_only(&read("ios/SupersededLatchPolicy.swift"))
+                .contains("static let EVENT_TYPE = \"internet_session_superseded\""),
+            "ios/SupersededLatchPolicy.swift EVENT_TYPE must match ONE_SHOT_EVENT_TYPES"
+        );
+
+        // --- Both halves of the JS mechanism, each useless alone ------------
+        let index_ts = read("src/index.ts");
+
+        let emit_event = code_only(slice_between(
+            &index_ts,
+            "private emitEvent(event: ProtocolEvent): void {",
+            "\n  /**",
+        ));
+        assert!(
+            emit_event.contains("ONE_SHOT_EVENT_TYPE_SET.has(event.type)")
+                && emit_event.contains("this.pendingOneShotEvents.set(event.type, event)"),
+            "src/index.ts emitEvent must hold a one-shot event it could not deliver to any app \
+             listener. Without the hold, Android's sticky flush — which fires from the native \
+             addListener the SDK's own constructor calls — delivers into an empty listener map \
+             and the event is lost for good; the native buffer has already dropped its copy"
+        );
+
+        let replay = code_only(slice_between(
+            &index_ts,
+            "private replayHeldOneShotEvents(",
+            "\n  /**",
+        ));
+        assert!(
+            replay.contains("this.pendingOneShotEvents.delete(eventType)")
+                && replay.contains("this.emitEvent(event)"),
+            "src/index.ts replayHeldOneShotEvents must remove the entry when it schedules the \
+             replay (so several on(...) calls in one tick cannot each deliver it) and redeliver \
+             through emitEvent (so every listener registered by then is served, and a listener \
+             removed in the interim re-holds instead of losing the event)"
+        );
+
+        let on_method = code_only(slice_between(
+            &index_ts,
+            "this.eventListeners.get(eventType)!.add(listener as EventListener);",
+            "return this;",
+        ));
+        assert!(
+            on_method.contains("this.replayHeldOneShotEvents(eventType)"),
+            "src/index.ts on() must call replayHeldOneShotEvents after registering — a hold with \
+             nothing to drain it is a memory leak that delivers nothing"
+        );
+
+        // --- The staleness transitions, mirroring the native session ones ---
+        // Redelivering a stale one-shot is the same failure inverted, not a
+        // milder one: `mesh_stopped_by_user` replayed into a starting session
+        // reports a mesh that is coming up as down, and nothing restates it.
+        let start = code_only(slice_between(
+            &index_ts,
+            "await OfflineProtocolNativeModule.start();",
+            "if (encryptionEnabled) {",
+        ));
+        assert!(
+            start.contains("this.pendingOneShotEvents.clear()"),
+            "src/index.ts start() must clear the one-shot hold once the native start resolves — \
+             the TypeScript half of the native beginSession(). Both enrolled events need a \
+             transport this call is what brings up, so anything held is from before it"
+        );
+
+        let enable_transport = code_only(slice_between(
+            &index_ts,
+            "const result = await OfflineProtocolNativeModule.enableTransport(",
+            "return result;",
+        ));
+        assert!(
+            enable_transport
+                .contains("this.pendingOneShotEvents.delete(\"internet_session_superseded\")"),
+            "src/index.ts enableTransport must drop a held internet_session_superseded when the \
+             internet transport is re-enabled, mirroring the native discard: the enable clears \
+             the latch, so the held copy would tell an app with a live relay socket that it is \
+             connected elsewhere"
+        );
+    }
+
     /// The iOS emit gate must check *both* of the conditions React Native
     /// itself checks, and report whether the event was handed over.
     ///

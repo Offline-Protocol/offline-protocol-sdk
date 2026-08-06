@@ -1954,14 +1954,16 @@ export interface InternetStatusChangedEvent extends BaseEvent {
  * `reason` is the relay-supplied close/notice reason when present.
  *
  * **Treat this as state, not as an edge.** Delivery is at-least-once: nothing
- * else ever restates the fact it reports, so both bridges work to make sure it
+ * else ever restates the fact it reports, so every layer works to make sure it
  * is not lost, and the cost is that it can repeat. Android redelivers a copy
  * held while JS could not take it (on your next subscribe or foreground); iOS
  * re-derives it from the live latch on every app foreground while the
- * transport stays superseded. Handlers must therefore be idempotent — setting
- * a "connected elsewhere" flag is fine, pushing a screen or firing a
- * notification per event is not. Repeats stop as soon as the transport is
- * re-enabled.
+ * transport stays superseded; and on both platforms the SDK holds a copy that
+ * arrived before you had a listener for it and replays it to your first
+ * `on(...)`. Handlers must therefore be idempotent — setting a "connected
+ * elsewhere" flag is fine, pushing a screen or firing a notification per event
+ * is not. Repeats stop as soon as the transport is re-enabled, which also
+ * drops any held copy.
  *
  * The pull-side counterpart is `isInternetSuperseded()`, which answers the
  * same question on demand and survives the windows no in-memory delivery can
@@ -1980,6 +1982,14 @@ export interface InternetSessionSupersededEvent extends BaseEvent {
  * protocol core by the time this arrives — it is a notification, not a request
  * to act. Apps that track mesh state themselves must reconcile it here, or
  * they will keep reporting an active mesh against stopped transports.
+ *
+ * **Treat this as state, not as an edge.** Like
+ * {@link InternetSessionSupersededEvent}, this is *one-shot* — nothing ever
+ * restates it — so it is held for redelivery when it cannot be delivered:
+ * natively while JS is unreachable, and by the SDK when it arrives before you
+ * have a listener for it (replayed to your first `on(...)`). Delivery is
+ * at-least-once and handlers must be idempotent. A held copy is dropped by
+ * `start()`, which is a mesh coming back up.
  *
  * Android only; iOS has no equivalent notification affordance.
  */

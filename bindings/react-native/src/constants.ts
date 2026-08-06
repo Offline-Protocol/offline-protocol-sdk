@@ -23,3 +23,36 @@ export const PROTOCOL_START_DELAY_MS = 100;
  */
 export const MAX_EVENT_HISTORY = 200;
 
+/**
+ * The *one-shot* event tags: events that report a state change nothing else
+ * will ever restate.
+ *
+ * `mesh_stopped_by_user` is emitted after the transports, the scheduler and
+ * the core are already down, so there is no later event to carry the same news
+ * and nothing left to ask. `internet_session_superseded` is the same shape for
+ * the relay: the transport latches stopped and refuses every reconnect path
+ * until an explicit re-enable, so a lost emit means the app never learns it is
+ * connected elsewhere. Every other event on this bridge is periodic,
+ * re-derivable, or followed by another carrying the same state, and dropping
+ * one is correct.
+ *
+ * Membership is a decision, not a filter: an event only belongs here when
+ * redelivering it late is *better* than losing it. A held periodic event
+ * (`internet_status_changed`, say) replayed after the fact would report a link
+ * state that has since changed — worse than the drop it replaced.
+ *
+ * These same two tags are enrolled in the native Android sticky buffer, which
+ * holds them across a *native→JS* gap; this set drives the JS-side hold that
+ * covers the *JS→app-listener* gap (see `OfflineProtocol.on`). The tags must
+ * agree across all four definitions — this one,
+ * `OfflineProtocolModule.EVENT_MESH_STOPPED_BY_USER` (Kotlin), and
+ * `SupersededLatchPolicy.EVENT_TYPE` (Kotlin and Swift) — or half the
+ * mechanism silently stops working while everything still compiles. A Rust
+ * guard (`react_native_one_shot_event_set_matches_native` in
+ * `crates/offline-protocol-uniffi`) pins them together.
+ */
+export const ONE_SHOT_EVENT_TYPES = [
+  'internet_session_superseded',
+  'mesh_stopped_by_user',
+] as const;
+
