@@ -87,13 +87,31 @@ class StickyEventDispatcherTest {
     }
 
     @Test
-    fun endingTheSessionBeforeTheEmitDoesNotRefuseTheNextEvent() {
-        // Keeps the test above honest. Only a teardown landing *mid-emit*
-        // refuses a hold: a session ended beforehand is simply the session the
-        // next event belongs to, and refusing that would quietly retire the
-        // buffer after the first destroy().
+    fun anEventEmittedAfterTheSessionEndedIsNotHeldEither() {
+        // The wider half of the same window, and the reason endSession() is not
+        // just a generation bump. send() reads the generation when it attempts
+        // the emit, so a destroy() that has *already* run is invisible to it —
+        // it reads the current generation and the stamp has nothing to refuse.
+        // The teardown that produces the event shares a lock with destroy()'s,
+        // so emitting after destroy() completes is the ordinary interleaving,
+        // and holding there hands a terminal mesh event to the next session.
         val harness = Harness(canEmit = false)
         harness.dispatcher.endSession()
+
+        harness.dispatcher.send("mesh_stopped_by_user", "{}")
+
+        assertTrue("held an event for a session that had already ended", harness.buffer.isEmpty())
+        assertTrue(harness.scheduled.isEmpty())
+    }
+
+    @Test
+    fun anEventEmittedAfterANewSessionBeginsIsHeld() {
+        // Keeps the test above honest: ending a session must not retire the
+        // buffer. start() reopens it, and everything after belongs to the
+        // session it began.
+        val harness = Harness(canEmit = false)
+        harness.dispatcher.endSession()
+        harness.dispatcher.beginSession()
 
         harness.dispatcher.send("mesh_stopped_by_user", "{}")
 
@@ -257,6 +275,31 @@ class StickyEventDispatcherTest {
 
         // "a" was delivered; "b" threw and "c" was never attempted. Both are back.
         assertEquals(listOf("b", "c"), harness.buffer.drain().map { it.key })
+    }
+
+    @Test
+    fun aSessionChangeUnderAnInFlightFlushStopsTheRestOfItGoingOut() {
+        // drain() removes on read, so once a flush is running the buffer has
+        // nothing left to refuse: without a per-entry generation check, a
+        // start() or destroy() landing on the NativeModules thread while the JS
+        // queue is partway through the batch bumps the generation and still
+        // watches every remaining entry go out. That is the discard start()
+        // documents silently not happening.
+        val harness = Harness(canEmit = true, emitResults = listOf(true))
+        harness.canEmit = false
+        harness.dispatcher.send("a", "1")
+        harness.dispatcher.send("b", "2")
+        harness.canEmit = true
+        harness.emitted.clear()
+        harness.dispatcher.flush()
+        harness.onEmit = { harness.dispatcher.beginSession() }
+
+        harness.runScheduled()
+
+        assertEquals("an entry from the ended session went out", listOf("1"), harness.emitted)
+        // And "b" is dropped rather than restored: the session it belongs to is
+        // over, so there is nobody left to redeliver it to.
+        assertTrue(harness.buffer.isEmpty())
     }
 
     @Test

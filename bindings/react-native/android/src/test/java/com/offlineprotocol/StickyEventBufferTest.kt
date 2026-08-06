@@ -237,7 +237,7 @@ class StickyEventBufferTest {
         // ended mid-emit must not reach into the next session's buffer.
         val buffer = StickyEventBuffer()
         val generation = buffer.currentGeneration()
-        buffer.invalidateSession()
+        buffer.beginSession()
         buffer.holdNow("mesh_stopped_by_user", """{"seq":2}""")
 
         buffer.discard("mesh_stopped_by_user", generation)
@@ -258,12 +258,25 @@ class StickyEventBufferTest {
     }
 
     @Test
-    fun invalidateSessionDiscardsEverythingHeld() {
+    fun endSessionDiscardsEverythingHeld() {
         // destroy() makes redelivery moot: the app tore the SDK down itself.
         val buffer = StickyEventBuffer()
         buffer.holdNow("mesh_stopped_by_user", "{}")
 
-        buffer.invalidateSession()
+        buffer.endSession()
+
+        assertTrue(buffer.isEmpty())
+    }
+
+    @Test
+    fun beginSessionDiscardsEverythingHeldForThePreviousOne() {
+        // start() brings the mesh back up, which is what a held stop would have
+        // told the app to reconcile against — redelivering it after would
+        // report a dead mesh against a live one.
+        val buffer = StickyEventBuffer()
+        buffer.holdNow("mesh_stopped_by_user", "{}")
+
+        buffer.beginSession()
 
         assertTrue(buffer.isEmpty())
     }
@@ -272,16 +285,40 @@ class StickyEventBufferTest {
     fun holdIsRefusedForASessionThatHasSinceEnded() {
         // The window that makes clearing alone insufficient: the teardown
         // thread reads the generation, spends the length of a full transport
-        // shutdown emitting, and only then holds — by which time destroy() may
-        // have run. Handing that stop to the next session would report a dead
-        // mesh against a live one, with nothing to restate it.
+        // shutdown emitting, and only then holds — by which time a new session
+        // may have begun. Handing that stop to it would report a dead mesh
+        // against a live one, with nothing to restate it.
+        //
+        // Uses beginSession so the *generation* gate is what refuses; the
+        // closed-buffer gate is covered separately below.
         val buffer = StickyEventBuffer()
         val generation = buffer.currentGeneration()
 
-        buffer.invalidateSession()
+        buffer.beginSession()
 
         assertFalse(buffer.hold("mesh_stopped_by_user", "{}", generation))
         assertTrue(buffer.isEmpty())
+    }
+
+    @Test
+    fun holdIsRefusedAfterTheSessionEndsUntilANewOneBegins() {
+        // The wider half of the same window, and the one a generation stamp
+        // cannot see: the emit reads the generation *after* destroy() has run,
+        // so it reads the current one and the stamp has nothing to refuse. The
+        // event still belongs to the session that just ended. A notification
+        // Stop shares stopTransportsAndProtocol()'s lock with destroy(), so it
+        // emitting after destroy() completes is the ordinary interleaving.
+        val buffer = StickyEventBuffer()
+        buffer.endSession()
+
+        assertFalse(buffer.holdNow("mesh_stopped_by_user", "{}"))
+        assertTrue(buffer.isEmpty())
+
+        // ...and the buffer is not retired by that: the next start() reopens it.
+        buffer.beginSession()
+
+        assertTrue(buffer.holdNow("mesh_stopped_by_user", """{"seq":2}"""))
+        assertEquals("""{"seq":2}""", buffer.drain()[0].eventJson)
     }
 
     @Test
@@ -292,21 +329,24 @@ class StickyEventBufferTest {
         buffer.holdNow("mesh_stopped_by_user", "{}")
         val inFlight = buffer.drain()
 
-        buffer.invalidateSession()
+        buffer.endSession()
         buffer.restore(inFlight)
 
         assertTrue(buffer.isEmpty())
     }
 
     @Test
-    fun holdsForTheNewSessionAreAcceptedAfterInvalidation() {
-        // Invalidation ends a session, it does not retire the buffer: a
-        // create() after destroy() keeps the same module instance.
+    fun restoreIsRefusedForEntriesFromASessionThatANewOneReplaced() {
+        // start() is the other bump, and it must refuse a restore for the same
+        // reason: the entries belong to the mesh session that just ended.
         val buffer = StickyEventBuffer()
-        buffer.invalidateSession()
+        buffer.holdNow("mesh_stopped_by_user", "{}")
+        val inFlight = buffer.drain()
 
-        assertTrue(buffer.holdNow("mesh_stopped_by_user", """{"seq":2}"""))
-        assertEquals("""{"seq":2}""", buffer.drain()[0].eventJson)
+        buffer.beginSession()
+        buffer.restore(inFlight)
+
+        assertTrue(buffer.isEmpty())
     }
 
     @Test

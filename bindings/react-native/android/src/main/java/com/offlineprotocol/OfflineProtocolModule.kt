@@ -783,7 +783,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // reconcile against — and it is why the getState() reconcile in
             // docs/react-native-integration.md §6.1 is documented as the
             // belt-and-braces rather than as an optional extra.
-            stickyEvents.endSession()
+            //
+            // beginSession(), not endSession(): this is a session *starting*,
+            // so the buffer must take what follows. destroy() is the transition
+            // that closes it. Collapsing the two is how an event emitted by the
+            // session destroy() just ended ends up held for the next one.
+            stickyEvents.beginSession()
             emitDiagnostic("info", "Starting protocol")
             protocol?.start()
             emitDiagnostic("info", "Protocol core started")
@@ -1799,6 +1804,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // still be between its failed emit and its hold, and a flush can
             // still be carrying drained entries — both are refused by
             // generation once this has run.
+            //
+            // And the buffer stops holding entirely until the next start().
+            // The generation gate only catches a teardown landing inside the
+            // instant between an emit's generation read and its hold; a
+            // notification Stop that began before this destroy() emits *after*
+            // it — the two share stopTransportsAndProtocol()'s lock, so this
+            // running to completion first is the ordinary interleaving, not the
+            // exotic one — and would otherwise be held under the new generation
+            // for whichever session subscribes next.
             stickyEvents.endSession()
             currentConfig = null
             promise.resolve(null)

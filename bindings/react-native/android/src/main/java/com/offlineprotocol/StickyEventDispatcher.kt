@@ -95,10 +95,23 @@ class StickyEventDispatcher(
 
     /**
      * Ends the current session, so nothing emitted for it can still be
-     * redelivered to the next one.
+     * redelivered to the next one — including an event whose teardown began
+     * before the session ended and reaches its emit afterwards, which the
+     * generation stamp alone cannot see. Nothing is held again until
+     * [beginSession].
      */
     fun endSession() {
-        buffer.invalidateSession()
+        buffer.endSession()
+    }
+
+    /**
+     * Begins a new session, discarding anything held for the previous one and
+     * taking holds again.
+     *
+     * Distinct from [endSession] on purpose — see [StickyEventBuffer.endSession].
+     */
+    fun beginSession() {
+        buffer.beginSession()
     }
 
     /**
@@ -110,6 +123,15 @@ class StickyEventDispatcher(
      * loop would destroy exactly what the buffer exists to preserve. [emit]
      * catches its own exceptions, but it also builds a JNI-backed payload
      * outside that catch, and an `Error` would escape it regardless.
+     *
+     * Each entry's generation is re-checked against the buffer's *before* it
+     * goes out, and re-read per entry rather than once for the batch. [drain]
+     * removes on read, so from here on the buffer has nothing left to refuse:
+     * a `destroy()` or `start()` landing under an in-flight flush would bump
+     * the generation and still watch every drained entry go out, which is the
+     * discard `start()` documents silently not happening. A skipped entry is
+     * dropped rather than put back — the session it belongs to is over, so
+     * there is nobody left to redeliver it to.
      */
     private fun deliverHeld() {
         val drained = buffer.drain()
@@ -119,8 +141,10 @@ class StickyEventDispatcher(
         try {
             while (index < drained.size) {
                 val entry = drained[index]
-                if (!emit(entry.eventJson)) {
-                    undelivered.add(entry)
+                if (entry.generation == buffer.currentGeneration()) {
+                    if (!emit(entry.eventJson)) {
+                        undelivered.add(entry)
+                    }
                 }
                 index += 1
             }
