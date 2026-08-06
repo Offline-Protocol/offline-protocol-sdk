@@ -80,8 +80,9 @@ class MainActivity : AppCompatActivity() {
             overflowPolicy = OverflowPolicy.DROP_OLDEST,
             // These 9 use their defaults: requireEncryption (true),
             // maxGroupMembers (256u), groupRelayEnabled (true),
-            // groupRelayBroadcastEnabled (false — group sends fan out per
-            // member so each copy gets the full delivery ladder; see
+            // groupRelayBroadcastEnabled (true — capability-gated, and it
+            // falls back to per-member fan-out against any relay that did not
+            // advertise group_delivery_v2; see
             // docs/configuration.md#group-configuration),
             // requireTransportIdentity (false), binaryWireEnabled (true),
             // compactEnvelopeEnabled (true), richPayloadEnabled (true),

@@ -43,11 +43,11 @@ import org.robolectric.annotation.Config
  * module died with the old process, and rebuilding them from here is refused —
  * a protocol with no React context behind it ACKs the messages it decrypts and
  * then drops them, which retires the sender's retry ladder for messages that
- * reached nobody. So the restart has to check whether a host has brought a mesh
- * back up before it re-posts a notification claiming one is running. That check reads the same
- * stop-callback slot, which is why the slot's lifetime is pinned here too: it
- * has to be surrendered when the mesh stops, not when the module dies, or the
- * gate reads "host present" over a mesh that is already down.
+ * reached nobody. So the restart has to check whether a host has brought a
+ * mesh back up before it re-posts a notification claiming one is running. That
+ * check reads the same stop-callback slot, which is why its lifetime is pinned
+ * here too: it has to be surrendered when the mesh stops, not when the module
+ * dies, or the gate reads "host present" over a mesh that is already down.
  *
  * Action strings are written out verbatim rather than read from the companion:
  * they cross a process boundary inside a PendingIntent that can outlive the
@@ -362,14 +362,14 @@ class MeshForegroundServiceTest {
         drainStartedServices()
         MeshForegroundService.stop(context, host)
         drainStartedServices()
-
-        createService()
-        val service = deliver(null)
-
         assertNull(
             "a host that stopped its mesh is not a host the gate may keep us up for",
             MeshForegroundService.onStopRequestedByUser
         )
+
+        createService()
+        val service = deliver(null)
+
         assertTrue(shadowOf(service).isForegroundStopped)
         assertTrue(shadowOf(service).isStoppedBySelf)
         assertFalse(MeshForegroundService.isRunning)

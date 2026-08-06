@@ -266,6 +266,12 @@ class MeshForegroundService : Service() {
      * The MLS ratchet generation is spent by then too, so a resend cannot
      * reconstruct it either.
      *
+     * Holding the event natively instead — the way [OfflineProtocolModule]'s
+     * sticky dispatcher holds `mesh_stopped_by_user` for a JS that was not
+     * listening — does not rescue it. That buffer keeps one entry per key, so
+     * it does not scale to one per message, and it is in memory, so it dies
+     * with the process whose death is the entire premise of this branch.
+     *
      * So the choice on a hostless restart is not "mesh back" versus "mesh
      * down". It is a recoverable outage — sender retries, parks, and pushes for
      * up to seven days, and delivers when this device is next actually running
