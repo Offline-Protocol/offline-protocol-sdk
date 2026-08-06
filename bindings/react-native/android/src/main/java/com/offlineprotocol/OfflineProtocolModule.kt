@@ -64,7 +64,31 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @Volatile
     private var foregroundStopCallback: (() -> Unit)? = null
-    private var listenerCount: Int = 0
+
+    /**
+     * How many JS subscriptions React Native believes this module has, as
+     * reported by [addListener] / [removeListeners].
+     *
+     * Atomic because it is written from the thread React Native delivers those
+     * calls on and read from wherever an event happens to originate — including
+     * the `"mesh-user-stop"` thread [handleUserRequestedMeshStop] spawns, which
+     * shares no lock and no happens-before edge with the writer. A plain `Int`
+     * there may legally read a stale `0` while JS is fully subscribed, and
+     * [sendEvent] would drop the event on it. That is not a theoretical race:
+     * the event it drops is the one report of a teardown the app did not
+     * initiate. Same reasoning as [foregroundStopCallback] above.
+     *
+     * A correct read is necessary but not sufficient — see [stickyEvents] for
+     * the events that must survive a genuinely shut gate.
+     */
+    private val listenerCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * Holds one-shot events that could not be handed to JS, for redelivery on
+     * the next subscribe or foreground. See [sendStickyEvent] for which events
+     * qualify and why the others must not.
+     */
+    private val stickyEvents = StickyEventBuffer()
     private var currentConfig: ProtocolConfig? = null
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
@@ -196,6 +220,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         if (foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs = android.os.SystemClock.elapsedRealtime())) {
             internetManager?.forceReconnect()
         }
+        // The other flush trigger besides [addListener]. An app whose listeners
+        // never went away still needs one: a sticky event held because the React
+        // instance was briefly down would otherwise wait for a resubscribe that
+        // is never coming.
+        flushStickyEvents()
     }
 
     override fun onHostDestroy() {
@@ -205,12 +234,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun addListener(eventName: String) {
-        listenerCount += 1
+        listenerCount.incrementAndGet()
+        // A subscription is the moment a held one-shot event becomes
+        // deliverable. The flush defers itself onto the JS queue rather than
+        // emitting here — see [flushStickyEvents] for why that is required
+        // rather than tidy.
+        flushStickyEvents()
     }
 
     @ReactMethod
     fun removeListeners(count: Double) {
-        listenerCount = (listenerCount - count.toInt()).coerceAtLeast(0)
+        listenerCount.updateAndGet { (it - count.toInt()).coerceAtLeast(0) }
     }
 
     private fun normalizeRelayPriority(priority: String?): RelayPriority? {
@@ -516,13 +550,115 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
     
     /**
-     * Send event to JavaScript
+     * Hands an event to JavaScript, reporting whether it got that far.
+     *
+     * Returns false when the gate is shut — no JS subscription, or no live
+     * React instance — and when the emit itself throws. Most callers ignore the
+     * result: their events are periodic, re-derivable, or followed by another
+     * carrying the same state, so a drop costs nothing. [sendStickyEvent] is
+     * for the ones where it costs everything.
+     *
+     * The [ReactContext.hasActiveReactInstance] check is a *precondition*, not
+     * belt-and-braces around the catch, because on the New Architecture there
+     * is nothing to catch: `getJSModule` returns a proxy that forwards to
+     * `ReactHost.callFunctionOnModule`, which reports failure by rejecting a
+     * Task rather than throwing. "Did not throw" is therefore not evidence of
+     * delivery on bridgeless, and this guard is the only signal available.
+     *
+     * Even a true return is not a delivery receipt — nothing here observes JS
+     * receiving the event. It means the event was handed over with the instance
+     * alive and a subscription registered, which is as much as this layer can
+     * know. [flushStickyEvents] is built around that limit.
      */
-    private fun sendEvent(eventName: String, params: Any?) {
-        if (listenerCount > 0) {
+    private fun sendEvent(eventName: String, params: Any?): Boolean {
+        if (listenerCount.get() <= 0 || !reactApplicationContext.hasActiveReactInstance()) {
+            return false
+        }
+        return try {
             reactApplicationContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit(eventName, params)
+            true
+        } catch (e: Exception) {
+            android.util.Log.w(NAME, "Event emit failed for $eventName", e)
+            false
+        }
+    }
+
+    /**
+     * Emits a *one-shot* event, holding it for redelivery if JS could not take
+     * it. For everything else, [sendEvent] and its silent drop are correct.
+     *
+     * The bar for enrolling an event here is narrow: nothing else must ever
+     * restate it. `mesh_stopped_by_user` is the terminal event of the mesh
+     * lifecycle — after it, every transport, the scheduler and the core are
+     * down, so there is no later event to carry the same news, and no periodic
+     * signal to re-derive it from. `internet_session_superseded` is the same
+     * shape for the relay: InternetManager latches the transport stopped and
+     * refuses every reconnect path until an explicit start(), so a dropped emit
+     * means the app never learns it is connected elsewhere.
+     *
+     * Sticking a *periodic* event would be actively wrong — a held
+     * `internet_status_changed` replayed minutes later reports a link state
+     * that has since changed, which is worse than the drop it replaced. That is
+     * why the sticky set is a decision at the call site rather than a filter
+     * over event JSON: a filter would have to parse every event that crosses
+     * this bridge, including the core callback's, to answer a question only
+     * two call sites ever ask.
+     *
+     * [key] identifies the event for last-wins collapsing, so a repeated stop
+     * cannot accumulate copies. Callers pass the event's `type` tag.
+     */
+    private fun sendStickyEvent(key: String, eventJson: String) {
+        val params = Arguments.createMap().apply {
+            putString("eventJson", eventJson)
+        }
+        if (!sendEvent(EVENT_NAME, params)) {
+            stickyEvents.hold(key, eventJson)
+        }
+    }
+
+    /**
+     * Redelivers held one-shot events, if JS looks able to take them now.
+     *
+     * **The hop onto the JS queue is load-bearing and must not be flattened
+     * into a direct emit.** `NativeEventEmitter.addListener` calls this
+     * module's [addListener] *before* it registers the JS-side listener, so an
+     * emit issued synchronously from there would arrive at an emitter with
+     * nothing subscribed — re-losing the event through a subtler version of the
+     * same hole this exists to close. `runOnJSQueueThread` always posts and
+     * never runs inline, even when the caller is already on the JS thread, so
+     * the flush lands after the current JS task — after that registration —
+     * under both the bridge and the New Architecture. It returns false if the
+     * JS thread has already finished, which leaves the events held.
+     *
+     * Entries are dropped once handed over rather than retained until JS
+     * confirms, because no confirmation exists (see [sendEvent]). The tradeoff
+     * is deliberate: an event redelivered twice is idempotent for an app whose
+     * response is to reconcile against actual state, whereas one that is never
+     * cleared would re-fire on every subscribe for the life of the process.
+     * Anything the emit refuses is restored, and [StickyEventBuffer.restore]
+     * will not overwrite a newer event that landed while the flush was in
+     * flight.
+     */
+    private fun flushStickyEvents() {
+        if (stickyEvents.isEmpty()) return
+        if (listenerCount.get() <= 0 || !reactApplicationContext.hasActiveReactInstance()) return
+        try {
+            reactApplicationContext.runOnJSQueueThread {
+                val failed = stickyEvents.drain().filterNot { entry ->
+                    val params = Arguments.createMap().apply {
+                        putString("eventJson", entry.eventJson)
+                    }
+                    sendEvent(EVENT_NAME, params)
+                }
+                stickyEvents.restore(failed)
+            }
+        } catch (e: Exception) {
+            // runOnJSQueueThread asserts the queue threads were initialized;
+            // a context torn down under us throws rather than returning false.
+            // The events stay held for the next trigger.
+            android.util.Log.w(NAME, "Could not schedule sticky event flush", e)
         }
     }
 
@@ -580,16 +716,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * code 4000 because a newer registration for the same identity took over;
      * the SDK will NOT auto-reconnect. The app surfaces "connected elsewhere"
      * and reconnects only on explicit user action (re-enabling the transport).
+     *
+     * Sticky: InternetManager latches the transport stopped on displacement and
+     * refuses auto- and force-reconnect until an explicit start(), so nothing
+     * restates this. Dropped, the app is left showing a relay connection that
+     * will never come back.
      */
     private fun emitInternetSupersededEvent(reason: String?) {
         try {
             val json = JSONObject()
             json.put("type", "internet_session_superseded")
             if (reason != null) json.put("reason", reason)
-            val params = Arguments.createMap().apply {
-                putString("eventJson", json.toString())
-            }
-            sendEvent(EVENT_NAME, params)
+            sendStickyEvent("internet_session_superseded", json.toString())
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Failed to emit internet superseded event", e)
         }
@@ -1176,15 +1314,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * Reports that the mesh was stopped from the notification's Stop action
      * rather than through a JS `stop()` call, so the app can reconcile its own
      * "mesh active" state with a teardown it did not initiate.
+     *
+     * Sticky, and the reason [sendStickyEvent] exists. This is the terminal
+     * event of the mesh lifecycle — by the time it fires the transports, the
+     * scheduler, the keep-alive service and the core are down, so no later
+     * event carries the same news. The window where it matters most is the one
+     * where JS is least likely to be listening: the user reaches the
+     * notification shade precisely when the app is not in front of them.
      */
     private fun emitMeshStoppedByUserEvent() {
         try {
             val json = JSONObject()
             json.put("type", "mesh_stopped_by_user")
-            val params = Arguments.createMap().apply {
-                putString("eventJson", json.toString())
-            }
-            sendEvent(EVENT_NAME, params)
+            sendStickyEvent("mesh_stopped_by_user", json.toString())
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Failed to emit mesh stopped event", e)
         }
@@ -1622,7 +1764,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             nostrManager = null
             protocol = null
             meshServices = null
-            listenerCount = 0
+            listenerCount.set(0)
+            // The app tore the SDK down itself, so it is not waiting to be told
+            // about a teardown it did not initiate.
+            stickyEvents.clear()
             currentConfig = null
             promise.resolve(null)
         } catch (e: Exception) {
