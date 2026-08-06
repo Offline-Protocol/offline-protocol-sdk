@@ -9446,6 +9446,27 @@ mod tests {
              the latch, so the held copy would tell an app with a live relay socket that it is \
              connected elsewhere"
         );
+
+        // `destroy()` is the transition whose necessity is least visible from
+        // the code, and the only one that has to defeat its own teardown: the
+        // listener map is emptied here, so a replay scheduled in the same tick
+        // re-holds when its microtask runs. Sliced from `removeAllListeners`
+        // so the ordering — not just the presence of a clear — is what is
+        // pinned; a clear that runs before the teardown does not see it.
+        let destroy = code_only(slice_between(
+            slice_between(&index_ts, "async destroy(): Promise<void> {", "\n  /**"),
+            "this.removeAllListeners();",
+            "\n  }",
+        ));
+        assert!(
+            destroy.contains("await Promise.resolve(); this.pendingOneShotEvents.clear();"),
+            "src/index.ts destroy() must clear the one-shot hold after a microtask yield, and \
+             after removeAllListeners(). Instances are reusable (start() re-creates), so an entry \
+             re-held behind this teardown is delivered into the *next* session by its first \
+             on(...) — which the documented order puts before start() and its sweep. The yield is \
+             what makes the clear run after that re-hold; without it the clear is a no-op on the \
+             one path that needs it"
+        );
     }
 
     /// The iOS emit gate must check *both* of the conditions React Native

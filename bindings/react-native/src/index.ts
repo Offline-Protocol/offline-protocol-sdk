@@ -3055,14 +3055,6 @@ export class OfflineProtocol {
     // Remove all event listeners
     this.removeAllListeners();
     this.telemetryListeners.clear();
-    // The session this instance's held one-shot events belong to is over, so
-    // there is nobody left to redeliver them to. A replay microtask scheduled
-    // just before this call can still re-hold its event afterwards (that is
-    // `emitEvent` refusing to lose what it could not deliver, and it is
-    // correct in general) — harmless here, because the native subscription
-    // goes below and a later `start()` clears the hold again before anything
-    // can claim it.
-    this.pendingOneShotEvents.clear();
     this.droppedEventTypesWarned.clear();
 
     // Remove native event subscription
@@ -3082,6 +3074,25 @@ export class OfflineProtocol {
     }
 
     this.initialRuntimeConfigApplied = false;
+
+    // The session these held one-shot events belong to is over, so there is
+    // nobody left to redeliver them to — and an instance can be started again
+    // (`start()` re-creates), where a survivor would be handed to the next
+    // session's first `on(...)`, which the documented order puts *before*
+    // `start()` and its sweep. That is the stale redelivery this mechanism
+    // exists to prevent, arriving by the one route `start()` cannot see.
+    //
+    // The yield is what makes the clear reach it. `removeAllListeners` above
+    // empties the map, so a replay scheduled by an `on(...)` in the same tick
+    // as this call finds nothing listening and re-holds its event — that is
+    // `emitEvent` refusing to lose what it could not deliver, correct in
+    // general and unwanted only here. Microtasks run in order, so awaiting
+    // one queued now resumes strictly after that replay and the clear sees
+    // what it left behind. Nothing can be held past this point: the native
+    // subscription is gone. Awaiting unconditionally rather than leaning on
+    // the native `destroy()` above, which an uncreated instance skips.
+    await Promise.resolve();
+    this.pendingOneShotEvents.clear();
   }
 
   /**
