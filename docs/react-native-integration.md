@@ -161,9 +161,11 @@ sdk.on('mesh_stopped_by_user', () => {
 **So reconcile on foreground regardless.** This is the belt-and-braces every integrator should have on both platforms, and it covers the windows no event can:
 
 ```ts
+import { ProtocolState } from '@offline-protocol/mesh-sdk';
+
 // on app foreground (AppState 'active')
 const state = await sdk.getState();
-if (state !== 'Running') {
+if (state !== ProtocolState.Running) {
   setMeshActive(false); // reconcile whatever local "mesh active" flag you keep
 }
 ```
