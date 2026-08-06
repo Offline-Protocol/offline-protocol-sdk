@@ -305,6 +305,16 @@ impl MlsManager {
             .tls_serialize_detached()
             .map_err(|e| MlsError::Serialization(e.to_string()))?;
 
+        // Stamped now because deriving it later from the serialized bytes
+        // costs a parse plus a signature validation, which the pool scan
+        // would pay per stored package per push. Best-effort: a record
+        // without it takes the derive path once and is backfilled on load.
+        let provider_hash_ref = key_package_bundle
+            .key_package()
+            .hash_ref(self.provider.crypto())
+            .ok()
+            .and_then(|hash_ref| hash_ref.tls_serialize_detached().ok());
+
         let package_id = Uuid::new_v4().to_string();
 
         let key_type = StorageKeyType::KeyPackage.as_str();
@@ -315,6 +325,7 @@ impl MlsManager {
             DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
         );
         bundle.reserved_for_publication = reserved;
+        bundle.provider_hash_ref = provider_hash_ref;
         let serialized =
             serde_json::to_vec(&bundle).map_err(|e| MlsError::Serialization(e.to_string()))?;
         self.storage
@@ -507,14 +518,13 @@ impl MlsManager {
     /// key too: deleting the bundle record alone leaves the material OpenMLS
     /// holds in place with nothing left pointing at it.
     pub fn delete_key_package(&self, package_id: &str) -> Result<()> {
-        let key_package_data = self
+        let bundle = self
             .storage
             .load(StorageKeyType::KeyPackage.as_str(), package_id)?
-            .and_then(|data| serde_json::from_slice::<KeyPackageBundle>(&data).ok())
-            .map(|bundle| bundle.key_package_data);
+            .and_then(|data| serde_json::from_slice::<KeyPackageBundle>(&data).ok());
 
-        match key_package_data {
-            Some(data) => self.purge_key_package_material(package_id, &data),
+        match bundle {
+            Some(bundle) => self.purge_key_package_material(package_id, &bundle),
             // No readable record: nothing names the material any more, so the
             // record delete is all that is left to do.
             None => {
@@ -1259,7 +1269,7 @@ impl MlsManager {
             None => return Ok(None),
         };
 
-        let bundle = match serde_json::from_slice::<KeyPackageBundle>(&data) {
+        let mut bundle = match serde_json::from_slice::<KeyPackageBundle>(&data) {
             Ok(bundle) => bundle,
             Err(_) => {
                 let legacy_bundle = KeyPackageBundle::new(
@@ -1283,18 +1293,41 @@ impl MlsManager {
             // caller, since they all read through here) until the grace window
             // closes, and only then is the material destroyed.
             if bundle.expired_past_grace(KEY_PACKAGE_PURGE_GRACE_SECS) {
-                self.purge_key_package_material(package_id, &bundle.key_package_data)?;
+                self.purge_key_package_material(package_id, &bundle)?;
             }
             return Ok(None);
         }
 
-        if !self.is_key_package_usable(&bundle.key_package_data) {
+        // Usability means the private init key is still in provider storage.
+        // The lookup key is cached on the record; deriving it instead is the
+        // expensive path (a parse plus a signature validation), paid once for
+        // records written before the cache existed and stamped back below so
+        // their next load is cheap.
+        let needs_backfill = bundle.provider_hash_ref.is_none();
+        let Some(hash_ref) = self.bundle_hash_ref(&bundle) else {
+            warn!(
+                package_id = %package_id,
+                "Key package bytes no longer parse as a key package, pruning stale entry"
+            );
+            self.storage.delete(key_type, package_id)?;
+            return Ok(None);
+        };
+        if !self.provider_has_init_key(&hash_ref) {
             warn!(
                 package_id = %package_id,
                 "Key package private key no longer in provider storage, pruning stale entry"
             );
             self.storage.delete(key_type, package_id)?;
             return Ok(None);
+        }
+
+        if needs_backfill {
+            if let Ok(bytes) = hash_ref.tls_serialize_detached() {
+                bundle.provider_hash_ref = Some(bytes);
+                let serialized = serde_json::to_vec(&bundle)
+                    .map_err(|e| MlsError::Serialization(e.to_string()))?;
+                self.storage.store(key_type, package_id, &serialized)?;
+            }
         }
 
         Ok(Some(bundle))
@@ -1314,8 +1347,12 @@ impl MlsManager {
     /// material no record points at any more. The package is already out of
     /// every caller's reach by the time this runs, so a retained record costs
     /// one storage read per scan and nothing else.
-    fn purge_key_package_material(&self, package_id: &str, key_package_data: &[u8]) -> Result<()> {
-        if let Some(hash_ref) = self.key_package_hash_ref(key_package_data) {
+    fn purge_key_package_material(
+        &self,
+        package_id: &str,
+        bundle: &KeyPackageBundle,
+    ) -> Result<()> {
+        if let Some(hash_ref) = self.bundle_hash_ref(bundle) {
             use openmls_traits::storage::StorageProvider;
             if let Err(e) = self.provider.storage().delete_key_package(&hash_ref) {
                 warn!(
@@ -1335,6 +1372,10 @@ impl MlsManager {
 
     /// Computes the OpenMLS hash reference a key package's private material is
     /// stored under, or `None` if the bytes no longer parse as a key package.
+    ///
+    /// This is the expensive path — a TLS parse plus a signature validation —
+    /// that [`KeyPackageBundle::provider_hash_ref`] caches the result of; go
+    /// through [`Self::bundle_hash_ref`] when a bundle is in hand.
     fn key_package_hash_ref(&self, key_package_data: &[u8]) -> Option<KeyPackageRef> {
         let kp_in = KeyPackageIn::tls_deserialize_exact(key_package_data).ok()?;
         let kp: KeyPackage = kp_in
@@ -1343,17 +1384,36 @@ impl MlsManager {
         kp.hash_ref(self.provider.crypto()).ok()
     }
 
-    /// Checks whether a key package's private init key is still present in
-    /// the OpenMLS provider storage. Returns `false` when the key material
-    /// has been consumed (e.g. by processing a Welcome) or was never stored.
-    fn is_key_package_usable(&self, key_package_data: &[u8]) -> bool {
-        let Some(hash_ref) = self.key_package_hash_ref(key_package_data) else {
-            return false;
-        };
+    /// Resolves the provider hash reference for one of this device's bundles:
+    /// the copy cached at mint time when present and decodable, else derived
+    /// from the serialized package bytes.
+    fn bundle_hash_ref(&self, bundle: &KeyPackageBundle) -> Option<KeyPackageRef> {
+        bundle
+            .provider_hash_ref
+            .as_deref()
+            .and_then(|bytes| KeyPackageRef::tls_deserialize_exact(bytes).ok())
+            .or_else(|| self.key_package_hash_ref(&bundle.key_package_data))
+    }
+
+    /// Whether the private init key `hash_ref` names is still in the OpenMLS
+    /// provider storage. Absent means consumed (a Welcome was processed
+    /// against it) or never stored.
+    fn provider_has_init_key(&self, hash_ref: &KeyPackageRef) -> bool {
         use openmls_traits::storage::StorageProvider;
         let found: std::result::Result<Option<openmls::key_packages::KeyPackageBundle>, _> =
-            self.provider.storage().key_package(&hash_ref);
+            self.provider.storage().key_package(hash_ref);
         matches!(found, Ok(Some(_)))
+    }
+
+    /// Ground-truth usability check from the serialized package bytes alone,
+    /// bypassing the cached provider ref. Test-only so tests observe the
+    /// provider directly rather than a cache they may be manipulating;
+    /// production reads go through [`Self::bundle_hash_ref`].
+    #[cfg(test)]
+    fn is_key_package_usable(&self, key_package_data: &[u8]) -> bool {
+        self.key_package_hash_ref(key_package_data)
+            .map(|hash_ref| self.provider_has_init_key(&hash_ref))
+            .unwrap_or(false)
     }
 
     /// Loads group metadata from storage.
@@ -1649,6 +1709,99 @@ mod tests {
     /// Whether the private init key for `bundle` is still in provider storage.
     fn init_key_present(manager: &MlsManager, bundle: &KeyPackageBundle) -> bool {
         manager.is_key_package_usable(&bundle.key_package_data)
+    }
+
+    /// Rewrites a stored package's record without its cached provider hash
+    /// ref, the way a build predating the cache would have written it.
+    fn strip_cached_ref(storage: &InMemoryStorage, package_id: &str) {
+        let key_type = StorageKeyType::KeyPackage.as_str();
+        let data = storage
+            .load(key_type, package_id)
+            .unwrap()
+            .expect("package to strip is not in storage");
+        let mut bundle: KeyPackageBundle = serde_json::from_slice(&data).unwrap();
+        bundle.provider_hash_ref = None;
+        storage
+            .store(key_type, package_id, &serde_json::to_vec(&bundle).unwrap())
+            .unwrap();
+    }
+
+    /// The provider hash ref is stamped at mint so the pool scan never pays a
+    /// TLS parse plus a signature validation per stored package per push —
+    /// unstamped, a scan-heavy path (many peers, full pool) costs tens of
+    /// debug-build seconds.
+    #[test]
+    fn test_minted_package_carries_its_provider_hash_ref() {
+        let manager = create_test_manager("alice");
+        let bundle = manager.take_push_key_package("bob").unwrap().bundle;
+
+        let cached = bundle
+            .provider_hash_ref
+            .as_deref()
+            .expect("mint must stamp the provider hash ref");
+        let derived = manager
+            .key_package_hash_ref(&bundle.key_package_data)
+            .expect("freshly minted package bytes must parse")
+            .tls_serialize_detached()
+            .unwrap();
+        assert_eq!(
+            cached,
+            &derived[..],
+            "cached ref disagrees with the one derived from the package bytes"
+        );
+    }
+
+    /// Records written before the cache existed take the derive path once and
+    /// are stamped back, so every later load is cheap.
+    #[test]
+    fn test_record_without_cached_ref_is_backfilled_on_first_load() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        let minted = manager.take_push_key_package("bob").unwrap().bundle;
+        strip_cached_ref(&storage, &minted.package_id);
+
+        let loaded = manager
+            .key_package_by_id(&minted.package_id)
+            .unwrap()
+            .expect("a record without a cached ref must still load");
+        assert_eq!(
+            loaded.provider_hash_ref, minted.provider_hash_ref,
+            "load must hand back a bundle stamped with the same ref the mint computed"
+        );
+
+        let stored: KeyPackageBundle = serde_json::from_slice(
+            &storage
+                .load(StorageKeyType::KeyPackage.as_str(), &minted.package_id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stored.provider_hash_ref, minted.provider_hash_ref,
+            "the backfilled ref must be persisted, not only returned"
+        );
+    }
+
+    /// The purge destroys key material for pre-cache records too, deriving
+    /// the ref they never carried.
+    #[test]
+    fn test_purge_destroys_init_key_for_a_record_without_cached_ref() {
+        let (manager, storage) = create_test_manager_with_storage("alice");
+        let bundle = manager.take_push_key_package("bob").unwrap().bundle;
+        strip_cached_ref(&storage, &bundle.package_id);
+        expire_package(
+            &storage,
+            &bundle.package_id,
+            KEY_PACKAGE_PURGE_GRACE_SECS + 60,
+        );
+
+        assert!(manager
+            .key_package_by_id(&bundle.package_id)
+            .unwrap()
+            .is_none());
+        assert!(
+            !init_key_present(&manager, &bundle),
+            "the private init key outlived a pre-cache package"
+        );
     }
 
     /// An expired package stops being advertised immediately, but its init key

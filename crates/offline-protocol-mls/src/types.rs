@@ -176,6 +176,20 @@ pub struct KeyPackageBundle {
     /// of the FFI record.
     #[serde(default)]
     pub assigned_peer: Option<String>,
+
+    /// The TLS-serialized OpenMLS hash reference this package's private init
+    /// key is stored under in the provider, stamped at mint time.
+    ///
+    /// A cache: deriving the reference from `key_package_data` costs a TLS
+    /// parse plus a signature validation, and the push path's pool scan checks
+    /// every stored package's usability on every push — without this it pays
+    /// that per package per push. Records written before the field existed
+    /// deserialize as `None` and are backfilled on their first load.
+    ///
+    /// Local bookkeeping only, like [`Self::assigned_peer`]: never on the
+    /// wire, never in the FFI record.
+    #[serde(default)]
+    pub provider_hash_ref: Option<Vec<u8>>,
 }
 
 impl KeyPackageBundle {
@@ -196,6 +210,7 @@ impl KeyPackageBundle {
             synced: false,
             reserved_for_publication: false,
             assigned_peer: None,
+            provider_hash_ref: None,
         }
     }
 
@@ -256,6 +271,9 @@ impl KeyPackageBundle {
             // Nor one of ours to hand out — the push-path assignment is about
             // packages this device minted.
             assigned_peer: None,
+            // Provider refs describe our own private material; a peer's
+            // package has none here.
+            provider_hash_ref: None,
         }
     }
 }

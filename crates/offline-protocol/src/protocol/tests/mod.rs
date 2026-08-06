@@ -13112,10 +13112,15 @@ fn test_session_reset_retains_pending_outbound_and_delivers_after_rebuild() {
 /// `rekey_due_at` is keyed by a wire-claimed peer id — the desync that reaches
 /// `schedule_session_rekey` is classified before MLS authenticates anything — so
 /// it must be bounded like every other map fed from the wire.
+///
+/// Deliberately built WITHOUT MLS: the map insert happens before the reset
+/// key-package advertisement, which `schedule_session_rekey` tolerates failing
+/// (here, fast, with `MlsNotInitialized`). With MLS wired, a thousand distinct
+/// peers would each mint into and scan the per-peer push pool — tens of
+/// seconds of debug-build signature work that proves nothing about the bound.
 #[test]
 fn test_rekey_tracking_map_is_bounded() {
-    let (mut alice, _h) = make_encrypted_protocol("alice");
-    alice.start().unwrap();
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
 
     for i in 0..(MAX_REKEY_TRACKED_PEERS + 5) {
         alice.schedule_session_rekey(&format!("peer-{i}"));
