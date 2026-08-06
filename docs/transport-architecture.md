@@ -81,7 +81,6 @@ public protocol TransportManager: AnyObject {
     func stop()
     func pause()
     func resume()
-    func getMetrics() -> [String: Any]
 }
 ```
 
@@ -99,7 +98,6 @@ interface TransportManager {
     fun stop()
     fun pause()
     fun resume()
-    fun getMetrics(): Map<String, Any>
 }
 ```
 
@@ -487,12 +485,14 @@ Transports don't need to implement routing logic - they just report availability
 ### 1. Keep Transports Independent
 Each transport should work independently without knowledge of other transports.
 
-### 2. Report Metrics
-Implement `getMetrics()` to report:
-- Bytes sent/received
-- Connection count
-- Error rates
-- Latency samples
+### 2. Leave Metrics to the Core
+Per-transport delivery metrics (bytes, packets, error rate, latency) are
+tracked by the Rust core and read from JS via `getTransportMetrics()`. A
+native transport manager does not maintain its own counters — it just reports
+availability and state, and the core measures what it carries. If a native
+manager genuinely needs to expose internal state that the core cannot see, add
+a narrow, purpose-named bridge method for it (as `isInternetReady()` and
+`isInternetSuperseded()` do) rather than a generic metrics dictionary.
 
 ### 3. Handle Lifecycle Properly
 - Clean up resources in `stop()`

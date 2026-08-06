@@ -140,7 +140,7 @@ public class InternetManager: NSObject, TransportManager {
     // AtomicBoolean/@Volatile fields: written on main (open/close/lifecycle),
     // read from messageQueue (poll ticks, drains), the URLSession delegate
     // queue (send completions), and RN threads (sendRawCommand,
-    // checkPresence, getMetrics).
+    // checkPresence, isReady).
     private var _isConnected = false
     private var isConnected: Bool {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnected }
@@ -387,9 +387,11 @@ public class InternetManager: NSObject, TransportManager {
     /// The pull half of the supersede contract, and the answer to a question
     /// `isReady()` structurally cannot resolve: a `false` from an ordinary
     /// disconnect (which reconnects itself) and a `false` from a displacement
-    /// (which never will) are identical there. Reads the latch on main, its
-    /// single writer, rather than the best-effort off-main read `getMetrics`
-    /// takes — this one gates whether the app offers the user a reconnect.
+    /// (which never will) are identical there. Hops to main — the latch's only
+    /// writer — rather than reading it from the calling RN thread: this gates
+    /// whether the app offers the user a reconnect, so it must not race a
+    /// close-funnel write. (Kotlin reaches the same result with `@Volatile`;
+    /// see SupersededLatchPolicy on both sides.)
     public func isSessionSuperseded() -> Bool {
         var superseded = false
         runOnMainSync { superseded = supersedeLatch.isSuperseded }
@@ -1924,8 +1926,8 @@ public class InternetManager: NSObject, TransportManager {
         // Timer already runs on messageQueue, no need for extra dispatch
         // Poll for next message from protocol - batch send up to 10 messages per poll
         // to efficiently flush the outbox after reconnection
-        // Batch counter — deliberately NOT the messagesSent metric, which the
-        // send completions own.
+        // Counts this poll's batch only; it bounds the loop and rides the
+        // diagnostic below. Not a lifetime total.
         var batchSent = 0
         let maxBatchSize = 10
 
@@ -2833,10 +2835,9 @@ extension InternetManager: URLSessionWebSocketDelegate {
 
 extension InternetManager: @unchecked Sendable {}
 
-/// Lock-guarded counter mirroring the Kotlin bridge's atomic metrics and
-/// failure counters: send/ping completions mutate on the URLSession delegate
-/// queue, the poll loop on messageQueue, and getMetrics() reads from the
-/// caller's thread.
+/// Lock-guarded counter mirroring the Kotlin bridge's `AtomicInteger` failure
+/// counters: the send and ping completion handlers mutate it on the URLSession
+/// delegate queue, while `handleConnectionOpened` resets it on main.
 final class AtomicCounter {
     private var value: Int64 = 0
     private let lock = NSLock()

@@ -61,9 +61,12 @@ class SupersededLatchPolicy {
         }
     }
 
-    // Main-owned like the InternetManager flags it replaces (autoReconnect):
-    // written on main, read best-effort off-main (getMetrics). @Volatile for
-    // the same defensive cross-thread visibility the field it replaced had.
+    // Written on main (the close funnel, the lifecycle entry points) and read
+    // off-main: `InternetManager.isSessionSuperseded()` runs on the caller's
+    // thread with no main hop, and the `internetIsSuperseded` bridge method
+    // calls it straight from an RN thread. @Volatile is what makes that read
+    // see the write. (The Swift mirror can use a plain Bool: its equivalent
+    // accessor hops through `runOnMainSync` first.)
     @Volatile
     private var latched = false
 

@@ -1632,8 +1632,8 @@ class InternetManager(
         try {
             // Poll for next message from protocol - batch send up to 10 messages per poll
             // to efficiently flush the outbox after reconnection.
-            // Batch counter — deliberately NOT the messagesSent metric, which
-            // the send paths own.
+            // Counts this poll's batch only; it bounds the loop and rides the
+            // diagnostic below. Not a lifetime total.
             var batchSent = 0
             val maxBatchSize = 10
 
