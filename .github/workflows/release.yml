@@ -665,9 +665,37 @@ jobs:
       # publishes a signed link from the tarball back to this workflow run, so
       # the registry copy is verifiable too rather than trusted on the strength
       # of the publishing token alone.
+      #
+      # It is conditional because the registry refuses it from a private source
+      # repository — "Unsupported GitHub Actions source repository visibility"
+      # (HTTP 422), which failed the v0.20.1 publish after the GitHub release had
+      # already been created. The rule is npm's, not ours, and it is coherent:
+      # a provenance statement nobody can check against the named source proves
+      # nothing. So the flag follows repository visibility rather than being
+      # hardcoded either way, and this re-enables itself if the repo is ever made
+      # public. Note the GitHub attestation above is unaffected — it verifies via
+      # the API against the repo, so a private repo is fine there.
+      #
+      # Decided in its own always-running step so a dry run reports which branch a
+      # real release would take; the publish itself is the only part dry runs skip.
+      - name: Resolve npm provenance eligibility
+        id: provenance
+        env:
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          if [[ "$REPO_VISIBILITY" == "public" ]]; then
+            echo "FLAG=--provenance" >> "$GITHUB_OUTPUT"
+            echo "Source repository is public — publishing with provenance."
+          else
+            echo "FLAG=" >> "$GITHUB_OUTPUT"
+            echo "::warning title=npm provenance skipped::Source repository visibility is \
+          '${REPO_VISIBILITY:-unknown}'; npm accepts provenance only from public repositories, \
+          so the tarball publishes without it. The GitHub release assets are still attested."
+          fi
+
       - name: Publish to npm
         if: inputs.dry_run != true
         working-directory: bindings/react-native
-        run: npm publish --access public --provenance
+        run: npm publish --access public ${{ steps.provenance.outputs.FLAG }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
