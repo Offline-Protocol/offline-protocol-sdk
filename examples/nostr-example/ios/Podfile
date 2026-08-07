@@ -17,9 +17,6 @@ end
 target 'NostrExample' do
   config = use_native_modules!
 
-  # Manually add the local MeshSdk
-  pod 'MeshSdk', :path => '../../../bindings/react-native/ios', :modular_headers => true
-
   use_react_native!(
     :path => config[:reactNativePath],
     # An absolute path to your application root.
@@ -49,13 +46,6 @@ target 'NostrExample' do
         build_config.build_settings['SWIFT_STRICT_CONCURRENCY'] ||= 'minimal'
       end
 
-      # Configure module map for MeshSdk pod
-      if target.name == 'MeshSdk'
-        target.build_configurations.each do |build_config|
-          build_config.build_settings['DEFINES_MODULE'] = 'YES'
-          build_config.build_settings['SWIFT_INCLUDE_PATHS'] = '$(PODS_TARGET_SRCROOT)/Generated'
-        end
-      end
     end
   end
 end

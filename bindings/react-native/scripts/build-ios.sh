@@ -10,7 +10,10 @@ echo "Building iOS universal library..."
 # Navigate to the Rust project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# shellcheck source=shared/xcframework.sh
+source "$SCRIPT_DIR/shared/xcframework.sh"
 OUTPUT_DIR="$SCRIPT_DIR/../ios/libs"
+XCFRAMEWORK="$OUTPUT_DIR/offline_protocol_uniffi.xcframework"
 
 cd "$PROJECT_ROOT"
 
@@ -37,38 +40,17 @@ done
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-echo "Copying iOS libraries..."
+echo "Packaging the XCFramework..."
 
-# Note: We can't create a fat binary with both device and simulator arm64 architectures
-# Modern Xcode handles this automatically with XCFrameworks or separate binaries
-# For now, we'll just copy the device library which works for both
-
-# Create universal libraries
-echo "Creating universal libraries..."
-
-# Device library
-echo "Copying device library (aarch64-apple-ios)..."
-cp "$PROJECT_ROOT/target/aarch64-apple-ios/release/liboffline_protocol_uniffi.a" \
-   "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-
-# Simulator library (universal for Intel and Apple Silicon)
-echo "Creating simulator library..."
-lipo -create \
+# Why an XCFramework, and why both slices share one archive basename: see
+# scripts/shared/xcframework.sh.
+package_xcframework \
+  "$OUTPUT_DIR" \
+  "$PROJECT_ROOT/target/aarch64-apple-ios/release/liboffline_protocol_uniffi.a" \
   "$PROJECT_ROOT/target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a" \
-  "$PROJECT_ROOT/target/x86_64-apple-ios/release/liboffline_protocol_uniffi.a" \
-  -output "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+  "$PROJECT_ROOT/target/x86_64-apple-ios/release/liboffline_protocol_uniffi.a"
 
-echo "iOS libraries created:"
-echo "  Device: $OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-echo "  Simulator: $OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
-
-# Print library info
-echo ""
-echo "Library info:"
-echo "Device:"
-lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-echo "Simulator:"
-lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+print_xcframework_slices "$XCFRAMEWORK"
 
 echo ""
 echo "✅ iOS build complete!"

@@ -1,8 +1,9 @@
 // swift-tools-version:5.9
 //
 // CI/test harness ONLY — this package is NOT how the SDK ships. The pod
-// (MeshSdk.podspec) owns distribution and lists its sources explicitly, so
-// it never picks this manifest up. The package exists so `swift test` can
+// (../MeshSdk.podspec, at the package root so React Native autolinking can
+// find it) owns distribution and lists its sources explicitly, so it never
+// picks this manifest up. The package exists so `swift test` can
 // run the standalone policy-class suites (the "mirrors android/, keep in
 // sync" contract) without an Xcode project: the library target compiles
 // exactly the Foundation-only helpers those suites cover — nothing that
@@ -43,7 +44,6 @@ let package = Package(
                 "BleManager.swift",
                 "Generated",
                 "InternetManager.swift",
-                "MeshSdk.podspec",
                 "NostrManager.swift",
                 "OfflineProtocolModule.m",
                 "OfflineProtocolModule.swift",

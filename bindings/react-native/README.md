@@ -52,6 +52,16 @@ npm install @offline-protocol/mesh-sdk
 cd ios && pod install
 ```
 
+Autolinking picks the SDK up — no `pod` entry, `:modular_headers`, or
+`post_install` hook of your own is required. The pre-built native binary ships as
+an XCFramework, so CocoaPods selects the right slice per build SDK and **device
+and simulator builds both work** with no linker configuration.
+
+> **Upgrading from below 0.20.0:** delete any manual `pod 'MeshSdk', ...` line
+> (and any `post_install` hook that set `OTHER_LDFLAGS`/`LIBRARY_SEARCH_PATHS`
+> for it) from your Podfile before running `pod install`. See
+> [`docs/UPGRADING.md`](../../docs/UPGRADING.md).
+
 ### Android
 
 Pre-built native libraries are included. No additional setup required.
@@ -1412,9 +1422,27 @@ await protocol.cancelFileTransfer(fileId);
 ### Linking Error
 
 If you see the linking error message:
-1. Run `pod install` (iOS)
-2. Rebuild the app after installing
-3. Verify not using Expo Go (native modules required)
+1. Remove any leftover manual `pod 'MeshSdk', ...` line from your `ios/Podfile`.
+   Autolinking supplies the pod as of 0.20.0; a line pointing into the package's
+   `ios/` directory fails `pod install` outright ("no podspec found"), and one
+   pointing elsewhere can shadow the autolinked pod.
+2. Confirm `pod install` output lists `MeshSdk` under "Auto-linking React Native
+   modules". If it doesn't, `npx react-native config` should show a
+   `platforms.ios.podspecPath` ending in `MeshSdk.podspec` for
+   `@offline-protocol/mesh-sdk`.
+3. Run `pod install` (iOS)
+4. Rebuild the app after installing — a JS-only reload will not pick up native changes
+5. Verify not using Expo Go (native modules required)
+
+### iOS Simulator Build Fails to Link
+
+Simulator builds are fully supported from 0.20.0 on. `Undefined symbols` or
+`building for iOS Simulator, but linking in object file built for iOS` means
+something is still linking the SDK's binary by hand. Remove any `post_install`
+hook that manipulates `OTHER_LDFLAGS` or `LIBRARY_SEARCH_PATHS` for `MeshSdk`
+(including flags naming `offline_protocol_uniffi_sim`/`_device` — those archives
+no longer exist), then `pod install` again. CocoaPods selects the correct
+XCFramework slice on its own.
 
 ---
 

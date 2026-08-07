@@ -238,13 +238,51 @@ jobs:
       # instead of on the PR that caused it. A dependabot bump to TypeScript 7
       # (#178) passed all of CI for exactly this reason while failing to build.
       #
-      # This job does not run scripts/prepare-npm.sh: that validates pre-built
-      # iOS .a and Android .so binaries, which don't exist outside a release run.
+      # This job does not run scripts/prepare-npm.sh: that validates the
+      # pre-built iOS XCFramework and Android .so binaries, which don't exist
+      # outside a release run. The packaging invariants that need no binaries
+      # are asserted directly below instead.
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: bindings/react-native/package-lock.json
+
+      # iOS autolinking invariants (#312). None of these need a native binary,
+      # and every one of them failed *silently* before that fix: React Native
+      # resolves a dependency's podspec by globbing "*.podspec" in the package
+      # root without recursing, so a podspec under ios/ is invisible and the
+      # dependency is skipped with no error anywhere — the consumer only finds
+      # out at runtime, from a linking error whose remedy is "run pod install".
+      - name: Verify iOS autolinking invariants
+        working-directory: bindings/react-native
+        run: |
+          test -f MeshSdk.podspec || {
+            echo "::error::MeshSdk.podspec must stay at the package root — autolinking does not recurse into ios/"
+            exit 1
+          }
+
+          if compgen -G "ios/*.podspec" > /dev/null; then
+            echo "::error::A podspec under ios/ is invisible to React Native autolinking; keep it at the package root"
+            exit 1
+          fi
+
+          node -e '
+            const ios = require("./react-native.config.js")?.dependency?.platforms?.ios;
+            if (ios === null || ios === undefined) {
+              console.error("::error::react-native.config.js disables iOS autolinking (dependency.platforms.ios is " + ios + ")");
+              process.exit(1);
+            }
+          '
+
+          node -e '
+            if (!(require("./package.json").files || []).includes("MeshSdk.podspec")) {
+              console.error("::error::package.json files[] must ship MeshSdk.podspec, or the published package has no podspec at its root");
+              process.exit(1);
+            }
+          '
+
+          echo "iOS autolinking invariants OK"
 
       - name: Install dependencies
         working-directory: bindings/react-native

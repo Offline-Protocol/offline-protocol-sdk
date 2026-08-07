@@ -22,7 +22,10 @@ yarn add @offline-protocol/mesh-sdk
 npm install @offline-protocol/mesh-sdk
 ```
 
-- **iOS**: `cd ios && pod install`
+- **iOS**: `cd ios && pod install`. Autolinking handles the native module — no
+  manual `pod` entry is needed, and device and simulator builds both work (the
+  native binary ships as an XCFramework, so CocoaPods picks the matching slice).
+  Upgrading from below 0.20.0: delete any manual `pod 'MeshSdk', ...` line first.
 - **Android**: Ensure `minSdkVersion ≥ 24` and Kotlin 1.8+.
 
 See `bindings/react-native/README.md` for existing native projects.

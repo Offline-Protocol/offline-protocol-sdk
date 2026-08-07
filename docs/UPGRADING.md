@@ -8,7 +8,14 @@ The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 several previously-accepted inputs are now rejected at the boundary. Sections
 1–12 below cover that release and are the ones that can stop your build.
 
-Nothing since `v0.17.0` breaks a build. Where a later section documents an
+Since `v0.17.0` exactly one change can break a build, and only for React Native
+on iOS: `v0.20.0` enables iOS autolinking, so a manual `pod 'MeshSdk'` line left
+in your `Podfile` now fails `pod install`. It is a one-line deletion —
+[§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) has the
+full list of Podfile leftovers to remove, and the same release is what makes iOS
+**simulator** builds link correctly.
+
+Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
 introduced it (for example, `wipePersistedState` in
 [§10](#10-storage-is-now-isolated-per-app_id-user_id) arrived in `v0.18.2`). If
@@ -42,6 +49,7 @@ cannot be undone later.
 | 10 | [Per-account storage namespaces](#10-storage-is-now-isolated-per-app_id-user_id) | your providers | your providers | behaviour change | behaviour change |
 | 11 | [Events you must handle](#11-events-you-must-now-handle) | all | all | all | all |
 | 12 | [Build & packaging](#12-build-and-packaging) | — | regenerate bindings | rebuild native | — |
+| 12.1 | [iOS: delete your manual `pod 'MeshSdk'` line](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) | n/a | n/a | **breaking** (`pod install` fails) | n/a |
 
 ---
 
@@ -940,6 +948,53 @@ reported. `detail` carries the reason.
 ---
 
 ## 12. Build and packaging
+
+### 12.1 React Native iOS: delete your manual `pod 'MeshSdk'` line *(v0.20.0)*
+
+**This is the one change in this document that can stop an iOS build outright,
+and it is the only step required.** Open `ios/Podfile` and delete:
+
+1. Any `pod 'MeshSdk', ...` line, with or without `:modular_headers => true`.
+2. Any `post_install` hook that configured `MeshSdk` — in particular one setting
+   `DEFINES_MODULE`, `SWIFT_INCLUDE_PATHS`, `LIBRARY_SEARCH_PATHS`, or
+   `OTHER_LDFLAGS` for it. The podspec now sets what is needed; a hook naming
+   `$(PODS_TARGET_SRCROOT)/Generated` points at a path that no longer exists.
+3. Any flag naming `offline_protocol_uniffi_sim` or `offline_protocol_uniffi_device`.
+   Those two archives are gone, and linking them fails with *library not found*.
+
+Then `pod install`. Its output should list `MeshSdk` under "Auto-linking React
+Native modules".
+
+If a `pod 'MeshSdk', :path => '.../mesh-sdk/ios'` line survives the upgrade,
+`pod install` fails immediately with a "no podspec found" error naming that
+path — loud, not silent. Deleting the line is the fix.
+
+**What changed and why.** Two packaging defects were fixed together:
+
+- **iOS autolinking is enabled.** It was off because the podspec lived in the
+  package's `ios/` directory, and React Native resolves a dependency's podspec by
+  globbing `*.podspec` in the package root only, without recursing — so
+  autolinking could never see it and every consumer had to declare the pod by
+  hand. `MeshSdk.podspec` now sits at the package root.
+- **The native binary is an XCFramework.** It previously shipped as two loose
+  archives (`..._device.a`, `..._sim.a`) declared through `vendored_libraries`,
+  which made CocoaPods emit an unconditional `-l` for *both* into the app's link
+  line. Simulator builds then tried to link the device archive and failed on the
+  architecture mismatch. The podspec's own sdk-conditional `OTHER_LDFLAGS` could
+  not prevent this: they sat in `pod_target_xcconfig`, and the flags that matter
+  are on the app target, which a podspec cannot reach. Slice selection is now
+  CocoaPods' job, and it gets it right without help.
+
+**Simulator builds work.** If you had concluded this SDK was device-only, that
+was this bug. Both slices have always shipped in the npm package — the publish
+gate refuses to publish without the simulator slice — but the linker flags made
+the simulator one unusable. No workaround is needed now, and any workaround you
+carried must be removed per the list above.
+
+Nothing else changes: same package name, same import, no JS/TS API change, no
+wire-format change, Android untouched.
+
+### 12.2 Regenerate UniFFI bindings
 
 **Regenerate UniFFI bindings.** The UDL changed: a new
 `ProtocolStateStorageProvider` callback interface, the two-argument

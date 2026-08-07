@@ -518,8 +518,14 @@ jobs:
       - name: Verify artifacts
         run: |
           echo "Checking iOS artifacts..."
-          test -f bindings/react-native/ios/libs/liboffline_protocol_uniffi_device.a
-          test -f bindings/react-native/ios/libs/liboffline_protocol_uniffi_sim.a
+          # Each slice is checked individually, not just the bundle: an
+          # XCFramework carrying only the device slice still installs and still
+          # builds for a device, so a missing simulator slice would ship
+          # silently and read to consumers as "no simulator support".
+          IOS_XCFRAMEWORK=bindings/react-native/ios/libs/offline_protocol_uniffi.xcframework
+          test -f "$IOS_XCFRAMEWORK/Info.plist"
+          test -f "$IOS_XCFRAMEWORK/ios-arm64/liboffline_protocol_uniffi.a"
+          test -f "$IOS_XCFRAMEWORK/ios-arm64_x86_64-simulator/liboffline_protocol_uniffi.a"
           test -d bindings/react-native/ios/Generated
 
           echo "Checking Android native libraries..."

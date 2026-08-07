@@ -58,7 +58,13 @@ LANG=en_US.UTF-8 pod install
 cd ..
 ```
 
-The `use_native_modules!` in your Podfile will automatically link the SDK.
+The `use_native_modules!` in your Podfile links the SDK automatically — no manual
+`pod` line is needed. Both device and simulator builds are supported; CocoaPods
+picks the matching slice out of the SDK's XCFramework.
+
+> Upgrading from a version before 0.20.0? Delete any manual
+> `pod 'MeshSdk', ...` line from your Podfile — autolinking now provides it, and
+> a stale line will fail `pod install`. See `docs/UPGRADING.md`.
 
 ### 2. Configure Info.plist
 
@@ -114,6 +120,9 @@ target 'YourApp' do
   # ... rest of configuration
 end
 ```
+
+A stock React Native Podfile is all that's required — the SDK needs no dedicated
+`pod` entry, no `:modular_headers`, and no `post_install` hook of its own.
 
 ### 4. Build
 

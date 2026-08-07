@@ -10,9 +10,12 @@ echo "Building UniFFI iOS library and generating Swift bindings..."
 # Navigate to the Rust project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# shellcheck source=shared/xcframework.sh
+source "$SCRIPT_DIR/shared/xcframework.sh"
 UNIFFI_DIR="$PROJECT_ROOT/crates/offline-protocol-uniffi"
 OUTPUT_DIR="$SCRIPT_DIR/../ios/libs"
 GENERATED_DIR="$SCRIPT_DIR/../ios/Generated"
+XCFRAMEWORK="$OUTPUT_DIR/offline_protocol_uniffi.xcframework"
 
 cd "$PROJECT_ROOT"
 
@@ -51,23 +54,15 @@ static_lib_for() {
   fi
 }
 
-echo "Creating universal libraries..."
+echo "Packaging the XCFramework..."
 
-# Create universal library for devices
-echo "Creating device library..."
-cp "$(static_lib_for aarch64-apple-ios)" \
-   "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-
-# Create universal library for simulators (both Intel and Apple Silicon)
-echo "Creating simulator library..."
-lipo -create \
+# Why an XCFramework, and why both slices share one archive basename: see
+# scripts/shared/xcframework.sh.
+package_xcframework \
+  "$OUTPUT_DIR" \
+  "$(static_lib_for aarch64-apple-ios)" \
   "$(static_lib_for aarch64-apple-ios-sim)" \
-  "$(static_lib_for x86_64-apple-ios)" \
-  -output "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
-
-echo "iOS libraries created:"
-echo "  Device: $OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-echo "  Simulator: $OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+  "$(static_lib_for x86_64-apple-ios)"
 
 # Generate Swift bindings
 echo ""
@@ -94,13 +89,7 @@ else
   echo "  uniffi-bindgen generate src/offline_protocol.udl --language swift --out-dir $GENERATED_DIR"
 fi
 
-# Print library info
-echo ""
-echo "Library info:"
-echo "Device library:"
-lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-echo "Simulator library:"
-lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
+print_xcframework_slices "$XCFRAMEWORK"
 
 echo ""
 echo "✅ iOS UniFFI build complete!"
