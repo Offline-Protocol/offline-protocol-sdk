@@ -577,6 +577,36 @@ impl MeshRelayGovernor {
         self.seen.observe(message_id);
     }
 
+    /// Absorbs an arrival that is a copy of a frame already dealt with and
+    /// needs no further decision, reporting whether it did.
+    ///
+    /// This is [`Self::admit`]'s suppression check, split out so a caller can
+    /// reach it without first assembling the arguments `admit` needs. In a
+    /// dense neighborhood most third-party arrivals are copies, and the caller's
+    /// `degree` and `is_last_hop` cost a status snapshot across every transport
+    /// and an enumeration of every link — work the suppression check would only
+    /// throw away.
+    ///
+    /// Deliberately answers `false` while we still hold a pending copy of the
+    /// id, even though that is also a duplicate: standing down for a neighbor
+    /// is the one duplicate outcome that depends on the neighbor set, so it has
+    /// to go through the full path. Those are rare — the pending window is one
+    /// jitter delay wide.
+    pub fn absorb_settled_duplicate(&mut self, message_id: &str) -> bool {
+        if !self.seen.contains(message_id) {
+            return false;
+        }
+        if self
+            .pending
+            .iter()
+            .any(|p| p.message.id.as_str() == message_id)
+        {
+            return false;
+        }
+        self.counters.duplicates_suppressed = self.counters.duplicates_suppressed.saturating_add(1);
+        true
+    }
+
     /// Neighbors a frame should be forwarded to, given the current neighbor
     /// set and the peers it must not go back to.
     ///
@@ -1074,6 +1104,27 @@ mod tests {
         assert!(later.is_empty());
         assert_eq!(gov.counters().abandoned_overdue, 1);
         assert_eq!(gov.pending_len(), 0);
+    }
+
+    #[test]
+    fn a_settled_duplicate_is_absorbed_without_the_full_admission_path() {
+        let mut gov = governor();
+        let msg = frame();
+
+        assert!(
+            !gov.absorb_settled_duplicate(&msg.id.as_str()),
+            "an id never seen is not a duplicate"
+        );
+
+        gov.admit(&msg, Some("b"), 3, false);
+        // While our copy is still pending, standing down is a decision that
+        // needs the neighbor set, so the cheap path must decline to make it.
+        assert!(!gov.absorb_settled_duplicate(&msg.id.as_str()));
+
+        // Once it has gone out, further copies are settled duplicates.
+        gov.take_due(Instant::now());
+        assert!(gov.absorb_settled_duplicate(&msg.id.as_str()));
+        assert_eq!(gov.counters().duplicates_suppressed, 1);
     }
 
     #[test]

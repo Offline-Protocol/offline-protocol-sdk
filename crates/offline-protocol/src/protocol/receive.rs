@@ -409,9 +409,6 @@ impl OfflineProtocol {
         }
     }
 
-    /// Whether another copy of an already-delivered message should be
-    /// acknowledged again.
-    ///
     /// Considers an inbound frame addressed to a third party for forwarding.
     ///
     /// Learns the route back toward the sender, then offers the frame to the
@@ -423,6 +420,26 @@ impl OfflineProtocol {
     /// `arrival_peer` is the neighbor that handed us this frame, when the
     /// carrier identified the link.
     fn try_relay_message(&mut self, message: &Message, arrival_peer: Option<&str>) {
+        // Cheapest answer first. This device sees the whole neighborhood's
+        // traffic, so in a crowded room most third-party arrivals are copies of
+        // a frame it has already dealt with — and everything below would be
+        // thrown away by the suppression check inside `admit`: a route-table
+        // write, a battery snapshot that locks and allocates across every
+        // transport, and an enumeration of every link. Answering a duplicate
+        // costs a hash lookup instead.
+        //
+        // Route learning is skipped along with the rest, which is deliberate:
+        // the copy teaches nothing the first one did not, and the table is not
+        // what forwarding decisions are made from. A duplicate we still hold a
+        // pending copy of is *not* absorbed here — standing down for a neighbor
+        // needs the neighbor set — so that case still takes the full path.
+        if self
+            .mesh_relay
+            .absorb_settled_duplicate(&message.id.as_str())
+        {
+            return;
+        }
+
         // Learn the route back toward the sender. The next hop is the neighbor
         // that handed us the frame, not the sender itself: for anything past
         // the first hop the sender is several links away and naming it here
