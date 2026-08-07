@@ -12971,6 +12971,124 @@ fn test_drained_message_that_hard_fails_is_not_acked() {
     );
 }
 
+/// The pre-decrypt sibling of the hard-failure class: an `__MLS_ENC__` payload
+/// that does not parse in *any* envelope form must not be ACKed either.
+///
+/// The frame never reaches MLS, so it fails one layer earlier than a corrupt
+/// ciphertext — but the disposition question is the same. In-transit corruption
+/// of the envelope encoding and injected garbage are indistinguishable here, and
+/// both rationales already accepted point the same way: a corrupted frame from an
+/// honest sender is recoverable by the resend (which the ACK would kill), and an
+/// injector learns less from silence than from an ACK.
+///
+/// Like the desync and spent-generation arms, this deliberately does NOT enqueue
+/// — an unparseable frame can never become parseable.
+#[test]
+fn test_unparseable_mls_envelope_withholds_ack_and_recovers_on_resend() {
+    let (mut bob, bob_handle, alice_manager) = hard_failure_pair(true);
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { content, .. } = event {
+            received_handle.lock().unwrap().push(content.clone());
+        }
+    });
+
+    // Neither JSON (no leading `{`) nor base64 (`!` is outside the alphabet),
+    // so every branch of `parse_encrypted_payload` refuses it.
+    let unparseable = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!("{}!!!not-an-envelope!!!", internal_prefixes::ENCRYPTED),
+    );
+    let msg_id = unparseable.id.clone();
+    let msg_id_str = msg_id.as_str().to_string();
+    let acks = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+            .count()
+    };
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(unparseable);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        acks(&bob_handle),
+        0,
+        "an unparseable envelope must NOT be delivery-ACKed"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&msg_id),
+        "the id must be unmarked so the sender's resend re-enters processing"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "an unparseable frame must NOT be enqueued: it could never become parseable"
+    );
+    assert!(received.lock().unwrap().is_empty(), "nothing surfaces");
+
+    // The resend under the same id carries a well-formed envelope and delivers.
+    let resent = alice_manager.encrypt_for_user("bob", b"recovered").unwrap();
+    bob_handle.queue_message(encrypted_wire(&resent, Some(msg_id.clone())));
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        received.lock().unwrap().as_slice(),
+        &["recovered".to_string()],
+        "the resend must deliver exactly once"
+    );
+    assert_eq!(
+        acks(&bob_handle),
+        1,
+        "the delivered resend must now be ACKed, exactly once"
+    );
+    assert!(
+        bob.deduplicator.is_duplicate(&msg_id),
+        "the delivered message must be re-marked so a later resend is deduped"
+    );
+}
+
+/// The kill switch covers the parse-failure arm too: with
+/// `crypto_recovery_enabled = false` an unparseable envelope falls back to the
+/// legacy drop-and-ACK. Sibling of
+/// `test_hard_decrypt_failure_disabled_falls_back_to_drop_and_ack`.
+#[test]
+fn test_unparseable_mls_envelope_disabled_falls_back_to_drop_and_ack() {
+    let (mut bob, bob_handle, _alice_manager) = hard_failure_pair(false);
+
+    let unparseable = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!("{}!!!not-an-envelope!!!", internal_prefixes::ENCRYPTED),
+    );
+    let msg_id = unparseable.id.clone();
+    let msg_id_str = msg_id.as_str().to_string();
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(unparseable);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        bob_handle
+            .sent_messages()
+            .iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+            .count(),
+        1,
+        "with recovery disabled, an unparseable envelope falls back to drop-and-ACK"
+    );
+    assert!(
+        bob.deduplicator.is_duplicate(&msg_id),
+        "the legacy path leaves the id dedup-marked"
+    );
+}
+
 /// The re-key DoS guard: a peer replaying stale-epoch ciphertext (or an injected
 /// wrong-epoch frame) must not be able to drive a re-key storm. Repeated
 /// same-peer re-key triggers within the rate-limit window collapse to a single
@@ -15657,10 +15775,22 @@ fn test_encrypted_message_decryption_failure_emits_app_error_event() {
     )));
 }
 
+/// An unparseable `__MLS_ENC__` payload surfaces an advisory
+/// `MessageDecryptionFailed` and is `Deferred` — not `Consumed`.
+///
+/// The `Deferred` disposition is what withholds the delivery ACK: corruption of
+/// the envelope encoding is recoverable by the sender's resend, and the ACK is
+/// what would kill that. Under `crypto_recovery_enabled = false` this falls back
+/// to the legacy `Consumed` (see
+/// `test_unparseable_mls_envelope_disabled_falls_back_to_drop_and_ack`).
 #[test]
-fn test_invalid_encrypted_payload_emits_app_error_event_and_is_consumed() {
+fn test_invalid_encrypted_payload_emits_app_error_event_and_is_deferred() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
+    assert!(
+        config.encryption.crypto_recovery_enabled,
+        "this test pins the recovery-enabled disposition"
+    );
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -15678,7 +15808,7 @@ fn test_invalid_encrypted_payload_emits_app_error_event_and_is_consumed() {
     );
 
     let result = protocol.process_internal_message(&message);
-    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    assert!(matches!(result, Some(InternalMessageResult::Deferred)));
 
     let captured = events.lock().unwrap();
     assert!(captured.iter().any(|event| matches!(
@@ -15691,7 +15821,7 @@ fn test_invalid_encrypted_payload_emits_app_error_event_and_is_consumed() {
         } if message_id == &message.id.as_str()
             && sender == "sender123"
             && code == &DecryptionFailureCode::InvalidPayload
-            && reason == "Invalid encrypted payload"
+            && reason.contains("Invalid encrypted payload")
     )));
 }
 
@@ -15750,7 +15880,19 @@ fn test_internal_prefix_malformed_payload_fuzz_is_panic_free() {
                 "panic for prefix {prefix:?} payload {payload:?}"
             );
             let result = outcome.unwrap();
-            assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+            // Every malformed payload settles without panicking. The
+            // `__MLS_ENC__` prefix defers rather than consumes: an envelope that
+            // does not parse withholds the ACK so the sender's resend can still
+            // deliver (all seven payloads above fail every parse branch). Every
+            // other prefix consumes as before.
+            if prefix == internal_prefixes::ENCRYPTED {
+                assert!(
+                    matches!(result, Some(InternalMessageResult::Deferred)),
+                    "unparseable envelope for payload {payload:?} must defer, not consume"
+                );
+            } else {
+                assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+            }
         }
     }
 }
@@ -15913,13 +16055,15 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
             content,
         );
         let result = protocol.process_internal_message(&message);
-        // Malformed payloads are consumed (nothing to queue or retry); a
-        // valid-but-early encrypted message is deferred (queued, not ACKed).
-        if is_invalid {
-            assert!(matches!(result, Some(InternalMessageResult::Consumed)));
-        } else {
-            assert!(matches!(result, Some(InternalMessageResult::Deferred)));
-        }
+        // Both shapes defer, but for different reasons — and only one of them
+        // queues. A valid-but-early encrypted message is queued and not ACKed
+        // (it becomes decryptable once the session lands). A malformed payload
+        // is *not* queued — it can never become parseable — but is still not
+        // ACKed, so the sender's resend stays the recovery path. The metrics
+        // assertions below are what pin that split: only the early messages
+        // count toward `pending_messages_received_total`, so a malformed flood
+        // cannot grow the queue.
+        assert!(matches!(result, Some(InternalMessageResult::Deferred)));
     }
 
     let per_peer_limit = protocol
@@ -24925,8 +25069,18 @@ fn telemetry_install_id_is_none_when_secret_persist_fails() {
 /// and a started BLE MockTransport. Returns the transport handle for wire
 /// inspection and message injection.
 fn media_test_protocol(user_id: &str) -> (OfflineProtocol, MockTransport) {
+    media_test_protocol_with_recovery(user_id, true)
+}
+
+/// [`media_test_protocol`] with an explicit `crypto_recovery_enabled`, for the
+/// tests that pin the legacy drop-and-ACK fall-through.
+fn media_test_protocol_with_recovery(
+    user_id: &str,
+    crypto_recovery_enabled: bool,
+) -> (OfflineProtocol, MockTransport) {
     let mut config = create_test_config_for_user(user_id);
     config.encryption.enabled = true;
+    config.encryption.crypto_recovery_enabled = crypto_recovery_enabled;
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol
         .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
@@ -27704,6 +27858,318 @@ fn test_media_chunk_hard_decrypt_failure_withholds_ack_and_recovers() {
         *files.lock().unwrap(),
         1,
         "the re-supplied transfer must complete after the withheld ACK"
+    );
+}
+
+/// Security parity with the text path: a media chunk whose envelope names
+/// another pair's session slot must be answered with silence, not an ACK.
+///
+/// The text path has refused to ACK this condition since it was written
+/// (`MlsError::SessionIdentityMismatch` → `InternalMessageResult::SecurityRejected`),
+/// on the reasoning that an ACK confirms to an injector that the target is
+/// online and processing their frames. Media used to ACK it — so an injector who
+/// sent the same forged frame both ways learned from the media ACK exactly what
+/// the text silence was protecting.
+#[test]
+fn test_media_chunk_naming_foreign_slot_withholds_ack_and_unmarks() {
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let files: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let files_handle = Arc::clone(&files);
+    bob.on_event(move |event| {
+        if matches!(event, Event::FileReceived { .. }) {
+            *files_handle.lock().unwrap() += 1;
+        }
+    });
+
+    alice
+        .send_media("bob", vec![7u8; 512], "s.bin", ContentType::File, None)
+        .unwrap();
+    let chunk_wire = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| m.content_type == ContentType::FileChunk)
+        .expect("alice should have sent a media chunk");
+    let chunk_id = chunk_wire.id.clone();
+    let chunk_id_str = chunk_id.as_str().to_string();
+    let acks = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&chunk_id_str))
+            .count()
+    };
+
+    // The envelope is sealed to `session:alice:bob`, but the wire claims
+    // mallory — so it names a slot that is not the claimed sender's. This is
+    // reachable by anyone who can capture and re-address a frame.
+    let mut foreign = chunk_wire.clone();
+    foreign.sender = UserId::new("mallory").unwrap();
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(foreign);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        acks(&bob_handle),
+        0,
+        "a chunk naming a foreign session slot must NOT be ACKed"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&chunk_id),
+        "the id must be unmarked so a replay re-enters this gate rather than \
+         hitting the duplicate re-ACK path"
+    );
+    assert_eq!(
+        *files.lock().unwrap(),
+        0,
+        "a rejected chunk must not assemble into a file"
+    );
+
+    // The honest frame still delivers: the rejection must not have damaged the
+    // transfer state or poisoned the id.
+    bob_handle.queue_message(chunk_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        *files.lock().unwrap(),
+        1,
+        "the genuine chunk under the true sender must still complete the transfer"
+    );
+    assert_eq!(
+        acks(&bob_handle),
+        1,
+        "the genuine chunk is ACKed exactly once"
+    );
+}
+
+/// The classification half of the media security rejection, pinned at the seam
+/// rather than end to end.
+///
+/// `SenderIdentityMismatch` is not reachable through any SDK-built ciphertext:
+/// the slot pre-check in `decrypt_media_chunk` requires the envelope to name
+/// `session:<local>:<claimed>`, and any manager that can encrypt into that group
+/// is itself named for one of the two slot ids, so its MLS credential always
+/// equals the claimed sender. Producing the error takes a substituted key
+/// package built with raw OpenMLS — an attack class the SDK's own Welcome guards
+/// (`verify_welcome_slot`, `ReservedSessionNamespace`) block from every in-crate
+/// path. The text path has the same property and pins the credential check at the
+/// MLS layer (`test_group_decrypt_rejects_spoofed_sender`) for the same reason.
+///
+/// So the *plumbing* is covered end to end by the slot test above, and this
+/// covers the *predicate*: both identity variants reject, and the classes that
+/// legitimately belong to `SessionStateError::Unknown` keep their terminal
+/// drop-and-ACK disposition.
+#[test]
+fn test_media_security_rejection_classifies_both_identity_mismatches() {
+    use crate::protocol::receive::is_media_security_rejection;
+    use offline_protocol_mls::MlsError;
+
+    assert!(
+        is_media_security_rejection(&MlsError::SenderIdentityMismatch {
+            claimed: "alice".to_string(),
+            authenticated: "mallory".to_string(),
+        }),
+        "a credential naming a different sender than the wire is a security rejection"
+    );
+    assert!(
+        is_media_security_rejection(&MlsError::SessionIdentityMismatch {
+            expected: "session:alice:bob".to_string(),
+            found: "session:bob:mallory".to_string(),
+        }),
+        "an envelope naming a foreign session slot is a security rejection"
+    );
+
+    // Negative controls. Both classify as `SessionStateError::Unknown` alongside
+    // the two above, which is exactly why the intercept has to run *before*
+    // classification: widening it to `Unknown` would silently swallow these.
+    assert!(
+        !is_media_security_rejection(&MlsError::CommitNotAuthorized {
+            committer: "mallory".to_string(),
+            added: vec!["eve".to_string()],
+            removed: Vec::new(),
+        }),
+        "a permanent policy refusal stays terminal drop-and-ACK: retries are pure waste"
+    );
+    assert!(
+        !is_media_security_rejection(&MlsError::Decryption("aead failure".to_string())),
+        "an AEAD failure is a recoverable crypto failure, not a security rejection"
+    );
+}
+
+/// The media half of the parse-failure class: an envelope whose magic byte still
+/// reads as a media envelope but whose encoding does not decode must not be
+/// ACKed. Same reasoning as the text sibling — corruption past the magic byte is
+/// recoverable by a resend, and the ACK is what kills that.
+#[test]
+fn test_undecodable_media_envelope_withholds_ack_and_recovers() {
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let files: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let files_handle = Arc::clone(&files);
+    bob.on_event(move |event| {
+        if matches!(event, Event::FileReceived { .. }) {
+            *files_handle.lock().unwrap() += 1;
+        }
+    });
+
+    alice
+        .send_media("bob", vec![5u8; 512], "s.bin", ContentType::File, None)
+        .unwrap();
+    let chunk_wire = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| m.content_type == ContentType::FileChunk)
+        .expect("alice should have sent a media chunk");
+    let chunk_id = chunk_wire.id.clone();
+    let chunk_id_str = chunk_id.as_str().to_string();
+    let acks = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&chunk_id_str))
+            .count()
+    };
+
+    // Magic intact (so `is_media_envelope` still routes it here), body truncated
+    // to garbage — the shape a bit-flip past the magic produces.
+    let mut corrupt = chunk_wire.clone();
+    corrupt.binary_content = Some(vec![b'M', b'L', 0xFF, 0x00, 0x01]);
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(corrupt);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        acks(&bob_handle),
+        0,
+        "an undecodable media envelope must NOT be delivery-ACKed"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&chunk_id),
+        "the id must be unmarked so a resend re-enters processing"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "an undecodable frame must NOT be enqueued: it could never become decodable"
+    );
+    assert_eq!(*files.lock().unwrap(), 0, "nothing completes yet");
+
+    // The re-supplied transfer (what `MediaResendRequired` asks the app for)
+    // carries an intact envelope and completes.
+    bob_handle.queue_message(chunk_wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(
+        *files.lock().unwrap(),
+        1,
+        "the intact resend must complete the transfer"
+    );
+}
+
+/// The kill switch covers the media parse-failure arm too.
+#[test]
+fn test_undecodable_media_envelope_disabled_falls_back_to_drop_and_ack() {
+    let (mut alice, alice_handle) = media_test_protocol_with_recovery("alice", false);
+    let (mut bob, bob_handle) = media_test_protocol_with_recovery("bob", false);
+    establish_media_session(&mut alice, &mut bob);
+
+    alice
+        .send_media("bob", vec![5u8; 512], "s.bin", ContentType::File, None)
+        .unwrap();
+    let chunk_wire = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| m.content_type == ContentType::FileChunk)
+        .expect("alice should have sent a media chunk");
+    let chunk_id = chunk_wire.id.clone();
+    let chunk_id_str = chunk_id.as_str().to_string();
+
+    let mut corrupt = chunk_wire;
+    corrupt.binary_content = Some(vec![b'M', b'L', 0xFF, 0x00, 0x01]);
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(corrupt);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        bob_handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&chunk_id_str))
+            .count(),
+        1,
+        "with recovery disabled, an undecodable envelope falls back to drop-and-ACK"
+    );
+    assert!(
+        bob.deduplicator.is_duplicate(&chunk_id),
+        "the legacy path leaves the id dedup-marked"
+    );
+}
+
+/// The media sibling of `test_drained_message_that_hard_fails_is_not_acked`: the
+/// one #317 ACK site that had no direct coverage.
+///
+/// A queued *media chunk* takes a different branch through the drain than a
+/// queued DM — `handle_incoming_file_chunk_via` → the `ChunkOutcome::Deferred`
+/// arm — and that arm is an empty no-op, so this test exists to pin the contract
+/// (no ACK on the recorded arrival transport, no re-mark, no re-queue) against
+/// future edits to the drain, exactly as the text sibling does.
+#[test]
+fn test_drained_media_chunk_that_hard_fails_is_not_acked() {
+    use crate::media_envelope::{decode_media_envelope, encode_media_envelope};
+
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    alice
+        .send_media("bob", vec![9u8; 512], "s.bin", ContentType::File, None)
+        .unwrap();
+    let chunk_wire = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| m.content_type == ContentType::FileChunk)
+        .expect("alice should have sent a media chunk");
+    let chunk_id = chunk_wire.id.clone();
+    let chunk_id_str = chunk_id.as_str().to_string();
+
+    let mut corrupt = chunk_wire.clone();
+    let mut envelope = decode_media_envelope(chunk_wire.binary_content.as_ref().unwrap()).unwrap();
+    envelope.ciphertext = vec![0u8; 24];
+    corrupt.binary_content = Some(encode_media_envelope(
+        &envelope,
+        crate::media_envelope::MEDIA_ENVELOPE_VERSION_MLS_V1,
+    ));
+
+    // Queued *with* a recorded arrival transport: with `received_via: None` the
+    // drain's ACK is a no-op and the no-ACK assertion below would pass
+    // vacuously.
+    bob.enqueue_pending_decryption_via("alice", &corrupt, Some(TransportType::BLE));
+    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+
+    bob_handle.clear_sent_messages();
+    bob.process_pending_decryption("alice");
+
+    assert_eq!(
+        bob_handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&chunk_id_str))
+            .count(),
+        0,
+        "a media chunk that hard-fails on drain must NOT be ACKed"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&chunk_id),
+        "it must stay unmarked so the sender's resend still recovers the transfer"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "the dead chunk must not be re-queued: the drain removed it, so a \
+         re-enqueue would restart its TTL on every drain"
     );
 }
 

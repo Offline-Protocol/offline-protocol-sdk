@@ -476,13 +476,39 @@ impl OfflineProtocol {
             if is_media_envelope(binary) {
                 let encrypted = match decode_media_envelope(binary) {
                     Ok(e) => e,
+                    // A frame whose magic byte still reads as a media envelope
+                    // but whose encoding does not decode — in-transit
+                    // corruption past the magic, or injected garbage. Under
+                    // crypto recovery this is the pre-decrypt sibling of a hard
+                    // decrypt failure: the frame as it stands is dead, but the
+                    // sender's resend carries a fresh encoding that would
+                    // decode, so withhold the ACK (`Deferred`) instead of
+                    // telling the sender "delivered" for a chunk we dropped.
+                    // Do NOT enqueue: an unparseable frame can never become
+                    // parseable, so a queued copy could never drain — the same
+                    // reasoning as the spent-generation arm below.
                     Err(e) => {
                         warn!(
                             message_id = %message.id,
                             error = %e,
-                            "Failed to decode encrypted media envelope, dropping"
+                            "Failed to decode encrypted media envelope"
                         );
-                        return ChunkOutcome::Handled;
+                        if !self.config.encryption.crypto_recovery_enabled {
+                            return ChunkOutcome::Handled;
+                        }
+                        // Advisory, not terminal — the chunk was never ACKed, so
+                        // the transfer is *stalled* pending a resend rather than
+                        // failed. The terminal media signal stays
+                        // `FileReceiveFailed`.
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::message_decryption_failed(
+                                message.id.clone(),
+                                sender.clone(),
+                                crate::events::DecryptionFailureCode::InvalidPayload,
+                                "encrypted media envelope failed to decode; its file transfer is stalled until the sender resends".to_string(),
+                            ));
+                        }
+                        return ChunkOutcome::Deferred;
                     }
                 };
                 let plaintext =
@@ -494,8 +520,16 @@ impl OfflineProtocol {
                         // sender can re-send): defer the ACK so the sender
                         // retries and the resend re-enters processing.
                         MediaChunkDecrypt::Deferred => return ChunkOutcome::Deferred,
-                        // Terminal drop (mismatch, permanent refusal, empty): ACK
-                        // as before — the sender cannot recover it by retrying.
+                        // Illegitimate frame (foreign session slot, or an MLS
+                        // credential naming a different sender): answer with
+                        // silence, exactly like the text `SecurityRejected`
+                        // path. ACKing here would tell an injector that the
+                        // target is online and processing their frames — the
+                        // one thing the text path withholds.
+                        MediaChunkDecrypt::SecurityRejected => return ChunkOutcome::Rejected,
+                        // Terminal drop (permanent refusal, empty plaintext, MLS
+                        // unavailable): ACK as before — the sender cannot
+                        // recover it by retrying.
                         MediaChunkDecrypt::Dropped => return ChunkOutcome::Handled,
                     };
                 let inner = match MediaChunkPlaintext::decode(&plaintext) {
@@ -752,7 +786,7 @@ impl OfflineProtocol {
         true
     }
 
-    /// Decrypts an encrypted media chunk envelope. Three failure dispositions,
+    /// Decrypts an encrypted media chunk envelope. Four failure dispositions,
     /// mirroring the text path in [`Self::handle_encrypted_message`]:
     ///
     /// - **Session not ready**: the whole message is queued for delayed
@@ -761,13 +795,21 @@ impl OfflineProtocol {
     ///   `crypto_recovery_enabled`): [`MediaChunkDecrypt::Deferred`] *without*
     ///   queueing — the ciphertext is dead either way, so recovery is the
     ///   sender's resend, driven by the withheld ACK.
-    /// - **Terminal** (identity/slot mismatch, a permanent refusal, or any
-    ///   crypto failure with recovery switched off): decryption telemetry plus
+    /// - **Security rejection** (the envelope names another pair's session
+    ///   slot, or the MLS credential authenticates a different sender than the
+    ///   wire envelope claims): [`MediaChunkDecrypt::SecurityRejected`], which
+    ///   the caller answers with silence. Deliberately *not* gated on
+    ///   `crypto_recovery_enabled` — this is about what the receiver reveals,
+    ///   not about recovery, and the text path's equivalent is unconditional.
+    /// - **Terminal** (a permanent refusal, an empty plaintext, or any crypto
+    ///   failure with recovery switched off): decryption telemetry plus
     ///   [`MediaChunkDecrypt::Dropped`], which the caller still ACKs.
     ///
-    /// On either `Deferred` the caller must skip the ACK and unmark the id so
-    /// the sender keeps retrying. A successful decrypt doubles as a session
-    /// confirmation signal, exactly like text decrypts.
+    /// On `Deferred` or `SecurityRejected` the caller must skip the ACK and
+    /// unmark the id — for the former so the sender keeps retrying, for the
+    /// latter so a replay re-enters this gate rather than hitting the duplicate
+    /// re-ACK path. A successful decrypt doubles as a session confirmation
+    /// signal, exactly like text decrypts.
     fn decrypt_media_chunk(
         &mut self,
         sender: &str,
@@ -791,17 +833,24 @@ impl OfflineProtocol {
             return MediaChunkDecrypt::Dropped;
         };
         if encrypted.group_id != expected_group {
-            warn!(
+            error!(
                 sender = %sender,
                 group_id = %group_id,
-                "Encrypted media chunk MLS group does not match the sender's 1:1 session, dropping"
+                expected = %expected_group,
+                "SECURITY: encrypted media chunk MLS group does not match the claimed sender's session, rejecting"
             );
             self.emit_security_warning(
                 sender,
                 SecurityWarningCode::MediaSenderGroupMismatch,
                 "Encrypted media chunk MLS group does not match the claimed sender",
             );
-            return MediaChunkDecrypt::Dropped;
+            // Not ACKed: the text path answers the identical condition
+            // (`MlsError::SessionIdentityMismatch` →
+            // `InternalMessageResult::SecurityRejected`) with silence, and an
+            // ACK here would leak exactly what that silence protects — an
+            // injector who gets an ACK for a media chunk but nothing for the
+            // same text frame learns the target is live either way.
+            return MediaChunkDecrypt::SecurityRejected;
         }
 
         let Some(mls) = self.mls_manager.clone() else {
@@ -842,6 +891,20 @@ impl OfflineProtocol {
             Ok(None) => {
                 warn!(sender = %sender, "Media chunk decryption returned empty, dropping");
                 MediaChunkDecrypt::Dropped
+            }
+            // Intercepted BEFORE classification, mirroring the text path in
+            // `handle_encrypted_message`. Both variants classify as
+            // `SessionStateError::Unknown`, whose disposition must stay
+            // terminal-drop-and-ACK for the refusals that genuinely belong
+            // there (`CommitNotAuthorized`), so the split has to happen here
+            // rather than in the classifier.
+            Err(ref e) if is_media_security_rejection(e) => {
+                error!(
+                    sender = %sender,
+                    error = %e,
+                    "SECURITY: encrypted media chunk failed its sender/session identity check, rejecting"
+                );
+                MediaChunkDecrypt::SecurityRejected
             }
             Err(e) => {
                 let classification = SessionStateError::from(&e);
@@ -974,12 +1037,47 @@ impl OfflineProtocol {
     }
 }
 
-/// Three-way outcome of [`OfflineProtocol::decrypt_media_chunk`]: the plaintext,
+/// Four-way outcome of [`OfflineProtocol::decrypt_media_chunk`]: the plaintext,
 /// a deferral (not delivered, but recoverable by the sender's resend — either
 /// queued because the session is not ready, or dropped as undecryptable with
-/// the ACK withheld), or a terminal drop the caller ACKs.
+/// the ACK withheld), a security rejection (an illegitimate frame the caller
+/// must answer with silence), or a terminal drop the caller ACKs.
 enum MediaChunkDecrypt {
     Plaintext(Vec<u8>),
     Deferred,
+    /// The frame is not a legitimate message from the claimed sender: its
+    /// envelope named another pair's session slot, or the MLS credential
+    /// authenticated a different member than the wire envelope claims. Mirrors
+    /// the text path's [`InternalMessageResult::SecurityRejected`] — the caller
+    /// must NOT ACK (an ACK confirms to an injector that the target is online
+    /// and processing their frames, which is exactly what the text path refuses
+    /// to reveal) and must unmark the id.
+    ///
+    /// [`InternalMessageResult::SecurityRejected`]: super::InternalMessageResult::SecurityRejected
+    SecurityRejected,
     Dropped,
+}
+
+/// Whether an MLS decrypt error is a *security* rejection rather than a session
+/// state problem — the two classes for which the receiver must stay silent
+/// instead of ACKing.
+///
+/// Used as the match guard that intercepts these variants *before*
+/// [`SessionStateError`] classification, exactly as the text path does inline in
+/// `handle_encrypted_message`. The intercept cannot be replaced by a
+/// classification arm: both variants map to [`SessionStateError::Unknown`], and
+/// `Unknown` must keep its terminal drop-and-ACK disposition for the classes
+/// that genuinely belong there (notably `CommitNotAuthorized`, a permanent
+/// refusal whose sender gains nothing from retrying).
+///
+/// Kept as a named predicate rather than an inline pattern so the classification
+/// itself is testable: `SenderIdentityMismatch` is not reachable through any
+/// SDK-built ciphertext (see
+/// `test_media_security_rejection_classifies_both_identity_mismatches`).
+pub(super) fn is_media_security_rejection(error: &offline_protocol_mls::MlsError) -> bool {
+    matches!(
+        error,
+        offline_protocol_mls::MlsError::SenderIdentityMismatch { .. }
+            | offline_protocol_mls::MlsError::SessionIdentityMismatch { .. }
+    )
 }
