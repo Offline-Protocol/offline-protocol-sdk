@@ -1064,16 +1064,46 @@ impl OfflineProtocol {
                 }
             }
         } else {
+            // The envelope did not parse at all — neither JSON nor a compact
+            // binary/base64 form. This is the pre-decrypt sibling of the hard
+            // decrypt failure above: in-transit corruption a few bytes earlier
+            // (in the envelope encoding rather than the MLS ciphertext), or
+            // injected garbage. Both point the same way — the sender's resend
+            // carries a fresh encoding that *would* parse, and for an injector
+            // silence reveals less than an ACK — so withhold the ACK rather
+            // than confirm delivery of a frame we dropped.
+            //
+            // Deliberately does NOT enqueue: an unparseable frame can never
+            // become parseable, so a queued copy could never drain. Recovery is
+            // the resend, exactly as for a spent ratchet generation.
+            //
+            // Unreachable from the pending-queue drain: a queued frame parsed
+            // successfully at receipt and parsing is deterministic, so the
+            // drain can never land here.
             warn!(sender = %sender, "Invalid encrypted payload");
+            let retriable = self.config.encryption.crypto_recovery_enabled;
             if let Ok(state) = lock_shared_state(&self.shared_state) {
+                // Advisory and per-attempt on the retriable path, like the
+                // hard-failure arm above: the sender resends, and each resend
+                // that still fails to parse reports again, bounded by the
+                // sender's ACK retry budget.
+                let reason = if retriable {
+                    "Invalid encrypted payload; not acknowledged, so the sender's resend can still deliver it".to_string()
+                } else {
+                    "Invalid encrypted payload".to_string()
+                };
                 state.emit_event(Event::message_decryption_failed(
                     message.id.clone(),
                     sender.to_string(),
                     DecryptionFailureCode::InvalidPayload,
-                    "Invalid encrypted payload".to_string(),
+                    reason,
                 ));
             }
-            Some(InternalMessageResult::Consumed)
+            if retriable {
+                Some(InternalMessageResult::Deferred)
+            } else {
+                Some(InternalMessageResult::Consumed)
+            }
         }
     }
 

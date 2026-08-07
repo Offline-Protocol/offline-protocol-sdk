@@ -912,11 +912,35 @@ cover them would turn every malformed frame into a session teardown, which is an
 unbounded churn vector; withholding an ACK carries no such cost, because the
 recovery it enables is the sender's own retry.
 
+**Frames that never reach MLS.** An envelope that fails to *parse* — an
+`__MLS_ENC__` payload in no recognized envelope form, or a media envelope whose
+encoding does not decode past its magic byte — takes the same disposition under
+the same switch: no ACK, and the sender's resend is the recovery path. The frame
+is not queued (an unparseable frame can never become parseable), so recovery is
+the resend and nothing else. This matters for a sender with an *encoding* bug
+rather than a transient corruption: its frames ride the full ACK retry ladder and
+then settle as an honest `message_failed`, where previously they were
+acknowledged as delivered and silently dropped.
+
+What stays acknowledged is everything that fails *after* a successful decrypt —
+an empty or non-UTF-8 plaintext, or a media chunk whose decrypted body does not
+parse. Those are terminal: the ratchet generation is spent and a resend would
+re-seal the same malformed plaintext, so retrying could never help.
+
 **Event semantics to plan for.** Because these failures no longer settle the
 message, `message_decryption_failed` is **advisory** and fires once per failed
 *attempt* rather than once per message — bounded by the sender's ACK retry
 budget. Treat it as "this attempt did not decrypt". The terminal signals stay
 `message_failed` for a DM and `file_receive_failed` for media.
+
+**Security-rejected frames are silent, on both paths.** Two conditions are
+refused as illegitimate rather than undeliverable: an envelope naming a session
+slot that is not the claimed sender's, and an MLS credential authenticating
+someone other than the wire sender. Neither is ACKed and neither is gated by
+`cryptoRecoveryEnabled` — an ACK would confirm to whoever injected the frame that
+the target is online and processing their traffic. Media behaves exactly like
+text here; before this parity fix a media chunk ACKed both conditions, which
+leaked precisely what the text path's silence protects.
 
 > **The re-key trigger is unauthenticated, and cannot be made otherwise.** Do not
 > read the paragraph above as "only a genuine peer can cause a re-key". An MLS

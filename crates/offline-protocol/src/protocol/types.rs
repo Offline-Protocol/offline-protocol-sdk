@@ -1041,7 +1041,7 @@ pub(crate) enum InternalMessageResult {
     /// loop responds by unmarking the id (so a resend re-enters processing
     /// instead of hitting the duplicate re-ACK path) and skipping the ACK.
     ///
-    /// Three conditions produce it, differing in whether the *frame* is worth
+    /// Four conditions produce it, differing in whether the *frame* is worth
     /// keeping:
     ///
     /// - **Session not ready**: the MLS session/group is not established yet,
@@ -1057,8 +1057,12 @@ pub(crate) enum InternalMessageResult {
     ///   consumed the ratchet generation on the failed attempt, so the frame is
     ///   likewise not queued — and no re-key is triggered, which stays
     ///   desync-only.
+    /// - **Envelope parse failure** with `crypto_recovery_enabled`: the
+    ///   `__MLS_ENC__` payload did not parse in any envelope form, so there is
+    ///   no ciphertext to decrypt. Not queued either — an unparseable frame can
+    ///   never become parseable.
     ///
-    /// In the latter two, recovery is the sender's *resend* rather than this
+    /// In the latter three, recovery is the sender's *resend* rather than this
     /// frame: Tier 2 re-seals each resend of an encrypted DM against a live
     /// generation, and a message that stays undeliverable settles as an honest
     /// `MessageFailed` instead of a lying "delivered". See the deferred-ACK and
@@ -1090,18 +1094,25 @@ pub(crate) enum ChunkOutcome {
     /// The chunk was not delivered but the sender can still recover it by
     /// resending: it could not be decrypted yet (session not ready, so queued
     /// for delayed decryption), or it is undecryptable as it stands (epoch
-    /// desync, or a crypto failure while `crypto_recovery_enabled`) and was
-    /// dropped without queueing. The caller must NOT ACK and must unmark the
-    /// id, so the sender keeps retrying and the resend re-enters processing.
-    /// For an undecryptable chunk that recovery is the media outbox's
-    /// `MediaResendRequired` path — chunks are re-encoded, never re-sealed.
+    /// desync, or a crypto failure while `crypto_recovery_enabled`), or its
+    /// media envelope did not decode at all (also `crypto_recovery_enabled`) —
+    /// the latter shapes dropped without queueing. The caller must NOT ACK and
+    /// must unmark the id, so the sender keeps retrying and the resend re-enters
+    /// processing. For an undecryptable or undecodable chunk that recovery is
+    /// the media outbox's `MediaResendRequired` path — chunks are re-encoded,
+    /// never re-sealed.
     Deferred,
-    /// The chunk was unencrypted and rejected by the encryption policy. Like
-    /// [`InternalMessageResult::SecurityRejected`] for text, the caller must NOT
-    /// ACK (don't confirm to an injector that the target processes their
-    /// messages) and must unmark the id (so a replay re-enters this gate instead
-    /// of the duplicate re-ACK path), matching the plaintext-text rejection in
-    /// the receive loop.
+    /// The chunk was refused as illegitimate rather than undeliverable. Two
+    /// shapes: an unencrypted chunk refused by the encryption policy, and an
+    /// encrypted chunk that failed its identity binding — the envelope named
+    /// another pair's session slot, or the MLS credential authenticated a
+    /// different sender than the wire envelope claims.
+    ///
+    /// Like [`InternalMessageResult::SecurityRejected`] for text, the caller
+    /// must NOT ACK (don't confirm to an injector that the target processes
+    /// their messages) and must unmark the id (so a replay re-enters this gate
+    /// instead of the duplicate re-ACK path), matching the plaintext-text
+    /// rejection in the receive loop.
     Rejected,
 }
 

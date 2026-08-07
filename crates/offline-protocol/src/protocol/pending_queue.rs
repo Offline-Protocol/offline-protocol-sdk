@@ -189,10 +189,16 @@ impl OfflineProtocol {
                     // for media means re-encoded bytes via `MediaResendRequired`
                     // rather than a replay of these.
                     ChunkOutcome::Deferred => {}
-                    // Plaintext chunk rejected by encryption policy: never ACK
-                    // (don't confirm processing to an injector) and leave the id
-                    // unmarked. Not expected on drain — queued chunks are always
-                    // encrypted — but handled for completeness.
+                    // Refused as illegitimate: never ACK (don't confirm
+                    // processing to an injector) and leave the id unmarked.
+                    //
+                    // The plaintext-policy shape cannot occur here (queued
+                    // chunks are always encrypted), but the identity-binding
+                    // shape can: a chunk queued while the session was missing
+                    // now decrypts far enough for the MLS credential to be
+                    // checked, and that check can fail where the pre-decrypt
+                    // slot check passed. Never re-queued — the frame can never
+                    // become legitimate.
                     ChunkOutcome::Rejected => {}
                 }
                 continue;
