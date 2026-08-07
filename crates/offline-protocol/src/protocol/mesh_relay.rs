@@ -74,6 +74,23 @@ pub const DEFAULT_RELAY_RATE_PER_SEC: f32 = 10.0;
 /// Burst allowance on top of the sustained forwarding rate.
 pub const DEFAULT_RELAY_BURST: f32 = 30.0;
 
+/// Transmissions held back from carrying other people's traffic so this device
+/// can always get its own frames out.
+///
+/// Own traffic and forwarded traffic share one budget, because they share one
+/// radio. Without a reserve they also share one queue discipline, and a device
+/// forwarding at its ceiling would starve its *own* sends behind strangers'
+/// — including the delivery acknowledgement for a message it just received,
+/// whose absence makes a delivered message look lost. Carving the reserve out
+/// of the burst rather than adding a second bucket keeps the ceiling exactly
+/// where it was: this changes who may spend the last few tokens, not how many
+/// there are.
+///
+/// It costs forwarding no throughput at saturation. Tokens refill continuously,
+/// so a forward simply waits for the level to climb back above the reserve —
+/// which at the sustained rate is a fraction of a second.
+pub const RELAY_OWN_TRAFFIC_RESERVE: f32 = 5.0;
+
 /// Sustained ceiling on frames accepted for forwarding from any one neighbor.
 ///
 /// Keeps a single noisy or hostile link from consuming the whole node's
@@ -294,9 +311,11 @@ impl TokenBucket {
         }
     }
 
-    fn try_take(&mut self, now: Instant) -> bool {
+    /// Spends a token, but only while more than `floor` would remain
+    /// untouched. A `floor` of zero spends down to empty.
+    fn try_take_above(&mut self, floor: f32, now: Instant) -> bool {
         self.refill(now);
-        if self.tokens >= 1.0 {
+        if self.tokens >= 1.0 + floor {
             self.tokens -= 1.0;
             true
         } else {
@@ -317,6 +336,10 @@ pub struct MeshRelayGovernor {
     /// Forwards awaiting their delay, in the order they were queued.
     pending: Vec<PendingRelay>,
     send_budget: TokenBucket,
+    /// Tokens of [`Self::send_budget`] that only this device's own frames may
+    /// spend. Clamped to half the burst so a small configured burst cannot
+    /// reserve the whole bucket and stop forwarding outright.
+    own_reserve: f32,
     peer_budgets: HashMap<String, TokenBucket>,
     counters: MeshRelayCounters,
     /// Seeds the per-frame delay so two nodes holding the same frame pick
@@ -331,6 +354,7 @@ impl MeshRelayGovernor {
         let seen = RelaySeenCache::with_config(config.seen.clone());
         Self {
             send_budget: TokenBucket::new(config.burst, config.rate_per_sec, now),
+            own_reserve: RELAY_OWN_TRAFFIC_RESERVE.min(config.burst.max(0.0) / 2.0),
             seen,
             pending: Vec::new(),
             peer_budgets: HashMap::new(),
@@ -522,21 +546,36 @@ impl MeshRelayGovernor {
         due
     }
 
-    /// Whether any budget remains to transmit right now.
+    /// Whether any budget remains to forward right now.
+    ///
+    /// Measured against the same reserve [`Self::take_send_token`] respects, so
+    /// `take_due` does not release a batch the flush is about to refuse.
     fn has_send_budget(&mut self, now: Instant) -> bool {
         self.send_budget.refill(now);
-        self.send_budget.tokens >= 1.0
+        self.send_budget.tokens >= 1.0 + self.own_reserve
     }
 
-    /// Claims budget for putting one frame on one link.
+    /// Claims budget for putting one **forwarded** frame on one link.
     ///
-    /// Every transmission goes through here — forwarding another device's
-    /// frame and handing over one of our own alike — because the ceiling is
-    /// about what this device puts on the air, not about whose message it is.
-    /// Returns false when the device is at its limit and the caller should not
-    /// transmit.
+    /// Stops short of the own-traffic reserve: at the ceiling, other people's
+    /// traffic waits so this device can still send its own. See
+    /// [`RELAY_OWN_TRAFFIC_RESERVE`] and [`Self::take_own_send_token`].
     pub fn take_send_token(&mut self) -> bool {
-        if self.send_budget.try_take(Instant::now()) {
+        self.claim_transmission(self.own_reserve)
+    }
+
+    /// Claims budget for putting one of **this device's own** frames on one
+    /// link.
+    ///
+    /// Metered against the same ceiling — it is the same radio — but allowed
+    /// into the reserve, so a device forwarding at its limit can still get its
+    /// own messages and acknowledgements out.
+    pub fn take_own_send_token(&mut self) -> bool {
+        self.claim_transmission(0.0)
+    }
+
+    fn claim_transmission(&mut self, floor: f32) -> bool {
+        if self.send_budget.try_take_above(floor, Instant::now()) {
             self.counters.transmissions = self.counters.transmissions.saturating_add(1);
             true
         } else {
@@ -795,7 +834,7 @@ impl MeshRelayGovernor {
 
         self.peer_budgets
             .get_mut(peer_id)
-            .map(|bucket| bucket.try_take(now))
+            .map(|bucket| bucket.try_take_above(0.0, now))
             .unwrap_or(true)
     }
 
@@ -1217,6 +1256,73 @@ mod tests {
             RelayAdmission::Queued,
             "a frame that got nowhere and could not be kept must stay carryable"
         );
+    }
+
+    #[test]
+    fn forwarding_leaves_room_for_this_devices_own_traffic() {
+        // One radio, one budget — but a device saturated with other people's
+        // traffic must still be able to send its own, above all the delivery
+        // acknowledgement whose absence makes a delivered message look lost.
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                queue_capacity: 512,
+                peer_rate_per_sec: 10_000.0,
+                peer_burst: 10_000.0,
+                ..immediate_config()
+            },
+        );
+
+        for _ in 0..200 {
+            gov.admit(&frame(), Some("b"), 3, false);
+        }
+        gov.take_due(Instant::now());
+
+        // Drain the budget the way a saturated forwarder does.
+        let forwarded = (0..1000).filter(|_| gov.take_send_token()).count();
+        assert!(forwarded > 0, "forwarding must get its share first");
+        assert!(
+            !gov.take_send_token(),
+            "forwarding must stop at the reserve, not at empty"
+        );
+
+        // The reserve is still there for us.
+        let own = (0..1000).filter(|_| gov.take_own_send_token()).count();
+        assert!(
+            own >= RELAY_OWN_TRAFFIC_RESERVE as usize,
+            "own traffic got {own} transmissions against a reserve of {RELAY_OWN_TRAFFIC_RESERVE}"
+        );
+
+        // And the ceiling still holds across both: the reserve is carved out of
+        // the burst, not added to it.
+        assert!(
+            (forwarded + own) <= DEFAULT_RELAY_BURST as usize + 1,
+            "{forwarded} forwarded + {own} own exceeds the burst of {DEFAULT_RELAY_BURST}"
+        );
+    }
+
+    #[test]
+    fn a_small_configured_burst_still_forwards() {
+        // The reserve is clamped to half the burst, so a device configured with
+        // a burst smaller than the reserve does not silently stop forwarding
+        // altogether.
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                burst: 2.0,
+                rate_per_sec: 1.0,
+                peer_rate_per_sec: 10_000.0,
+                peer_burst: 10_000.0,
+                ..immediate_config()
+            },
+        );
+
+        gov.admit(&frame(), Some("b"), 3, false);
+        assert!(
+            !gov.take_due(Instant::now()).is_empty(),
+            "a small burst must still release forwards"
+        );
+        assert!(gov.take_send_token(), "and still allow transmitting them");
     }
 
     #[test]

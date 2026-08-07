@@ -3105,7 +3105,12 @@ impl OfflineProtocol {
             // traffic: it is the same radio. Without this a large transfer,
             // which offers every chunk separately, would put an unbounded burst
             // on the air in one call.
-            if !self.mesh_relay.take_send_token() {
+            //
+            // Own traffic spends from the reserve that forwarding leaves alone,
+            // so a device carrying the neighborhood at its ceiling can still
+            // get its own frames out — an acknowledgement above all, whose
+            // absence makes a delivered message look lost to its sender.
+            if !self.mesh_relay.take_own_send_token() {
                 debug!(
                     message_id = %message.id,
                     "At the forwarding limit; not handing this to further neighbors"
