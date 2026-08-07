@@ -1,8 +1,9 @@
 //! Message receive loop and file chunk handling.
 
+use super::mesh_relay::RelayAdmission as MeshRelayAdmission;
 use super::{
     internal_prefixes, lock_shared_state, ChunkOutcome, InternalMessageResult, OfflineProtocol,
-    PendingMediaMetadataEntry, ProtocolState, RichPayloadV1,
+    PendingMediaMetadataEntry, ProtocolState, RichPayloadV1, CRITICAL_RELAY_BATTERY_LEVEL,
 };
 use crate::constants::{ACK_FOR_KEY, RELAY_LEARNED_ROUTE_QUALITY};
 use crate::events::{Event, SecurityWarningCode};
@@ -100,12 +101,51 @@ impl OfflineProtocol {
         loop {
             match self.transport_manager.receive() {
                 Ok(Some((transport_used, mut message))) => {
+                    // The peer whose link this frame physically arrived on.
+                    // Distinct from `message.sender`, which is who wrote it:
+                    // the two agree only at the first hop. `None` when the
+                    // carrier does not identify links (Nostr) or the platform
+                    // did not supply an id.
+                    let arrival_peer = message.transport_peer_id().map(str::to_string);
+
+                    // Traffic for someone else is forwarded, not processed, and
+                    // that decision comes first.
+                    //
+                    // Everything below this point treats the frame as part of
+                    // our own exchange: it merges the sender's clock into ours,
+                    // settles our outbox from acknowledgements, and consumes the
+                    // frame. None of that is true of a frame merely passing
+                    // through us — its acknowledgements belong to the pair it
+                    // travels between, and once a node carries the whole
+                    // neighborhood's traffic, absorbing every clock it sees
+                    // would drag ours to the network's maximum.
+                    //
+                    // Never forward a frame claiming our own origin: a genuine
+                    // self-originated frame is never received inbound with a
+                    // foreign recipient (the send path does not loop back), so
+                    // this is a routing loop or a forgery aimed at
+                    // `internet_control_op`'s self-origination gate — re-issuing
+                    // it from our outbox would let a mesh peer drive
+                    // relay-native control ops on our authenticated relay
+                    // connection. (A sender==self frame addressed *to* us is the
+                    // legitimate relay echo and falls through unchanged.)
+                    if message.recipient.as_str() != self.config.user_id {
+                        if message.sender.as_str() == self.config.user_id {
+                            debug!(
+                                message_id = %message.id,
+                                recipient = %message.recipient,
+                                "Dropping inbound frame forging our own origin"
+                            );
+                            continue;
+                        }
+                        self.try_relay_message(&message, arrival_peer.as_deref());
+                        continue;
+                    }
+
                     // Block filter (early): check before any side-effects so
                     // that blocked users cannot advance our Lamport clock,
                     // leak our presence via re-ACK, or trigger any processing.
-                    // Relay messages for third parties pass through.
-                    let sender_blocked = self.is_user_blocked(message.sender.as_str())
-                        && message.recipient.as_str() == self.config.user_id;
+                    let sender_blocked = self.is_user_blocked(message.sender.as_str());
 
                     // Merge Lamport clock for every non-blocked received message
                     // — including duplicates, ACKs, and internal protocol
@@ -127,6 +167,18 @@ impl OfflineProtocol {
                         // Re-ACK duplicate packets so the sender can stop
                         // retrying — but NOT for blocked users, to avoid
                         // leaking presence information.
+                        //
+                        // Every copy is answered, including the several that
+                        // one delivery produces when it travels through nearby
+                        // devices. Answering only the first was tried and
+                        // rejected: a copy arriving moments later and a
+                        // retransmission arriving because the answer was lost
+                        // are not distinguishable here, and staying quiet for
+                        // the second turns a delivered message into a failed
+                        // one. The redundant answers are bounded — a delivery
+                        // arrives by at most as many paths as neighbors carried
+                        // it, answers never provoke further answers, and every
+                        // frame that leaves is rate-capped like any other.
                         if !sender_blocked && message.requires_ack {
                             if let Err(err) = self.send_delivery_ack(&message, transport_used) {
                                 error!(
@@ -153,29 +205,6 @@ impl OfflineProtocol {
                     }
 
                     self.deduplicator.mark_seen(message.id.clone());
-
-                    // Relay: if this message is not for us, forward it.
-                    // Never relay a frame claiming our own origin: a genuine
-                    // self-originated frame is never received inbound with a
-                    // foreign recipient (the send path does not loop back), so
-                    // this is a routing loop or a forgery aimed at
-                    // `internet_control_op`'s self-origination gate — re-issuing
-                    // it from our outbox would let a mesh peer drive
-                    // relay-native control ops on our authenticated relay
-                    // connection. (A sender==self frame addressed *to* us is the
-                    // legitimate relay echo and falls through unchanged.)
-                    if message.recipient.as_str() != self.config.user_id {
-                        if message.sender.as_str() == self.config.user_id {
-                            debug!(
-                                message_id = %message.id,
-                                recipient = %message.recipient,
-                                "Dropping inbound frame forging our own origin"
-                            );
-                            continue;
-                        }
-                        self.try_relay_message(&message);
-                        continue;
-                    }
 
                     // Handle internal MLS messages
                     let mut was_decrypted = false;
@@ -374,75 +403,274 @@ impl OfflineProtocol {
         }
     }
 
-    /// Attempts to relay (forward) a message destined for a third party.
+    /// Considers an inbound frame addressed to a third party for forwarding.
     ///
-    /// Learns a route back to the sender, checks relay configuration and TTL,
-    /// then forwards the message with hop count incremented and TTL decremented.
-    /// Emits a `MessageRelayed` event on success.
-    fn try_relay_message(&mut self, message: &Message) {
-        // Learn route back to sender through whoever gave us this message.
-        // Note: in multi-hop scenarios this records sender as both destination
-        // and next_hop, which is correct for 1-hop but conservative for deeper
-        // chains (the transport layer does not expose the immediate peer ID).
+    /// Learns the route back toward the sender, then offers the frame to the
+    /// governor, which decides whether it travels any further. Nothing is
+    /// transmitted here: an accepted frame is queued and goes out from
+    /// [`Self::flush_mesh_relays`] once its delay elapses, which is what gives
+    /// a neighbor the chance to cover it first.
+    ///
+    /// `arrival_peer` is the neighbor that handed us this frame, when the
+    /// carrier identified the link.
+    fn try_relay_message(&mut self, message: &Message, arrival_peer: Option<&str>) {
+        // Cheapest answer first. This device sees the whole neighborhood's
+        // traffic, so in a crowded room most third-party arrivals are copies of
+        // a frame it has already dealt with — and everything below would be
+        // thrown away by the suppression check inside `admit`: a route-table
+        // write, a battery snapshot that locks and allocates across every
+        // transport, and an enumeration of every link. Answering a duplicate
+        // costs a hash lookup instead.
+        //
+        // Route learning is skipped along with the rest, which is deliberate:
+        // the copy teaches nothing the first one did not, and the table is not
+        // what forwarding decisions are made from. A duplicate we still hold a
+        // pending copy of is *not* absorbed here — standing down for a neighbor
+        // needs the neighbor set — so that case still takes the full path.
+        if self
+            .mesh_relay
+            .absorb_settled_duplicate(&message.id.as_str())
+        {
+            return;
+        }
+
+        // Learn the route back toward the sender. The next hop is the neighbor
+        // that handed us the frame, not the sender itself: for anything past
+        // the first hop the sender is several links away and naming it here
+        // would record a next hop we cannot address. Frames from carriers that
+        // do not identify links fall back to the sender, which is correct at
+        // one hop and no worse than before beyond it.
+        let learned_next_hop = arrival_peer.unwrap_or_else(|| message.sender.as_str());
         self.path_selector.learn_route_from_message(
             message,
-            message.sender.as_str(),
+            learned_next_hop,
             RELAY_LEARNED_ROUTE_QUALITY,
         );
 
+        // Carrying traffic for others costs this device's radio and battery,
+        // so it stays a local decision.
         let relay_allowed = self.config.relay.allow_relay
             && self.config.relay.relay_priority != RelayPriority::Never;
 
         if !relay_allowed {
             debug!(
                 message_id = %message.id,
-                "Dropping relay message: relay disabled"
+                "Not forwarding: relaying is disabled on this device"
             );
             return;
         }
 
-        if message.is_ttl_exhausted() {
+        // Carrying other people's messages is the first thing to give up when
+        // the battery is going: a device that spends its last few percent
+        // relaying cannot send its own message when its owner needs to. The
+        // device keeps sending and receiving its own traffic either way.
+        //
+        // An unknown battery level is treated as willing — most platforms
+        // report one, and refusing to carry anything on a device that simply
+        // does not publish a level would quietly remove it from the network.
+        if !self.battery_allows_relaying() {
             debug!(
                 message_id = %message.id,
-                sender = %message.sender,
-                recipient = %message.recipient,
-                "Dropping relay message: TTL exhausted"
+                "Not forwarding: battery is below the level for carrying traffic"
             );
             return;
         }
 
-        let mut relay_msg = message.clone();
-        let _ = relay_msg.decrement_ttl();
-        let _ = relay_msg.increment_hop();
-
-        let hop_count = relay_msg.hop_count.value();
-        let remaining_ttl = relay_msg.ttl.value();
-
-        match self.transport_manager.send(&relay_msg) {
-            Ok(()) => {
+        let neighbors = self.transport_manager.mesh_neighbors();
+        let degree = neighbors.len();
+        // Whether we hold the link to the recipient ourselves. At the last hop
+        // no other device can be assumed to have it, so our copy must not be
+        // dropped in favour of a neighbor's.
+        let is_last_hop = neighbors
+            .iter()
+            .any(|n| n.peer_id == message.recipient.as_str());
+        match self
+            .mesh_relay
+            .admit(message, arrival_peer, degree, is_last_hop)
+        {
+            MeshRelayAdmission::Queued => {
                 debug!(
-                    message_id = %relay_msg.id,
-                    sender = %relay_msg.sender,
-                    recipient = %relay_msg.recipient,
-                    hop_count,
-                    remaining_ttl,
-                    "Relayed message for third party"
-                );
-                self.emit_event(Event::message_relayed(
-                    relay_msg.id.as_str(),
-                    relay_msg.sender.as_str().to_string(),
-                    relay_msg.recipient.as_str().to_string(),
-                    hop_count,
-                    remaining_ttl,
-                ));
-            }
-            Err(err) => {
-                warn!(
-                    message_id = %relay_msg.id,
-                    error = %err,
-                    "Failed to relay message"
+                    message_id = %message.id,
+                    recipient = %message.recipient,
+                    degree,
+                    "Queued frame for forwarding"
                 );
             }
+            MeshRelayAdmission::Rejected(reason) => {
+                debug!(
+                    message_id = %message.id,
+                    ?reason,
+                    "Not forwarding"
+                );
+            }
+        }
+    }
+
+    /// Whether the battery is healthy enough to carry other people's traffic.
+    ///
+    /// Applies [`RelayConfig::min_battery_for_relay`], the same floor the relay
+    /// role uses, with the same exemption for a charging device: plugged in,
+    /// only a critical level stops it. An unknown level means yes — see the
+    /// caller.
+    fn battery_allows_relaying(&self) -> bool {
+        let (_statuses, available) = self.transport_manager.snapshot_status_and_available();
+        let (battery_level, is_charging) =
+            crate::telemetry::aggregator::device_battery_from_available(
+                self.transport_manager.current_transport(),
+                &available,
+            );
+
+        let Some(level) = battery_level else {
+            return true;
+        };
+
+        if level < CRITICAL_RELAY_BATTERY_LEVEL {
+            return false;
+        }
+
+        is_charging || level >= self.config.relay.min_battery_for_relay
+    }
+
+    /// Transmits the forwards whose delay has elapsed.
+    ///
+    /// Called from the process tick. Each frame goes to a bounded set of
+    /// neighbors chosen by the governor, never back to the peer it came from or
+    /// to the peer that wrote it. A frame whose recipient is a neighbor of ours
+    /// is handed straight to them instead — the shortest path we can see.
+    pub(super) fn flush_mesh_relays(&mut self) {
+        let due = self.mesh_relay.take_due(Instant::now());
+        if due.is_empty() {
+            return;
+        }
+
+        let neighbors = self.transport_manager.mesh_neighbors();
+
+        // `relay` is borrowed rather than destructured throughout: a frame that
+        // reaches no neighbor has to be handed back whole, and cloning the
+        // message to keep that option open would copy the payload — up to a
+        // whole media chunk — on every flush.
+        for relay in due {
+            let message = &relay.message;
+            let recipient = message.recipient.as_str().to_string();
+            let message_id = message.id.as_str();
+            let hop_count = message.hop_count.value();
+            let remaining_ttl = message.ttl.value();
+
+            let mut exclude: Vec<&str> = vec![message.sender.as_str()];
+            if let Some(peer) = relay.arrival_peer.as_deref() {
+                exclude.push(peer);
+            }
+            let onward = self.mesh_relay.select_targets(
+                neighbors
+                    .iter()
+                    .map(|n| (n.peer_id.as_str(), n.link_quality())),
+                &exclude,
+                &message_id,
+            );
+
+            // If the destination is one of our own neighbors, hand it over
+            // directly: no fan-out is worth more than arriving. Should that
+            // link fail between choosing it and writing to it, fall back to
+            // carrying it onward rather than dropping a frame we could still
+            // move.
+            let targets = if neighbors.iter().any(|n| n.peer_id == recipient) {
+                let mut ordered = vec![recipient.clone()];
+                ordered.extend(onward.into_iter().filter(|peer| peer != &recipient));
+                ordered
+            } else {
+                onward
+            };
+            let deliver_direct = targets.first() == Some(&recipient);
+
+            if targets.is_empty() {
+                // Nowhere to hand it right now: we hold no link, or the only
+                // ones we hold are the peers this frame must not go back to.
+                // Falls through to the hand-back below rather than being
+                // dropped — a neighbor may well appear within the few seconds
+                // the frame is still worth carrying.
+                debug!(
+                    message_id = %message.id,
+                    "No onward neighbor for this frame"
+                );
+            }
+
+            let mut delivered_to = 0usize;
+            for target in &targets {
+                // Each link this frame crosses is one transmission against the
+                // device's ceiling. Running out mid-fan-out stops the fan-out
+                // rather than the frame: the neighbors already reached carry it
+                // on, and the sender's retry covers the rest.
+                if !self.mesh_relay.take_send_token() {
+                    debug!(
+                        message_id = %message.id,
+                        "At the forwarding limit; stopping this fan-out here"
+                    );
+                    break;
+                }
+
+                match self.transport_manager.send_to_neighbor(target, message) {
+                    Ok(transport) => {
+                        delivered_to += 1;
+                        // Handing it to the recipient themselves ends the
+                        // journey; the remaining neighbors are only a fallback
+                        // for that link failing.
+                        if deliver_direct && target == &recipient {
+                            debug!(
+                                message_id = %message.id,
+                                next_hop = %target,
+                                transport = ?transport,
+                                "Delivered to its recipient directly"
+                            );
+                            break;
+                        }
+                        debug!(
+                            message_id = %message.id,
+                            next_hop = %target,
+                            transport = ?transport,
+                            hop_count,
+                            remaining_ttl,
+                            "Forwarded frame to neighbor"
+                        );
+                    }
+                    Err(err) => {
+                        // A link that went away between selection and send.
+                        // The other targets still carry the frame.
+                        debug!(
+                            message_id = %message.id,
+                            next_hop = %target,
+                            error = %err,
+                            "Could not forward to neighbor"
+                        );
+                    }
+                }
+            }
+
+            // Nothing reached a neighbor. Hand it back instead of dropping it:
+            // its id is already recorded as handled here, so a drop would lose
+            // this copy *and* refuse both the copies arriving behind it and the
+            // sender's retransmissions, for the whole retention window.
+            //
+            // Why it got nowhere does not change that. The budget ran out (the
+            // frames released alongside this one spent the allowance between
+            // them), every link chosen for it went away between being picked
+            // and being written to, or there was no usable link to pick. In all
+            // three the frame has travelled nowhere and this queue is the only
+            // thing that still remembers it. It keeps its due time, so one that
+            // stays stuck is abandoned by the overdue cut-off rather than
+            // retried forever.
+            if delivered_to == 0 {
+                self.mesh_relay.requeue(relay);
+                continue;
+            }
+
+            self.mesh_relay.record_forwarded();
+            self.emit_event(Event::message_relayed(
+                message.id.as_str(),
+                message.sender.as_str().to_string(),
+                recipient,
+                hop_count,
+                remaining_ttl,
+            ));
         }
     }
 

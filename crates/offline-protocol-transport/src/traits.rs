@@ -65,7 +65,56 @@ pub trait Transport: Send + Sync + Any {
     /// that instead *broadcasts* serialized bytes to every neighbor would break
     /// that assumption and must re-establish per-link codec safety before
     /// emitting anything other than JSON.
+    ///
+    /// [`Transport::send_to_peer`] keeps the same invariant by moving the key:
+    /// there the physical target is `peer_id`, so codec and MTU decisions are
+    /// made against *that* peer's confirmed capabilities rather than the
+    /// recipient's. Frames still go out one addressed link at a time; nothing
+    /// in this crate emits one serialized buffer to many peers.
     fn send(&self, message: &Message) -> Result<()>;
+
+    /// Queues a message for delivery to a **specific directly connected
+    /// peer**, regardless of `message.recipient`.
+    ///
+    /// This is the addressed-hop counterpart to [`Transport::send`]: it exists
+    /// so a caller can hand a frame to a neighbor that is not the frame's final
+    /// recipient (mesh forwarding), while [`Transport::send`] remains the
+    /// "deliver this to its recipient" call. Transports that cannot address a
+    /// peer independently of the recipient return an error, which is the
+    /// default.
+    ///
+    /// Implementations must treat `peer_id` as the physical target for every
+    /// link-layer decision — MTU selection, queue keying, wire-codec choice —
+    /// because that is the peer whose capabilities were negotiated. Using
+    /// `message.recipient` for any of those on a forwarded frame would apply a
+    /// third party's link parameters to this hop.
+    ///
+    /// Returns `Ok(())` if the transport accepted the message for that peer,
+    /// `Err` if the peer is not a live link or the transport is unavailable.
+    fn send_to_peer(&self, peer_id: &str, message: &Message) -> Result<()> {
+        let _ = message;
+        Err(crate::Error::Other(format!(
+            "{} transport cannot address peer {} independently of the recipient",
+            self.transport_type(),
+            peer_id
+        )))
+    }
+
+    /// Lists the peers this transport currently holds a live link to.
+    ///
+    /// Only transports whose links are peer-to-peer (BLE, Wi-Fi Direct) report
+    /// anything; carriers that reach peers through infrastructure return the
+    /// default empty list, since "directly connected" has no meaning for them.
+    ///
+    /// This is deliberately a *live connectivity* view, not a discovery
+    /// memory: entries appear when the platform reports a connection and
+    /// disappear when it reports a loss or the transport leaves
+    /// [`TransportStatus::Available`]. Callers that fan out to neighbors
+    /// depend on that — addressing a remembered-but-gone peer would queue
+    /// frames for a link that no longer exists.
+    fn connected_peers(&self) -> Vec<crate::PeerLink> {
+        Vec::new()
+    }
 
     /// Attempts to receive a message from this transport.
     ///
@@ -144,6 +193,23 @@ pub trait Transport: Send + Sync + Any {
         Err(crate::Error::Other(format!(
             "{} transport does not reassemble fragments; \
              use on_data_received instead",
+            self.transport_type()
+        )))
+    }
+
+    /// Like [`Transport::on_fragment_received`], but attaches a
+    /// transport-verified `peer_id` to the reassembled message.
+    ///
+    /// This is the fragmenting counterpart to
+    /// [`Transport::on_data_received_from`]. The peer id it records is the
+    /// link the frame physically arrived on, which is what lets the protocol
+    /// layer tell "who handed me this" apart from "who wrote this" — the two
+    /// are the same peer only at the first hop.
+    fn on_fragment_received_from(&self, fragment_data: Vec<u8>, peer_id: String) -> Result<()> {
+        let _ = (fragment_data, peer_id);
+        Err(crate::Error::Other(format!(
+            "{} transport does not reassemble fragments; \
+             use on_data_received_from instead",
             self.transport_type()
         )))
     }

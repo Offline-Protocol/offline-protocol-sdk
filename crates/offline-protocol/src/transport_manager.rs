@@ -63,6 +63,41 @@ pub struct TransportManager {
     peer_binary_wire: HashSet<String>,
 }
 
+/// Carriers whose links are peer-to-peer, in the order a forwarding caller
+/// should prefer them.
+///
+/// These are the only transports that can carry a *mesh hop*: a frame handed
+/// straight to a neighbor's radio. Wi-Fi Direct leads because a link that
+/// exists at all is the higher-bandwidth one; BLE is the carrier that is
+/// almost always present. Everything else reaches peers through
+/// infrastructure, which is not a hop — it is an exit from the mesh.
+const MESH_TRANSPORTS: &[TransportType] = &[TransportType::WiFiDirect, TransportType::BLE];
+
+/// A peer reachable over a direct mesh link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshNeighbor {
+    /// User-level id of the neighbor.
+    pub peer_id: String,
+    /// Signal strength for the link, when the carrier measures one.
+    pub rssi: Option<i16>,
+    /// The carrier holding the link.
+    pub transport: TransportType,
+}
+
+impl MeshNeighbor {
+    /// How good this link is, on a 0–100 scale.
+    ///
+    /// Derived from signal strength where the carrier reports it, and a
+    /// mid-scale value where it does not — an unmeasured link should not
+    /// outrank a measured good one, nor be discarded like a measured bad one.
+    pub fn link_quality(&self) -> u8 {
+        match self.rssi {
+            Some(rssi) => offline_protocol_transport::LinkQuality::from_rssi(rssi).value(),
+            None => offline_protocol_transport::DEFAULT_LINK_QUALITY_WITHOUT_RSSI,
+        }
+    }
+}
+
 /// Dedupe window: don't re-emit same escalation trigger reason within this duration.
 const ESCALATION_TRIGGER_DEDUPE_SECS: u64 = 30;
 
@@ -845,6 +880,174 @@ impl TransportManager {
         self.current_transport = Some(transport_type);
 
         Ok(())
+    }
+
+    /// Lists every peer reachable over a direct mesh link, with the transport
+    /// that link runs on.
+    ///
+    /// Only the peer-to-peer carriers are consulted: a mesh neighbor is one we
+    /// can hand a frame to over our own radio, which is what makes it a
+    /// candidate next hop. Infrastructure carriers (Internet, Nostr, Reticulum)
+    /// reach peers through something else, so they report no links and appear
+    /// here as nothing — a message routed through them is not taking a mesh
+    /// hop, it is leaving the mesh.
+    ///
+    /// A peer visible on more than one carrier is reported once, on the first
+    /// carrier that claims it; [`Self::send_to_neighbor`] resolves the same way,
+    /// so the pair stay consistent.
+    pub fn mesh_neighbors(&self) -> Vec<MeshNeighbor> {
+        let mut neighbors: Vec<MeshNeighbor> = Vec::new();
+
+        for transport_type in MESH_TRANSPORTS {
+            let Some(transport) = self.transports.get(transport_type) else {
+                continue;
+            };
+            for link in transport.connected_peers() {
+                if neighbors.iter().any(|n| n.peer_id == link.peer_id) {
+                    continue;
+                }
+                neighbors.push(MeshNeighbor {
+                    peer_id: link.peer_id,
+                    rssi: link.rssi,
+                    transport: *transport_type,
+                });
+            }
+        }
+
+        neighbors
+    }
+
+    /// Whether a frame for `peer_id` can plausibly arrive without being carried
+    /// by other devices.
+    ///
+    /// This exists because **a send returning `Ok` is not evidence of
+    /// reachability**. Only BLE refuses a recipient it holds no link to; Wi-Fi
+    /// Direct and Reticulum enqueue for any recipient and report success, so a
+    /// frame handed to them for someone out of range is queued for a link that
+    /// will never drain — reported as sent, silently swallowed. Anything that
+    /// decides "the mesh has to carry this" from a send failure therefore never
+    /// fires on a device where one of those carriers is up. Asking this instead
+    /// keeps that decision on facts we can check.
+    ///
+    /// Two ways the answer is yes:
+    ///
+    /// - An **infrastructure** carrier is available. Internet, Nostr and
+    ///   Reticulum do their own routing and reach peers we hold no radio link
+    ///   to, so a direct send is a real delivery attempt. (Reticulum counts
+    ///   here because it is a routing network in its own right — its `Ok` means
+    ///   "accepted for routing", which is as much as any relay-style carrier
+    ///   promises.)
+    /// - The peer is one of our own **mesh neighbors**, so a mesh carrier can
+    ///   hand the frame straight over.
+    ///
+    /// Checked in that order so the common online case costs a status scan and
+    /// never enumerates links.
+    pub fn can_reach_without_carrying(&self, peer_id: &str) -> bool {
+        let has_infrastructure = self.transports.iter().any(|(transport_type, transport)| {
+            !MESH_TRANSPORTS.contains(transport_type)
+                && transport.status() == TransportStatus::Available
+        });
+        if has_infrastructure {
+            return true;
+        }
+
+        MESH_TRANSPORTS.iter().any(|transport_type| {
+            self.transports
+                .get(transport_type)
+                .filter(|transport| transport.status() == TransportStatus::Available)
+                .is_some_and(|transport| {
+                    transport
+                        .connected_peers()
+                        .iter()
+                        .any(|link| link.peer_id == peer_id)
+                })
+        })
+    }
+
+    /// Whether `transport_type` can actually put a frame in front of `peer_id`.
+    ///
+    /// The narrower question [`Self::can_reach_without_carrying`] answers across
+    /// every carrier, asked of one. It exists for the same reason: a transport
+    /// returning `Ok` is not evidence the frame can arrive. A **mesh** carrier
+    /// can only address a peer it holds a live link to, and Wi-Fi Direct
+    /// enqueues for any recipient regardless — so a frame handed to it for
+    /// someone several hops away is queued for a link that never drains.
+    /// **Infrastructure** carriers do their own routing, so for them the answer
+    /// is yes whenever they are available.
+    ///
+    /// Callers that would otherwise trust a preferred transport — replying on
+    /// the link a message arrived over, above all — must ask this first, or the
+    /// reply dies on exactly the multi-hop path that made forwarding necessary.
+    pub fn can_address_via(&self, transport_type: TransportType, peer_id: &str) -> bool {
+        let Some(transport) = self.transports.get(&transport_type) else {
+            return false;
+        };
+        if transport.status() != TransportStatus::Available {
+            return false;
+        }
+        if !MESH_TRANSPORTS.contains(&transport_type) {
+            return true;
+        }
+        transport
+            .connected_peers()
+            .iter()
+            .any(|link| link.peer_id == peer_id)
+    }
+
+    /// Hands `message` to a specific mesh neighbor, whatever the message's own
+    /// recipient is.
+    ///
+    /// This is the forwarding primitive: the frame crosses one link, to the
+    /// peer named by `peer_id`. Because that peer is the physical target, the
+    /// binary wire codec is negotiated against **its** capabilities rather than
+    /// the recipient's — stamping a forwarded frame binary because the distant
+    /// recipient supports it could put bytes a neighbor cannot decode onto that
+    /// neighbor's link.
+    ///
+    /// Returns the transport the frame went out on.
+    pub fn send_to_neighbor(&self, peer_id: &str, message: &Message) -> Result<TransportType> {
+        let stamped;
+        let message = if message.wire_codec() != WireCodec::BinaryV1
+            && self.peer_binary_wire.contains(peer_id)
+        {
+            let mut m = message.clone();
+            m.set_wire_codec(WireCodec::BinaryV1);
+            stamped = m;
+            &stamped
+        } else if message.wire_codec() == WireCodec::BinaryV1
+            && !self.peer_binary_wire.contains(peer_id)
+        {
+            // The frame arrived stamped binary (or was stamped for a different
+            // peer) but this hop cannot decode it. Fall back to the JSON floor
+            // rather than writing bytes the neighbor will drop.
+            let mut m = message.clone();
+            m.set_wire_codec(WireCodec::Json);
+            stamped = m;
+            &stamped
+        } else {
+            message
+        };
+
+        let mut last_error: Option<String> = None;
+
+        for transport_type in MESH_TRANSPORTS {
+            let Some(transport) = self.transports.get(transport_type) else {
+                continue;
+            };
+            if transport.status() != TransportStatus::Available {
+                continue;
+            }
+            match transport.send_to_peer(peer_id, message) {
+                Ok(()) => return Ok(*transport_type),
+                Err(e) => last_error = Some(e.to_string()),
+            }
+        }
+
+        Err(Error::Transport(TransportError::PeerNotReachable(format!(
+            "no mesh transport holds a link to {}{}",
+            peer_id,
+            last_error.map(|e| format!(" ({})", e)).unwrap_or_default()
+        ))))
     }
 
     /// Attempts to receive a message from any transport.

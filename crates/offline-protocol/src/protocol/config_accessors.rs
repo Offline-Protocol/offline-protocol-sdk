@@ -1,5 +1,6 @@
 //! Configuration accessors, diagnostics, and service registration.
 
+use super::mesh_relay::MeshRelayStats;
 use super::{
     lock_shared_state, OfflineProtocol, PendingQueueMetrics, ProtocolState, KNOWN_PEER_TTL_SECS,
     MEDIA_TRANSFER_STALE_TIMEOUT_SECS,
@@ -160,6 +161,30 @@ impl OfflineProtocol {
         self.known_peers.contains_key(peer_id)
     }
 
+    /// Reports how much traffic this device is carrying for other people.
+    ///
+    /// Useful for showing a user what their device is contributing, and for
+    /// spotting a neighborhood in trouble: a rising `rate_deferred` means
+    /// forwarding is hitting its ceiling, and `peer_rate_limited` means a
+    /// single neighbor is sending more than its share. `dropped_for_capacity`
+    /// is expected to stay at zero — see [`MeshRelayStats::dropped_for_capacity`].
+    pub fn mesh_relay_stats(&self) -> MeshRelayStats {
+        let counters = self.mesh_relay.counters();
+        MeshRelayStats {
+            forwarded: counters.forwarded,
+            transmissions: counters.transmissions,
+            queued: counters.queued,
+            awaiting_transmission: self.mesh_relay.pending_len(),
+            duplicates_suppressed: counters.duplicates_suppressed,
+            covered_by_a_neighbor: counters.cancelled_by_duplicate,
+            peer_rate_limited: counters.peer_rate_limited,
+            rate_deferred: counters.rate_deferred,
+            hop_limit_reached: counters.hop_limit_reached,
+            reach_clamped: counters.ttl_clamped,
+            dropped_for_capacity: self.mesh_relay.seen_capacity_evictions(),
+        }
+    }
+
     /// Returns a mutable reference to the retry queue (test-only).
     #[cfg(test)]
     pub(crate) fn retry_queue_mut(&mut self) -> &mut offline_protocol_reliability::RetryQueue {
@@ -171,6 +196,7 @@ impl OfflineProtocol {
     pub(crate) fn cleanup_expired_entries(&mut self) {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
+        self.mesh_relay.maintain(std::time::Instant::now());
         self.prune_stale_known_peers(std::time::Instant::now());
         self.cleanup_expired_pending_messages_if_due();
         self.cleanup_outbox();

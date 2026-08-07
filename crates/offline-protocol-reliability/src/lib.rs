@@ -13,10 +13,15 @@ pub mod ack_optimization;
 pub mod constants;
 pub mod deduplicator;
 pub mod error;
+pub mod relay_seen;
 pub mod retry_queue;
 
 pub use ack_manager::{AckConfig, AckEvictionInfo, AckManager};
 pub use ack_optimization::{AckOptimizationConfig, AckOptimizer, AggregatedAck, PiggybackAckData};
 pub use deduplicator::{Deduplicator, DeduplicatorConfig, DeduplicatorMode, DeduplicatorStats};
 pub use error::{Error, Result};
+pub use relay_seen::{
+    RelaySeenCache, RelaySeenConfig, SeenOutcome, DEFAULT_RELAY_SEEN_CAPACITY,
+    DEFAULT_RELAY_SEEN_RETENTION_SECS,
+};
 pub use retry_queue::{RetryConfig, RetryQueue, RetryQueueStats};

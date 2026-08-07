@@ -31,6 +31,19 @@ pub(crate) fn create_test_config_for_user(user_id: &str) -> ProtocolConfig {
     config
 }
 
+/// A config whose forwarding holds no frames back, so a test can queue a frame
+/// and flush it in the same breath.
+///
+/// The hold exists to let neighbors cover each other in a real neighborhood;
+/// tests that assert *what* was forwarded rather than *when* would otherwise
+/// have to sleep. Tests covering the hold itself set their own timings.
+pub(crate) fn create_relay_test_config_for_user(user_id: &str) -> ProtocolConfig {
+    let mut config = create_test_config_for_user(user_id);
+    config.mesh_relay.jitter_min = std::time::Duration::from_millis(0);
+    config.mesh_relay.jitter_max = std::time::Duration::from_millis(0);
+    config
+}
+
 #[derive(Default, Clone)]
 struct RecordingMlsEmitter {
     events: Arc<Mutex<Vec<MlsLifecycleEvent>>>,
@@ -21396,7 +21409,7 @@ fn test_reset_tofu_for_peer_allows_repinning() {
 
 #[test]
 fn test_relay_forwards_third_party_message() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
 
     let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
     let relay_events_clone = relay_events.clone();
@@ -21408,6 +21421,10 @@ fn test_relay_forwards_third_party_message() {
 
     let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
+    // Someone to carry it onward: without a neighbor there is nowhere for a
+    // forwarded frame to go.
+    mock.add_connected_peer("carol", -55);
+    let transport_handle = mock.clone();
 
     // Create a message from alice to bob (not for us = user123)
     let msg = Message::new(
@@ -21430,6 +21447,18 @@ fn test_relay_forwards_third_party_message() {
     assert!(
         received.is_none(),
         "Third-party message should be relayed, not returned"
+    );
+
+    // Forwarding goes out from the process tick.
+    protocol.process().unwrap();
+
+    let forwarded = transport_handle.peer_sends();
+    assert_eq!(forwarded.len(), 1, "forwarded to exactly one neighbor");
+    assert_eq!(forwarded[0].0, "carol", "handed to the neighbor");
+    assert_eq!(
+        forwarded[0].1.recipient.as_str(),
+        "bob",
+        "still addressed to its recipient"
     );
 
     // Verify MessageRelayed event was emitted with correct fields
@@ -21456,16 +21485,266 @@ fn test_relay_forwards_third_party_message() {
     }
 }
 
+/// Drives one third-party frame through a device whose battery reports
+/// `level` and `is_charging`, and returns how many neighbors it was handed to.
+///
+/// The device always has a neighbor to carry it and forwarding is otherwise
+/// allowed, so the only thing deciding the outcome is the battery gate.
+fn neighbors_carried_to_at_battery(level: Option<u8>, is_charging: bool) -> usize {
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    mock.set_metrics(TransportMetrics {
+        battery_level: level,
+        is_charging,
+        ..TransportMetrics::default()
+    });
+    mock.add_connected_peer("carol", -55);
+    let transport_handle = mock.clone();
+
+    mock.queue_message(Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "carry me if you can",
+    ));
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    assert!(
+        protocol.receive_message().is_none(),
+        "a third-party frame is never surfaced to the app"
+    );
+    // Admission (including the battery gate) happens on receive; transmission
+    // happens on the tick.
+    protocol.process().unwrap();
+
+    transport_handle.peer_sends().len()
+}
+
+#[test]
+fn a_healthy_battery_carries_other_peoples_traffic() {
+    assert_eq!(neighbors_carried_to_at_battery(Some(80), false), 1);
+}
+
+#[test]
+fn a_battery_below_the_relay_floor_carries_nothing() {
+    // Carrying other people's messages is the first thing to give up when the
+    // battery is going: a device that spends its last few percent relaying
+    // cannot send its own message when its owner needs to. Default floor is 30.
+    assert_eq!(
+        neighbors_carried_to_at_battery(Some(20), false),
+        0,
+        "below the relay battery floor, nothing is carried for others"
+    );
+}
+
+#[test]
+fn a_charging_device_carries_below_the_floor() {
+    // Plugged in, the soft floor is excused — the same exemption the relay
+    // role itself applies, so the two policies do not disagree about whether
+    // this device should be working for the network.
+    assert_eq!(
+        neighbors_carried_to_at_battery(Some(20), true),
+        1,
+        "a charging device below the soft floor must still carry"
+    );
+}
+
+#[test]
+fn a_critical_battery_carries_nothing_even_while_charging() {
+    // The hard floor beneath the soft one. `CRITICAL_RELAY_BATTERY_LEVEL` is
+    // shared with the relay-role policy, so a device cannot keep carrying
+    // traffic at a level that would have stripped it of the role.
+    assert!(
+        crate::protocol::CRITICAL_RELAY_BATTERY_LEVEL == 15,
+        "the shared critical floor moved; this test's levels assume 15"
+    );
+    assert_eq!(
+        neighbors_carried_to_at_battery(Some(10), true),
+        0,
+        "a critical battery stops carrying even while charging"
+    );
+}
+
+#[test]
+fn an_unknown_battery_level_is_treated_as_willing() {
+    // Most platforms report a level. Refusing to carry anything on a device
+    // that simply does not publish one would quietly remove it from the
+    // network, which is a worse failure than carrying on an unknown battery.
+    assert_eq!(
+        neighbors_carried_to_at_battery(None, false),
+        1,
+        "an unknown battery level must not silently remove a device from the mesh"
+    );
+}
+
+#[test]
+fn a_device_with_infrastructure_does_not_spend_the_mesh_on_its_own_traffic() {
+    // `can_reach_without_carrying` is what keeps a device from handing copies
+    // to its neighbors when a carrier that does its own routing is up. The
+    // swallowing-transport test proves the offer fires when it should; this
+    // proves it stays quiet when it should not.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.add_connected_peer("carol", -55);
+    let ble_handle = ble.clone();
+
+    // An infrastructure carrier that reaches peers we hold no radio link to.
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    // Addressed to someone who is not a neighbor: the relay can route it.
+    protocol
+        .send_message("distant", "over the wire", None, None::<String>)
+        .unwrap();
+
+    assert!(
+        ble_handle.peer_sends().is_empty(),
+        "with a routing carrier up, neighbors must not be asked to carry copies"
+    );
+}
+
+#[test]
+fn a_forward_whose_links_all_failed_is_kept_rather_than_dropped() {
+    // A link can go away between being chosen for a frame and being written to.
+    // The frame has then travelled nowhere — but its id was recorded as handled
+    // when it was admitted, so dropping it here would lose this copy *and*
+    // refuse every copy and retransmission behind it for the whole retention
+    // window. It has to go back on the queue, the same way a frame starved of
+    // budget does.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    // Carol stays listed as a live link throughout: the failure is the write,
+    // not the enumeration, which is exactly the race being covered.
+    mock.add_connected_peer("carol", -55);
+    let transport_handle = mock.clone();
+
+    let msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "carry me",
+    );
+    mock.queue_message(msg);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    assert!(
+        protocol.receive_message().is_none(),
+        "a third-party message is forwarded, not returned"
+    );
+
+    // The one write this flush attempts fails.
+    transport_handle.set_fail_next_sends(1);
+    protocol.process().unwrap();
+
+    assert!(
+        transport_handle.peer_sends().is_empty(),
+        "nothing can have reached a neighbor"
+    );
+    assert_eq!(
+        protocol.mesh_relay_stats().awaiting_transmission,
+        1,
+        "the frame must still be held, not dropped with its id suppressed"
+    );
+    assert_eq!(
+        protocol.mesh_relay_stats().forwarded,
+        0,
+        "a frame that reached nobody was not carried"
+    );
+
+    // The link works on the next tick, and the frame we kept goes out.
+    protocol.process().unwrap();
+
+    let forwarded = transport_handle.peer_sends();
+    assert_eq!(forwarded.len(), 1, "the kept frame is forwarded");
+    assert_eq!(forwarded[0].0, "carol");
+    assert_eq!(forwarded[0].1.recipient.as_str(), "bob");
+    assert_eq!(protocol.mesh_relay_stats().awaiting_transmission, 0);
+    assert_eq!(protocol.mesh_relay_stats().forwarded, 1);
+}
+
+#[test]
+fn a_forward_with_no_usable_neighbor_is_kept_rather_than_dropped() {
+    // Same hazard, reached the other way: the only link this device holds is
+    // the one the frame arrived on, which it must not go back to. There is
+    // nowhere to send it *this* tick — which is not a reason to blackhole the
+    // id for the next ten minutes.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    mock.add_connected_peer("dave", -55);
+    let transport_handle = mock.clone();
+
+    let msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "nowhere to go yet",
+    );
+    // Dave handed it to us, so dave is excluded as a target and no other link
+    // exists.
+    mock.queue_message_from(msg, "dave".to_string());
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    assert!(protocol.receive_message().is_none());
+
+    protocol.process().unwrap();
+    assert!(transport_handle.peer_sends().is_empty());
+    assert_eq!(
+        protocol.mesh_relay_stats().awaiting_transmission,
+        1,
+        "with nowhere to send it, the frame is held rather than dropped"
+    );
+
+    // A second neighbor appears, and the frame we kept can travel.
+    transport_handle.add_connected_peer("erin", -60);
+    protocol.process().unwrap();
+
+    let forwarded = transport_handle.peer_sends();
+    assert_eq!(forwarded.len(), 1, "the frame goes out once a link exists");
+    assert_eq!(forwarded[0].0, "erin");
+    assert_eq!(protocol.mesh_relay_stats().awaiting_transmission, 0);
+}
+
 #[test]
 fn relay_restamps_binary_for_capable_third_party() {
     // A relayed message must be (re-)stamped from the relay's own per-peer
     // negotiation for the next hop — not left on whatever codec it arrived with.
     // Here we relay a third-party message to bob, who advertised binary support,
     // and assert the frame that leaves is a binary frame.
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
 
     let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
+    // Bob is our neighbor here, so he is both the recipient and the physical
+    // next hop — the link whose negotiation decides the codec.
+    mock.add_connected_peer("bob", -55);
     let transport_handle = mock.clone();
 
     // From alice to bob — a third party, since we are user123 — so it is relayed
@@ -21491,13 +21770,15 @@ fn relay_restamps_binary_for_capable_third_party() {
         protocol.receive_message().is_none(),
         "third-party message should be relayed, not returned"
     );
+    protocol.process().unwrap();
 
     // Isolate the frame relayed to bob (any incidental control sends go to other
     // recipients) and assert it was re-stamped binary.
-    let sent = transport_handle.sent_messages();
+    let sent = transport_handle.peer_sends();
     let to_bob: Vec<_> = sent
         .iter()
-        .filter(|m| m.recipient.as_str() == "bob")
+        .filter(|(peer, _)| peer == "bob")
+        .map(|(_, message)| message)
         .collect();
     assert_eq!(to_bob.len(), 1, "exactly one frame relayed to bob");
     assert_eq!(to_bob[0].content, "relay me");
@@ -21602,7 +21883,7 @@ fn test_relay_disabled_does_not_forward() {
 
 #[test]
 fn test_relay_preserves_original_sender() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
 
     let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
     let relay_events_clone = relay_events.clone();
@@ -21614,6 +21895,8 @@ fn test_relay_preserves_original_sender() {
 
     let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
+    mock.add_connected_peer("carol", -55);
+    let transport_handle = mock.clone();
 
     let msg = Message::new(
         UserId::new("alice").unwrap(),
@@ -21630,6 +21913,14 @@ fn test_relay_preserves_original_sender() {
     protocol.start().unwrap();
 
     protocol.receive_message();
+    protocol.process().unwrap();
+
+    // The frame that leaves is the original, unmodified apart from its hop
+    // accounting: a carrier must not rewrite what it carries.
+    let forwarded = transport_handle.peer_sends();
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].1.sender.as_str(), "alice");
+    assert_eq!(forwarded[0].1.content, "original content");
 
     let events = relay_events.lock().unwrap();
     assert_eq!(events.len(), 1);

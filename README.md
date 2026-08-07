@@ -176,7 +176,9 @@ For details, see the [DORS Deep Dive](docs/dors.md) and [DORS Configuration Guid
 
 ## Mesh Networking
 
-The SDK implements a cluster-based, self-organizing mesh network. Devices discover peers via BLE advertisements, form clusters with scored peer connections, and bridge separate clusters automatically. Messages route through the mesh using gossip-based forwarding with TTL-based expiration and gradient routing when routes are known.
+The SDK implements a cluster-based, self-organizing mesh network. Devices discover peers via BLE advertisements, form clusters with scored peer connections, and bridge separate clusters automatically.
+
+A message addressed to someone out of radio range is carried by the devices in between: each hands it onward to a bounded set of neighbors until it arrives or runs out of hops. Delivery acknowledgements travel back the same way, so a message that crossed several devices is not mistaken for a lost one. Devices only carry traffic when their own battery policy allows it, and every device caps how much it forwards — per second overall and per neighbor — so a crowded room stays usable rather than filling with repeated copies.
 
 For details, see the [Mesh Networking Guide](docs/mesh.md).
 

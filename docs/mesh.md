@@ -184,15 +184,20 @@ Periodically (default: every 15 seconds), the mesh evaluates whether to swap con
 When an application sends a message:
 1. The message is assigned a unique ID, TTL, and timestamp
 2. DORS selects the best transport (BLE, Wi-Fi Direct, or Internet)
-3. The message is sent to all connected peers on that transport
+3. The message is sent to its recipient over that transport; if the recipient
+   is out of range, it is handed to nearby devices to carry
 4. The message is tracked for acknowledgment
 
 ### Receiving Messages
 When a device receives a message:
-1. Check deduplication (skip if already seen)
-2. If the message is addressed to this device, deliver to the application
-3. Send an acknowledgment back to the sender
-4. Increment hop count (for tracking)
+1. If it is addressed to someone else, consider carrying it onward (see
+   [What a device does with a frame for someone else](#what-a-device-does-with-a-frame-for-someone-else))
+   and stop — a message passing through is not part of this device's own
+   exchange
+2. Check deduplication (skip if already seen)
+3. Deliver to the application
+4. Send an acknowledgment back to the sender, which travels through the mesh if
+   the sender is not directly reachable
 
 ### Message Metadata
 Each message includes:
@@ -506,15 +511,47 @@ This provides:
 
 ## Rust Core: Path Selection and Routing
 
-The Rust `offline-protocol-router` crate implements path selection using gossip-based probabilistic forwarding to prevent broadcast storms in large networks. The system also includes a gradient routing table for directed message delivery when routes are known.
+A message addressed to a device that is out of range is carried by the devices in between. Each one that receives it hands it onward to a bounded set of its own neighbors, until it reaches its recipient or runs out of hops. The recipient's acknowledgement travels back the same way.
 
-### Path Selection Overview
+### What a device does with a frame for someone else
 
-The router uses a multi-factor scoring system to select the best neighbors for message forwarding:
+Every frame passing through runs the same sequence before it goes anywhere, and each step covers something the others cannot:
 
-1. **Gossip-Based Forwarding**: In large networks, messages are forwarded probabilistically to a subset of neighbors to prevent broadcast storms
-2. **Top-K Selection**: Selects the top K neighbors (default: configurable via `forwardToTopK`) based on path scores
-3. **Gradient Routing**: When routes are known, uses directed delivery; otherwise falls back to flooding
+1. **Handled once** — an id a device has already dealt with is ignored. Without this, copies circulate until their hop budget runs out and every device repeats every copy.
+2. **Accepted from this neighbor?** — each link has its own allowance, so one noisy or hostile neighbor cannot consume the device's whole capacity for carrying traffic.
+3. **Hop budget** — the remaining budget a frame claims is cut down to what local policy would have issued, then spent. Nothing authenticates that claim, so it is never taken at face value. In a dense neighborhood the ceiling is lower: with more devices in range, a message covers the same ground in fewer hops.
+4. **Held briefly, and dropped if covered** — a frame waits a short randomized moment before going out, and is dropped if the same frame arrives again while it waits. In a crowded room the first device to transmit covers everyone in earshot and the rest stand down. This is what keeps cost tied to coverage rather than to the number of links, and it adapts as a room fills without any threshold to tune.
+5. **Sent to a few, never backwards** — the frame goes to a bounded number of neighbors chosen by signal strength and capacity, never to the device it came from or the one that wrote it. If the recipient is a neighbor, it goes straight there instead.
+6. **Within budget** — a device caps how many frames it forwards per second. The steps above assume frames are what they appear to be; this one holds regardless. Whatever arrives, a device cannot be made to transmit faster than its budget, so the failure mode under overload or attack is added delay rather than a radio that never goes quiet.
+
+Carrying traffic is subject to the same relay policy as everything else (`allowRelay`, battery floors): a device that declines carries nothing, while still sending and receiving its own messages. Handing over its *own* messages — an acknowledgement above all — is deliberately not gated on that setting, or a device that declined to carry traffic could never answer anything that reached it across the mesh, and its sender would report a failure for a message that was delivered and read.
+
+#### What "handled once" costs
+
+Step 1 is what keeps a message from multiplying, and it has a price worth knowing. Once a device takes a frame on, it ignores that id for the next ten minutes — including the sender's own retransmissions of it. So if the device that accepted a frame then fails to pass it on (it walks out of range, its battery drops below the floor, its queue is full of newer traffic), that particular route is closed for the rest of the window, and the message has to arrive some other way: through a device that never accepted it, or over the internet relay once one of the two comes back online.
+
+This is the trade every controlled flood makes — the alternative is a device re-forwarding the same message each time a copy reaches it, which is exactly the storm the step exists to prevent. Three things keep the cost bounded in practice: a frame is handed to several neighbors at once, so a single carrier walking away rarely closes every route; a device only records an id once it has genuinely *accepted* the frame, so one turned away for rate, hop budget or queue space leaves the way open for the next copy; and a frame that was accepted but then dropped **without ever being transmitted** — displaced by more urgent traffic, abandoned after waiting too long, or refused room on its way back to the queue — releases its id again, because nothing went on the air that a later copy could duplicate.
+
+What this means for an app: a message is not lost when this happens, but it can be slow. Treat delivery as settled by the acknowledgement, never by elapsed time.
+
+#### Reading the numbers
+
+`mesh_relay_stats()` reports what a device has been carrying. Two counters are easy to confuse:
+
+- `forwarded` — messages moved on someone else's behalf, counted once each. This is the contribution figure to show a user.
+- `transmissions` — times a frame was put on a link, counting each link separately and including the device handing over its own messages. This is what the per-second budget bounds, so it is the one to compare against the ceiling.
+
+`rate_deferred` rising means forwarding is hitting that ceiling — those frames are delayed, not dropped. `peer_rate_limited` means a single neighbor is sending more than its share. `dropped_for_capacity` should stay at zero; anything else means the device is seeing more traffic than it can remember having handled.
+
+The device's own sends draw on the same per-second budget — it is one radio — but keep a small reserve that forwarding never touches, so a device carrying a busy neighborhood can still get its own messages and acknowledgements out.
+
+Tunables live in `ProtocolConfig::mesh_relay`. Both the tunables and these counters are **Rust-core surfaces today**: neither is mirrored over UniFFI or React Native yet, so apps get the defaults and cannot read the counters from JS or native.
+
+#### What forwarding does not cover
+
+A device offers frames to its neighbors only when it holds no other way to reach the recipient. If any carrier that does its own routing is up — Internet, Nostr, Reticulum — that counts as reachable for **every** recipient, and nothing is handed to the mesh.
+
+That is right for the case this is built for, where nobody has infrastructure, but it leaves a gap in a mixed neighborhood: a device with internet will send to the relay rather than across the mesh, even when the recipient is reachable only by a multi-hop mesh path. It applies to acknowledgements too, so an online recipient answers a mesh-delivered message over the relay, where an offline sender cannot see it. Closing this means letting the relay's own "recipient unreachable" verdict fall back to the mesh, which is future work.
 
 ### Path Scoring
 
@@ -596,10 +633,21 @@ When sending to a known destination:
 2. Sort by quality score
 3. Return the highest-quality route
 
-### Usage Example (Swift)
+### Do apps need to do any of this?
+
+No. Carrying messages for nearby devices is handled inside the SDK — an app
+sends a message and the SDK works out whether it can be delivered directly,
+handed to a neighbor to carry, or held for retry. There is no app-side
+forwarding to write, and writing one is a mistake: a second forwarder would
+transmit copies the SDK's own accounting knows nothing about, so neither the
+handled-once check nor the per-second budgets would cover it.
+
+The routing-table calls below remain available over UniFFI for native code that
+wants its own view of reachability. They are read-and-record only; nothing an
+app does with them changes what the SDK forwards.
 
 ```swift
-// On message receive - learn route to sender through delivering neighbor:
+// Record what a neighbor can reach, from a message it delivered:
 protocol.learnRoute(
     destination: message.sender,
     nextHop: neighborId,
@@ -608,14 +656,8 @@ protocol.learnRoute(
     sequenceNumber: message.sequenceNumber ?? 0
 )
 
-// On send - use directed delivery if route known:
-if let route = protocol.getBestRoute(destination: recipient) {
-    // Forward via learned route
-    sendToNeighbor(route.nextHop, message: data)
-} else {
-    // Fall back to flooding
-    broadcastToAllNeighbors(message: data)
-}
+// Look up what is known about reaching someone:
+let route = protocol.getBestRoute(destination: recipient)
 
 // On peer disconnect - cleanup stale routes:
 protocol.removeNeighborRoutes(neighborId: disconnectedPeerId)
@@ -624,10 +666,7 @@ protocol.removeNeighborRoutes(neighborId: disconnectedPeerId)
 protocol.cleanupExpiredRoutes()
 ```
 
-### Usage Example (Kotlin)
-
 ```kotlin
-// On message receive - learn route to sender through delivering neighbor:
 protocol.learnRoute(
     destination = message.sender,
     nextHop = neighborId,
@@ -636,33 +675,19 @@ protocol.learnRoute(
     sequenceNumber = (message.sequenceNumber ?: 0).coerceAtLeast(0).toUInt()
 )
 
-// On send - use directed delivery if route known:
 val route = protocol.getBestRoute(destination = recipient)
-if (route != null) {
-    // Forward via learned route
-    sendToNeighbor(route.nextHop, message = data)
-} else {
-    // Fall back to flooding
-    broadcastToAllNeighbors(message = data)
-}
 
-// On peer disconnect - cleanup stale routes:
 protocol.removeNeighborRoutes(neighborId = disconnectedPeerId)
-
-// Periodic maintenance (e.g., every 30 seconds):
 protocol.cleanupExpiredRoutes()
 ```
-
-### Cleanup Operations
-
-- **removeNeighborRoutes()**: Called on disconnect, removes all routes through that neighbor
-- **cleanupExpiredRoutes()**: Periodic cleanup of stale routes (recommended: every 30 seconds)
 
 ### Gradient Routing Table
 
 The gradient routing table learns routes from incoming messages. When a message arrives from a neighbor, we record that neighbor as a route to the message's original sender. Over time, this builds a map of how to reach known destinations.
 
-**Current Status**: The gradient routing table is available via UniFFI bindings and can be used by native implementations for directed delivery when routes are known. The Rust router supports both gradient routing (when routes exist) and gossip-based flooding (when routes are unknown).
+Routes are learned from the link a frame arrived on, which is the neighbor that can be addressed to reach back toward its sender — not the sender itself, who may be several devices away.
+
+**Current status**: forwarding decisions are made from live neighbor state rather than from this table, and that is deliberate. In the environments this is built for — a crowd, a venue, a march — links appear and vanish in seconds, so a remembered route is usually stale by the time it would be used, while a fresh choice among current neighbors never is. The table is also exposed over UniFFI for native code that wants it.
 
 ### Monitoring
 

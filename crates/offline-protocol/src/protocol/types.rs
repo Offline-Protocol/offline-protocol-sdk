@@ -151,6 +151,16 @@ pub(crate) const MAX_KNOWN_PEERS: usize = 1000;
 /// advertisement or message), so erring long only delays hygiene.
 pub(crate) const KNOWN_PEER_TTL_SECS: u64 = 1800;
 
+/// Battery level below which a device stops carrying traffic for other
+/// people even while charging.
+///
+/// Re-exported from the router crate rather than restated here: message
+/// forwarding and the relay role apply the same floor, and a device must not
+/// keep carrying traffic at a level that would have stripped it of the role.
+/// Two copies of the number would eventually disagree, and nothing would
+/// notice.
+pub(crate) use offline_protocol_router::CRITICAL_RELAY_BATTERY_LEVEL;
+
 /// Metadata key for the Ed25519 signature over the control message content (base64).
 pub(crate) const CTRL_SIG_META_KEY: &str = "__ctrl_sig";
 /// Metadata key for the sender's Ed25519 public key (base64, 32 bytes raw).

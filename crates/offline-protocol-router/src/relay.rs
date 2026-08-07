@@ -2,6 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Battery level below which a device stops doing anything for other people,
+/// however willing its configuration is.
+///
+/// This is the hard floor beneath the soft [`RelayConfig::min_battery_for_relay`]:
+/// a charging device, or one configured [`RelayPriority::Always`], is excused
+/// the soft minimum but never this. It is public because the protocol crate
+/// applies the same floor to message forwarding — a device must not keep
+/// carrying traffic at a level that would have stripped it of the relay role,
+/// and two copies of the number would eventually disagree.
+pub const CRITICAL_RELAY_BATTERY_LEVEL: u8 = 15;
+
 /// Configuration for relay behavior.
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
@@ -205,7 +216,7 @@ impl RelayManager {
 
         // If priority is Always, stay as relay unless critical battery
         if matches!(self.config.relay_priority, RelayPriority::Always) {
-            return battery_level < 15;
+            return battery_level < CRITICAL_RELAY_BATTERY_LEVEL;
         }
 
         // Demote if connections drop below threshold
@@ -239,7 +250,7 @@ impl RelayManager {
     /// transition classifier and the demotion decision never disagree.
     fn demotion_battery_floor(&self, is_charging: bool) -> u8 {
         if matches!(self.config.relay_priority, RelayPriority::Always) || is_charging {
-            15
+            CRITICAL_RELAY_BATTERY_LEVEL
         } else {
             self.config.min_battery_for_relay
         }

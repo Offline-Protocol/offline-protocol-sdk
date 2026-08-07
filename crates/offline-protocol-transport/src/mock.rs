@@ -1,6 +1,6 @@
 //! Mock transport for testing.
 
-use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
+use crate::{PeerLink, Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,17 @@ pub struct MockTransport {
     metrics: Arc<Mutex<TransportMetrics>>,
     /// When > 0, next send() calls fail this many times (for escalation/fallback tests).
     fail_next_sends: Arc<Mutex<usize>>,
+    /// Simulated live links, in the order they were registered.
+    connected_peers: Arc<Mutex<Vec<PeerLink>>>,
+    /// When set, `send` refuses a recipient with no live link, the way a
+    /// radio-backed transport does. Off by default so tests that only care
+    /// about what was sent need not declare a topology.
+    reject_unknown_recipients: Arc<Mutex<bool>>,
+    /// Every `send_to_peer` call, as `(peer_id, message)`, so forwarding tests
+    /// can assert *which neighbor* a frame crossed and how many times it was
+    /// transmitted — the counts that distinguish a controlled flood from a
+    /// storm.
+    peer_sends: Arc<Mutex<Vec<(String, Message)>>>,
 }
 
 impl std::fmt::Debug for MockTransport {
@@ -37,7 +48,61 @@ impl MockTransport {
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
             fail_next_sends: Arc::new(Mutex::new(0)),
+            connected_peers: Arc::new(Mutex::new(Vec::new())),
+            peer_sends: Arc::new(Mutex::new(Vec::new())),
+            reject_unknown_recipients: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// Makes `send` behave like a radio-backed transport: a recipient with no
+    /// live link is refused rather than silently accepted.
+    ///
+    /// This is what lets a test exercise the path a message takes when its
+    /// recipient is out of range — the case mesh forwarding exists for.
+    pub fn set_reject_unknown_recipients(&self, reject: bool) {
+        *self.reject_unknown_recipients.lock().unwrap() = reject;
+    }
+
+    /// Declares the simulated set of directly connected peers.
+    pub fn set_connected_peers(&self, peers: Vec<PeerLink>) {
+        *self.connected_peers.lock().unwrap() = peers;
+    }
+
+    /// Adds one simulated live link.
+    pub fn add_connected_peer(&self, peer_id: impl Into<String>, rssi: i16) {
+        self.connected_peers
+            .lock()
+            .unwrap()
+            .push(PeerLink::with_rssi(peer_id, rssi));
+    }
+
+    /// Drops one simulated live link (peer churn).
+    pub fn remove_connected_peer(&self, peer_id: &str) {
+        self.connected_peers
+            .lock()
+            .unwrap()
+            .retain(|link| link.peer_id != peer_id);
+    }
+
+    /// Returns every `(peer_id, message)` handed to `send_to_peer`.
+    pub fn peer_sends(&self) -> Vec<(String, Message)> {
+        self.peer_sends.lock().unwrap().clone()
+    }
+
+    /// Number of times `message_id` was transmitted to any peer — the
+    /// per-node transmission count a storm test asserts against.
+    pub fn peer_send_count_for(&self, message_id: &str) -> usize {
+        self.peer_sends
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, message)| message.id.as_str() == message_id)
+            .count()
+    }
+
+    /// Clears the recorded per-peer sends.
+    pub fn clear_peer_sends(&self) {
+        self.peer_sends.lock().unwrap().clear();
     }
 
     /// Makes the next `n` send attempts return an error (for retry-failure / escalation tests).
@@ -101,6 +166,17 @@ impl Transport for MockTransport {
     }
 
     fn send(&self, message: &Message) -> Result<()> {
+        if *self.reject_unknown_recipients.lock().unwrap() {
+            let recipient = message.recipient.as_str();
+            let peers = self.connected_peers.lock().unwrap();
+            if !peers.iter().any(|link| link.peer_id == recipient) {
+                return Err(crate::Error::PeerNotReachable(format!(
+                    "mock: no connected peer for recipient {}",
+                    recipient
+                )));
+            }
+        }
+
         {
             let mut fail = self.fail_next_sends.lock().unwrap();
             if *fail > 0 {
@@ -136,6 +212,45 @@ impl Transport for MockTransport {
         Ok(())
     }
 
+    fn send_to_peer(&self, peer_id: &str, message: &Message) -> Result<()> {
+        if self.status() != TransportStatus::Available {
+            return Err(crate::Error::TransportNotAvailable(
+                "mock transport is not available".to_string(),
+            ));
+        }
+
+        {
+            let peers = self.connected_peers.lock().unwrap();
+            if !peers.iter().any(|link| link.peer_id == peer_id) {
+                return Err(crate::Error::PeerNotReachable(format!(
+                    "mock: {} is not a connected peer",
+                    peer_id
+                )));
+            }
+        }
+
+        {
+            let mut fail = self.fail_next_sends.lock().unwrap();
+            if *fail > 0 {
+                *fail = fail.saturating_sub(1);
+                return Err(crate::Error::SendFailed("mock fail_next_sends".to_string()));
+            }
+        }
+
+        self.peer_sends
+            .lock()
+            .unwrap()
+            .push((peer_id.to_string(), message.clone()));
+        Ok(())
+    }
+
+    fn connected_peers(&self) -> Vec<PeerLink> {
+        if self.status() != TransportStatus::Available {
+            return Vec::new();
+        }
+        self.connected_peers.lock().unwrap().clone()
+    }
+
     fn receive(&self) -> Result<Option<Message>> {
         let mut queue = self.receive_queue.lock().unwrap();
         Ok(queue.pop_front())
@@ -160,6 +275,59 @@ impl Transport for MockTransport {
 mod tests {
     use super::*;
     use offline_protocol_core::{AppId, UserId};
+
+    fn test_message() -> Message {
+        Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "Test message",
+        )
+    }
+
+    #[test]
+    fn send_to_peer_records_the_hop_not_the_recipient() {
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        transport.add_connected_peer("carol", -60);
+
+        // A frame addressed to bob, handed across the link to carol.
+        let message = test_message();
+        transport.send_to_peer("carol", &message).unwrap();
+
+        let sends = transport.peer_sends();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0, "carol");
+        assert_eq!(sends[0].1.recipient.as_str(), "bob");
+        assert_eq!(transport.peer_send_count_for(&message.id.as_str()), 1);
+    }
+
+    #[test]
+    fn send_to_peer_refuses_a_peer_without_a_live_link() {
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        transport.add_connected_peer("carol", -60);
+
+        // The failure must be synchronous so a forwarding caller can pick a
+        // different neighbor instead of assuming the frame is on its way.
+        assert!(transport.send_to_peer("dave", &test_message()).is_err());
+        assert!(transport.peer_sends().is_empty());
+    }
+
+    #[test]
+    fn connected_peers_follows_link_state() {
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.add_connected_peer("carol", -60);
+
+        // Links are only real while the transport itself is available.
+        assert!(transport.connected_peers().is_empty());
+
+        transport.start().unwrap();
+        assert_eq!(transport.connected_peers().len(), 1);
+
+        transport.remove_connected_peer("carol");
+        assert!(transport.connected_peers().is_empty());
+    }
 
     #[test]
     fn test_mock_transport_send_receive() {

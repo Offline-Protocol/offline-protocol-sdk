@@ -1,6 +1,7 @@
 //! Protocol configuration.
 
 use crate::constants::DEFAULT_INITIAL_TTL;
+use crate::protocol::mesh_relay::MeshRelayConfig;
 use offline_protocol_reliability::{AckConfig, DeduplicatorConfig, RetryConfig};
 use offline_protocol_router::{DorsConfig, PathConfig, RelayConfig};
 use serde::{Deserialize, Serialize};
@@ -541,8 +542,17 @@ pub struct ProtocolConfig {
     /// DORS (Dynamic Offline Relay Switch) configuration.
     pub dors: DorsConfig,
 
-    /// Relay management configuration.
+    /// Relay management configuration: whether this device carries traffic
+    /// for other people at all, and the battery floors under which it stops.
     pub relay: RelayConfig,
+
+    /// How this device carries traffic for other people: how far frames
+    /// travel, how many neighbors each is handed to, and the ceilings that
+    /// keep forwarding from crowding the radio out.
+    ///
+    /// Whether to forward is [`Self::relay`]'s decision; this is the shape of
+    /// it once the answer is yes.
+    pub mesh_relay: MeshRelayConfig,
 
     /// Path selection configuration.
     pub path: PathConfig,
@@ -577,6 +587,7 @@ impl ProtocolConfig {
             transport: TransportConfig::default(),
             dors: DorsConfig::default(),
             relay: RelayConfig::default(),
+            mesh_relay: MeshRelayConfig::default(),
             path: PathConfig::default(),
             reliability: ReliabilityConfig::default(),
             encryption: EncryptionConfig::default(),
@@ -858,6 +869,12 @@ impl ProtocolConfigBuilder {
     /// Configures relay management.
     pub fn relay(mut self, config: RelayConfig) -> Self {
         self.config.relay = config;
+        self
+    }
+
+    /// Configures how traffic is carried for other people.
+    pub fn mesh_relay(mut self, config: MeshRelayConfig) -> Self {
+        self.config.mesh_relay = config;
         self
     }
 

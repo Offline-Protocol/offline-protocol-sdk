@@ -67,8 +67,20 @@ pub struct WifiDirectTransport {
     config: WifiDirectConfig,
     /// Transport status
     status: Arc<Mutex<TransportStatus>>,
-    /// Discovered peers
+    /// Discovered peers, keyed by device address (MAC).
+    ///
+    /// This is the *discovery* view reported by `WifiP2pManager`, so its key
+    /// is a hardware address. It deliberately stays separate from
+    /// [`Self::connected_links`], which is keyed by user-level id — the two
+    /// answer different questions ("what did we see?" vs "who can we address
+    /// right now?") and only the latter is safe to route by.
     peers: Arc<Mutex<HashMap<String, WifiDirectPeer>>>,
+    /// Live links, keyed by the peer's user-level id.
+    ///
+    /// Populated from the platform's connect/disconnect callbacks, which are
+    /// the only signals that carry a user id. Drained whenever the transport
+    /// leaves `Available`, so it can never hand out a link that has gone away.
+    connected_links: Arc<Mutex<HashMap<String, SystemTime>>>,
     /// Received message queue
     receive_queue: Arc<Mutex<VecDeque<Message>>>,
     /// Send queue
@@ -94,6 +106,7 @@ impl WifiDirectTransport {
             config,
             status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             peers: Arc::new(Mutex::new(HashMap::new())),
+            connected_links: Arc::new(Mutex::new(HashMap::new())),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
@@ -140,6 +153,26 @@ impl WifiDirectTransport {
     pub fn on_peer_lost(&self, device_address: &str) {
         let mut peers = self.peers.lock_or_recover();
         peers.remove(device_address);
+    }
+
+    /// Records a live link to `peer_id` (platform connect callback).
+    ///
+    /// Takes the peer's **user-level id**, which is what the send path and
+    /// [`Transport::connected_peers`] are keyed by — unlike
+    /// [`Self::on_peer_discovered`], whose key is a hardware address.
+    pub fn on_peer_connected(&self, peer_id: impl Into<String>) {
+        let peer_id = peer_id.into();
+        if peer_id.is_empty() {
+            return;
+        }
+        self.connected_links
+            .lock_or_recover()
+            .insert(peer_id, SystemTime::now());
+    }
+
+    /// Drops the live link to `peer_id` (platform disconnect callback).
+    pub fn on_peer_disconnected(&self, peer_id: &str) {
+        self.connected_links.lock_or_recover().remove(peer_id);
     }
 
     /// Called when a message is received from a peer.
@@ -233,6 +266,51 @@ impl Transport for WifiDirectTransport {
         Ok(())
     }
 
+    /// Queues `message` for a specific connected peer.
+    ///
+    /// Unlike [`Transport::send`], which accepts any recipient and lets the
+    /// platform discover it cannot be reached, this refuses a peer with no
+    /// live link — a forwarding caller needs the failure synchronously so it
+    /// can pick another neighbor instead.
+    fn send_to_peer(&self, peer_id: &str, message: &Message) -> Result<()> {
+        if self.status() != TransportStatus::Available {
+            return Err(crate::Error::TransportNotAvailable(
+                "Wi-Fi Direct transport is not available".to_string(),
+            ));
+        }
+
+        if !self.connected_links.lock_or_recover().contains_key(peer_id) {
+            return Err(crate::Error::PeerNotReachable(format!(
+                "Wi-Fi Direct: {} is not a connected peer",
+                peer_id
+            )));
+        }
+
+        {
+            let mut queue = self.send_queue.lock_or_recover();
+            queue.push_back((peer_id.to_string(), message.clone()));
+
+            let mut metrics = self.metrics.lock_or_recover();
+            metrics.queue_depth = queue.len();
+            metrics.congestion = ((metrics.queue_depth as f32) / 20.0).clamp(0.0, 1.0);
+        }
+
+        self.notify_messages_available();
+
+        Ok(())
+    }
+
+    fn connected_peers(&self) -> Vec<crate::PeerLink> {
+        if self.status() != TransportStatus::Available {
+            return Vec::new();
+        }
+        self.connected_links
+            .lock_or_recover()
+            .keys()
+            .map(crate::PeerLink::new)
+            .collect()
+    }
+
     fn receive(&self) -> Result<Option<Message>> {
         let mut queue = self.receive_queue.lock_or_recover();
         Ok(queue.pop_front())
@@ -246,6 +324,7 @@ impl Transport for WifiDirectTransport {
     fn stop(&self) -> Result<()> {
         *self.status.lock_or_recover() = TransportStatus::Disconnected;
         self.peers.lock_or_recover().clear();
+        self.connected_links.lock_or_recover().clear();
         self.send_queue.lock_or_recover().clear();
         self.receive_queue.lock_or_recover().clear();
         let mut metrics = self.metrics.lock_or_recover();
@@ -268,6 +347,7 @@ impl Transport for WifiDirectTransport {
 
         if previous == TransportStatus::Available && status != TransportStatus::Available {
             self.peers.lock_or_recover().clear();
+            self.connected_links.lock_or_recover().clear();
             self.send_queue.lock_or_recover().clear();
             self.receive_queue.lock_or_recover().clear();
             let mut metrics = self.metrics.lock_or_recover();

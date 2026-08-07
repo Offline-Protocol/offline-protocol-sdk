@@ -2968,6 +2968,34 @@ impl OfflineProtocol {
     ) -> Result<()> {
         self.mark_message_sent(message, transport, Some(1));
         self.ensure_ack_registration(message)?;
+
+        // A transport reporting success is not always evidence the frame can
+        // arrive. Wi-Fi Direct and Reticulum accept any recipient and return
+        // `Ok`, so a send to someone we hold no link to is queued for a link
+        // that never drains — and because the mesh hand-off used to hang off
+        // the *failure* path, a device with either carrier up would swallow the
+        // frame instead of asking its neighbors to carry it. That is precisely
+        // the out-of-range case forwarding exists for, so the question is asked
+        // directly rather than inferred from an error that never comes.
+        //
+        // Offering here is additive, never a replacement: the outbox entry and
+        // the ACK registration above stand either way, and if the accepting
+        // carrier did deliver after all, the recipient's deduplicator absorbs
+        // the second copy.
+        if !self
+            .transport_manager
+            .can_reach_without_carrying(message.recipient.as_str())
+        {
+            let handed_to_mesh = self.offer_to_mesh(message);
+            if handed_to_mesh > 0 {
+                debug!(
+                    message_id = %message.id,
+                    recipient = %message.recipient,
+                    handed_to_mesh,
+                    "Transport accepted a recipient it cannot reach; also handed to neighbors"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -2993,15 +3021,126 @@ impl OfflineProtocol {
         // Ensure message is persisted to outbox for recovery
         self.ensure_outbox_entry(message);
 
+        // No transport could reach the recipient directly — but a neighbor
+        // might be able to, or know someone who can. Offer the frame to the
+        // mesh before settling for a retry: this is the case the whole
+        // forwarding path exists for, someone out of our range but inside the
+        // crowd's.
+        //
+        // The outbox entry and retry stay in place regardless. Handing a frame
+        // to neighbors is not proof it arrived, and the acknowledgement coming
+        // back is what settles it.
+        let handed_to_mesh = self.offer_to_mesh(message);
+
         // Schedule retry (enqueue is infallible — no attempt limit)
         let next_retry_at = self.retry_queue.enqueue(message.clone(), 0);
 
         warn!(
             message_id = %message.id,
             transport = ?transport,
+            handed_to_mesh,
             "Deferred message due to send error"
         );
         Ok(next_retry_at)
+    }
+
+    /// Hands a locally-originated frame to nearby devices so it can travel
+    /// toward a recipient we cannot reach ourselves.
+    ///
+    /// Returns how many neighbors took a copy. Zero means we are alone, or
+    /// every neighbor refused the link — in both cases the retry ladder and the
+    /// outbox remain the recovery path, exactly as before.
+    ///
+    /// Unlike a forwarded frame, this one is not held back: the delay before
+    /// forwarding exists so neighbors holding the *same* frame do not all
+    /// transmit at once, and nobody else is holding this one yet.
+    pub(super) fn offer_to_mesh(&mut self, message: &Message) -> usize {
+        // Deliberately not gated on `allow_relay`. That setting is about what
+        // this device does for *other people* — whether it spends its battery
+        // carrying their traffic. This is the device's own message, and the
+        // ones it must be able to send include the acknowledgement for a
+        // message it just received. Gating it here would leave a
+        // relay-declining device unable to answer anything that reached it
+        // across the mesh, so its sender would retransmit to exhaustion and
+        // report a failure for a message that was delivered and read.
+
+        // Never hand a self-addressed frame to the mesh. Those are the relay
+        // hint frames (`__GRP_RELAY_REG__`, `__GRP_RELAY_BCAST__`), which mean
+        // something only to our own bridge: a neighbor receiving one would see
+        // a frame addressed to somebody else and carry it further, spending
+        // airtime to deliver a control op nobody can act on. They are pinned to
+        // Internet for the same reason.
+        if message.recipient.as_str() == self.config.user_id {
+            return 0;
+        }
+
+        let neighbors = self.transport_manager.mesh_neighbors();
+        if neighbors.is_empty() {
+            return 0;
+        }
+
+        // Ours to originate: record it as handled so a copy coming back to us
+        // through the mesh is recognized and not forwarded again.
+        self.mesh_relay.mark_handled(&message.id.as_str());
+
+        // If the recipient is standing right there, hand it to them. Reached
+        // here it means the ordinary send could not use that link, but trying
+        // it costs one call and beats routing around the destination.
+        let recipient = message.recipient.as_str();
+        let targets = if neighbors.iter().any(|n| n.peer_id == recipient) {
+            vec![recipient.to_string()]
+        } else {
+            self.mesh_relay.select_targets(
+                neighbors
+                    .iter()
+                    .map(|n| (n.peer_id.as_str(), n.link_quality())),
+                &[],
+                &message.id.as_str(),
+            )
+        };
+
+        let mut handed_to = 0usize;
+        for target in targets {
+            // Metered against the same ceiling as carrying other people's
+            // traffic: it is the same radio. Without this a large transfer,
+            // which offers every chunk separately, would put an unbounded burst
+            // on the air in one call.
+            //
+            // Own traffic spends from the reserve that forwarding leaves alone,
+            // so a device carrying the neighborhood at its ceiling can still
+            // get its own frames out — an acknowledgement above all, whose
+            // absence makes a delivered message look lost to its sender.
+            if !self.mesh_relay.take_own_send_token() {
+                debug!(
+                    message_id = %message.id,
+                    "At the forwarding limit; not handing this to further neighbors"
+                );
+                break;
+            }
+
+            match self.transport_manager.send_to_neighbor(&target, message) {
+                Ok(transport) => {
+                    handed_to += 1;
+                    debug!(
+                        message_id = %message.id,
+                        recipient = %message.recipient,
+                        next_hop = %target,
+                        transport = ?transport,
+                        "Handed message to a neighbor to carry"
+                    );
+                }
+                Err(err) => {
+                    debug!(
+                        message_id = %message.id,
+                        next_hop = %target,
+                        error = %err,
+                        "Neighbor could not take the message"
+                    );
+                }
+            }
+        }
+
+        handed_to
     }
 
     /// Confirms that a message was successfully sent by the transport layer.
@@ -3663,25 +3802,72 @@ impl OfflineProtocol {
             .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport))
             .build();
 
-        // Try sending ACK via the same transport that received the message first.
-        // This is the preferred path as it's known to work for this peer.
-        // If the inbound transport is no longer available (e.g., internet disconnected),
-        // fall back to DORS selection to try any available transport.
+        self.route_ack(&ack_message, inbound_transport)
+    }
+
+    /// Gets an acknowledgement back to whoever sent us the message it answers.
+    ///
+    /// The single route-selection point for every delivery ACK, direct or
+    /// group. Keeping one ladder is deliberate: it has four callers across two
+    /// builders, and the failure this ordering exists to prevent is silent —
+    /// a copy of the ladder that drifted would look fine and lose answers.
+    ///
+    /// Three routes, in order:
+    ///
+    /// 1. **The link it arrived on**, when that carrier can actually address
+    ///    the sender. Preferred because it is known to work for this peer.
+    /// 2. **The mesh**, when nothing we hold reaches the sender directly: the
+    ///    answer travels back the way the message came, carried by the devices
+    ///    in between. Without this, multi-hop delivery looks like failure to a
+    ///    sender who retransmits a message we already have and read.
+    /// 3. **DORS**, which picks among whatever else is available.
+    ///
+    /// Step 1 is *gated on addressability* rather than on a send error, and
+    /// that gate is load-bearing. A transport returning `Ok` is not evidence
+    /// the frame can arrive: Wi-Fi Direct enqueues for any recipient, and it is
+    /// the preferred mesh carrier — so on the last hop of a forwarded frame the
+    /// answer would be queued for a link that never drains, reported as sent,
+    /// and step 2 would never run. The sender's retransmissions would take the
+    /// same path every time, ending in a failure report for a delivered
+    /// message.
+    fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> Result<()> {
+        let ack_to = ack_message.recipient.as_str().to_string();
+
         if self
             .transport_manager
-            .send_via_transport(&ack_message, inbound_transport)
-            .is_ok()
+            .can_address_via(inbound_transport, &ack_to)
+            && self
+                .transport_manager
+                .send_via_transport(ack_message, inbound_transport)
+                .is_ok()
         {
             return Ok(());
         }
 
-        // Fallback: try any available transport via DORS
         debug!(
-            message_id = %message.id,
+            ack_to = %ack_to,
             inbound_transport = ?inbound_transport,
-            "Inbound transport unavailable for ACK, falling back to DORS selection"
+            "Inbound transport cannot answer this sender; looking for another route"
         );
-        self.transport_manager.send(&ack_message)
+
+        if !self.transport_manager.can_reach_without_carrying(&ack_to)
+            && self.offer_to_mesh(ack_message) > 0
+        {
+            debug!(
+                ack_to = %ack_to,
+                "Sender is not directly reachable; handed the acknowledgement to the mesh"
+            );
+            return Ok(());
+        }
+
+        if self.transport_manager.send(ack_message).is_ok() {
+            return Ok(());
+        }
+
+        Err(Error::Other(format!(
+            "no route back to {} for delivery acknowledgement",
+            ack_to
+        )))
     }
 
     /// Builds and sends a delivery ACK from the group-message drain, which
@@ -3709,20 +3895,9 @@ impl OfflineProtocol {
             .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport))
             .build();
 
-        // Prefer the transport the message arrived on; fall back to DORS.
-        if self
-            .transport_manager
-            .send_via_transport(&ack_message, inbound_transport)
-            .is_ok()
-        {
-            return Ok(());
-        }
-        debug!(
-            message_id = %acked_message_id,
-            inbound_transport = ?inbound_transport,
-            "Inbound transport unavailable for group ACK, falling back to DORS selection"
-        );
-        self.transport_manager.send(&ack_message)
+        // Same ladder as a direct-message ACK, mesh fallback included: a group
+        // frame reaches its members over the same hops a DM does.
+        self.route_ack(&ack_message, inbound_transport)
     }
 
     pub(super) fn handle_ack_message(&mut self, message: &Message) {

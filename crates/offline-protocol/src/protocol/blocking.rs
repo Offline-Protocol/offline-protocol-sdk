@@ -302,7 +302,12 @@ mod tests {
         use offline_protocol_transport::{mock::MockTransport, TransportType};
         use std::sync::{Arc, Mutex};
 
-        let mut proto = make_protocol("alice");
+        let mut config = ProtocolConfig::new("test-app", "alice");
+        config.encryption.require_encryption = false;
+        // Flush forwarding in the same breath as receiving it.
+        config.mesh_relay.jitter_min = std::time::Duration::from_millis(0);
+        config.mesh_relay.jitter_max = std::time::Duration::from_millis(0);
+        let mut proto = crate::OfflineProtocol::new(config).unwrap();
         proto.block_user("mallory").unwrap();
 
         let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
@@ -315,6 +320,10 @@ mod tests {
 
         let mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
+        // Blocking someone stops us talking to them; it does not stop this
+        // device carrying the crowd's traffic, so a neighbor must be present
+        // for that forwarding to be observable.
+        mock.add_connected_peer("dave", -55);
 
         // Message from blocked user but addressed to a THIRD party — should NOT be blocked.
         // With relay enabled, the message is forwarded and NOT returned to the app layer.
@@ -339,6 +348,7 @@ mod tests {
             received.is_none(),
             "Relay messages for third parties should be forwarded, not returned"
         );
+        proto.process().unwrap();
 
         // Verify that a MessageRelayed event was emitted — blocking must not
         // suppress relay forwarding for messages addressed to third parties.

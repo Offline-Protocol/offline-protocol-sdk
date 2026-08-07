@@ -2538,6 +2538,29 @@ impl OfflineProtocol {
         Ok(Some(f(ble_transport)))
     }
 
+    /// [`Self::with_ble_transport_fallible`] for the Wi-Fi Direct transport.
+    fn with_wifi_direct_transport_fallible<F, R>(&self, f: F) -> Result<Option<R>, ProtocolError>
+    where
+        F: FnOnce(&offline_protocol_transport::WifiDirectTransport) -> R,
+    {
+        let protocol = self.lock_inner()?;
+        let transport_arc = match protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::WiFiDirect)
+        {
+            Some(arc) => arc,
+            None => return Ok(None),
+        };
+        let wifi_transport = match transport_arc
+            .as_any()
+            .downcast_ref::<offline_protocol_transport::WifiDirectTransport>(
+        ) {
+            Some(wd) => wd,
+            None => return Ok(None),
+        };
+        Ok(Some(f(wifi_transport)))
+    }
+
     /// Acquire the inner + transport locks, downcast to `NostrTransport`,
     /// and call `f` with it.  Returns `None` when the transport is absent or
     /// not a `NostrTransport`.  Only for Nostr-specific inherent methods
@@ -3338,9 +3361,14 @@ impl OfflineProtocol {
     }
 
     /// BLE: Fragment received
+    ///
+    /// `sender_id` is the peer whose link the fragment arrived on. It is
+    /// recorded on the reassembled message so the protocol layer can tell the
+    /// peer that handed us a frame from the peer that wrote it — the same at
+    /// the first hop, different for anything forwarded.
     pub fn ble_fragment_received(
         &self,
-        _sender_id: String,
+        sender_id: String,
         fragment: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         let mut protocol = self.lock_inner()?;
@@ -3348,9 +3376,11 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::BLE)
         {
-            transport_arc.on_fragment_received(fragment).map_err(|e| {
-                ProtocolError::TransportError(format!("Fragment processing failed: {}", e))
-            })?;
+            transport_arc
+                .on_fragment_received_from(fragment, sender_id)
+                .map_err(|e| {
+                    ProtocolError::TransportError(format!("Fragment processing failed: {}", e))
+                })?;
         }
 
         while protocol.receive_message().is_some() {}
@@ -3764,7 +3794,9 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::WiFiDirect)
         {
-            if let Err(e) = transport_arc.on_data_received(data) {
+            // Record the arriving link, as BLE does — the peer that handed us
+            // the frame is what a forwarding decision needs.
+            if let Err(e) = transport_arc.on_data_received_from(data, sender_id.clone()) {
                 return Err(ProtocolError::TransportError(format!(
                     "Failed to process WiFi Direct message: {}",
                     e
@@ -3809,6 +3841,12 @@ impl OfflineProtocol {
             wifi_direct_state.connected_peer = Some(peer_id.clone());
         }
 
+        // Register the link with the transport so it can be addressed directly,
+        // mirroring what ble_peer_discovered does for BLE.
+        self.with_wifi_direct_transport_fallible(|wifi_transport| {
+            wifi_transport.on_peer_connected(peer_id.clone());
+        })?;
+
         self.notify_neighbor_reachable(&peer_id, "WiFiDirect", None)
     }
 
@@ -3821,6 +3859,12 @@ impl OfflineProtocol {
                 wifi_direct_state.connected_peer = None;
             }
         }
+
+        // Drop the link from the transport so it stops being offered as an
+        // addressable neighbor.
+        self.with_wifi_direct_transport_fallible(|wifi_transport| {
+            wifi_transport.on_peer_disconnected(&peer_id);
+        })?;
 
         // Notify the core protocol of neighbor loss, matching ble_peer_lost —
         // WiFi Direct is the only other carrier with an explicit disconnect

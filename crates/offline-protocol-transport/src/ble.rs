@@ -529,9 +529,23 @@ impl BleTransport {
     /// send boundary; do not hold `peer_mtus` across the whole loop,
     /// which would serialise every fragmenting send on a single peer.
     pub fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
+        self.fragment_message_for(message.recipient.as_str(), message)
+    }
+
+    /// [`Self::fragment_message`], but sized against an explicit **physical
+    /// peer** rather than the message recipient.
+    ///
+    /// The two differ only for a forwarded frame, where the link this batch is
+    /// about to cross belongs to `peer_id` and the recipient is some node
+    /// further along. MTU is a property of that link, so it must be looked up
+    /// by the peer actually being written to — sizing a forwarded frame
+    /// against the final recipient's MTU would apply a stranger's link
+    /// parameters (or, more often, silently fall back to the floor because the
+    /// recipient has no entry at all).
+    pub fn fragment_message_for(&self, peer_id: &str, message: &Message) -> Result<Vec<Vec<u8>>> {
         let message_bytes = self.serialize_message(message)?;
 
-        let recipient = message.recipient.as_str();
+        let recipient = peer_id;
         // Look up the per-peer MTU. On a miss, the `peers` map tells
         // us whether this is a keying-contract break (recipient is
         // still a registered direct peer but has no MTU on file — the
@@ -1066,6 +1080,61 @@ impl Transport for BleTransport {
         Ok(())
     }
 
+    /// Queues `message` for a specific connected peer.
+    ///
+    /// Identical to [`Transport::send`] except that the queue key — which is
+    /// both the write target for the platform bridge and the MTU key for
+    /// fragmentation — is `peer_id` rather than `message.recipient`.
+    fn send_to_peer(&self, peer_id: &str, message: &Message) -> Result<()> {
+        let status = self.status();
+
+        if status != TransportStatus::Available {
+            return Err(crate::Error::TransportNotAvailable(format!(
+                "BLE transport is not available (status: {:?})",
+                status
+            )));
+        }
+
+        {
+            let peers = self.peers.lock_or_recover();
+            if !peers.contains_key(peer_id) {
+                return Err(crate::Error::PeerNotReachable(format!(
+                    "BLE: {} is not a connected peer",
+                    peer_id
+                )));
+            }
+        }
+
+        {
+            let mut queue = self.send_queue.lock_or_recover();
+            queue.push_back((peer_id.to_string(), message.clone()));
+        }
+
+        self.update_queue_metric();
+        self.notify_fragments_available();
+
+        Ok(())
+    }
+
+    /// Lists every registered direct peer.
+    ///
+    /// Membership is deliberately the same test [`Transport::send`] and
+    /// [`Transport::send_to_peer`] apply — presence in `peers` — rather than
+    /// the `PeerDevice::connected` flag. The two must agree: a peer omitted
+    /// here but accepted by the send path is a usable link a forwarding caller
+    /// would never try, whereas the reverse costs only a synchronous error the
+    /// caller already handles by moving to the next neighbor.
+    fn connected_peers(&self) -> Vec<crate::PeerLink> {
+        if self.status() != TransportStatus::Available {
+            return Vec::new();
+        }
+        self.peers
+            .lock_or_recover()
+            .values()
+            .map(|peer| crate::PeerLink::with_rssi(peer.device_id.clone(), peer.rssi))
+            .collect()
+    }
+
     fn receive(&self) -> Result<Option<Message>> {
         let mut queue = self.receive_queue.lock_or_recover();
         Ok(queue.pop_front())
@@ -1163,6 +1232,20 @@ impl Transport for BleTransport {
         }
     }
 
+    /// Called when raw fragment data arrives from a known peer.
+    ///
+    /// Delegates to the inherent
+    /// [`BleTransport::on_fragment_received_from`], which records the peer on
+    /// the reassembled message. An empty `peer_id` is treated as "the platform
+    /// did not identify this link" and falls back to the anonymous path rather
+    /// than failing the frame.
+    fn on_fragment_received_from(&self, fragment_data: Vec<u8>, peer_id: String) -> Result<()> {
+        if peer_id.is_empty() {
+            return self.on_fragment_received(fragment_data);
+        }
+        BleTransport::on_fragment_received_from(self, fragment_data, peer_id)
+    }
+
     /// Gets the next fragment to send (for platform implementation).
     ///
     /// Returns (recipient, fragment_data) or None if no messages to send.
@@ -1187,7 +1270,10 @@ impl Transport for BleTransport {
             return Ok(None);
         };
 
-        let fragments = self.fragment_message(&message)?;
+        // Size against the queue key, not `message.recipient`: the key is the
+        // peer this batch is about to be written to, which for a forwarded
+        // frame is the next hop rather than the final recipient.
+        let fragments = self.fragment_message_for(&recipient, &message)?;
 
         if fragments.is_empty() {
             self.update_queue_metric();
@@ -1336,6 +1422,61 @@ mod tests {
             AppId::new("app").unwrap(),
             "hi",
         )
+    }
+
+    #[test]
+    fn send_to_peer_targets_the_hop_and_sizes_by_its_mtu() {
+        let transport = BleTransport::new("relay");
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("carol"));
+        // Carol's link negotiated a large MTU; bob (the recipient) is not a
+        // peer here at all, so sizing by recipient would fall back to the floor.
+        transport.set_peer_mtu("carol", 500);
+
+        let message = small_message(); // addressed to bob
+        transport.send_to_peer("carol", &message).unwrap();
+
+        let (target, _) = transport
+            .get_next_fragment()
+            .unwrap()
+            .expect("fragment queued for the hop");
+        assert_eq!(target, "carol");
+        // Sized against carol's 500-byte MTU, not the 185-byte floor: a small
+        // message fits in exactly one fragment.
+        assert!(transport.get_next_fragment().unwrap().is_none());
+        assert_eq!(transport.fragment_fallback_count(), 0);
+    }
+
+    #[test]
+    fn send_to_peer_refuses_an_unconnected_peer() {
+        let transport = BleTransport::new("relay");
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("carol"));
+
+        let result = transport.send_to_peer("dave", &small_message());
+        assert!(matches!(result, Err(crate::Error::PeerNotReachable(_))));
+    }
+
+    #[test]
+    fn connected_peers_matches_what_the_send_path_accepts() {
+        let transport = BleTransport::new("relay");
+        transport.on_peer_discovered(peer_device("carol"));
+
+        // Nothing is addressable while the transport is down.
+        assert!(transport.connected_peers().is_empty());
+
+        transport.start().unwrap();
+        let links = transport.connected_peers();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].peer_id, "carol");
+        assert_eq!(links[0].rssi, Some(-60));
+        // Every listed link is one send_to_peer will accept.
+        assert!(transport
+            .send_to_peer(&links[0].peer_id, &small_message())
+            .is_ok());
+
+        transport.on_peer_lost("carol");
+        assert!(transport.connected_peers().is_empty());
     }
 
     #[test]
