@@ -4,7 +4,30 @@ All notable changes to the Offline Protocol SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This changelog covers everything after the **v0.7.1** release.
 
-## [Unreleased]
+## [0.20.1] — 2026-08-07
+
+> **Nothing breaks a build, and one event changes meaning.** A receiver no
+> longer acknowledges a frame it failed to decrypt or failed to parse — it
+> withholds the ACK so the sender's resend can deliver, where before the sender
+> was told "delivered" for a message that was dropped. The visible consequence
+> is that **`messageDecryptionFailed` is now advisory and fires once per failed
+> *attempt*, not once per message.** If your UI settles a message on it — marks
+> it lost, removes it from a list — switch to `messageFailed`, or
+> `fileReceiveFailed` for media, which are the terminal signals. Everything here
+> stays under the existing `encryption.cryptoRecoveryEnabled` kill switch
+> (default on); `false` restores the previous drop-and-ACK.
+>
+> A media chunk that fails its identity binding is now answered with silence
+> like the text path, which is deliberately *not* under that switch — it governs
+> what the receiver reveals to whoever injected the frame, not whether anything
+> can be recovered. One side effect: a repeated injection of the identical frame
+> re-emits `MEDIA_SENDER_GROUP_MISMATCH` on each attempt rather than being
+> suppressed by dedup after the first. The rate is the signal.
+>
+> GitHub releases now attach the compiled binaries — six archives plus
+> `SHA256SUMS.txt`, each carrying its own licence and export notices, and all of
+> them attested. npm is unchanged and remains the supported route for React
+> Native.
 
 ### Changed
 

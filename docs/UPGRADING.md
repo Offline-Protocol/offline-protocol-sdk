@@ -36,6 +36,14 @@ a `ProtocolState` your app *persisted itself* (AsyncStorage, redux-persist):
 that value returns as a number and now matches nothing, so treat an
 unrecognised persisted value as `Stopped`.
 
+`v0.20.1` adds one more, and this one *does* need a change if your UI settles a
+message on it: `messageDecryptionFailed` is now advisory and fires once per
+failed **attempt** rather than once per message, because a receiver that cannot
+decrypt or parse a frame now withholds the delivery ACK so the sender's resend
+can deliver.
+[§11.1](#111-messagedecryptionfailed-is-advisory-not-terminal-v0201) has the
+full contract and the events to settle on instead.
+
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
 cannot be undone later.
@@ -954,6 +962,54 @@ reported. `detail` carries the reason.
 - A retry of a failed `initialize_mls` can settle the same id twice. A duplicate
   terminal event is deliberate — it is a far smaller lie than silence. Make your
   handler idempotent.
+
+### 11.1 `messageDecryptionFailed` is advisory, not terminal *(v0.20.1)*
+
+No new event type — but this one changes meaning, and an app that settles a
+message on it now settles too early.
+
+A receiver that cannot decrypt or parse an inbound frame used to drop it and
+send a delivery ACK anyway, so the sender marked the message delivered and
+stopped retrying: silent loss behind an ACK claiming the opposite. It now
+**withholds the ACK**, which is what lets the sender's resend deliver — and for
+a DM that resend is re-sealed against the peer's current session, so it carries
+a live ratchet generation rather than replaying bytes that already failed.
+
+The consequence for your event handler:
+
+| Event | Before | Now |
+|---|---|---|
+| `messageDecryptionFailed` | effectively terminal — one per lost message | **advisory**, once per failed *attempt*, bounded by the sender's ACK retry budget |
+| `messageFailed` | terminal | terminal — **settle here** |
+| `fileReceiveFailed` | terminal | terminal — **settle here for media** |
+
+**What to change.** If your UI marks a message lost, removes it from a list, or
+resolves a promise on `messageDecryptionFailed`, move that to `messageFailed`
+(or `fileReceiveFailed` for media). Treat `messageDecryptionFailed` as "this
+attempt did not decrypt" — useful for diagnostics, and expect repeats for the
+same message. Make the handler idempotent, as with the settlements above.
+
+Media has no sender-side re-seal (chunks are re-encoded rather than replayed),
+so an undecryptable chunk recovers the way an interrupted transfer already
+does: the withheld ACK drives the media outbox to surface `MediaResendRequired`
+and the app re-supplies the bytes.
+
+**What did not change is the re-key.** Only a proven epoch mismatch tears down
+and rebuilds a session. These failures withhold the ACK but never re-key —
+turning every malformed frame into a session teardown would be an unbounded
+churn vector. And **failures *after* a successful decrypt stay terminal and
+still ACK** (an empty or non-UTF-8 plaintext, a decrypted media body that does
+not parse): the generation is spent, so no resend could ever deliver.
+
+All of the above sits under the existing `encryption.cryptoRecoveryEnabled`
+kill switch (default on); setting it `false` restores the previous
+drop-and-ACK. One related change is deliberately **not** under that switch: a
+media chunk failing its identity binding is now answered with silence, matching
+what the text path has always done, because it governs what the receiver
+reveals to whoever injected the frame rather than whether anything can be
+recovered. A repeated injection of the identical frame therefore re-emits
+`MEDIA_SENDER_GROUP_MISMATCH` on each attempt instead of being suppressed by
+dedup after the first — the rate is the signal, as with `SESSION_REKEY_TRIGGERED`.
 
 ---
 
