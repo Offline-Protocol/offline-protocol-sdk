@@ -489,22 +489,29 @@ impl OfflineProtocol {
             let hop_count = message.hop_count.value();
             let remaining_ttl = message.ttl.value();
 
+            let mut exclude: Vec<&str> = vec![message.sender.as_str()];
+            if let Some(peer) = relay.arrival_peer.as_deref() {
+                exclude.push(peer);
+            }
+            let onward = self.mesh_relay.select_targets(
+                neighbors.iter().map(|n| n.peer_id.as_str()),
+                &exclude,
+                &message.id.as_str(),
+            );
+
             // If the destination is one of our own neighbors, hand it over
-            // directly: no fan-out is worth more than arriving.
-            let direct = neighbors.iter().any(|n| n.peer_id == recipient);
-            let targets = if direct {
-                vec![recipient.clone()]
+            // directly: no fan-out is worth more than arriving. Should that
+            // link fail between choosing it and writing to it, fall back to
+            // carrying it onward rather than dropping a frame we could still
+            // move.
+            let targets = if neighbors.iter().any(|n| n.peer_id == recipient) {
+                let mut ordered = vec![recipient.clone()];
+                ordered.extend(onward.into_iter().filter(|peer| peer != &recipient));
+                ordered
             } else {
-                let mut exclude: Vec<&str> = vec![message.sender.as_str()];
-                if let Some(peer) = relay.arrival_peer.as_deref() {
-                    exclude.push(peer);
-                }
-                self.mesh_relay.select_targets(
-                    neighbors.iter().map(|n| n.peer_id.as_str()),
-                    &exclude,
-                    &message.id.as_str(),
-                )
+                onward
             };
+            let deliver_direct = targets.first() == Some(&recipient);
 
             if targets.is_empty() {
                 debug!(
@@ -519,6 +526,18 @@ impl OfflineProtocol {
                 match self.transport_manager.send_to_neighbor(target, &message) {
                     Ok(transport) => {
                         delivered_to += 1;
+                        // Handing it to the recipient themselves ends the
+                        // journey; the remaining neighbors are only a fallback
+                        // for that link failing.
+                        if deliver_direct && target == &recipient {
+                            debug!(
+                                message_id = %message.id,
+                                next_hop = %target,
+                                transport = ?transport,
+                                "Delivered to its recipient directly"
+                            );
+                            break;
+                        }
                         debug!(
                             message_id = %message.id,
                             next_hop = %target,
