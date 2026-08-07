@@ -709,6 +709,14 @@ impl OfflineProtocol {
                     sender: String,
                     group_id: String,
                     kind: DecryptionFailureKind,
+                    /// Whether the sender can still recover this message by
+                    /// resending it. True for a genuine crypto/transport
+                    /// failure while crypto recovery is enabled: the ACK is
+                    /// withheld so the sender keeps retrying, and Tier 2
+                    /// re-seals each resend against a live ratchet generation.
+                    /// False for the permanent classes and for the whole
+                    /// recovery-disabled fall-through, which drop and ACK.
+                    retriable: bool,
                 },
                 SecurityRejected,
                 SessionSlotMismatch,
@@ -812,9 +820,50 @@ impl OfflineProtocol {
                                         sender: sender.to_string(),
                                     }
                                 }
-                                // Epoch desync with recovery disabled, or any
-                                // genuine crypto/transport failure: fall through
-                                // to the legacy drop-and-ACK behavior.
+                                // A genuine crypto/transport failure: an AEAD or
+                                // authentication failure, a discarded past
+                                // ratchet generation, a malformed frame. The
+                                // ciphertext as it stands is undecryptable, but
+                                // the *message* is not lost — Tier 2 re-seals
+                                // every resend against the peer's current
+                                // session, so the sender's next attempt carries
+                                // a fresh generation that can decrypt. Withhold
+                                // the ACK (the receive loop's `Deferred` arm) so
+                                // the sender keeps that lever, exactly like the
+                                // desync path above.
+                                //
+                                // What this must NOT do is re-key. Desync stays
+                                // its own class precisely because re-keying on
+                                // AEAD failures is a re-key-storm vector (see
+                                // `test_corrupt_ciphertext_is_not_classified_as_session_desync`);
+                                // this arm changes only the ACK disposition.
+                                SessionStateError::TransportFailure
+                                | SessionStateError::CryptoFailure
+                                    if self.config.encryption.crypto_recovery_enabled =>
+                                {
+                                    let kind = DecryptionFailureKind::from_mls_error(&e);
+                                    warn!(
+                                        sender = %sender,
+                                        error = %e,
+                                        error_code = session_state_error.code(),
+                                        "Failed to decrypt message; withholding ACK so the sender can resend"
+                                    );
+                                    DecryptResult::Failed {
+                                        sender: sender.to_string(),
+                                        group_id: encrypted.group_id.as_str().to_string(),
+                                        kind,
+                                        retriable: true,
+                                    }
+                                }
+                                // Epoch desync or a crypto/transport failure with
+                                // recovery disabled, or a permanently-doomed
+                                // frame: drop and ACK. `Unknown` is deliberately
+                                // never retriable — it covers refusals that can
+                                // never become decryptable no matter how often
+                                // the sender resends (`CommitNotAuthorized`,
+                                // `SessionIdentityMismatch`; see the disposition
+                                // notes on `SessionStateError`'s `MlsError`
+                                // conversion), so retries would be pure waste.
                                 SessionStateError::SessionDesync
                                 | SessionStateError::TransportFailure
                                 | SessionStateError::CryptoFailure
@@ -830,6 +879,7 @@ impl OfflineProtocol {
                                         sender: sender.to_string(),
                                         group_id: encrypted.group_id.as_str().to_string(),
                                         kind,
+                                        retriable: false,
                                     }
                                 }
                             }
@@ -939,6 +989,7 @@ impl OfflineProtocol {
                     sender: sender_owned,
                     group_id,
                     kind,
+                    retriable,
                 } => {
                     self.emit_mls_decryption_failed(
                         &sender_owned,
@@ -947,14 +998,38 @@ impl OfflineProtocol {
                         MlsOperationContext::Receive,
                     );
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        // On the retriable path this event is **advisory, not
+                        // terminal**, and fires once per failed attempt rather
+                        // than once per message: the frame was not ACKed, so the
+                        // sender resends and each resend that still fails
+                        // reports again. It is bounded by the sender's ACK retry
+                        // budget, after which the sender settles the message as
+                        // an honest `MessageFailed`.
+                        let reason = if retriable {
+                            format!(
+                                "Failed to decrypt MLS message ({kind:?}); not acknowledged, so the sender's resend can still deliver it"
+                            )
+                        } else {
+                            format!("Failed to decrypt MLS message ({kind:?})")
+                        };
                         state.emit_event(Event::message_decryption_failed(
                             message.id.clone(),
                             sender_owned.clone(),
                             Self::decryption_failure_code_from_kind(kind),
-                            format!("Failed to decrypt MLS message ({kind:?})"),
+                            reason,
                         ));
                     }
-                    Some(InternalMessageResult::Consumed)
+                    if retriable {
+                        // Reuses the Deferred atom (skip ACK + `unmark_seen`)
+                        // without enqueueing: like a desync, this ciphertext is
+                        // dead — OpenMLS consumed the ratchet generation on the
+                        // failed attempt, so a queued copy could never drain.
+                        // Recovery is the sender's re-sealed resend, not this
+                        // frame.
+                        Some(InternalMessageResult::Deferred)
+                    } else {
+                        Some(InternalMessageResult::Consumed)
+                    }
                 }
                 DecryptResult::SecurityRejected => {
                     // Spoofed sender: the MLS credential proves the message came

@@ -274,12 +274,22 @@ impl OfflineProtocol {
                     }
                     InternalMessageResult::Deferred => {
                         // Still undecryptable during a drain. Drains only run
-                        // after the session is confirmed, so this is not
-                        // expected — but re-enqueue defensively rather than drop
-                        // it (the id is already unmarked, so a resend still
-                        // recovers it too). Preserve the arrival transport so a
-                        // later drain can still ACK it. `enqueue` is idempotent
-                        // by id, so this cannot stack.
+                        // after the session is confirmed, so a session-not-ready
+                        // deferral here is unexpected — but a *hard* decrypt
+                        // failure of a queued frame lands here routinely now
+                        // (its generation is spent, or the session was rebuilt
+                        // at a new epoch under it), and the important part is
+                        // what it no longer does: it is not ACKed and its id is
+                        // not re-marked, so the sender's resend still recovers
+                        // the message instead of being told "delivered" for a
+                        // frame we dropped.
+                        //
+                        // Re-enqueue defensively rather than drop it (the id is
+                        // already unmarked, so a resend recovers it either way);
+                        // a frame that can never decrypt just ages out on the
+                        // queue TTL. Preserve the arrival transport so a later
+                        // drain can still ACK it. `enqueue` is idempotent by id,
+                        // so this cannot stack.
                         debug!(
                             message_id = %msg.id,
                             "Delayed message still undecryptable during drain; re-queuing"
