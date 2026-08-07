@@ -294,9 +294,10 @@ pub enum DecryptionFailureCode {
     /// later resend re-enters the queue and can still complete the transfer once
     /// the session confirms. Treat this as "the transfer is stalled and may need
     /// a resend", not "the transfer has permanently failed" — the terminal
-    /// failure signal for media is `FileReceiveFailed`. (A genuinely
-    /// unrecoverable decrypt — e.g. a hard crypto failure — surfaces under a
-    /// different `DecryptionFailureCode`, not this one.)
+    /// failure signal for media is `FileReceiveFailed`. The same is true of a
+    /// hard decrypt failure while `crypto_recovery_enabled`, which surfaces
+    /// under its own code but is equally un-ACKed and equally recoverable by a
+    /// resend; see the `MessageDecryptionFailed` docs.
     PendingQueueDropped,
     /// Failure class is unknown.
     Unknown,
@@ -451,7 +452,17 @@ pub enum Event {
         retry_count: u32,
     },
 
-    /// Failed to decrypt an inbound encrypted message.
+    /// An inbound encrypted message failed to decrypt on this attempt.
+    ///
+    /// **Advisory, not terminal, and emitted once per failed *attempt*.** While
+    /// `EncryptionConfig::crypto_recovery_enabled` is on (the default) a
+    /// message that fails to decrypt is not delivery-ACKed, so the sender keeps
+    /// retrying — and each resend of a DM is re-sealed against the peer's
+    /// current session, so a resend can actually land. Every failing attempt
+    /// reports again, bounded by the sender's ACK retry budget. Read this as
+    /// "this attempt did not decrypt"; the terminal signals are
+    /// [`Event::MessageFailed`] on the sender and `FileReceiveFailed` for
+    /// media.
     MessageDecryptionFailed {
         /// ID of the message that could not be decrypted.
         message_id: String,

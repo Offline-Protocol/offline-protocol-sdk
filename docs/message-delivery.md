@@ -377,6 +377,16 @@ The delivery system emits events at each stage of the message lifecycle:
 | `MessageDelivered` | ACK received from recipient | `message_id`, `latency_ms`, `hop_count`, `transport` |
 | `MessageFailed` | Terminal failure (max ACK retries, outbox lifetime or capacity exceeded) | `message_id`, `reason`, `retry_count` |
 | `MediaResendRequired` | Interrupted outbound media transfer detected at `start()`; app must re-supply the bytes via `send_media` with the same `file_id` | `file_id`, `recipient`, `file_name`, `file_size` |
+| `MessageDecryptionFailed` | An inbound encrypted message failed to decrypt on this attempt; **advisory, not terminal** (see below) | `message_id`, `sender`, `code`, `reason` |
+
+`MessageDecryptionFailed` is the one receiver-side event on this list, and it
+does not settle anything. A message that fails to decrypt is not delivery-ACKed
+(so the sender keeps retrying, and each resend of a DM is re-sealed against the
+current session), which means the event fires once per failed *attempt* rather
+than once per message — bounded by the sender's ACK retry budget. Treat it as
+"this attempt did not decrypt"; the terminal signal is `MessageFailed` on the
+sender, or `FileReceiveFailed` for media. See
+[Crypto-Failure Recovery](mls-integration.md#crypto-failure-recovery).
 
 ### Event Flow Examples
 

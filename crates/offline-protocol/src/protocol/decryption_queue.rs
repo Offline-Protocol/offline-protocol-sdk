@@ -25,7 +25,8 @@ pub(crate) struct PendingDecryptMessage {
     /// drain can send the deferred delivery ACK directly (see the deferred-ACK
     /// design in CLAUDE.md) instead of waiting for the sender's next resend to
     /// hit the duplicate re-ACK path. `None` when the message was enqueued from
-    /// a context with no transport (tests, defensive re-enqueue) — the drain
+    /// a context with no transport (tests, or a re-queue by the handler during a
+    /// drain, which re-processes with no live arrival transport) — the drain
     /// then falls back to the resend-driven ACK.
     pub(crate) received_via: Option<TransportType>,
 }

@@ -389,13 +389,21 @@ export interface EncryptionConfig {
    */
   richPayloadEnabled?: boolean;
   /**
-   * Kill switch for 1:1 MLS crypto-failure recovery (default: true). When a
-   * 1:1 session falls out of epoch sync with the peer, an undecryptable DM is
-   * not delivery-ACKed and a rate-limited session re-key heals the channel,
-   * instead of silently dropping it. Failures that are *not* an epoch mismatch
+   * Kill switch for 1:1 MLS crypto-failure recovery (default: true). An
+   * undecryptable DM or media chunk is not delivery-ACKed, so the sender keeps
+   * retrying — and each DM resend is re-sealed against the peer's current
+   * session — instead of being told "delivered" for a message that was
+   * dropped. Only an epoch mismatch (the two sides disagreeing on the MLS
+   * epoch, e.g. after a fork) additionally triggers a rate-limited session
+   * re-key to heal the channel; failures that are *not* an epoch mismatch
    * (AEAD/authentication failures, discarded ratchet generations, malformed
-   * frames) are unaffected and still fail closed. Disabling reverts to the
-   * legacy drop-and-ACK behavior.
+   * frames) withhold the ACK but never re-key. Disabling reverts to the legacy
+   * drop-and-ACK behavior.
+   *
+   * Plan for one consequence: `messageDecryptionFailed` is **advisory**, not
+   * terminal, and fires once per failed *attempt* rather than once per message.
+   * Read it as "this attempt did not decrypt"; `messageFailed` (or
+   * `fileReceiveFailed` for media) remains the terminal signal.
    *
    * The re-key trigger is unauthenticated by construction: an MLS epoch is
    * checked during framing validation, before the sender is verified, so any

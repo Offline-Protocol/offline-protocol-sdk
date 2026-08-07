@@ -107,7 +107,7 @@ const protocol = new OfflineProtocol({
 | `pendingQueue.overflowPolicy` | `drop_oldest` | Overflow policy: `drop_oldest` or `drop_newest` |
 | `compactEnvelopeEnabled` | `true` | Emit the compact MLS envelope to recipients that advertise `env_versions` |
 | `richPayloadEnabled` | `true` | Seal rich extras inside the MLS ciphertext for recipients that advertise `rich_versions` |
-| `cryptoRecoveryEnabled` | `true` | Heal an epoch-desynced 1:1 session instead of dropping the message ([below](#crypto-failure-recovery)) |
+| `cryptoRecoveryEnabled` | `true` | Recover an undecryptable 1:1 message instead of dropping it and ACKing anyway ([below](#crypto-failure-recovery)) |
 
 The `pendingTtlMs` default is 30 minutes, not the 2 minutes earlier releases
 used: under the deferred-ACK model a message held here is not delivery-ACKed on
@@ -874,19 +874,24 @@ for runtime disable semantics.
 ### Crypto-Failure Recovery
 
 Distinct from the pending queue above, which covers a session that is *not yet
-ready*. This covers an **established** 1:1 session that has fallen out of epoch
-sync with the peer — the two sides disagree on the MLS epoch, e.g. after a fork.
-The decrypt fails, and previously that failure was delivery-ACKed and the
-message dropped: silent loss behind an ACK that claimed delivery.
+ready*. This covers an **established** 1:1 session on which a decrypt fails —
+most importantly one that has fallen out of epoch sync with the peer (the two
+sides disagree on the MLS epoch, e.g. after a fork). Previously such a failure
+was delivery-ACKed and the message dropped: silent loss behind an ACK that
+claimed delivery.
 
 Gated by `encryption.cryptoRecoveryEnabled` (default `true`), the SDK now
 recovers in two tiers.
 
-**Tier 1 — honest failure, then heal.** An epoch-mismatch decrypt failure
-withholds the delivery ACK and un-marks the message id, so the sender keeps
-retrying rather than marking it delivered. It does *not* queue the ciphertext —
-that ciphertext is sealed to a dead epoch and could never be decrypted, however
-long it waited. Instead the receiver tears down its own stale session and
+**Tier 1 — honest failure, then heal.** A decrypt failure withholds the delivery
+ACK and un-marks the message id, so the sender keeps retrying rather than
+marking it delivered. It does *not* queue the ciphertext — a frame sealed to a
+dead epoch, or one whose ratchet generation the failed attempt already consumed,
+could never be decrypted however long it waited. Recovery is the sender's
+*resend*, not this frame.
+
+When — and only when — the failure is a proven **epoch mismatch**, the receiver
+additionally heals the channel: it tears down its own stale session and
 advertises a `session_reset` key package; the peer drops its stale session,
 rebuilds from that key package, and Welcomes the receiver back. Deleting the
 local session is what makes convergence work for both user-id orderings. Re-keys
@@ -898,10 +903,20 @@ re-sealed against the peer's *current* session while preserving the message id
 for dedup and ACK correlation. Tier 1 makes the failure honest; Tier 2 is what
 makes the message actually arrive.
 
-What is deliberately **excluded**: failures that are *not* an epoch mismatch —
-an AEAD/authentication failure, a discarded past ratchet generation, a malformed
-frame — are classified separately and still fail closed. Widening the recoverable
-classification to cover them would add an unbounded teardown vector.
+What is deliberately **excluded from the re-key**: failures that are *not* an
+epoch mismatch — an AEAD/authentication failure, a discarded past ratchet
+generation, a malformed frame — withhold the ACK exactly like an epoch mismatch
+(Tier 1 and Tier 2 both apply, so the sender's re-sealed resend still recovers
+the message), but they never trigger a re-key. Widening the *re-key* trigger to
+cover them would turn every malformed frame into a session teardown, which is an
+unbounded churn vector; withholding an ACK carries no such cost, because the
+recovery it enables is the sender's own retry.
+
+**Event semantics to plan for.** Because these failures no longer settle the
+message, `message_decryption_failed` is **advisory** and fires once per failed
+*attempt* rather than once per message — bounded by the sender's ACK retry
+budget. Treat it as "this attempt did not decrypt". The terminal signals stay
+`message_failed` for a DM and `file_receive_failed` for media.
 
 > **The re-key trigger is unauthenticated, and cannot be made otherwise.** Do not
 > read the paragraph above as "only a genuine peer can cause a re-key". An MLS

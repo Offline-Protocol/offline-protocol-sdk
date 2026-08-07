@@ -213,16 +213,26 @@ impl OfflineProtocol {
                                 continue;
                             }
                             InternalMessageResult::Deferred => {
-                                // The message could not be decrypted yet (session
-                                // not ready) and was queued for delayed decryption.
+                                // The message was not delivered, but the sender
+                                // can still recover it by resending: it could not
+                                // be decrypted *yet* (session not ready, so queued
+                                // for delayed decryption), or it is undecryptable
+                                // as it stands (epoch desync, or a hard crypto
+                                // failure while `crypto_recovery_enabled`) and was
+                                // dropped without queueing. See the three
+                                // conditions on `InternalMessageResult::Deferred`.
+                                //
                                 // Do NOT send a delivery ACK and do NOT keep the id
                                 // dedup-marked: the message is not delivered, so the
                                 // sender must be free to retry and that retry must
                                 // re-enter processing rather than hit the duplicate
-                                // re-ACK path above. When the session confirms and
-                                // the queue drains, the copy is surfaced and the id
-                                // is re-marked (see `process_pending_decryption`), so
-                                // the sender's next resend is then deduped + re-ACKed.
+                                // re-ACK path above. For a queued copy, the session
+                                // confirming drains it: the message is surfaced and
+                                // the id re-marked (see `process_pending_decryption`),
+                                // so the sender's next resend is then deduped +
+                                // re-ACKed. For the other two, recovery is that
+                                // resend itself — re-sealed against a live
+                                // generation by Tier 2.
                                 self.deduplicator.unmark_seen(&message.id);
                                 continue;
                             }
@@ -265,14 +275,17 @@ impl OfflineProtocol {
 
                     // Route file-chunk messages to the transfer manager BEFORE
                     // the delivery ACK, and never surface them to the app as
-                    // regular messages. An encrypted chunk that cannot be
-                    // decrypted yet (session not ready) is queued for delayed
-                    // decryption and returns `Deferred`: it must NOT be ACKed
-                    // and its id is unmarked, so the sender keeps retrying and
-                    // the resend re-enters processing — matching the text
-                    // `Deferred` path. Every other outcome (`Handled`:
-                    // decrypted/assembled, or a terminal drop) is ACKed as
-                    // before, since the sender cannot recover it by retrying.
+                    // regular messages. An encrypted chunk that was not
+                    // delivered but that the sender can still recover by
+                    // resending — not decryptable yet (session not ready, so
+                    // queued for delayed decryption), or undecryptable as it
+                    // stands (epoch desync, crypto failure) — returns
+                    // `Deferred`: it must NOT be ACKed and its id is unmarked,
+                    // so the sender keeps retrying and the resend re-enters
+                    // processing, matching the text `Deferred` path. Every other
+                    // outcome (`Handled`: decrypted/assembled, or a terminal
+                    // drop) is ACKed as before, since the sender cannot recover
+                    // it by retrying.
                     if message.content_type == ContentType::FileChunk {
                         match self.handle_incoming_file_chunk_via(&message, Some(transport_used)) {
                             ChunkOutcome::Deferred => {
@@ -476,11 +489,13 @@ impl OfflineProtocol {
                     match self.decrypt_media_chunk(&sender, &encrypted, message, arrival_transport)
                     {
                         MediaChunkDecrypt::Plaintext(p) => p,
-                        // Queued for delayed decryption: defer the ACK so the sender
+                        // Not delivered and recoverable by a resend (queued for
+                        // delayed decryption, or an undecryptable frame the
+                        // sender can re-send): defer the ACK so the sender
                         // retries and the resend re-enters processing.
                         MediaChunkDecrypt::Deferred => return ChunkOutcome::Deferred,
-                        // Terminal drop (mismatch, crypto failure, empty): ACK as
-                        // before — the sender cannot recover it by retrying.
+                        // Terminal drop (mismatch, permanent refusal, empty): ACK
+                        // as before — the sender cannot recover it by retrying.
                         MediaChunkDecrypt::Dropped => return ChunkOutcome::Handled,
                     };
                 let inner = match MediaChunkPlaintext::decode(&plaintext) {
@@ -737,14 +752,22 @@ impl OfflineProtocol {
         true
     }
 
-    /// Decrypts an encrypted media chunk envelope. On session-not-ready the
-    /// whole message is queued for delayed decryption and
-    /// [`MediaChunkDecrypt::Deferred`] is returned (mirroring the text path):
-    /// the caller must then skip the ACK and unmark the id so the sender keeps
-    /// retrying. Other failures emit decryption telemetry and return
-    /// [`MediaChunkDecrypt::Dropped`] (a terminal drop the caller still ACKs).
-    /// A successful decrypt doubles as a session confirmation signal, exactly
-    /// like text decrypts.
+    /// Decrypts an encrypted media chunk envelope. Three failure dispositions,
+    /// mirroring the text path in [`Self::handle_encrypted_message`]:
+    ///
+    /// - **Session not ready**: the whole message is queued for delayed
+    ///   decryption and [`MediaChunkDecrypt::Deferred`] is returned.
+    /// - **Recoverable** (epoch desync, or a crypto/transport failure while
+    ///   `crypto_recovery_enabled`): [`MediaChunkDecrypt::Deferred`] *without*
+    ///   queueing — the ciphertext is dead either way, so recovery is the
+    ///   sender's resend, driven by the withheld ACK.
+    /// - **Terminal** (identity/slot mismatch, a permanent refusal, or any
+    ///   crypto failure with recovery switched off): decryption telemetry plus
+    ///   [`MediaChunkDecrypt::Dropped`], which the caller still ACKs.
+    ///
+    /// On either `Deferred` the caller must skip the ACK and unmark the id so
+    /// the sender keeps retrying. A successful decrypt doubles as a session
+    /// confirmation signal, exactly like text decrypts.
     fn decrypt_media_chunk(
         &mut self,
         sender: &str,
@@ -865,6 +888,54 @@ impl OfflineProtocol {
                         self.schedule_session_rekey(sender);
                         MediaChunkDecrypt::Deferred
                     }
+                    SessionStateError::TransportFailure | SessionStateError::CryptoFailure
+                        if self.config.encryption.crypto_recovery_enabled =>
+                    {
+                        // A genuine crypto/transport failure on a chunk (AEAD
+                        // failure, spent ratchet generation, malformed frame).
+                        // Mirrors the text path in `handle_encrypted_message`:
+                        // withhold the ACK and unmark the id rather than lying
+                        // "delivered" for a chunk we dropped. Do NOT enqueue —
+                        // the generation is spent, so a queued copy could never
+                        // drain — and do NOT re-key, which stays desync-only.
+                        //
+                        // Recovery differs from a DM: chunks have no Tier 2
+                        // re-seal (they are re-encoded, not replayed), so the
+                        // un-ACKed chunk drives the media outbox's retry/ACK
+                        // budget to lapse and surface `MediaResendRequired`,
+                        // and the app re-supplies the bytes via `send_media_with`
+                        // — re-encoded against a live generation. Same
+                        // descriptor-based recovery as the media desync arm.
+                        warn!(
+                            sender = %sender,
+                            error = %e,
+                            error_code = classification.code(),
+                            "Failed to decrypt media chunk; withholding ACK so the transfer can be resent"
+                        );
+                        let kind = DecryptionFailureKind::from_mls_error(&e);
+                        self.emit_mls_decryption_failed(
+                            sender,
+                            Some(&group_id),
+                            kind,
+                            MlsOperationContext::Receive,
+                        );
+                        // Advisory, not terminal — matching a pending-queue
+                        // eviction: the chunk was never ACKed, so the transfer
+                        // is *stalled* pending a resend, not failed. The
+                        // terminal media signal is still `FileReceiveFailed`.
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::message_decryption_failed(
+                                message.id.clone(),
+                                sender.to_string(),
+                                Self::decryption_failure_code_from_kind(kind),
+                                format!(
+                                    "encrypted media chunk failed to decrypt ({}); its file transfer is stalled until the sender resends",
+                                    classification.code()
+                                ),
+                            ));
+                        }
+                        MediaChunkDecrypt::Deferred
+                    }
                     _ => {
                         warn!(
                             sender = %sender,
@@ -879,9 +950,10 @@ impl OfflineProtocol {
                             kind,
                             MlsOperationContext::Receive,
                         );
-                        // The chunk was already ACKed and dedup-marked on
-                        // receipt, so this loss is permanent — surface it to
-                        // the app like a pending-queue drop, not just as MLS
+                        // Permanently undecryptable (or crypto recovery is
+                        // switched off): the chunk is ACKed and stays
+                        // dedup-marked, so this loss is terminal for the
+                        // transfer — surface it to the app, not just as MLS
                         // telemetry.
                         if let Ok(state) = lock_shared_state(&self.shared_state) {
                             state.emit_event(Event::message_decryption_failed(
@@ -903,7 +975,9 @@ impl OfflineProtocol {
 }
 
 /// Three-way outcome of [`OfflineProtocol::decrypt_media_chunk`]: the plaintext,
-/// a deferral (queued because the session is not ready), or a terminal drop.
+/// a deferral (not delivered, but recoverable by the sender's resend — either
+/// queued because the session is not ready, or dropped as undecryptable with
+/// the ACK withheld), or a terminal drop the caller ACKs.
 enum MediaChunkDecrypt {
     Plaintext(Vec<u8>),
     Deferred,

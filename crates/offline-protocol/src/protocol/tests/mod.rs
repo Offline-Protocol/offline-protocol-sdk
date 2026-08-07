@@ -12669,6 +12669,308 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
     );
 }
 
+/// Builds a bob wired to a BLE `MockTransport` with a real, confirmed 1:1 MLS
+/// session to the returned alice-side `MlsManager`. Shared by the hard-decrypt
+/// failure tests below, which all need an *established* session — the whole
+/// point is that these failures are not "session not ready".
+fn hard_failure_pair(
+    crypto_recovery_enabled: bool,
+) -> (OfflineProtocol, MockTransport, MlsManager) {
+    let mut bob_config = create_test_config_for_user("bob");
+    bob_config.encryption.enabled = true;
+    bob_config.encryption.store_pending = true;
+    bob_config.encryption.crypto_recovery_enabled = crypto_recovery_enabled;
+
+    let mut bob = OfflineProtocol::new(bob_config).unwrap();
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_transport = MockTransport::new(TransportType::BLE);
+    bob_transport.start().unwrap();
+    let bob_handle = bob_transport.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(bob_transport));
+    bob.start().unwrap();
+
+    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    alice_manager
+        .import_key_package(
+            "bob",
+            &bob_key_package.key_package_data,
+            offline_protocol_mls::KeyPackageTrust::FirstUse,
+        )
+        .unwrap();
+    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome_wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::WELCOME,
+            serde_json::to_string(&welcome).unwrap()
+        ),
+    );
+    bob_handle.queue_message(welcome_wire);
+    while bob.receive_message().is_some() {}
+
+    (bob, bob_handle, alice_manager)
+}
+
+/// Wraps an MLS envelope in an alice → bob wire message, optionally reusing an
+/// existing message id (what a Tier 2 re-sealed resend does: fresh ciphertext,
+/// same id, so the receiver's dedup and ACK correlation still line up).
+fn encrypted_wire(
+    encrypted: &offline_protocol_mls::EncryptedMessage,
+    reuse_id: Option<MessageId>,
+) -> Message {
+    let mut wire = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(encrypted).unwrap()
+        ),
+    );
+    if let Some(id) = reuse_id {
+        wire.id = id;
+    }
+    wire
+}
+
+/// A structurally valid envelope for the live session whose MLS ciphertext is
+/// garbage — an AEAD/parse failure, NOT an epoch desync and NOT session-not-ready.
+fn corrupt_ciphertext_for(alice_manager: &MlsManager) -> offline_protocol_mls::EncryptedMessage {
+    let mut encrypted = alice_manager.encrypt_for_user("bob", b"payload").unwrap();
+    encrypted.ciphertext = vec![0u8; 24];
+    encrypted
+}
+
+/// Tier 1 extended past epoch desync: a *hard* decrypt failure (AEAD /
+/// authentication failure, malformed frame, spent ratchet generation) on an
+/// established session must not be delivery-ACKed either. Dropping the message
+/// while telling the sender "delivered" is the same silent loss behind a lying
+/// ACK that the desync path already refuses — and the sender can recover, since
+/// Tier 2 re-seals every resend against a live generation.
+///
+/// It must equally NOT trigger a re-key. That boundary is load-bearing:
+/// `SessionDesync` is a separate class precisely because re-keying on failures
+/// that are not a proven epoch mismatch is a re-key-storm vector. This change
+/// moves the ACK disposition only.
+#[test]
+fn test_hard_decrypt_failure_withholds_ack_and_does_not_rekey() {
+    let (mut bob, bob_handle, alice_manager) = hard_failure_pair(true);
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    let failures: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let failures_handle = Arc::clone(&failures);
+    bob.on_event(move |event| match event {
+        Event::MessageReceived { content, .. } => {
+            received_handle.lock().unwrap().push(content.clone())
+        }
+        Event::MessageDecryptionFailed { reason, .. } => {
+            failures_handle.lock().unwrap().push(reason.clone())
+        }
+        _ => {}
+    });
+
+    let wire = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    assert!(wire.requires_ack, "delivery ACK must be in play");
+    let msg_id = wire.id.clone();
+    let msg_id_str = msg_id.as_str().to_string();
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(wire);
+    while bob.receive_message().is_some() {}
+
+    let sent = bob_handle.sent_messages();
+    assert_eq!(
+        sent.iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+            .count(),
+        0,
+        "a hard decrypt failure must NOT be delivery-ACKed"
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|m| m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+                && m.recipient.as_str() == "alice")
+            .count(),
+        0,
+        "a hard decrypt failure must NOT trigger a re-key (that is the re-key-storm vector)"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&msg_id),
+        "the id must be unmarked so the sender's resend re-enters processing"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "the frame must NOT be enqueued: its generation is spent, so it could never drain"
+    );
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "an undecryptable DM must not surface to the app"
+    );
+    let got = failures.lock().unwrap();
+    assert!(
+        got.iter().any(|r| r.contains("not acknowledged")),
+        "the failure event must read as advisory, not terminal, got {got:?}"
+    );
+}
+
+/// The recovery half: because the ACK was withheld and the id unmarked, the
+/// sender's next resend — freshly sealed against the live session, carrying the
+/// same message id, which is exactly what `reseal_for_resend_in_place` produces
+/// — re-enters processing and delivers. Without the un-ACK this message was
+/// simply lost while the sender believed it delivered.
+#[test]
+fn test_hard_decrypt_failure_recovers_on_resealed_resend() {
+    let (mut bob, bob_handle, alice_manager) = hard_failure_pair(true);
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { content, .. } = event {
+            received_handle.lock().unwrap().push(content.clone());
+        }
+    });
+
+    let corrupt = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    let msg_id = corrupt.id.clone();
+    let msg_id_str = msg_id.as_str().to_string();
+    let acks = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+            .count()
+    };
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(corrupt);
+    while bob.receive_message().is_some() {}
+    assert_eq!(acks(&bob_handle), 0);
+    assert!(received.lock().unwrap().is_empty());
+
+    // The Tier 2 resend: same id, ciphertext re-sealed at a live generation.
+    let resealed = alice_manager.encrypt_for_user("bob", b"recovered").unwrap();
+    bob_handle.queue_message(encrypted_wire(&resealed, Some(msg_id.clone())));
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        received.lock().unwrap().as_slice(),
+        &["recovered".to_string()],
+        "the re-sealed resend must deliver exactly once"
+    );
+    assert_eq!(
+        acks(&bob_handle),
+        1,
+        "the delivered resend must now be ACKed"
+    );
+    assert!(
+        bob.deduplicator.is_duplicate(&msg_id),
+        "the delivered message must be re-marked so a later resend is deduped"
+    );
+}
+
+/// The kill switch covers the widened behavior too: with
+/// `crypto_recovery_enabled = false`, a hard decrypt failure falls all the way
+/// back to the legacy drop-and-ACK. Sibling of
+/// `test_crypto_recovery_disabled_falls_back_to_drop_and_ack`, which pins the
+/// same rollback for the desync class.
+#[test]
+fn test_hard_decrypt_failure_disabled_falls_back_to_drop_and_ack() {
+    let (mut bob, bob_handle, alice_manager) = hard_failure_pair(false);
+
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = Arc::clone(&received);
+    bob.on_event(move |event| {
+        if let Event::MessageReceived { content, .. } = event {
+            received_handle.lock().unwrap().push(content.clone());
+        }
+    });
+
+    let wire = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    let msg_id = wire.id.clone();
+    let msg_id_str = msg_id.as_str().to_string();
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(wire);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        bob_handle
+            .sent_messages()
+            .iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+            .count(),
+        1,
+        "with recovery disabled, a hard decrypt failure falls back to drop-and-ACK"
+    );
+    assert!(
+        bob.deduplicator.is_duplicate(&msg_id),
+        "the legacy path leaves the id dedup-marked"
+    );
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "an undecryptable DM never surfaces regardless of the kill switch"
+    );
+}
+
+/// The third ACK site: a queued message that hard-fails when the queue *drains*
+/// must not be ACKed or re-marked either. This one mattered most in the old
+/// shape — the drain ACKs on the recorded arrival transport, so a frame that
+/// failed here was actively acknowledged to a sender who could still have
+/// recovered it.
+///
+/// It must also not be re-queued. The drain *removes* the entry before
+/// processing, so a re-enqueue would miss `enqueue`'s idempotency check and
+/// re-stamp `received_at` — restarting the TTL of a frame whose ratchet
+/// generation is already spent, on every drain, forever.
+#[test]
+fn test_drained_message_that_hard_fails_is_not_acked() {
+    let (mut bob, bob_handle, alice_manager) = hard_failure_pair(true);
+
+    let wire = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    let msg_id = wire.id.clone();
+    let msg_id_str = msg_id.as_str().to_string();
+
+    // Queue it with a recorded arrival transport, so the drain would genuinely
+    // be able to ACK it — with `received_via: None` the ACK is a no-op and this
+    // test would pass vacuously.
+    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::BLE));
+    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+
+    bob_handle.clear_sent_messages();
+    bob.process_pending_decryption("alice");
+
+    assert_eq!(
+        bob_handle
+            .sent_messages()
+            .iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
+            .count(),
+        0,
+        "a message that hard-fails on drain must NOT be ACKed"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&msg_id),
+        "it must stay unmarked so the sender's resend still recovers the message"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "the dead frame must not be re-queued: the drain removed it, so a \
+         re-enqueue would restart its TTL on every drain"
+    );
+}
+
 /// The re-key DoS guard: a peer replaying stale-epoch ciphertext (or an injected
 /// wrong-epoch frame) must not be able to drive a re-key storm. Repeated
 /// same-peer re-key triggers within the rate-limit window collapse to a single
@@ -27275,8 +27577,7 @@ fn test_media_chunk_hard_decrypt_failure_emits_decryption_failed_event() {
     });
 
     // A structurally valid envelope for the correct session group whose MLS
-    // ciphertext is garbage: decryption hard-fails (not session-not-ready),
-    // and the loss is permanent because the chunk was ACKed on receipt.
+    // ciphertext is garbage: decryption hard-fails (not session-not-ready).
     let mut encrypted = {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
@@ -27298,13 +27599,111 @@ fn test_media_chunk_hard_decrypt_failure_emits_decryption_failed_event() {
     bob_handle.queue_message(msg);
     while bob.receive_message().is_some() {}
 
+    // The chunk was never ACKed, so this reads as *stalled pending a resend*,
+    // not as a completed failure — the terminal media signal stays
+    // `FileReceiveFailed`. See
+    // `test_media_chunk_hard_decrypt_failure_withholds_ack_and_recovers` for
+    // the delivery contract behind that wording.
     let got = failures.lock().unwrap();
     assert!(
         got.iter().any(|(sender, code, reason)| sender == "alice"
             && *code != DecryptionFailureCode::PendingQueueDropped
-            && reason.contains("file transfer cannot complete")),
+            && reason.contains("stalled until the sender resends")),
         "hard decrypt failure of a media chunk must surface MessageDecryptionFailed, got {:?}",
         got
+    );
+}
+
+/// The media half of the widened Tier 1: a chunk that hard-fails to decrypt is
+/// not delivery-ACKed and its id is unmarked, so the transfer is recoverable
+/// instead of silently stalled behind a lying ACK.
+///
+/// Media recovers differently from a DM. There is no Tier 2 re-seal for chunks
+/// (they are re-encoded, not replayed), so the withheld ACK drives the sender's
+/// media outbox to lapse into `MediaResendRequired`, and the app re-supplies the
+/// bytes — producing freshly encrypted chunks. That re-supply is what the second
+/// half of this test stands in for.
+#[test]
+fn test_media_chunk_hard_decrypt_failure_withholds_ack_and_recovers() {
+    use crate::media_envelope::{decode_media_envelope, encode_media_envelope};
+
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let files: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let files_handle = Arc::clone(&files);
+    bob.on_event(move |event| {
+        if matches!(event, Event::FileReceived { .. }) {
+            *files_handle.lock().unwrap() += 1;
+        }
+    });
+
+    // A real single-chunk transfer, then the same chunk with its MLS ciphertext
+    // corrupted in flight — the shape a bit-flip or a spent generation produces.
+    alice
+        .send_media("bob", vec![3u8; 512], "s.bin", ContentType::File, None)
+        .unwrap();
+    let chunk_wire = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| m.content_type == ContentType::FileChunk)
+        .expect("alice should have sent a media chunk");
+    let chunk_id = chunk_wire.id.clone();
+    let chunk_id_str = chunk_id.as_str().to_string();
+    let acks = |handle: &MockTransport| -> usize {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&chunk_id_str))
+            .count()
+    };
+
+    let mut corrupt = chunk_wire.clone();
+    let mut envelope = decode_media_envelope(chunk_wire.binary_content.as_ref().unwrap()).unwrap();
+    envelope.ciphertext = vec![0u8; 24];
+    corrupt.binary_content = Some(encode_media_envelope(
+        &envelope,
+        crate::media_envelope::MEDIA_ENVELOPE_VERSION_MLS_V1,
+    ));
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(corrupt);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        acks(&bob_handle),
+        0,
+        "a hard-failing chunk must NOT be delivery-ACKed"
+    );
+    assert!(
+        !bob.deduplicator.is_duplicate(&chunk_id),
+        "the chunk id must be unmarked so a resend re-enters processing"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "an undecryptable chunk must NOT be enqueued: it could never drain"
+    );
+    assert_eq!(*files.lock().unwrap(), 0, "nothing completes yet");
+
+    // The app re-supplies the bytes (what `MediaResendRequired` asks for): fresh
+    // chunks, encrypted at a live generation. The transfer completes.
+    alice_handle.clear_sent_messages();
+    alice
+        .send_media("bob", vec![3u8; 512], "s.bin", ContentType::File, None)
+        .unwrap();
+    let resent = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| m.content_type == ContentType::FileChunk)
+        .expect("alice should have re-sent a media chunk");
+    bob_handle.queue_message(resent);
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        *files.lock().unwrap(),
+        1,
+        "the re-supplied transfer must complete after the withheld ACK"
     );
 }
 

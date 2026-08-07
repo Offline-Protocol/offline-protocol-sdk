@@ -157,20 +157,34 @@ pub struct EncryptionConfig {
     /// separately.
     pub rich_payload_enabled: bool,
 
-    /// Whether to recover a 1:1 MLS session that has fallen out of epoch sync
-    /// with the peer (the two sides disagree on the MLS epoch — e.g. after a
-    /// fork), rather than silently dropping the undecryptable message.
+    /// Whether to recover an inbound encrypted message that failed to decrypt,
+    /// rather than silently dropping it while telling the sender it was
+    /// delivered.
     ///
     /// Defaults to `true`. When enabled, an inbound encrypted DM (or media
-    /// chunk) that fails to decrypt *specifically* because of an epoch
-    /// mismatch is not delivery-ACKed — so the sender keeps retrying instead of
-    /// marking it delivered — and a rate-limited session re-key (the
-    /// `session_reset` key-package exchange) is triggered to rebuild the
-    /// channel. Failures that are *not* an epoch mismatch — an AEAD /
-    /// authentication failure, a discarded past ratchet generation, a malformed
-    /// frame — stay classified as plain decrypt failures and still fail closed
-    /// as before. When disabled, an epoch-mismatch failure falls back to the
-    /// legacy drop-and-ACK behavior.
+    /// chunk) that fails to decrypt is **not delivery-ACKed** and its id is not
+    /// left dedup-marked, so the sender keeps retrying instead of marking it
+    /// delivered — and each resend of a DM is re-sealed against the peer's
+    /// current session, so a resend can actually land. A message that stays
+    /// undeliverable settles as an honest `MessageFailed` once the sender's
+    /// retry budget lapses. When disabled, every decrypt failure falls back to
+    /// the legacy drop-and-ACK behavior.
+    ///
+    /// **Only an epoch mismatch additionally triggers a re-key.** A decrypt
+    /// failure *specifically* because the two sides disagree on the MLS epoch
+    /// (e.g. after a fork) also starts a rate-limited `session_reset`
+    /// key-package exchange to rebuild the channel. Failures that are *not* an
+    /// epoch mismatch — an AEAD / authentication failure, a discarded past
+    /// ratchet generation, a malformed frame — withhold the ACK but never
+    /// re-key: widening the re-key trigger to cover them would turn every
+    /// malformed frame into a teardown, which is an unbounded churn vector.
+    /// That separation is why the two classifications stay distinct.
+    ///
+    /// One consequence worth planning for: `MessageDecryptionFailed` is
+    /// **advisory, not terminal**, and fires once per failed *attempt* rather
+    /// than once per message. Treat it as "this attempt did not decrypt", and
+    /// read `MessageFailed` (or `FileReceiveFailed` for media) as the terminal
+    /// signal.
     ///
     /// **The re-key trigger is unauthenticated, by construction — do not read
     /// this switch as "only genuine peers can cause a re-key".** An MLS epoch is

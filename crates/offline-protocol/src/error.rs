@@ -53,9 +53,14 @@ pub enum SessionStateError {
     /// Cryptographic operation failure.
     CryptoFailure,
     /// Session exists but is out of sync with the sender's epoch (the two sides
-    /// disagree on the MLS epoch). Unlike [`Self::CryptoFailure`] this is
-    /// recoverable by re-establishing the 1:1 session, so the receive path
-    /// withholds the delivery ACK and triggers a re-key rather than dropping.
+    /// disagree on the MLS epoch).
+    ///
+    /// What separates this from [`Self::CryptoFailure`] is the **re-key**, not
+    /// the ACK: under `crypto_recovery_enabled` both classes withhold the
+    /// delivery ACK so the sender's resend can still deliver, but only this one
+    /// additionally re-establishes the 1:1 session. The split is deliberate —
+    /// re-keying on an AEAD/authentication failure, which any injected frame can
+    /// produce, would be a re-key-storm vector.
     SessionDesync,
     /// Error that does not match a known class.
     Unknown,

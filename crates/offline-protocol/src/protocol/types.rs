@@ -1034,19 +1034,35 @@ pub(crate) enum InternalMessageResult {
     /// be sent back, to avoid confirming to the attacker that the target is
     /// online and processing messages.
     SecurityRejected,
-    /// Message could not be decrypted *yet* because the MLS session/group is
-    /// not established, so it was queued for delayed decryption
-    /// (`enqueue_pending_decryption`). Unlike `Consumed`, a delivery ACK must
-    /// NOT be sent and the id must NOT stay dedup-marked: the message is
-    /// provably not delivered, so the receiver must leave the sender's retry
-    /// lever intact. The receive loop responds by unmarking the id (so a
-    /// resend re-enters processing instead of hitting the duplicate re-ACK
-    /// path) and skipping the ACK. The queued copy is surfaced — and the id
-    /// re-marked — once the session confirms and the queue drains
-    /// (`process_pending_decryption`), which also sends the deferred delivery
-    /// ACK directly on the recorded arrival transport (so a sender that gave up
-    /// before the session confirmed still learns of delivery). See the
-    /// deferred-ACK design in CLAUDE.md's MLS envelope notes.
+    /// Message was not delivered, but the sender can still recover it by
+    /// resending. Unlike `Consumed`, a delivery ACK must NOT be sent and the id
+    /// must NOT stay dedup-marked: the message is provably not delivered, so
+    /// the receiver must leave the sender's retry lever intact. The receive
+    /// loop responds by unmarking the id (so a resend re-enters processing
+    /// instead of hitting the duplicate re-ACK path) and skipping the ACK.
+    ///
+    /// Three conditions produce it, differing in whether the *frame* is worth
+    /// keeping:
+    ///
+    /// - **Session not ready**: the MLS session/group is not established yet,
+    ///   so the frame is queued for delayed decryption
+    ///   (`enqueue_pending_decryption`). The queued copy is surfaced — and the
+    ///   id re-marked — once the session confirms and the queue drains
+    ///   (`process_pending_decryption`), which also sends the deferred delivery
+    ///   ACK directly on the recorded arrival transport (so a sender that gave
+    ///   up before the session confirmed still learns of delivery).
+    /// - **Epoch desync**: the frame is sealed to a dead epoch, so it is *not*
+    ///   queued (it could never drain) and a rate-limited re-key is triggered.
+    /// - **Crypto/transport failure** with `crypto_recovery_enabled`: OpenMLS
+    ///   consumed the ratchet generation on the failed attempt, so the frame is
+    ///   likewise not queued — and no re-key is triggered, which stays
+    ///   desync-only.
+    ///
+    /// In the latter two, recovery is the sender's *resend* rather than this
+    /// frame: Tier 2 re-seals each resend of an encrypted DM against a live
+    /// generation, and a message that stays undeliverable settles as an honest
+    /// `MessageFailed` instead of a lying "delivered". See the deferred-ACK and
+    /// crypto-failure-recovery designs in CLAUDE.md.
     Deferred,
     /// Message was decrypted, here's the plaintext.
     Decrypted(String),
@@ -1068,12 +1084,17 @@ pub(crate) enum InternalMessageResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChunkOutcome {
     /// The chunk was decrypted/assembled or dropped for a terminal reason
-    /// (parse failure, resource limit, crypto failure). The sender should stop
-    /// retrying either way, so the caller ACKs as before.
+    /// (parse failure, resource limit, permanent refusal). The sender should
+    /// stop retrying either way, so the caller ACKs as before.
     Handled,
-    /// The chunk could not be decrypted yet (session not ready) and was queued
-    /// for delayed decryption. The caller must NOT ACK and must unmark the id,
-    /// so the sender keeps retrying and the resend re-enters processing.
+    /// The chunk was not delivered but the sender can still recover it by
+    /// resending: it could not be decrypted yet (session not ready, so queued
+    /// for delayed decryption), or it is undecryptable as it stands (epoch
+    /// desync, or a crypto failure while `crypto_recovery_enabled`) and was
+    /// dropped without queueing. The caller must NOT ACK and must unmark the
+    /// id, so the sender keeps retrying and the resend re-enters processing.
+    /// For an undecryptable chunk that recovery is the media outbox's
+    /// `MediaResendRequired` path — chunks are re-encoded, never re-sealed.
     Deferred,
     /// The chunk was unencrypted and rejected by the encryption policy. Like
     /// [`InternalMessageResult::SecurityRejected`] for text, the caller must NOT
