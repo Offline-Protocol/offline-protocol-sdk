@@ -524,9 +524,26 @@ Every frame passing through runs the same sequence before it goes anywhere, and 
 5. **Sent to a few, never backwards** — the frame goes to a bounded number of neighbors chosen by signal strength and capacity, never to the device it came from or the one that wrote it. If the recipient is a neighbor, it goes straight there instead.
 6. **Within budget** — a device caps how many frames it forwards per second. The steps above assume frames are what they appear to be; this one holds regardless. Whatever arrives, a device cannot be made to transmit faster than its budget, so the failure mode under overload or attack is added delay rather than a radio that never goes quiet.
 
-Carrying traffic is subject to the same relay policy as everything else (`allowRelay`, battery floors): a device that declines carries nothing, while still sending and receiving its own messages.
+Carrying traffic is subject to the same relay policy as everything else (`allowRelay`, battery floors): a device that declines carries nothing, while still sending and receiving its own messages. Handing over its *own* messages — an acknowledgement above all — is deliberately not gated on that setting, or a device that declined to carry traffic could never answer anything that reached it across the mesh, and its sender would report a failure for a message that was delivered and read.
 
-Tunables live in `ProtocolConfig::mesh_relay`, and `mesh_relay_stats()` reports what a device has been carrying.
+#### What "handled once" costs
+
+Step 1 is what keeps a message from multiplying, and it has a price worth knowing. Once a device takes a frame on, it ignores that id for the next ten minutes — including the sender's own retransmissions of it. So if the device that accepted a frame then fails to pass it on (it walks out of range, its battery drops below the floor, its queue is full of newer traffic), that particular route is closed for the rest of the window, and the message has to arrive some other way: through a device that never accepted it, or over the internet relay once one of the two comes back online.
+
+This is the trade every controlled flood makes — the alternative is a device re-forwarding the same message each time a copy reaches it, which is exactly the storm the step exists to prevent. Two things keep the cost bounded in practice: a frame is handed to several neighbors at once, so a single carrier walking away rarely closes every route; and a device only records an id once it has genuinely *accepted* the frame, so one turned away for rate, hop budget or queue space leaves the way open for the next copy.
+
+What this means for an app: a message is not lost when this happens, but it can be slow. Treat delivery as settled by the acknowledgement, never by elapsed time.
+
+#### Reading the numbers
+
+`mesh_relay_stats()` reports what a device has been carrying. Two counters are easy to confuse:
+
+- `forwarded` — messages moved on someone else's behalf, counted once each. This is the contribution figure to show a user.
+- `transmissions` — times a frame was put on a link, counting each link separately and including the device handing over its own messages. This is what the per-second budget bounds, so it is the one to compare against the ceiling.
+
+`rateDeferred` rising means forwarding is hitting that ceiling — those frames are delayed, not dropped. `peerRateLimited` means a single neighbor is sending more than its share. `droppedForCapacity` should stay at zero; anything else means the device is seeing more traffic than it can remember having handled.
+
+Tunables live in `ProtocolConfig::mesh_relay`.
 
 ### Path Scoring
 
