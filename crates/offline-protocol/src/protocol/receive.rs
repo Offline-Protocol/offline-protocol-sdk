@@ -100,6 +100,13 @@ impl OfflineProtocol {
         loop {
             match self.transport_manager.receive() {
                 Ok(Some((transport_used, mut message))) => {
+                    // The peer whose link this frame physically arrived on.
+                    // Distinct from `message.sender`, which is who wrote it:
+                    // the two agree only at the first hop. `None` when the
+                    // carrier does not identify links (Nostr) or the platform
+                    // did not supply an id.
+                    let arrival_peer = message.transport_peer_id().map(str::to_string);
+
                     // Block filter (early): check before any side-effects so
                     // that blocked users cannot advance our Lamport clock,
                     // leak our presence via re-ACK, or trigger any processing.
@@ -173,7 +180,7 @@ impl OfflineProtocol {
                             );
                             continue;
                         }
-                        self.try_relay_message(&message);
+                        self.try_relay_message(&message, arrival_peer.as_deref());
                         continue;
                     }
 
@@ -379,14 +386,20 @@ impl OfflineProtocol {
     /// Learns a route back to the sender, checks relay configuration and TTL,
     /// then forwards the message with hop count incremented and TTL decremented.
     /// Emits a `MessageRelayed` event on success.
-    fn try_relay_message(&mut self, message: &Message) {
-        // Learn route back to sender through whoever gave us this message.
-        // Note: in multi-hop scenarios this records sender as both destination
-        // and next_hop, which is correct for 1-hop but conservative for deeper
-        // chains (the transport layer does not expose the immediate peer ID).
+    ///
+    /// `arrival_peer` is the neighbor that handed us this frame, when the
+    /// carrier identified the link.
+    fn try_relay_message(&mut self, message: &Message, arrival_peer: Option<&str>) {
+        // Learn the route back toward the sender. The next hop is the neighbor
+        // that handed us the frame, not the sender itself: for anything past
+        // the first hop the sender is several links away and naming it here
+        // would record a next hop we cannot address. Frames from carriers that
+        // do not identify links fall back to the sender, which is correct at
+        // one hop and no worse than before beyond it.
+        let learned_next_hop = arrival_peer.unwrap_or_else(|| message.sender.as_str());
         self.path_selector.learn_route_from_message(
             message,
-            message.sender.as_str(),
+            learned_next_hop,
             RELAY_LEARNED_ROUTE_QUALITY,
         );
 

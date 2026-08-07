@@ -1232,6 +1232,20 @@ impl Transport for BleTransport {
         }
     }
 
+    /// Called when raw fragment data arrives from a known peer.
+    ///
+    /// Delegates to the inherent
+    /// [`BleTransport::on_fragment_received_from`], which records the peer on
+    /// the reassembled message. An empty `peer_id` is treated as "the platform
+    /// did not identify this link" and falls back to the anonymous path rather
+    /// than failing the frame.
+    fn on_fragment_received_from(&self, fragment_data: Vec<u8>, peer_id: String) -> Result<()> {
+        if peer_id.is_empty() {
+            return self.on_fragment_received(fragment_data);
+        }
+        BleTransport::on_fragment_received_from(self, fragment_data, peer_id)
+    }
+
     /// Gets the next fragment to send (for platform implementation).
     ///
     /// Returns (recipient, fragment_data) or None if no messages to send.

@@ -197,6 +197,23 @@ pub trait Transport: Send + Sync + Any {
         )))
     }
 
+    /// Like [`Transport::on_fragment_received`], but attaches a
+    /// transport-verified `peer_id` to the reassembled message.
+    ///
+    /// This is the fragmenting counterpart to
+    /// [`Transport::on_data_received_from`]. The peer id it records is the
+    /// link the frame physically arrived on, which is what lets the protocol
+    /// layer tell "who handed me this" apart from "who wrote this" — the two
+    /// are the same peer only at the first hop.
+    fn on_fragment_received_from(&self, fragment_data: Vec<u8>, peer_id: String) -> Result<()> {
+        let _ = (fragment_data, peer_id);
+        Err(crate::Error::Other(format!(
+            "{} transport does not reassemble fragments; \
+             use on_data_received_from instead",
+            self.transport_type()
+        )))
+    }
+
     // ------------------------------------------------------------------
     // Platform-bridge egress / poll (Rust → platform)
     // ------------------------------------------------------------------
