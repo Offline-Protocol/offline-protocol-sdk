@@ -481,6 +481,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Provenance for both distribution channels. Until now SHA256SUMS.txt was
+      # the only integrity signal, and it sits on the same release page as the
+      # binaries it covers — whoever can replace an asset can replace the
+      # manifest in the same operation. Attestation and npm provenance are
+      # signed by the workflow identity, so neither is forgeable from the
+      # release page.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -515,6 +523,25 @@ jobs:
           name: android-uniffi-bindings
           path: bindings/react-native/android/src/main/java
 
+      # Not consumed by the npm package — these exist only to be attached to the
+      # release. Each build-desktop job uploads under desktop-libs/<platform>/,
+      # so merging the four is collision-free.
+      - name: Download desktop libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          path: desktop-libs
+          merge-multiple: true
+
+      # Also not consumed by the npm package. The desktop archives carry this
+      # module, because the cdylib alone is not usable: it is what calls into
+      # the library, and until now it shipped only inside the Python wheels.
+      - name: Download Python bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: python-bindings
+          path: bindings/python/offline_protocol_sdk
+
       - name: Verify artifacts
         run: |
           echo "Checking iOS artifacts..."
@@ -539,6 +566,18 @@ jobs:
 
           echo "Checking Android Kotlin bindings..."
           test -d bindings/react-native/android/src/main/java/uniffi
+
+          # Checked here rather than at packaging time so a missing desktop slice
+          # fails before anything is published, not between the GitHub release and
+          # the npm publish.
+          echo "Checking desktop libraries..."
+          test -f desktop-libs/macos-arm64/liboffline_protocol_uniffi.dylib
+          test -f desktop-libs/linux-x86_64/liboffline_protocol_uniffi.so
+          test -f desktop-libs/linux-aarch64/liboffline_protocol_uniffi.so
+          test -f desktop-libs/windows-x86_64/offline_protocol_uniffi.dll
+
+          echo "Checking Python bindings..."
+          test -s bindings/python/offline_protocol_sdk/offline_protocol.py
 
           echo "All artifacts verified."
 
@@ -586,12 +625,35 @@ jobs:
         working-directory: bindings/react-native
         run: bash scripts/prepare-npm.sh
 
+      # Runs on dry runs too, so a packaging break surfaces before a tag is cut
+      # rather than during one. Only the upload below is gated.
+      #
+      # The packaging itself lives in a script so it can be shellchecked and
+      # exercised on every PR (ci.yml's "Release Packaging" job drives it
+      # against a fixture tree, including the failure paths); this workflow only
+      # ever runs on a `v*` tag, so inline logic would first execute during a
+      # real release.
+      - name: Package binary release assets
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: bash scripts/package-release-assets.sh
+
+      # Signed by this workflow's identity, so it does not share the weakness of
+      # SHA256SUMS.txt sitting next to the assets it covers. Consumers verify
+      # with `gh attestation verify <asset> --repo ${{ github.repository }}`.
+      - name: Attest release asset provenance
+        if: inputs.dry_run != true
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: 'release-assets/*'
+
       - name: Create GitHub Release
         if: inputs.dry_run != true
         uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
           files: |
+            release-assets/*
             THIRD-PARTY-NOTICES.md
             EXPORT.md
           draft: false
@@ -599,9 +661,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # --provenance is the npm-side counterpart to the attestation above: it
+      # publishes a signed link from the tarball back to this workflow run, so
+      # the registry copy is verifiable too rather than trusted on the strength
+      # of the publishing token alone.
       - name: Publish to npm
         if: inputs.dry_run != true
         working-directory: bindings/react-native
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
