@@ -3,6 +3,7 @@
 mod blocking;
 mod config_accessors;
 mod decryption_queue;
+mod mesh_relay;
 mod message_dispatch;
 mod nostr_publication;
 mod observability;
