@@ -12929,6 +12929,11 @@ fn test_hard_decrypt_failure_disabled_falls_back_to_drop_and_ack() {
 /// shape — the drain ACKs on the recorded arrival transport, so a frame that
 /// failed here was actively acknowledged to a sender who could still have
 /// recovered it.
+///
+/// It must also not be re-queued. The drain *removes* the entry before
+/// processing, so a re-enqueue would miss `enqueue`'s idempotency check and
+/// re-stamp `received_at` — restarting the TTL of a frame whose ratchet
+/// generation is already spent, on every drain, forever.
 #[test]
 fn test_drained_message_that_hard_fails_is_not_acked() {
     let (mut bob, bob_handle, alice_manager) = hard_failure_pair(true);
@@ -12958,6 +12963,11 @@ fn test_drained_message_that_hard_fails_is_not_acked() {
     assert!(
         !bob.deduplicator.is_duplicate(&msg_id),
         "it must stay unmarked so the sender's resend still recovers the message"
+    );
+    assert!(
+        !bob.pending_queue.contains_peer("alice"),
+        "the dead frame must not be re-queued: the drain removed it, so a \
+         re-enqueue would restart its TTL on every drain"
     );
 }
 

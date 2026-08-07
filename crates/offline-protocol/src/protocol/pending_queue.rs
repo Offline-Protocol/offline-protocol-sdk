@@ -103,8 +103,8 @@ impl OfflineProtocol {
     /// the duplicate re-ACK path — so a sender that exhausted its retry budget
     /// before the session confirmed would mark a locally-delivered message
     /// undeliverable. `received_via` is `None` only when the entry was queued
-    /// from a transport-less context (tests, defensive re-enqueue); the drain
-    /// then falls back to the resend-driven ACK as before.
+    /// from a transport-less context (tests, or a handler re-queue during a
+    /// drain); the drain then falls back to the resend-driven ACK as before.
     fn ack_drained_message(&mut self, message: &Message, received_via: Option<TransportType>) {
         if !message.requires_ack {
             return;
@@ -180,9 +180,14 @@ impl OfflineProtocol {
                         self.deduplicator.mark_seen(msg.id.clone());
                         self.ack_drained_message(&msg, received_via);
                     }
-                    // Still not decryptable (unexpected post-confirmation): the
-                    // chunk was re-queued inside the handler and the id stays
-                    // unmarked so a resend can still recover it.
+                    // Not delivered, recoverable by a resend. Two shapes, both
+                    // leaving the id unmarked: still session-not-ready
+                    // (unexpected post-confirmation — the handler re-queued the
+                    // chunk itself), or a hard decrypt failure, which is
+                    // deliberately *not* re-queued because its generation is
+                    // spent. Either way recovery is the sender's resend, which
+                    // for media means re-encoded bytes via `MediaResendRequired`
+                    // rather than a replay of these.
                     ChunkOutcome::Deferred => {}
                     // Plaintext chunk rejected by encryption policy: never ACK
                     // (don't confirm processing to an injector) and leave the id
@@ -273,31 +278,40 @@ impl OfflineProtocol {
                         debug!(message_id = %msg.id, "Delayed message was consumed internally");
                     }
                     InternalMessageResult::Deferred => {
-                        // Still undecryptable during a drain. Drains only run
-                        // after the session is confirmed, so a session-not-ready
-                        // deferral here is unexpected — but a *hard* decrypt
-                        // failure of a queued frame lands here routinely now
-                        // (its generation is spent, or the session was rebuilt
-                        // at a new epoch under it), and the important part is
-                        // what it no longer does: it is not ACKed and its id is
-                        // not re-marked, so the sender's resend still recovers
-                        // the message instead of being told "delivered" for a
-                        // frame we dropped.
+                        // Still undecryptable during a drain. Not ACKed and the
+                        // id is not re-marked, so the sender's resend still
+                        // recovers the message instead of being told
+                        // "delivered" for a frame we dropped.
                         //
-                        // Re-enqueue defensively rather than drop it (the id is
-                        // already unmarked, so a resend recovers it either way);
-                        // a frame that can never decrypt just ages out on the
-                        // queue TTL. Preserve the arrival transport so a later
-                        // drain can still ACK it. `enqueue` is idempotent by id,
-                        // so this cannot stack.
+                        // Deliberately does NOT re-queue here, because each of
+                        // the three ways a drained frame reaches this arm has
+                        // already settled the question:
+                        //
+                        // - Session not ready (unexpected post-confirmation):
+                        //   `handle_encrypted_message` re-queued it itself
+                        //   before returning `Deferred`, so a re-queue here is
+                        //   redundant — `enqueue` is idempotent by id.
+                        // - Epoch desync, and a hard crypto/transport failure
+                        //   (the routine case): both refuse to enqueue on the
+                        //   live path for a reason that holds just as well
+                        //   here — the ciphertext is sealed to a dead epoch, or
+                        //   the failed attempt already spent its ratchet
+                        //   generation, so no number of later drains can make
+                        //   this frame decrypt.
+                        //
+                        // Re-queuing the latter two used to look free, but the
+                        // drain *removes* the entry before processing, so the
+                        // re-enqueue missed `enqueue`'s idempotency check and
+                        // re-stamped `received_at`. A frame that can never
+                        // decrypt then had its TTL restarted by every drain,
+                        // outliving its budget and re-reporting an advisory
+                        // decrypt failure each time — including after the
+                        // sender's re-sealed resend had already delivered the
+                        // same id. Dropping it costs nothing the un-ACK does
+                        // not already cover.
                         debug!(
                             message_id = %msg.id,
-                            "Delayed message still undecryptable during drain; re-queuing"
-                        );
-                        self.enqueue_pending_decryption_via(
-                            msg.sender.as_str(),
-                            &msg,
-                            received_via,
+                            "Delayed message still undecryptable during drain; dropping the queued copy (recovery is the sender's resend)"
                         );
                     }
                     InternalMessageResult::SecurityRejected => {

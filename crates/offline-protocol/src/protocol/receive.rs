@@ -213,16 +213,26 @@ impl OfflineProtocol {
                                 continue;
                             }
                             InternalMessageResult::Deferred => {
-                                // The message could not be decrypted yet (session
-                                // not ready) and was queued for delayed decryption.
+                                // The message was not delivered, but the sender
+                                // can still recover it by resending: it could not
+                                // be decrypted *yet* (session not ready, so queued
+                                // for delayed decryption), or it is undecryptable
+                                // as it stands (epoch desync, or a hard crypto
+                                // failure while `crypto_recovery_enabled`) and was
+                                // dropped without queueing. See the three
+                                // conditions on `InternalMessageResult::Deferred`.
+                                //
                                 // Do NOT send a delivery ACK and do NOT keep the id
                                 // dedup-marked: the message is not delivered, so the
                                 // sender must be free to retry and that retry must
                                 // re-enter processing rather than hit the duplicate
-                                // re-ACK path above. When the session confirms and
-                                // the queue drains, the copy is surfaced and the id
-                                // is re-marked (see `process_pending_decryption`), so
-                                // the sender's next resend is then deduped + re-ACKed.
+                                // re-ACK path above. For a queued copy, the session
+                                // confirming drains it: the message is surfaced and
+                                // the id re-marked (see `process_pending_decryption`),
+                                // so the sender's next resend is then deduped +
+                                // re-ACKed. For the other two, recovery is that
+                                // resend itself — re-sealed against a live
+                                // generation by Tier 2.
                                 self.deduplicator.unmark_seen(&message.id);
                                 continue;
                             }
