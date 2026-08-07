@@ -34,6 +34,7 @@ pub use events::{
 };
 pub use group_mesh::{GroupRichReadiness, GroupSendOptions, RelaySyncState};
 pub use offline_protocol_services::MeshServices;
+pub use protocol::mesh_relay::{MeshRelayConfig, MeshRelayStats};
 pub use protocol::{MediaSendOptions, OfflineProtocol, SendMessageOptions};
 pub use protocol_state_storage::{
     ProtocolStateError, ProtocolStateResult, ProtocolStateStorage,

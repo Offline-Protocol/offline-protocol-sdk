@@ -207,6 +207,38 @@ pub struct MeshRelayCounters {
     pub ttl_clamped: u64,
 }
 
+/// What this device has carried for other people.
+///
+/// A snapshot, safe to poll: every field counts since start-up.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MeshRelayStats {
+    /// Frames transmitted onward to a neighbor.
+    pub forwarded: u64,
+    /// Frames accepted for forwarding.
+    pub queued: u64,
+    /// Frames waiting to go out right now.
+    pub awaiting_transmission: usize,
+    /// Arrivals ignored because the frame had already been handled.
+    pub duplicates_suppressed: u64,
+    /// Forwards dropped because a neighbor transmitted the same frame first —
+    /// the saving that keeps a crowded room from repeating itself.
+    pub covered_by_a_neighbor: u64,
+    /// Frames refused because the neighbor sending them was over its share.
+    pub peer_rate_limited: u64,
+    /// Transmissions held back because this device was at its forwarding rate.
+    pub rate_deferred: u64,
+    /// Frames that had travelled as far as they were allowed to.
+    pub hop_limit_reached: u64,
+    /// Frames whose claimed reach was cut down to local policy.
+    pub reach_clamped: u64,
+    /// Ids forgotten for lack of room rather than age.
+    ///
+    /// Expected to stay at zero. A non-zero value means this device is seeing
+    /// more traffic than it can remember having handled, and a frame it forgets
+    /// can be forwarded a second time.
+    pub dropped_for_capacity: u64,
+}
+
 /// A refilling allowance, in frames.
 #[derive(Debug, Clone)]
 struct TokenBucket {
@@ -267,11 +299,6 @@ pub struct MeshRelayGovernor {
 }
 
 impl MeshRelayGovernor {
-    /// Creates a governor for `local_id` with default tunables.
-    pub fn new(local_id: impl Into<String>) -> Self {
-        Self::with_config(local_id, MeshRelayConfig::default())
-    }
-
     /// Creates a governor with explicit tunables.
     pub fn with_config(local_id: impl Into<String>, config: MeshRelayConfig) -> Self {
         let now = Instant::now();
@@ -287,7 +314,10 @@ impl MeshRelayGovernor {
         }
     }
 
-    /// The tunables in force.
+    /// The tunables in force. Apps read these from
+    /// `ProtocolConfig::mesh_relay`; this is for the tests that assert the
+    /// defaults hold together.
+    #[cfg(test)]
     pub fn config(&self) -> &MeshRelayConfig {
         &self.config
     }
@@ -300,11 +330,6 @@ impl MeshRelayGovernor {
     /// Forwards awaiting transmission.
     pub fn pending_len(&self) -> usize {
         self.pending.len()
-    }
-
-    /// Whether an id has already been handled.
-    pub fn has_seen(&self, message_id: &str) -> bool {
-        self.seen.contains(message_id)
     }
 
     /// Ids dropped from the suppression cache for capacity rather than age.
@@ -416,11 +441,6 @@ impl MeshRelayGovernor {
 
         self.pending = keep;
         due
-    }
-
-    /// Whether any queued forward is due at `now`, without taking it.
-    pub fn has_due(&self, now: Instant) -> bool {
-        self.pending.iter().any(|relay| relay.due_at <= now)
     }
 
     /// Records an id as handled without forwarding it.

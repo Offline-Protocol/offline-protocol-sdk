@@ -1,5 +1,6 @@
 //! Configuration accessors, diagnostics, and service registration.
 
+use super::mesh_relay::MeshRelayStats;
 use super::{
     lock_shared_state, OfflineProtocol, PendingQueueMetrics, ProtocolState, KNOWN_PEER_TTL_SECS,
     MEDIA_TRANSFER_STALE_TIMEOUT_SECS,
@@ -158,6 +159,29 @@ impl OfflineProtocol {
     /// are never tracked.
     pub fn is_known_peer(&self, peer_id: &str) -> bool {
         self.known_peers.contains_key(peer_id)
+    }
+
+    /// Reports how much traffic this device is carrying for other people.
+    ///
+    /// Useful for showing a user what their device is contributing, and for
+    /// spotting a neighborhood in trouble: a rising `rate_deferred` means
+    /// forwarding is hitting its ceiling, and `peer_rate_limited` means a
+    /// single neighbor is sending more than its share. `dropped_for_capacity`
+    /// is expected to stay at zero — see [`MeshRelayStats::dropped_for_capacity`].
+    pub fn mesh_relay_stats(&self) -> MeshRelayStats {
+        let counters = self.mesh_relay.counters();
+        MeshRelayStats {
+            forwarded: counters.forwarded,
+            queued: counters.queued,
+            awaiting_transmission: self.mesh_relay.pending_len(),
+            duplicates_suppressed: counters.duplicates_suppressed,
+            covered_by_a_neighbor: counters.cancelled_by_duplicate,
+            peer_rate_limited: counters.peer_rate_limited,
+            rate_deferred: counters.rate_deferred,
+            hop_limit_reached: counters.hop_limit_reached,
+            reach_clamped: counters.ttl_clamped,
+            dropped_for_capacity: self.mesh_relay.seen_capacity_evictions(),
+        }
     }
 
     /// Returns a mutable reference to the retry queue (test-only).
