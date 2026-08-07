@@ -606,6 +606,71 @@ fn an_answer_is_carried_even_when_a_transport_accepts_a_peer_it_cannot_reach() {
 }
 
 #[test]
+fn an_answer_is_carried_when_the_last_hop_arrived_over_the_swallowing_carrier() {
+    // The same hazard as above, reached the way it actually happens. Wi-Fi
+    // Direct is the *preferred* mesh carrier, so on a real fleet it is usually
+    // the link a forwarded frame's last hop crosses — and answering on the link
+    // a message arrived over is the first thing an acknowledgement tries.
+    //
+    // That combination is what makes the swallow reachable: Wi-Fi Direct
+    // accepts alice as a recipient it holds no link to, reports success, and
+    // the answer is queued for a link that never drains. Alice then
+    // retransmits a message carol has already read, until she reports it
+    // failed. Answering the arrival link therefore has to be gated on whether
+    // that carrier can address the sender at all.
+    let mut carol = OfflineProtocol::new(default_config("carol")).unwrap();
+
+    // The link carol really has: bob, who can reach alice.
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.set_reject_unknown_recipients(true);
+    ble.add_connected_peer("bob", -55);
+    let ble_handle = ble.clone();
+
+    // Up, holding no links, and accepting anyone — the production shape.
+    let swallowing = MockTransport::new(TransportType::WiFiDirect);
+    swallowing.start().unwrap();
+    let swallowing_handle = swallowing.clone();
+
+    carol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    carol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(swallowing));
+    carol.start().unwrap();
+
+    // Alice's message arrives over Wi-Fi Direct, handed across by bob.
+    let msg = message("alice", "carol", "did this get through?");
+    swallowing_handle.queue_message_from(msg, "bob".to_string());
+    assert!(
+        carol.receive_message().is_some(),
+        "carol should have received the message"
+    );
+    carol.process().unwrap();
+
+    assert!(
+        swallowing_handle
+            .sent_messages()
+            .iter()
+            .all(|m| m.recipient.as_str() != "alice"),
+        "the answer must not be spent on the carrier that only pretends to reach alice"
+    );
+
+    let carried: Vec<_> = ble_handle
+        .peer_sends()
+        .into_iter()
+        .filter(|(_, m)| m.recipient.as_str() == "alice")
+        .collect();
+    assert_eq!(
+        carried.len(),
+        1,
+        "carol's answer must be carried by the neighbor she has"
+    );
+    assert_eq!(carried[0].0, "bob");
+}
+
+#[test]
 fn a_frame_claiming_an_absurd_reach_is_cut_down() {
     // Nothing authenticates how far a frame says it may travel, so a device
     // must not take that claim at face value. The claim can only come off the

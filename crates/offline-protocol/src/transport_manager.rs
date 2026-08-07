@@ -964,6 +964,36 @@ impl TransportManager {
         })
     }
 
+    /// Whether `transport_type` can actually put a frame in front of `peer_id`.
+    ///
+    /// The narrower question [`Self::can_reach_without_carrying`] answers across
+    /// every carrier, asked of one. It exists for the same reason: a transport
+    /// returning `Ok` is not evidence the frame can arrive. A **mesh** carrier
+    /// can only address a peer it holds a live link to, and Wi-Fi Direct
+    /// enqueues for any recipient regardless — so a frame handed to it for
+    /// someone several hops away is queued for a link that never drains.
+    /// **Infrastructure** carriers do their own routing, so for them the answer
+    /// is yes whenever they are available.
+    ///
+    /// Callers that would otherwise trust a preferred transport — replying on
+    /// the link a message arrived over, above all — must ask this first, or the
+    /// reply dies on exactly the multi-hop path that made forwarding necessary.
+    pub fn can_address_via(&self, transport_type: TransportType, peer_id: &str) -> bool {
+        let Some(transport) = self.transports.get(&transport_type) else {
+            return false;
+        };
+        if transport.status() != TransportStatus::Available {
+            return false;
+        }
+        if !MESH_TRANSPORTS.contains(&transport_type) {
+            return true;
+        }
+        transport
+            .connected_peers()
+            .iter()
+            .any(|link| link.peer_id == peer_id)
+    }
+
     /// Hands `message` to a specific mesh neighbor, whatever the message's own
     /// recipient is.
     ///

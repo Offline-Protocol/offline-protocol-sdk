@@ -3802,56 +3802,71 @@ impl OfflineProtocol {
             .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport))
             .build();
 
-        // Try sending ACK via the same transport that received the message first.
-        // This is the preferred path as it's known to work for this peer.
-        // If the inbound transport is no longer available (e.g., internet disconnected),
-        // fall back to DORS selection to try any available transport.
+        self.route_ack(&ack_message, inbound_transport)
+    }
+
+    /// Gets an acknowledgement back to whoever sent us the message it answers.
+    ///
+    /// The single route-selection point for every delivery ACK, direct or
+    /// group. Keeping one ladder is deliberate: it has four callers across two
+    /// builders, and the failure this ordering exists to prevent is silent —
+    /// a copy of the ladder that drifted would look fine and lose answers.
+    ///
+    /// Three routes, in order:
+    ///
+    /// 1. **The link it arrived on**, when that carrier can actually address
+    ///    the sender. Preferred because it is known to work for this peer.
+    /// 2. **The mesh**, when nothing we hold reaches the sender directly: the
+    ///    answer travels back the way the message came, carried by the devices
+    ///    in between. Without this, multi-hop delivery looks like failure to a
+    ///    sender who retransmits a message we already have and read.
+    /// 3. **DORS**, which picks among whatever else is available.
+    ///
+    /// Step 1 is *gated on addressability* rather than on a send error, and
+    /// that gate is load-bearing. A transport returning `Ok` is not evidence
+    /// the frame can arrive: Wi-Fi Direct enqueues for any recipient, and it is
+    /// the preferred mesh carrier — so on the last hop of a forwarded frame the
+    /// answer would be queued for a link that never drains, reported as sent,
+    /// and step 2 would never run. The sender's retransmissions would take the
+    /// same path every time, ending in a failure report for a delivered
+    /// message.
+    fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> Result<()> {
+        let ack_to = ack_message.recipient.as_str().to_string();
+
         if self
             .transport_manager
-            .send_via_transport(&ack_message, inbound_transport)
-            .is_ok()
+            .can_address_via(inbound_transport, &ack_to)
+            && self
+                .transport_manager
+                .send_via_transport(ack_message, inbound_transport)
+                .is_ok()
         {
             return Ok(());
         }
 
         debug!(
-            message_id = %message.id,
+            ack_to = %ack_to,
             inbound_transport = ?inbound_transport,
-            "Inbound transport unavailable for ACK, falling back to DORS selection"
+            "Inbound transport cannot answer this sender; looking for another route"
         );
 
-        // The sender is not reachable on the link their message arrived over.
-        // If nothing else we hold can reach them either, the answer has to
-        // travel back the way the message came — carried by the devices in
-        // between. Without this, multi-hop delivery looks like failure to the
-        // sender, who retransmits a message we already have and read.
-        //
-        // This is asked *before* the DORS fallback, and asked rather than
-        // inferred from a send error, because a send error is not what a
-        // swallowed frame produces: Wi-Fi Direct and Reticulum accept any
-        // recipient and return `Ok`. Ordering it first also keeps us from
-        // spending a send into a queue that will never drain.
-        if !self
-            .transport_manager
-            .can_reach_without_carrying(ack_message.recipient.as_str())
-            && self.offer_to_mesh(&ack_message) > 0
+        if !self.transport_manager.can_reach_without_carrying(&ack_to)
+            && self.offer_to_mesh(ack_message) > 0
         {
             debug!(
-                message_id = %message.id,
-                ack_to = %ack_message.recipient,
+                ack_to = %ack_to,
                 "Sender is not directly reachable; handed the acknowledgement to the mesh"
             );
             return Ok(());
         }
 
-        // Fallback: try any available transport via DORS
-        if self.transport_manager.send(&ack_message).is_ok() {
+        if self.transport_manager.send(ack_message).is_ok() {
             return Ok(());
         }
 
         Err(Error::Other(format!(
             "no route back to {} for delivery acknowledgement",
-            ack_message.recipient
+            ack_to
         )))
     }
 
@@ -3880,20 +3895,9 @@ impl OfflineProtocol {
             .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport))
             .build();
 
-        // Prefer the transport the message arrived on; fall back to DORS.
-        if self
-            .transport_manager
-            .send_via_transport(&ack_message, inbound_transport)
-            .is_ok()
-        {
-            return Ok(());
-        }
-        debug!(
-            message_id = %acked_message_id,
-            inbound_transport = ?inbound_transport,
-            "Inbound transport unavailable for group ACK, falling back to DORS selection"
-        );
-        self.transport_manager.send(&ack_message)
+        // Same ladder as a direct-message ACK, mesh fallback included: a group
+        // frame reaches its members over the same hops a DM does.
+        self.route_ack(&ack_message, inbound_transport)
     }
 
     pub(super) fn handle_ack_message(&mut self, message: &Message) {
