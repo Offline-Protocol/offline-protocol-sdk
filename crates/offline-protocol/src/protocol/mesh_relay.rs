@@ -501,6 +501,11 @@ impl MeshRelayGovernor {
             }
 
             if now.saturating_duration_since(relay.due_at) > RELAY_QUEUE_MAX_OVERDUE {
+                // Never made it onto a link, so its id must not stay
+                // suppressed: the sender's retransmissions carry the same id,
+                // and refusing them would close this route for the whole
+                // retention window over a few seconds of congestion.
+                self.seen.forget(&relay.message.id.as_str());
                 self.counters.abandoned_overdue = self.counters.abandoned_overdue.saturating_add(1);
                 continue;
             }
@@ -569,6 +574,11 @@ impl MeshRelayGovernor {
     /// bound every other queued frame is subject to.
     pub fn requeue(&mut self, relay: PendingRelay) {
         if self.pending.len() >= self.config.queue_capacity {
+            // Refused room on the way back, so this frame is being dropped
+            // having reached nobody. Release its id for the same reason the
+            // overdue cut-off does — a copy behind it, or the sender's own
+            // retransmission, is now the only way it travels.
+            self.seen.forget(&relay.message.id.as_str());
             self.counters.queue_full = self.counters.queue_full.saturating_add(1);
             return;
         }
@@ -736,7 +746,12 @@ impl MeshRelayGovernor {
 
         match victim {
             Some(index) => {
-                self.pending.remove(index);
+                let displaced = self.pending.remove(index);
+                // Displaced before it ever reached a link. Its id goes back to
+                // being unknown, so the copy behind it — or the sender's
+                // retransmission — can still be carried by this device once
+                // there is room again.
+                self.seen.forget(&displaced.message.id.as_str());
                 self.counters.queue_evicted = self.counters.queue_evicted.saturating_add(1);
                 true
             }
@@ -1111,6 +1126,97 @@ mod tests {
         assert!(later.is_empty());
         assert_eq!(gov.counters().abandoned_overdue, 1);
         assert_eq!(gov.pending_len(), 0);
+    }
+
+    #[test]
+    fn a_frame_abandoned_for_waiting_too_long_releases_its_id() {
+        // A frame dropped for waiting past its turn never reached a link, so
+        // nothing is circulating that a second forward could duplicate. Its id
+        // must go back to being unknown, or the sender's retransmissions —
+        // which carry the same id — are refused for the whole retention window
+        // because of a few seconds of congestion.
+        let mut gov = governor();
+        let msg = frame();
+        gov.admit(&msg, Some("b"), 3, false);
+
+        let due = gov.take_due(Instant::now() + RELAY_QUEUE_MAX_OVERDUE + Duration::from_secs(1));
+        assert!(due.is_empty());
+        assert_eq!(gov.counters().abandoned_overdue, 1);
+
+        assert_eq!(
+            gov.admit(&msg, Some("c"), 3, false),
+            RelayAdmission::Queued,
+            "the sender's retransmission must still be carried"
+        );
+    }
+
+    #[test]
+    fn a_frame_displaced_from_the_queue_releases_its_id() {
+        // Same rule for a frame evicted to make room for an urgent one: it was
+        // never transmitted, so the route through this device must stay open.
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                queue_capacity: 1,
+                peer_rate_per_sec: 10_000.0,
+                peer_burst: 10_000.0,
+                ..immediate_config()
+            },
+        );
+
+        let routine = frame_with(8, MessagePriority::Low);
+        gov.admit(&routine, Some("b"), 3, false);
+        gov.admit(
+            &frame_with(8, MessagePriority::Critical),
+            Some("b"),
+            3,
+            false,
+        );
+        assert_eq!(gov.counters().queue_evicted, 1);
+
+        // The urgent frame goes out, leaving room again. A later copy of the
+        // displaced one — or the sender's retransmission — must be carryable.
+        gov.take_due(Instant::now());
+        assert_eq!(
+            gov.admit(&routine, Some("c"), 3, false),
+            RelayAdmission::Queued,
+            "the displaced frame's id must not be blackholed"
+        );
+    }
+
+    #[test]
+    fn a_frame_refused_room_on_the_way_back_releases_its_id() {
+        // The third drop that happens after the id was recorded: a frame that
+        // reached no neighbor and finds the queue full when handed back.
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                queue_capacity: 1,
+                peer_rate_per_sec: 10_000.0,
+                peer_burst: 10_000.0,
+                ..immediate_config()
+            },
+        );
+
+        let starved = frame();
+        gov.admit(&starved, Some("b"), 3, false);
+        let mut due = gov.take_due(Instant::now());
+        assert_eq!(due.len(), 1);
+
+        // The queue fills while the frame is out being transmitted, so there is
+        // no room for it on the way back.
+        gov.admit(&frame(), Some("b"), 3, false);
+        gov.requeue(due.remove(0));
+        assert_eq!(gov.counters().queue_full, 1);
+        assert_eq!(gov.pending_len(), 1, "the dropped frame is not held");
+
+        // Once the queue drains, the copy behind it must still be carryable.
+        gov.take_due(Instant::now());
+        assert_eq!(
+            gov.admit(&starved, Some("c"), 3, false),
+            RelayAdmission::Queued,
+            "a frame that got nowhere and could not be kept must stay carryable"
+        );
     }
 
     #[test]

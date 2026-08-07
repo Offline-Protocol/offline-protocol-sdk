@@ -122,6 +122,30 @@ impl RelaySeenCache {
         SeenOutcome::Fresh
     }
 
+    /// Forgets `message_id`, so a later copy is treated as new again.
+    ///
+    /// For a frame that was recorded as handled and then dropped **without
+    /// ever being transmitted** — displaced from a queue, abandoned for
+    /// waiting too long, refused room on the way back. The record would
+    /// otherwise refuse every later copy for the rest of the retention window,
+    /// including the sender's own retransmissions, which carry the same id: a
+    /// route closed for ten minutes by a few seconds of congestion, with
+    /// nothing on the air to justify it.
+    ///
+    /// Safe only because nothing was transmitted. An id forgotten after the
+    /// frame reached a neighbor could be forwarded a second time — by every
+    /// node — which is how a flood becomes a storm, so callers must be certain
+    /// the frame travelled nowhere.
+    pub fn forget(&mut self, message_id: &str) {
+        if self.entries.remove(message_id).is_some() {
+            // Keep the insertion-order queue in lockstep with the map. Leaving
+            // the stale entry would be tolerated by `expire`, but it would also
+            // be counted as a capacity eviction by `observe`, and that counter
+            // is the signal that the cache is undersized.
+            self.order.retain(|id| id != message_id);
+        }
+    }
+
     /// Whether `message_id` is currently suppressed, without recording it.
     pub fn contains(&self, message_id: &str) -> bool {
         match self.entries.get(message_id) {
@@ -269,6 +293,38 @@ mod tests {
         // cache leaks memory that no expiry pass can reach.
         assert_eq!(cache.order.len(), cache.entries.len());
         assert!(cache.len() <= 4);
+    }
+
+    #[test]
+    fn a_forgotten_id_is_new_again_and_leaves_no_orphan() {
+        let mut cache = RelaySeenCache::new();
+        cache.observe("m1");
+        cache.observe("m2");
+
+        cache.forget("m1");
+
+        assert!(
+            !cache.contains("m1"),
+            "a forgotten id must not be suppressed"
+        );
+        assert!(cache.contains("m2"), "and its neighbors are untouched");
+        assert_eq!(cache.observe("m1"), SeenOutcome::Fresh);
+        // The order queue must not keep the forgotten id, or `observe` would
+        // count popping it as a capacity eviction.
+        assert_eq!(cache.order.len(), cache.entries.len());
+        assert_eq!(cache.capacity_evictions(), 0);
+    }
+
+    #[test]
+    fn forgetting_an_unknown_id_is_a_no_op() {
+        let mut cache = RelaySeenCache::new();
+        cache.observe("m1");
+
+        cache.forget("never-seen");
+
+        assert!(cache.contains("m1"));
+        assert_eq!(cache.order.len(), 1);
+        assert_eq!(cache.entries.len(), 1);
     }
 
     #[test]
