@@ -19,6 +19,10 @@ pub struct MockTransport {
     fail_next_sends: Arc<Mutex<usize>>,
     /// Simulated live links, in the order they were registered.
     connected_peers: Arc<Mutex<Vec<PeerLink>>>,
+    /// When set, `send` refuses a recipient with no live link, the way a
+    /// radio-backed transport does. Off by default so tests that only care
+    /// about what was sent need not declare a topology.
+    reject_unknown_recipients: Arc<Mutex<bool>>,
     /// Every `send_to_peer` call, as `(peer_id, message)`, so forwarding tests
     /// can assert *which neighbor* a frame crossed and how many times it was
     /// transmitted — the counts that distinguish a controlled flood from a
@@ -46,7 +50,17 @@ impl MockTransport {
             fail_next_sends: Arc::new(Mutex::new(0)),
             connected_peers: Arc::new(Mutex::new(Vec::new())),
             peer_sends: Arc::new(Mutex::new(Vec::new())),
+            reject_unknown_recipients: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// Makes `send` behave like a radio-backed transport: a recipient with no
+    /// live link is refused rather than silently accepted.
+    ///
+    /// This is what lets a test exercise the path a message takes when its
+    /// recipient is out of range — the case mesh forwarding exists for.
+    pub fn set_reject_unknown_recipients(&self, reject: bool) {
+        *self.reject_unknown_recipients.lock().unwrap() = reject;
     }
 
     /// Declares the simulated set of directly connected peers.
@@ -152,6 +166,17 @@ impl Transport for MockTransport {
     }
 
     fn send(&self, message: &Message) -> Result<()> {
+        if *self.reject_unknown_recipients.lock().unwrap() {
+            let recipient = message.recipient.as_str();
+            let peers = self.connected_peers.lock().unwrap();
+            if !peers.iter().any(|link| link.peer_id == recipient) {
+                return Err(crate::Error::PeerNotReachable(format!(
+                    "mock: no connected peer for recipient {}",
+                    recipient
+                )));
+            }
+        }
+
         {
             let mut fail = self.fail_next_sends.lock().unwrap();
             if *fail > 0 {

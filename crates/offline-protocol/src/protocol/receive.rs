@@ -167,6 +167,18 @@ impl OfflineProtocol {
                         // Re-ACK duplicate packets so the sender can stop
                         // retrying — but NOT for blocked users, to avoid
                         // leaking presence information.
+                        //
+                        // Every copy is answered, including the several that
+                        // one delivery produces when it travels through nearby
+                        // devices. Answering only the first was tried and
+                        // rejected: a copy arriving moments later and a
+                        // retransmission arriving because the answer was lost
+                        // are not distinguishable here, and staying quiet for
+                        // the second turns a delivered message into a failed
+                        // one. The redundant answers are bounded — a delivery
+                        // arrives by at most as many paths as neighbors carried
+                        // it, answers never provoke further answers, and every
+                        // frame that leaves is rate-capped like any other.
                         if !sender_blocked && message.requires_ack {
                             if let Err(err) = self.send_delivery_ack(&message, transport_used) {
                                 error!(
@@ -397,6 +409,9 @@ impl OfflineProtocol {
         }
     }
 
+    /// Whether another copy of an already-delivered message should be
+    /// acknowledged again.
+    ///
     /// Considers an inbound frame addressed to a third party for forwarding.
     ///
     /// Learns the route back toward the sender, then offers the frame to the
