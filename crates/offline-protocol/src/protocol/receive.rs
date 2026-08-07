@@ -206,12 +206,6 @@ impl OfflineProtocol {
 
                     self.deduplicator.mark_seen(message.id.clone());
 
-                    // Record the id as handled so that a copy of this same
-                    // message reaching us later by another path is not
-                    // forwarded on someone else's behalf. Delivery is ours to
-                    // make, not to pass on.
-                    self.mesh_relay.mark_handled(&message.id.as_str());
-
                     // Handle internal MLS messages
                     let mut was_decrypted = false;
                     if let Some(result) =

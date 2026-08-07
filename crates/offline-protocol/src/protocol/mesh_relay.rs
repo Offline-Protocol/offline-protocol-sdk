@@ -625,10 +625,18 @@ impl MeshRelayGovernor {
         self.pending.push(relay);
     }
 
-    /// Records an id as handled without forwarding it.
+    /// Records an id as handled without queueing a forward for it.
     ///
-    /// Used for frames we consume ourselves, so a copy arriving later by
-    /// another path is not forwarded on their behalf.
+    /// Used for frames this device **originates** and hands to its neighbors:
+    /// a copy circling back to us through the mesh is then recognized rather
+    /// than carried onward as though it were someone else's.
+    ///
+    /// Deliberately not called for frames addressed to us. A later copy of one
+    /// of those is still addressed to us, so it never reaches the forwarding
+    /// path at all — recording it would only fill the cache at delivery rate,
+    /// which the capacity is not sized for and which would make
+    /// [`Self::seen_capacity_evictions`] climb for reasons unrelated to relay
+    /// load.
     pub fn mark_handled(&mut self, message_id: &str) {
         self.seen.observe(message_id);
     }
@@ -1626,7 +1634,9 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_we_consumed_ourselves_is_not_forwarded_for_someone_else() {
+    fn a_frame_we_originated_is_not_carried_back_for_someone_else() {
+        // Our own message, handed to neighbors. When a neighbor's copy reaches
+        // us again we must recognize it, not take it on as third-party traffic.
         let mut gov = governor();
         let msg = frame();
 
