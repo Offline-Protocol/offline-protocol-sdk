@@ -530,7 +530,7 @@ Carrying traffic is subject to the same relay policy as everything else (`allowR
 
 Step 1 is what keeps a message from multiplying, and it has a price worth knowing. Once a device takes a frame on, it ignores that id for the next ten minutes — including the sender's own retransmissions of it. So if the device that accepted a frame then fails to pass it on (it walks out of range, its battery drops below the floor, its queue is full of newer traffic), that particular route is closed for the rest of the window, and the message has to arrive some other way: through a device that never accepted it, or over the internet relay once one of the two comes back online.
 
-This is the trade every controlled flood makes — the alternative is a device re-forwarding the same message each time a copy reaches it, which is exactly the storm the step exists to prevent. Two things keep the cost bounded in practice: a frame is handed to several neighbors at once, so a single carrier walking away rarely closes every route; and a device only records an id once it has genuinely *accepted* the frame, so one turned away for rate, hop budget or queue space leaves the way open for the next copy.
+This is the trade every controlled flood makes — the alternative is a device re-forwarding the same message each time a copy reaches it, which is exactly the storm the step exists to prevent. Three things keep the cost bounded in practice: a frame is handed to several neighbors at once, so a single carrier walking away rarely closes every route; a device only records an id once it has genuinely *accepted* the frame, so one turned away for rate, hop budget or queue space leaves the way open for the next copy; and a frame that was accepted but then dropped **without ever being transmitted** — displaced by more urgent traffic, abandoned after waiting too long, or refused room on its way back to the queue — releases its id again, because nothing went on the air that a later copy could duplicate.
 
 What this means for an app: a message is not lost when this happens, but it can be slow. Treat delivery as settled by the acknowledgement, never by elapsed time.
 
@@ -541,9 +541,17 @@ What this means for an app: a message is not lost when this happens, but it can 
 - `forwarded` — messages moved on someone else's behalf, counted once each. This is the contribution figure to show a user.
 - `transmissions` — times a frame was put on a link, counting each link separately and including the device handing over its own messages. This is what the per-second budget bounds, so it is the one to compare against the ceiling.
 
-`rateDeferred` rising means forwarding is hitting that ceiling — those frames are delayed, not dropped. `peerRateLimited` means a single neighbor is sending more than its share. `droppedForCapacity` should stay at zero; anything else means the device is seeing more traffic than it can remember having handled.
+`rate_deferred` rising means forwarding is hitting that ceiling — those frames are delayed, not dropped. `peer_rate_limited` means a single neighbor is sending more than its share. `dropped_for_capacity` should stay at zero; anything else means the device is seeing more traffic than it can remember having handled.
 
-Tunables live in `ProtocolConfig::mesh_relay`.
+The device's own sends draw on the same per-second budget — it is one radio — but keep a small reserve that forwarding never touches, so a device carrying a busy neighborhood can still get its own messages and acknowledgements out.
+
+Tunables live in `ProtocolConfig::mesh_relay`. Both the tunables and these counters are **Rust-core surfaces today**: neither is mirrored over UniFFI or React Native yet, so apps get the defaults and cannot read the counters from JS or native.
+
+#### What forwarding does not cover
+
+A device offers frames to its neighbors only when it holds no other way to reach the recipient. If any carrier that does its own routing is up — Internet, Nostr, Reticulum — that counts as reachable for **every** recipient, and nothing is handed to the mesh.
+
+That is right for the case this is built for, where nobody has infrastructure, but it leaves a gap in a mixed neighborhood: a device with internet will send to the relay rather than across the mesh, even when the recipient is reachable only by a multi-hop mesh path. It applies to acknowledgements too, so an online recipient answers a mesh-delivered message over the relay, where an offline sender cannot see it. Closing this means letting the relay's own "recipient unreachable" verdict fall back to the mesh, which is future work.
 
 ### Path Scoring
 
