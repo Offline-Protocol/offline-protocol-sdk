@@ -1,7 +1,7 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.19.x` line.
+current `v0.20.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
@@ -20,11 +20,21 @@ addition or a behaviour change, it is labelled inline with the release that
 introduced it (for example, `wipePersistedState` in
 [§10](#10-storage-is-now-isolated-per-app_id-user_id) arrived in `v0.18.2`). If
 you are already on `v0.17.0`, those labelled paragraphs are the only parts you
-still need — and on this release that means
+still need — coming from `v0.18.x` that means
 [§1.10](#110-the-inbound-plaintext-gate-no-longer-reads-session_states) and
 [§1.11](#111-key-packages-are-checked-against-the-pinned-signing-key), two
 receive-side behaviour changes in `v0.19.0` that compile fine and can still
 surprise you at runtime.
+
+`v0.20.0` adds one more of that kind, and it needs no section because it needs
+no code change: React Native's exported `ProtocolState` enum now holds the
+*strings* `getState()` has always resolved (`"Stopped"` / `"Running"` /
+`"Paused"`) rather than `0` / `1` / `2`, so `state === ProtocolState.Running` —
+which could never be true before — now works, and `state === 'Running'` stops
+failing `tsc`. Nothing read back from `getState()` changes. The single hazard is
+a `ProtocolState` your app *persisted itself* (AsyncStorage, redux-persist):
+that value returns as a number and now matches nothing, so treat an
+unrecognised persisted value as `Stopped`.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
