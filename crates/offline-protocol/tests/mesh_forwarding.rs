@@ -47,32 +47,30 @@ impl Neighborhood {
         };
 
         for id in node_ids {
-            let mut config = ProtocolConfig::new("mesh-test", *id);
-            // These tests are about who carries what, not about encryption.
-            config.encryption.require_encryption = false;
-            // No hold before forwarding: the tests drive time by stepping, and
-            // the hold's own behavior is covered by the governor's unit tests.
-            config.mesh_relay.jitter_min = std::time::Duration::from_millis(0);
-            config.mesh_relay.jitter_max = std::time::Duration::from_millis(0);
-
-            let radio = MockTransport::new(TransportType::BLE);
-            radio.start().unwrap();
-            // A device can only put a frame on a link it actually has.
-            radio.set_reject_unknown_recipients(true);
-            let handle = radio.clone();
-
-            let mut node = OfflineProtocol::new(config).unwrap();
-            node.transport_manager_mut()
-                .add_transport(TransportType::BLE, Box::new(radio));
-            node.start().unwrap();
-
-            neighborhood.nodes.insert(id.to_string(), node);
-            neighborhood.radios.insert(id.to_string(), handle);
-            neighborhood.links.insert(id.to_string(), Vec::new());
-            neighborhood.inboxes.insert(id.to_string(), Vec::new());
+            neighborhood.add_node(id, default_config(id));
         }
 
         neighborhood
+    }
+
+    /// Adds one device, which may be configured differently from the rest —
+    /// a device that declines to carry traffic, for instance.
+    fn add_node(&mut self, id: &str, config: ProtocolConfig) {
+        let radio = MockTransport::new(TransportType::BLE);
+        radio.start().unwrap();
+        // A device can only put a frame on a link it actually has.
+        radio.set_reject_unknown_recipients(true);
+        let handle = radio.clone();
+
+        let mut node = OfflineProtocol::new(config).unwrap();
+        node.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(radio));
+        node.start().unwrap();
+
+        self.nodes.insert(id.to_string(), node);
+        self.radios.insert(id.to_string(), handle);
+        self.links.insert(id.to_string(), Vec::new());
+        self.inboxes.insert(id.to_string(), Vec::new());
     }
 
     /// Puts two devices in range of each other.
@@ -212,6 +210,18 @@ impl Neighborhood {
             .filter(|(_, to, id)| to == node_id && id == message_id)
             .count()
     }
+}
+
+/// The configuration every simulated device starts from.
+fn default_config(user_id: &str) -> ProtocolConfig {
+    let mut config = ProtocolConfig::new("mesh-test", user_id);
+    // These tests are about who carries what, not about encryption.
+    config.encryption.require_encryption = false;
+    // No hold before forwarding: the tests drive time by stepping, and the
+    // hold's own behavior is covered by the governor's unit tests.
+    config.mesh_relay.jitter_min = std::time::Duration::from_millis(0);
+    config.mesh_relay.jitter_max = std::time::Duration::from_millis(0);
+    config
 }
 
 fn message(from: &str, to: &str, content: &str) -> Message {
@@ -466,24 +476,11 @@ fn a_message_survives_the_carrier_walking_away() {
 fn a_device_that_opts_out_carries_nothing() {
     // Carrying other people's traffic costs battery, and a device is allowed to
     // decline. It must still be able to send and receive its own.
-    let mut config = ProtocolConfig::new("mesh-test", "bob");
-    config.encryption.require_encryption = false;
+    let mut config = default_config("bob");
     config.relay.allow_relay = false;
 
     let mut net = Neighborhood::new(&["alice", "carol"]);
-
-    let radio = MockTransport::new(TransportType::BLE);
-    radio.start().unwrap();
-    radio.set_reject_unknown_recipients(true);
-    let handle = radio.clone();
-    let mut bob = OfflineProtocol::new(config).unwrap();
-    bob.transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(radio));
-    bob.start().unwrap();
-    net.nodes.insert("bob".to_string(), bob);
-    net.radios.insert("bob".to_string(), handle);
-    net.links.insert("bob".to_string(), Vec::new());
-    net.inboxes.insert("bob".to_string(), Vec::new());
+    net.add_node("bob", config);
 
     net.link("alice", "bob");
     net.link("bob", "carol");
@@ -503,6 +500,108 @@ fn a_device_that_opts_out_carries_nothing() {
             .count(),
         0,
         "and must not have transmitted it at all"
+    );
+}
+
+#[test]
+fn a_device_that_carries_nothing_still_gets_its_own_answer_out() {
+    // Declining to carry other people's traffic must not cost a device the
+    // ability to answer its own. Carol is two links from alice, so her
+    // acknowledgement can only get home by being handed to bob — the one thing
+    // a relay-declining device still has to be able to do, and the reason
+    // handing over our *own* frames is deliberately not gated on that setting.
+    // Without it her sender retransmits to exhaustion and reports a failure for
+    // a message that was delivered and read.
+    let mut config = default_config("carol");
+    config.relay.allow_relay = false;
+
+    let mut net = Neighborhood::new(&["alice", "bob"]);
+    net.add_node("carol", config);
+
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+
+    net.send("alice", "carol", "do you copy?");
+
+    net.run_until_quiet(12);
+
+    assert_eq!(net.inbox("carol"), vec!["do you copy?".to_string()]);
+    assert!(
+        net.transmissions
+            .iter()
+            .any(|(from, to, _)| from == "carol" && to == "bob"),
+        "a device that carries nothing must still hand its own answer to a neighbor"
+    );
+    assert!(
+        net.transmissions
+            .iter()
+            .any(|(from, to, _)| from == "bob" && to == "alice"),
+        "and that answer must reach the sender"
+    );
+}
+
+#[test]
+fn an_answer_is_carried_even_when_a_transport_accepts_a_peer_it_cannot_reach() {
+    // Only BLE refuses a recipient it holds no link to. Wi-Fi Direct and
+    // Reticulum enqueue for anyone and return `Ok`, so a frame handed to them
+    // for someone out of range is queued for a link that never drains —
+    // reported as sent, silently swallowed.
+    //
+    // That matters most for an acknowledgement. Carol's answer to alice is two
+    // links away and has to be carried; if the decision to carry it is inferred
+    // from a send failure, the accepting carrier reports success first and the
+    // answer dies. Alice then retransmits a message carol already has, and
+    // eventually reports failure for a message that was delivered and read.
+    let mut carol = OfflineProtocol::new(default_config("carol")).unwrap();
+
+    // The link carol really has: bob, who can reach alice.
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.set_reject_unknown_recipients(true);
+    ble.add_connected_peer("bob", -55);
+    let ble_handle = ble.clone();
+
+    // A carrier that is up and takes any recipient without holding a link to
+    // one — the shape both Wi-Fi Direct and Reticulum have in production.
+    let swallowing = MockTransport::new(TransportType::WiFiDirect);
+    swallowing.start().unwrap();
+    let swallowing_handle = swallowing.clone();
+
+    carol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    carol
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(swallowing));
+    carol.start().unwrap();
+
+    // Alice's message arrives over the link bob handed it across.
+    let msg = message("alice", "carol", "did this get through?");
+    ble_handle.queue_message_from(msg, "bob".to_string());
+    assert!(
+        carol.receive_message().is_some(),
+        "carol should have received the message"
+    );
+    carol.process().unwrap();
+
+    let carried: Vec<_> = ble_handle
+        .peer_sends()
+        .into_iter()
+        .filter(|(_, m)| m.recipient.as_str() == "alice")
+        .collect();
+    assert_eq!(
+        carried.len(),
+        1,
+        "carol's answer must be handed to a neighbor to carry"
+    );
+    assert_eq!(carried[0].0, "bob", "and handed to the neighbor she has");
+
+    assert!(
+        swallowing_handle
+            .sent_messages()
+            .iter()
+            .all(|m| m.recipient.as_str() != "alice"),
+        "the answer must not be spent on a carrier that cannot reach alice"
     );
 }
 

@@ -917,6 +917,53 @@ impl TransportManager {
         neighbors
     }
 
+    /// Whether a frame for `peer_id` can plausibly arrive without being carried
+    /// by other devices.
+    ///
+    /// This exists because **a send returning `Ok` is not evidence of
+    /// reachability**. Only BLE refuses a recipient it holds no link to; Wi-Fi
+    /// Direct and Reticulum enqueue for any recipient and report success, so a
+    /// frame handed to them for someone out of range is queued for a link that
+    /// will never drain — reported as sent, silently swallowed. Anything that
+    /// decides "the mesh has to carry this" from a send failure therefore never
+    /// fires on a device where one of those carriers is up. Asking this instead
+    /// keeps that decision on facts we can check.
+    ///
+    /// Two ways the answer is yes:
+    ///
+    /// - An **infrastructure** carrier is available. Internet, Nostr and
+    ///   Reticulum do their own routing and reach peers we hold no radio link
+    ///   to, so a direct send is a real delivery attempt. (Reticulum counts
+    ///   here because it is a routing network in its own right — its `Ok` means
+    ///   "accepted for routing", which is as much as any relay-style carrier
+    ///   promises.)
+    /// - The peer is one of our own **mesh neighbors**, so a mesh carrier can
+    ///   hand the frame straight over.
+    ///
+    /// Checked in that order so the common online case costs a status scan and
+    /// never enumerates links.
+    pub fn can_reach_without_carrying(&self, peer_id: &str) -> bool {
+        let has_infrastructure = self.transports.iter().any(|(transport_type, transport)| {
+            !MESH_TRANSPORTS.contains(transport_type)
+                && transport.status() == TransportStatus::Available
+        });
+        if has_infrastructure {
+            return true;
+        }
+
+        MESH_TRANSPORTS.iter().any(|transport_type| {
+            self.transports
+                .get(transport_type)
+                .filter(|transport| transport.status() == TransportStatus::Available)
+                .is_some_and(|transport| {
+                    transport
+                        .connected_peers()
+                        .iter()
+                        .any(|link| link.peer_id == peer_id)
+                })
+        })
+    }
+
     /// Hands `message` to a specific mesh neighbor, whatever the message's own
     /// recipient is.
     ///

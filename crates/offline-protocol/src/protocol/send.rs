@@ -2968,6 +2968,34 @@ impl OfflineProtocol {
     ) -> Result<()> {
         self.mark_message_sent(message, transport, Some(1));
         self.ensure_ack_registration(message)?;
+
+        // A transport reporting success is not always evidence the frame can
+        // arrive. Wi-Fi Direct and Reticulum accept any recipient and return
+        // `Ok`, so a send to someone we hold no link to is queued for a link
+        // that never drains — and because the mesh hand-off used to hang off
+        // the *failure* path, a device with either carrier up would swallow the
+        // frame instead of asking its neighbors to carry it. That is precisely
+        // the out-of-range case forwarding exists for, so the question is asked
+        // directly rather than inferred from an error that never comes.
+        //
+        // Offering here is additive, never a replacement: the outbox entry and
+        // the ACK registration above stand either way, and if the accepting
+        // carrier did deliver after all, the recipient's deduplicator absorbs
+        // the second copy.
+        if !self
+            .transport_manager
+            .can_reach_without_carrying(message.recipient.as_str())
+        {
+            let handed_to_mesh = self.offer_to_mesh(message);
+            if handed_to_mesh > 0 {
+                debug!(
+                    message_id = %message.id,
+                    recipient = %message.recipient,
+                    handed_to_mesh,
+                    "Transport accepted a recipient it cannot reach; also handed to neighbors"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -3035,6 +3063,17 @@ impl OfflineProtocol {
         // relay-declining device unable to answer anything that reached it
         // across the mesh, so its sender would retransmit to exhaustion and
         // report a failure for a message that was delivered and read.
+
+        // Never hand a self-addressed frame to the mesh. Those are the relay
+        // hint frames (`__GRP_RELAY_REG__`, `__GRP_RELAY_BCAST__`), which mean
+        // something only to our own bridge: a neighbor receiving one would see
+        // a frame addressed to somebody else and carry it further, spending
+        // airtime to deliver a control op nobody can act on. They are pinned to
+        // Internet for the same reason.
+        if message.recipient.as_str() == self.config.user_id {
+            return 0;
+        }
+
         let neighbors = self.transport_manager.mesh_neighbors();
         if neighbors.is_empty() {
             return 0;
@@ -3770,22 +3809,38 @@ impl OfflineProtocol {
             return Ok(());
         }
 
-        // Fallback: try any available transport via DORS
         debug!(
             message_id = %message.id,
             inbound_transport = ?inbound_transport,
             "Inbound transport unavailable for ACK, falling back to DORS selection"
         );
-        if self.transport_manager.send(&ack_message).is_ok() {
+
+        // The sender is not reachable on the link their message arrived over.
+        // If nothing else we hold can reach them either, the answer has to
+        // travel back the way the message came — carried by the devices in
+        // between. Without this, multi-hop delivery looks like failure to the
+        // sender, who retransmits a message we already have and read.
+        //
+        // This is asked *before* the DORS fallback, and asked rather than
+        // inferred from a send error, because a send error is not what a
+        // swallowed frame produces: Wi-Fi Direct and Reticulum accept any
+        // recipient and return `Ok`. Ordering it first also keeps us from
+        // spending a send into a queue that will never drain.
+        if !self
+            .transport_manager
+            .can_reach_without_carrying(ack_message.recipient.as_str())
+            && self.offer_to_mesh(&ack_message) > 0
+        {
+            debug!(
+                message_id = %message.id,
+                ack_to = %ack_message.recipient,
+                "Sender is not directly reachable; handed the acknowledgement to the mesh"
+            );
             return Ok(());
         }
 
-        // The sender is not somewhere we can reach directly. A message that
-        // arrived across several devices has an answer that must travel the
-        // same way back — without this, multi-hop delivery would look like
-        // failure to the sender, who would retransmit a message we already
-        // have.
-        if self.offer_to_mesh(&ack_message) > 0 {
+        // Fallback: try any available transport via DORS
+        if self.transport_manager.send(&ack_message).is_ok() {
             return Ok(());
         }
 
