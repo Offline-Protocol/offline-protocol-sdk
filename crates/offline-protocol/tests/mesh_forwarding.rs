@@ -346,31 +346,85 @@ fn a_message_does_not_circle_a_ring_forever() {
 
 #[test]
 fn everyone_hearing_everyone_does_not_multiply_the_traffic() {
-    // The crowded-room case. Eight devices, all in range of each other, and one
-    // message. Without restraint each device would repeat what it heard to
-    // everyone else and the room would fill with copies of one message.
-    let ids = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"];
-    let mut net = Neighborhood::new(&ids);
-    for (i, a) in ids.iter().enumerate() {
-        for b in ids.iter().skip(i + 1) {
+    // The crowded-room case: a dense cluster of devices that all hear each
+    // other, carrying a message to someone standing just outside it. Without
+    // restraint every device in the cluster repeats what it heard to every
+    // other, and one message fills the room with copies.
+    //
+    // The recipient is deliberately outside the cluster. If they were inside
+    // it, the sender would simply hand the message over directly and no
+    // carrying would happen at all — the test would pass while exercising
+    // nothing.
+    let cluster = ["n0", "n1", "n2", "n3", "n4", "n5", "n6"];
+    let mut net = Neighborhood::new(&["n0", "n1", "n2", "n3", "n4", "n5", "n6", "far"]);
+    for (i, a) in cluster.iter().enumerate() {
+        for b in cluster.iter().skip(i + 1) {
             net.link(a, b);
         }
     }
+    // One device in the cluster — not the sender — can reach the recipient.
+    net.link("n6", "far");
 
-    let msg_id = net.send("n0", "n7", "in the crowd");
+    let msg_id = net.send("n0", "far", "in the crowd");
 
     net.run_until_quiet(24);
 
-    assert_eq!(net.inbox("n7"), vec!["in the crowd".to_string()]);
+    assert_eq!(net.inbox("far"), vec!["in the crowd".to_string()]);
 
-    // Eight devices with a link between every pair is 28 links. Uncontrolled
-    // forwarding would cross most of them repeatedly; the bound here is well
-    // under a single pass over the topology.
+    // Seven devices with a link between every pair is 21 links, plus the one
+    // out to the recipient. Delivery costs fewer transmissions than the cluster
+    // has links — uncontrolled repetition would cross them all, several times
+    // over, until the hop budget ran out.
+    //
+    // This is the *worst* case rather than the expected one. These devices run
+    // with the pre-transmit hold set to zero and are stepped in lock-step, so
+    // every forward is due at once and none of them ever gets the chance to
+    // stand down for a neighbor. Real timing spreads them out, and the
+    // cancellation that follows only lowers this number.
     let crossings = net.transmission_count(&msg_id);
     assert!(
-        crossings <= 20,
-        "one message crossed links {crossings} times in a room of {} devices",
-        ids.len()
+        crossings < 21,
+        "one message crossed links {crossings} times in a room of {} devices, \
+         which is more than the cluster has links",
+        cluster.len()
+    );
+
+    // And it really did travel through the cluster rather than going direct.
+    assert!(
+        net.transmissions
+            .iter()
+            .any(|(from, to, id)| from == "n6" && to == "far" && id == &msg_id),
+        "the message should have reached the recipient through the cluster"
+    );
+}
+
+#[test]
+fn the_only_device_that_can_reach_the_recipient_does_not_stand_down() {
+    // Two forwarders that can hear each other, only one of which can reach the
+    // recipient:
+    //
+    //     alice — bob — carol — dave
+    //       \_____________/
+    //
+    // Both bob and carol take a copy. Whichever transmits first hands it to the
+    // other, and standing down on a duplicate is normally right — a neighbor
+    // covered the same ground. But carol holds the only link to dave. If carol
+    // drops her copy because bob's arrived, dave never hears it, and the id is
+    // suppressed so the sender's retries cannot rescue it either.
+    let mut net = Neighborhood::new(&["alice", "bob", "carol", "dave"]);
+    net.link("alice", "bob");
+    net.link("alice", "carol");
+    net.link("bob", "carol");
+    net.link("carol", "dave");
+
+    net.send("alice", "dave", "only carol can finish this");
+
+    net.run_until_quiet(16);
+
+    assert_eq!(
+        net.inbox("dave"),
+        vec!["only carol can finish this".to_string()],
+        "the device holding the last link must deliver, not defer to a neighbor"
     );
 }
 

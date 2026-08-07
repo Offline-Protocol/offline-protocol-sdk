@@ -3,7 +3,7 @@
 use super::mesh_relay::RelayAdmission as MeshRelayAdmission;
 use super::{
     internal_prefixes, lock_shared_state, ChunkOutcome, InternalMessageResult, OfflineProtocol,
-    PendingMediaMetadataEntry, ProtocolState, RichPayloadV1,
+    PendingMediaMetadataEntry, ProtocolState, RichPayloadV1, CRITICAL_RELAY_BATTERY_LEVEL,
 };
 use crate::constants::{ACK_FOR_KEY, RELAY_LEARNED_ROUTE_QUALITY};
 use crate::events::{Event, SecurityWarningCode};
@@ -449,8 +449,34 @@ impl OfflineProtocol {
             return;
         }
 
-        let degree = self.transport_manager.mesh_neighbors().len();
-        match self.mesh_relay.admit(message, arrival_peer, degree) {
+        // Carrying other people's messages is the first thing to give up when
+        // the battery is going: a device that spends its last few percent
+        // relaying cannot send its own message when its owner needs to. The
+        // device keeps sending and receiving its own traffic either way.
+        //
+        // An unknown battery level is treated as willing — most platforms
+        // report one, and refusing to carry anything on a device that simply
+        // does not publish a level would quietly remove it from the network.
+        if !self.battery_allows_relaying() {
+            debug!(
+                message_id = %message.id,
+                "Not forwarding: battery is below the level for carrying traffic"
+            );
+            return;
+        }
+
+        let neighbors = self.transport_manager.mesh_neighbors();
+        let degree = neighbors.len();
+        // Whether we hold the link to the recipient ourselves. At the last hop
+        // no other device can be assumed to have it, so our copy must not be
+        // dropped in favour of a neighbor's.
+        let is_last_hop = neighbors
+            .iter()
+            .any(|n| n.peer_id == message.recipient.as_str());
+        match self
+            .mesh_relay
+            .admit(message, arrival_peer, degree, is_last_hop)
+        {
             MeshRelayAdmission::Queued => {
                 debug!(
                     message_id = %message.id,
@@ -467,6 +493,31 @@ impl OfflineProtocol {
                 );
             }
         }
+    }
+
+    /// Whether the battery is healthy enough to carry other people's traffic.
+    ///
+    /// Applies [`RelayConfig::min_battery_for_relay`], the same floor the relay
+    /// role uses, with the same exemption for a charging device: plugged in,
+    /// only a critical level stops it. An unknown level means yes — see the
+    /// caller.
+    fn battery_allows_relaying(&self) -> bool {
+        let (_statuses, available) = self.transport_manager.snapshot_status_and_available();
+        let (battery_level, is_charging) =
+            crate::telemetry::aggregator::device_battery_from_available(
+                self.transport_manager.current_transport(),
+                &available,
+            );
+
+        let Some(level) = battery_level else {
+            return true;
+        };
+
+        if level < CRITICAL_RELAY_BATTERY_LEVEL {
+            return false;
+        }
+
+        is_charging || level >= self.config.relay.min_battery_for_relay
     }
 
     /// Transmits the forwards whose delay has elapsed.
@@ -494,7 +545,9 @@ impl OfflineProtocol {
                 exclude.push(peer);
             }
             let onward = self.mesh_relay.select_targets(
-                neighbors.iter().map(|n| n.peer_id.as_str()),
+                neighbors
+                    .iter()
+                    .map(|n| (n.peer_id.as_str(), n.link_quality())),
                 &exclude,
                 &message.id.as_str(),
             );
@@ -523,6 +576,18 @@ impl OfflineProtocol {
 
             let mut delivered_to = 0usize;
             for target in &targets {
+                // Each link this frame crosses is one transmission against the
+                // device's ceiling. Running out mid-fan-out stops the fan-out
+                // rather than the frame: the neighbors already reached carry it
+                // on, and the sender's retry covers the rest.
+                if !self.mesh_relay.take_send_token() {
+                    debug!(
+                        message_id = %message.id,
+                        "At the forwarding limit; stopping this fan-out here"
+                    );
+                    break;
+                }
+
                 match self.transport_manager.send_to_neighbor(target, &message) {
                     Ok(transport) => {
                         delivered_to += 1;

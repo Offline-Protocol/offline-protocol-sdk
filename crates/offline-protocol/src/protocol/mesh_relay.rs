@@ -35,7 +35,7 @@
 //! of transmission (so a forward cancelled while waiting costs no budget).
 
 use offline_protocol_core::{Message, MessagePriority};
-use offline_protocol_reliability::{RelaySeenCache, RelaySeenConfig, SeenOutcome};
+use offline_protocol_reliability::{RelaySeenCache, RelaySeenConfig};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -343,28 +343,48 @@ impl MeshRelayGovernor {
     /// Runs the full admission sequence and, when the frame is accepted,
     /// queues an adjusted copy for later transmission. `degree` is the current
     /// neighbor count, which sets both the hop budget and the delay spread.
+    /// `is_last_hop` says whether the frame's recipient is one of our own
+    /// neighbors, which changes what a duplicate means — see below.
     pub fn admit(
         &mut self,
         message: &Message,
         arrival_peer: Option<&str>,
         degree: usize,
+        is_last_hop: bool,
     ) -> RelayAdmission {
         let now = Instant::now();
         let message_id = message.id.as_str();
 
-        // Suppression first: it is the cheapest check and the one that has to
-        // run on every arrival for the others to matter.
-        if self.seen.observe(&message_id) == SeenOutcome::Duplicate {
+        // Has this id been dealt with? Checked without recording, because a
+        // frame that is about to be *refused* must not be remembered as
+        // handled: another copy of it arriving over a healthy link a moment
+        // later is the alternate path that should still carry it. Recording on
+        // rejection would leave the id suppressed for the whole retention
+        // window, so a single link running hot — or one frame with its hop
+        // budget rewritten to nothing, which nothing here can authenticate —
+        // would blank every path through this device.
+        if self.seen.contains(&message_id) {
             self.counters.duplicates_suppressed =
                 self.counters.duplicates_suppressed.saturating_add(1);
 
-            // If our own copy is still waiting, a neighbor has just covered
-            // this frame for everyone in earshot of them. Stand down.
+            // Our own copy is still waiting, so a neighbor has transmitted
+            // this frame already.
             if let Some(index) = self
                 .pending
                 .iter()
                 .position(|p| p.message.id.as_str() == message_id)
             {
+                // Standing down is right in the middle of a network, where a
+                // neighbor's transmission reaches the same region ours would.
+                // It is wrong at the last hop: our pending copy is addressed
+                // to the recipient themselves, and no other device can be
+                // assumed to hold that link. Dropping it there loses the
+                // delivery outright — and leaves the id suppressed, so the
+                // sender's retries cannot rescue it either.
+                if is_last_hop {
+                    return RelayAdmission::Rejected(RelayRejection::AlreadySeen);
+                }
+
                 self.pending.remove(index);
                 self.counters.cancelled_by_duplicate =
                     self.counters.cancelled_by_duplicate.saturating_add(1);
@@ -395,6 +415,13 @@ impl MeshRelayGovernor {
             return RelayAdmission::Rejected(RelayRejection::QueueFull);
         }
 
+        // Accepted: now it is genuinely handled, and further copies can be
+        // suppressed. Recording here rather than at the top also means the
+        // cache fills at the rate frames are *taken on*, which the per-neighbor
+        // and per-device limits bound — not at the rate they arrive, which
+        // nothing bounds.
+        self.seen.observe(&message_id);
+
         let due_at = now + self.jitter_for(&message_id, degree);
         self.pending.push(PendingRelay {
             message: forwarded,
@@ -409,10 +436,16 @@ impl MeshRelayGovernor {
     /// Returns the forwards whose delay has elapsed, removing them from the
     /// queue.
     ///
-    /// Pacing is applied here rather than at admission so a forward cancelled
-    /// while waiting costs nothing. Frames held back for rate stay queued and
-    /// are retried on the next call, unless they have waited so long past their
-    /// due time that forwarding them no longer helps.
+    /// Frames whose delay has not elapsed stay queued, as do frames the device
+    /// has no budget left to transmit. A frame that has waited far past its
+    /// turn is abandoned instead: by then other paths have carried it or the
+    /// sender has retransmitted, and holding it only displaces newer traffic.
+    ///
+    /// Budget is *checked* here and *spent* in [`Self::take_send_token`], once
+    /// per link a frame actually crosses. Spending it here instead would
+    /// undercount by the fan-out — one release from this queue can put the
+    /// frame on several links — and the whole point of the ceiling is that it
+    /// bounds what reaches the radio.
     pub fn take_due(&mut self, now: Instant) -> Vec<PendingRelay> {
         self.seen.expire(now);
 
@@ -430,8 +463,7 @@ impl MeshRelayGovernor {
                 continue;
             }
 
-            if self.send_budget.try_take(now) {
-                self.counters.forwarded = self.counters.forwarded.saturating_add(1);
+            if self.has_send_budget(now) {
                 due.push(relay);
             } else {
                 self.counters.rate_deferred = self.counters.rate_deferred.saturating_add(1);
@@ -441,6 +473,29 @@ impl MeshRelayGovernor {
 
         self.pending = keep;
         due
+    }
+
+    /// Whether any budget remains to transmit right now.
+    fn has_send_budget(&mut self, now: Instant) -> bool {
+        self.send_budget.refill(now);
+        self.send_budget.tokens >= 1.0
+    }
+
+    /// Claims budget for putting one frame on one link.
+    ///
+    /// Every transmission goes through here — forwarding another device's
+    /// frame and handing over one of our own alike — because the ceiling is
+    /// about what this device puts on the air, not about whose message it is.
+    /// Returns false when the device is at its limit and the caller should not
+    /// transmit.
+    pub fn take_send_token(&mut self) -> bool {
+        if self.send_budget.try_take(Instant::now()) {
+            self.counters.forwarded = self.counters.forwarded.saturating_add(1);
+            true
+        } else {
+            self.counters.rate_deferred = self.counters.rate_deferred.saturating_add(1);
+            false
+        }
     }
 
     /// Records an id as handled without forwarding it.
@@ -459,28 +514,45 @@ impl MeshRelayGovernor {
     /// between two nodes.
     pub fn select_targets<'a>(
         &self,
-        neighbors: impl IntoIterator<Item = &'a str>,
+        neighbors: impl IntoIterator<Item = (&'a str, u8)>,
         exclude: &[&str],
         message_id: &str,
     ) -> Vec<String> {
-        let mut candidates: Vec<&str> = neighbors
+        let mut candidates: Vec<(&str, u8)> = neighbors
             .into_iter()
-            .filter(|peer| !exclude.contains(peer))
+            .filter(|(peer, _)| !exclude.contains(peer))
             .collect();
 
         if candidates.len() <= self.config.fanout {
-            return candidates.into_iter().map(str::to_string).collect();
+            return candidates
+                .into_iter()
+                .map(|(peer, _)| peer.to_string())
+                .collect();
         }
 
-        // Order by a hash of (id, peer, self) so the subset is stable for a
-        // given frame — a second copy of the same frame would pick the same
-        // neighbors rather than a fresh set — while different frames spread
-        // across different neighbors.
-        candidates.sort_by_key(|peer| Self::hash_of(&[message_id, peer, &self.local_id]));
+        // Strongest links first: a fan-out slot spent on a barely-connected
+        // neighbor is one the frame probably does not survive, and there are
+        // only a few slots.
+        //
+        // Ties break on a hash of (id, peer, self), which does two things.
+        // Within a group of equally good links it spreads different messages
+        // across different neighbors rather than pinning every frame to the
+        // same one. And it is stable per frame: a second copy of the same
+        // message picks the same neighbors instead of a fresh set, so a
+        // retransmission does not widen its own footprint.
+        candidates.sort_by(|(a_peer, a_quality), (b_peer, b_quality)| {
+            b_quality.cmp(a_quality).then_with(|| {
+                Self::hash_of(&[message_id, a_peer, &self.local_id]).cmp(&Self::hash_of(&[
+                    message_id,
+                    b_peer,
+                    &self.local_id,
+                ]))
+            })
+        });
         candidates
             .into_iter()
             .take(self.config.fanout)
-            .map(str::to_string)
+            .map(|(peer, _)| peer.to_string())
             .collect()
     }
 
@@ -643,7 +715,7 @@ mod tests {
         let mut gov = governor();
         let msg = frame();
 
-        assert_eq!(gov.admit(&msg, Some("b"), 3), RelayAdmission::Queued);
+        assert_eq!(gov.admit(&msg, Some("b"), 3, false), RelayAdmission::Queued);
 
         // Copies arriving after ours has gone out are suppressed, not forwarded.
         let due = gov.take_due(Instant::now());
@@ -651,11 +723,11 @@ mod tests {
 
         for _ in 0..5 {
             assert_eq!(
-                gov.admit(&msg, Some("c"), 3),
+                gov.admit(&msg, Some("c"), 3, false),
                 RelayAdmission::Rejected(RelayRejection::AlreadySeen)
             );
         }
-        assert_eq!(gov.counters().forwarded, 1);
+        assert_eq!(gov.counters().queued, 1);
         assert_eq!(gov.counters().duplicates_suppressed, 5);
     }
 
@@ -674,12 +746,12 @@ mod tests {
         );
         let msg = frame();
 
-        assert_eq!(gov.admit(&msg, Some("b"), 6), RelayAdmission::Queued);
+        assert_eq!(gov.admit(&msg, Some("b"), 6, false), RelayAdmission::Queued);
         assert_eq!(gov.pending_len(), 1);
 
         // The same frame arrives again while ours is still waiting.
         assert_eq!(
-            gov.admit(&msg, Some("c"), 6),
+            gov.admit(&msg, Some("c"), 6, false),
             RelayAdmission::Rejected(RelayRejection::SupersededByDuplicate)
         );
 
@@ -699,7 +771,7 @@ mod tests {
         let mut gov = governor();
         let msg = frame_with(255, MessagePriority::Medium);
 
-        assert_eq!(gov.admit(&msg, Some("b"), 2), RelayAdmission::Queued);
+        assert_eq!(gov.admit(&msg, Some("b"), 2, false), RelayAdmission::Queued);
         let due = gov.take_due(Instant::now());
 
         assert_eq!(due.len(), 1);
@@ -713,7 +785,7 @@ mod tests {
         let msg = frame_with(255, MessagePriority::Medium);
 
         assert_eq!(
-            gov.admit(&msg, Some("b"), DEFAULT_RELAY_DENSE_DEGREE),
+            gov.admit(&msg, Some("b"), DEFAULT_RELAY_DENSE_DEGREE, false),
             RelayAdmission::Queued
         );
         let due = gov.take_due(Instant::now());
@@ -727,7 +799,7 @@ mod tests {
         let msg = frame_with(1, MessagePriority::Medium);
 
         assert_eq!(
-            gov.admit(&msg, Some("b"), 3),
+            gov.admit(&msg, Some("b"), 3, false),
             RelayAdmission::Rejected(RelayRejection::HopLimitReached)
         );
         assert_eq!(gov.counters().hop_limit_reached, 1);
@@ -741,7 +813,7 @@ mod tests {
         // forward. Verifies the budget lands exactly on `TTL::is_exhausted`
         // rather than a hop early or late.
         assert_eq!(
-            gov.admit(&frame_with(2, MessagePriority::Medium), Some("b"), 3),
+            gov.admit(&frame_with(2, MessagePriority::Medium), Some("b"), 3, false),
             RelayAdmission::Queued
         );
         let due = gov.take_due(Instant::now());
@@ -758,7 +830,7 @@ mod tests {
         }
 
         assert_eq!(
-            gov.admit(&msg, Some("b"), 3),
+            gov.admit(&msg, Some("b"), 3, false),
             RelayAdmission::Rejected(RelayRejection::HopLimitReached)
         );
     }
@@ -771,7 +843,7 @@ mod tests {
         // suppression cannot help with, since every id is new.
         let mut accepted_from_noisy = 0;
         for _ in 0..200 {
-            if gov.admit(&frame(), Some("noisy"), 3) == RelayAdmission::Queued {
+            if gov.admit(&frame(), Some("noisy"), 3, false) == RelayAdmission::Queued {
                 accepted_from_noisy += 1;
             }
         }
@@ -785,15 +857,17 @@ mod tests {
         // A different neighbor still gets through: the limit is per link, so
         // one bad actor degrades only itself.
         assert_eq!(
-            gov.admit(&frame(), Some("quiet"), 3),
+            gov.admit(&frame(), Some("quiet"), 3, false),
             RelayAdmission::Queued
         );
     }
 
     #[test]
     fn transmission_never_exceeds_the_node_budget() {
-        // The invariant the whole design rests on: whatever arrives, the radio
-        // spend is capped. Frames held back stay queued rather than vanishing.
+        // The invariant the whole design rests on: whatever arrives, what the
+        // radio is asked to send is capped. Asserted on transmissions rather
+        // than on queue releases, because one release can put a frame on
+        // several links and it is the links that cost airtime.
         let mut gov = MeshRelayGovernor::with_config(
             "relay-node",
             MeshRelayConfig {
@@ -806,26 +880,104 @@ mod tests {
         );
 
         for _ in 0..200 {
-            gov.admit(&frame(), Some("b"), 3);
+            gov.admit(&frame(), Some("b"), 3, false);
         }
+        let due = gov.take_due(Instant::now());
+        assert!(!due.is_empty());
 
-        let now = Instant::now();
-        let due = gov.take_due(now);
+        // Ask for far more transmissions than the budget allows.
+        let granted = (0..1000).filter(|_| gov.take_send_token()).count();
 
         assert!(
-            due.len() <= DEFAULT_RELAY_BURST as usize,
-            "released {} frames in one pass, budget is {}",
-            due.len(),
-            DEFAULT_RELAY_BURST
+            granted <= DEFAULT_RELAY_BURST as usize + 1,
+            "granted {granted} transmissions against a burst of {DEFAULT_RELAY_BURST}"
         );
+        assert_eq!(gov.counters().forwarded as usize, granted);
         assert!(gov.counters().rate_deferred > 0);
-        assert!(gov.pending_len() > 0, "deferred frames must stay queued");
+    }
+
+    #[test]
+    fn a_refused_frame_leaves_the_way_open_for_another_copy() {
+        // A frame turned away must not be remembered as handled: the copy
+        // arriving over a healthy link a moment later is the alternate path,
+        // and suppressing it would blank every route through this device for
+        // the whole retention window.
+        let mut gov = governor();
+
+        // Refused for having no hops left — the cheapest thing an attacker can
+        // forge, since nothing authenticates the claim.
+        let msg = frame_with(1, MessagePriority::Medium);
+        assert_eq!(
+            gov.admit(&msg, Some("hostile"), 3, false),
+            RelayAdmission::Rejected(RelayRejection::HopLimitReached)
+        );
+
+        // The same message, arriving intact by another route.
+        let mut healthy = msg.clone();
+        healthy.ttl = TTL::new(8).unwrap();
+        assert_eq!(
+            gov.admit(&healthy, Some("good"), 3, false),
+            RelayAdmission::Queued,
+            "a refused frame must not blackhole its id"
+        );
+    }
+
+    #[test]
+    fn a_rate_limited_neighbor_does_not_blackhole_the_ids_it_sent() {
+        let mut gov = governor();
+
+        // Exhaust one neighbor's allowance with distinct frames.
+        let mut refused = Vec::new();
+        for _ in 0..200 {
+            let msg = frame();
+            if gov.admit(&msg, Some("noisy"), 3, false)
+                == RelayAdmission::Rejected(RelayRejection::PeerRateLimited)
+            {
+                refused.push(msg);
+            }
+        }
+        assert!(!refused.is_empty());
+
+        // Those same messages, reaching us through someone else, must still be
+        // carried.
+        let victim = &refused[0];
+        assert_eq!(
+            gov.admit(victim, Some("quiet"), 3, false),
+            RelayAdmission::Queued
+        );
+    }
+
+    #[test]
+    fn the_last_hop_does_not_stand_down_for_a_neighbor() {
+        // Standing down assumes a neighbor's transmission covers the same
+        // ground ours would. At the last hop it does not: our copy is going to
+        // the recipient over a link only we are known to hold, so dropping it
+        // loses the delivery.
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                jitter_min: Duration::from_millis(50),
+                jitter_max: Duration::from_millis(200),
+                ..Default::default()
+            },
+        );
+        let msg = frame();
+
+        assert_eq!(gov.admit(&msg, Some("b"), 3, true), RelayAdmission::Queued);
+        // Another forwarder hands us the same frame.
+        assert_eq!(
+            gov.admit(&msg, Some("c"), 3, true),
+            RelayAdmission::Rejected(RelayRejection::AlreadySeen)
+        );
+
+        assert_eq!(gov.pending_len(), 1, "the delivering copy must survive");
+        assert_eq!(gov.counters().cancelled_by_duplicate, 0);
     }
 
     #[test]
     fn a_forward_waiting_far_past_its_turn_is_abandoned() {
         let mut gov = governor();
-        gov.admit(&frame(), Some("b"), 3);
+        gov.admit(&frame(), Some("b"), 3, false);
 
         // Long enough that other paths have carried it or the sender has
         // retransmitted; holding it would only displace newer traffic.
@@ -850,10 +1002,13 @@ mod tests {
         );
 
         for _ in 0..4 {
-            assert_eq!(gov.admit(&frame(), Some("b"), 3), RelayAdmission::Queued);
+            assert_eq!(
+                gov.admit(&frame(), Some("b"), 3, false),
+                RelayAdmission::Queued
+            );
         }
         assert_eq!(
-            gov.admit(&frame(), Some("b"), 3),
+            gov.admit(&frame(), Some("b"), 3, false),
             RelayAdmission::Rejected(RelayRejection::QueueFull)
         );
         assert_eq!(gov.pending_len(), 4);
@@ -873,11 +1028,16 @@ mod tests {
             },
         );
 
-        gov.admit(&frame_with(8, MessagePriority::Low), Some("b"), 3);
-        gov.admit(&frame_with(8, MessagePriority::Low), Some("b"), 3);
+        gov.admit(&frame_with(8, MessagePriority::Low), Some("b"), 3, false);
+        gov.admit(&frame_with(8, MessagePriority::Low), Some("b"), 3, false);
 
         assert_eq!(
-            gov.admit(&frame_with(8, MessagePriority::Critical), Some("b"), 3),
+            gov.admit(
+                &frame_with(8, MessagePriority::Critical),
+                Some("b"),
+                3,
+                false
+            ),
             RelayAdmission::Queued
         );
         assert_eq!(gov.pending_len(), 2);
@@ -891,7 +1051,7 @@ mod tests {
     fn a_frame_is_never_sent_back_where_it_came_from() {
         let gov = governor();
         let targets = gov.select_targets(
-            ["alice", "b", "c", "d"],
+            [("alice", 80), ("b", 80), ("c", 80), ("d", 80)],
             &["b", "alice"], // arrival neighbor and the peer that wrote it
             "msg-1",
         );
@@ -905,7 +1065,18 @@ mod tests {
     #[test]
     fn fanout_is_capped_and_stable_for_a_given_frame() {
         let gov = governor();
-        let neighbors = ["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"];
+        // All equally good, so the tie-break is what decides — which is the
+        // property under test.
+        let neighbors = [
+            ("n0", 70),
+            ("n1", 70),
+            ("n2", 70),
+            ("n3", 70),
+            ("n4", 70),
+            ("n5", 70),
+            ("n6", 70),
+            ("n7", 70),
+        ];
 
         let first = gov.select_targets(neighbors, &[], "msg-1");
         let again = gov.select_targets(neighbors, &[], "msg-1");
@@ -927,7 +1098,7 @@ mod tests {
         gov.mark_handled(&msg.id.as_str());
 
         assert_eq!(
-            gov.admit(&msg, Some("b"), 3),
+            gov.admit(&msg, Some("b"), 3, false),
             RelayAdmission::Rejected(RelayRejection::AlreadySeen)
         );
     }

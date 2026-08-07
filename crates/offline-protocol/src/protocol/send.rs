@@ -3027,16 +3027,14 @@ impl OfflineProtocol {
     /// forwarding exists so neighbors holding the *same* frame do not all
     /// transmit at once, and nobody else is holding this one yet.
     pub(super) fn offer_to_mesh(&mut self, message: &Message) -> usize {
-        if !self.config.relay.allow_relay
-            || self.config.relay.relay_priority
-                == offline_protocol_router::relay::RelayPriority::Never
-        {
-            // A device that does not carry other people's traffic still sends
-            // its own — but sending it *through* other devices is the same
-            // favor in reverse, so honor the same opt-out.
-            return 0;
-        }
-
+        // Deliberately not gated on `allow_relay`. That setting is about what
+        // this device does for *other people* — whether it spends its battery
+        // carrying their traffic. This is the device's own message, and the
+        // ones it must be able to send include the acknowledgement for a
+        // message it just received. Gating it here would leave a
+        // relay-declining device unable to answer anything that reached it
+        // across the mesh, so its sender would retransmit to exhaustion and
+        // report a failure for a message that was delivered and read.
         let neighbors = self.transport_manager.mesh_neighbors();
         if neighbors.is_empty() {
             return 0;
@@ -3054,7 +3052,9 @@ impl OfflineProtocol {
             vec![recipient.to_string()]
         } else {
             self.mesh_relay.select_targets(
-                neighbors.iter().map(|n| n.peer_id.as_str()),
+                neighbors
+                    .iter()
+                    .map(|n| (n.peer_id.as_str(), n.link_quality())),
                 &[],
                 &message.id.as_str(),
             )
@@ -3062,6 +3062,18 @@ impl OfflineProtocol {
 
         let mut handed_to = 0usize;
         for target in targets {
+            // Metered against the same ceiling as carrying other people's
+            // traffic: it is the same radio. Without this a large transfer,
+            // which offers every chunk separately, would put an unbounded burst
+            // on the air in one call.
+            if !self.mesh_relay.take_send_token() {
+                debug!(
+                    message_id = %message.id,
+                    "At the forwarding limit; not handing this to further neighbors"
+                );
+                break;
+            }
+
             match self.transport_manager.send_to_neighbor(&target, message) {
                 Ok(transport) => {
                     handed_to += 1;

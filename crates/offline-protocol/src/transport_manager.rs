@@ -84,6 +84,20 @@ pub struct MeshNeighbor {
     pub transport: TransportType,
 }
 
+impl MeshNeighbor {
+    /// How good this link is, on a 0–100 scale.
+    ///
+    /// Derived from signal strength where the carrier reports it, and a
+    /// mid-scale value where it does not — an unmeasured link should not
+    /// outrank a measured good one, nor be discarded like a measured bad one.
+    pub fn link_quality(&self) -> u8 {
+        match self.rssi {
+            Some(rssi) => offline_protocol_transport::LinkQuality::from_rssi(rssi).value(),
+            None => offline_protocol_transport::DEFAULT_LINK_QUALITY_WITHOUT_RSSI,
+        }
+    }
+}
+
 /// Dedupe window: don't re-emit same escalation trigger reason within this duration.
 const ESCALATION_TRIGGER_DEDUPE_SECS: u64 = 30;
 
