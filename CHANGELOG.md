@@ -4,6 +4,18 @@ All notable changes to the Offline Protocol SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This changelog covers everything after the **v0.7.1** release.
 
+## [Unreleased]
+
+### Changed
+
+- **A GitHub release now carries the compiled binaries as assets.** Every native artifact the release workflow builds was uploaded with `retention-days: 1` and then deleted; the release itself attached only `THIRD-PARTY-NOTICES.md` and `EXPORT.md`, so the binaries survived in exactly one place — the npm tarball. That serves React Native and nothing else. An iOS project consuming the XCFramework directly, a plain Gradle Android build, or anything on desktop had no download to point at, and a build more than a day old could not be re-fetched at all, including for forensics on a release that had already shipped.
+
+  Six archives are attached from now on: `offline-protocol-<version>-ios-xcframework.zip` (the XCFramework **plus** the generated FFI header, modulemap and Swift bindings, without which it does not build), `-android.zip` (all four ABIs plus the Kotlin bindings that call them), and one per desktop target — `-macos-arm64.tar.gz`, `-linux-x86_64.tar.gz`, `-linux-aarch64.tar.gz`, `-windows-x86_64.zip` — with a `SHA256SUMS.txt` over the set. **Each archive carries `LICENSE`, `LICENSE-COMMERCIAL.md`, `THIRD-PARTY-NOTICES.md` and `EXPORT.md` inside it**, because a binary pulled straight off the release page is an AGPL distribution in its own right, and the [15 CFR §742.15(b)](https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-742/section-742.15) notice attaches to the cryptography rather than to the npm package that usually delivers it.
+
+  The desktop libraries are now verified alongside the iOS and Android ones *before* anything publishes, so a missing slice fails the job rather than surfacing between the GitHub release and the npm publish. Packaging itself runs on dry runs too, so a break in it is found before a tag is cut rather than during one. npm is unchanged and remains the supported route for React Native.
+
+  **Python wheels are deliberately not attached.** `python-package` builds four of them, but its `matrix.plat_name` is referenced nowhere and the step captioned "Re-tag the wheel with the correct platform" only prints filenames — and with no ext modules setuptools emits `offline_protocol_sdk-<version>-py3-none-any.whl` for every platform. All four therefore share one filename while carrying different native libraries: attaching them would collide on upload, and any that landed would be a wheel `pip` installs happily on the wrong platform. Correcting the tagging is separate work, tracked apart from this change.
+
 ## [0.20.0] — 2026-08-07
 
 > **One breaking change, and it is React Native on iOS only.** iOS autolinking

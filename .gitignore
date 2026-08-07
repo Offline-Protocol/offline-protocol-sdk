@@ -21,6 +21,10 @@ Thumbs.db
 *.a
 *.lib
 
+# Staged GitHub release assets (built by release.yml on the runner; present
+# locally only if someone reproduces that step by hand)
+/release-assets/
+
 # Python
 __pycache__/
 *.py[cod]

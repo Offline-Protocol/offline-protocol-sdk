@@ -515,6 +515,16 @@ jobs:
           name: android-uniffi-bindings
           path: bindings/react-native/android/src/main/java
 
+      # Not consumed by the npm package — these exist only to be attached to the
+      # release. Each build-desktop job uploads under desktop-libs/<platform>/,
+      # so merging the four is collision-free.
+      - name: Download desktop libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          path: desktop-libs
+          merge-multiple: true
+
       - name: Verify artifacts
         run: |
           echo "Checking iOS artifacts..."
@@ -539,6 +549,15 @@ jobs:
 
           echo "Checking Android Kotlin bindings..."
           test -d bindings/react-native/android/src/main/java/uniffi
+
+          # Checked here rather than at packaging time so a missing desktop slice
+          # fails before anything is published, not between the GitHub release and
+          # the npm publish.
+          echo "Checking desktop libraries..."
+          test -f desktop-libs/macos-arm64/liboffline_protocol_uniffi.dylib
+          test -f desktop-libs/linux-x86_64/liboffline_protocol_uniffi.so
+          test -f desktop-libs/linux-aarch64/liboffline_protocol_uniffi.so
+          test -f desktop-libs/windows-x86_64/offline_protocol_uniffi.dll
 
           echo "All artifacts verified."
 
@@ -586,12 +605,73 @@ jobs:
         working-directory: bindings/react-native
         run: bash scripts/prepare-npm.sh
 
+      # Runs on dry runs too, so a packaging break surfaces before a tag is cut
+      # rather than during one. Only the upload below is gated.
+      - name: Package binary release assets
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          ASSETS="$GITHUB_WORKSPACE/release-assets"
+          mkdir -p "$ASSETS"
+
+          # Every archive carries the licences and the export notice with it. A
+          # binary handed out on its own is an AGPL distribution, and 15 CFR
+          # §742.15(b) attaches to the crypto, not to the npm package that
+          # usually delivers it — so an asset downloaded straight off the
+          # release page must not arrive without either.
+          LEGAL=(LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md)
+
+          # iOS. The XCFramework alone does not build: the generated FFI header,
+          # modulemap and Swift bindings under Generated/ are what an importer
+          # actually needs, and npm is the only place they ship today.
+          stage="$(mktemp -d)"
+          cp -R bindings/react-native/ios/libs/offline_protocol_uniffi.xcframework "$stage/"
+          cp -R bindings/react-native/ios/Generated "$stage/"
+          cp "${LEGAL[@]}" "$stage/"
+          (cd "$stage" && zip -qry "$ASSETS/offline-protocol-$VERSION-ios-xcframework.zip" .)
+          rm -rf "$stage"
+
+          # Android: all four ABIs plus the Kotlin bindings that call them.
+          stage="$(mktemp -d)"
+          mkdir -p "$stage/jniLibs"
+          cp -R bindings/react-native/android/src/main/jniLibs/. "$stage/jniLibs/"
+          cp -R bindings/react-native/android/src/main/java/uniffi "$stage/"
+          cp "${LEGAL[@]}" "$stage/"
+          (cd "$stage" && zip -qry "$ASSETS/offline-protocol-$VERSION-android.zip" .)
+          rm -rf "$stage"
+
+          # Desktop: zip for Windows, tar.gz elsewhere, matching what each
+          # platform's tooling expects to be handed.
+          for spec in macos-arm64:tar linux-x86_64:tar linux-aarch64:tar windows-x86_64:zip; do
+            plat="${spec%%:*}"
+            fmt="${spec##*:}"
+            stage="$(mktemp -d)"
+            cp desktop-libs/"$plat"/* "$stage/"
+            cp "${LEGAL[@]}" "$stage/"
+            if [ "$fmt" = tar ]; then
+              tar -czf "$ASSETS/offline-protocol-$VERSION-$plat.tar.gz" -C "$stage" .
+            else
+              (cd "$stage" && zip -qry "$ASSETS/offline-protocol-$VERSION-$plat.zip" .)
+            fi
+            rm -rf "$stage"
+          done
+
+          # Written outside the directory and moved in, so the manifest can never
+          # race its own glob.
+          (cd "$ASSETS" && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS.txt")
+          mv "$RUNNER_TEMP/SHA256SUMS.txt" "$ASSETS/"
+
+          echo "Release assets:"
+          ls -lh "$ASSETS"
+
       - name: Create GitHub Release
         if: inputs.dry_run != true
         uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
           files: |
+            release-assets/*
             THIRD-PARTY-NOTICES.md
             EXPORT.md
           draft: false
