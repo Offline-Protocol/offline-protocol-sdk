@@ -3,7 +3,7 @@
 mod blocking;
 mod config_accessors;
 mod decryption_queue;
-mod mesh_relay;
+pub(crate) mod mesh_relay;
 mod message_dispatch;
 mod nostr_publication;
 mod observability;
@@ -38,6 +38,7 @@ use crate::{
     TransportManager,
 };
 use chrono::{DateTime, Utc};
+use mesh_relay::MeshRelayGovernor;
 use offline_protocol_core::{LamportClock, Message, MessageId, MutexExt};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
@@ -89,6 +90,12 @@ pub struct OfflineProtocol {
 
     /// Deduplicator for preventing duplicates.
     pub(crate) deduplicator: Deduplicator,
+
+    /// Decides which frames this device carries for other people, when they
+    /// go out, and how fast. Kept separate from [`Self::deduplicator`], whose
+    /// entries track messages addressed to us and are removed again when
+    /// delivery has to be retried.
+    pub(crate) mesh_relay: MeshRelayGovernor,
 
     /// Shared mutable state.
     shared_state: Arc<Mutex<SharedState>>,
@@ -623,6 +630,10 @@ impl OfflineProtocol {
             ack_manager: AckManager::with_config(config.reliability.ack.clone()),
             retry_queue: RetryQueue::with_config(config.reliability.retry.clone()),
             deduplicator: Deduplicator::with_config(config.reliability.dedup.clone()),
+            mesh_relay: MeshRelayGovernor::with_config(
+                config.user_id.clone(),
+                config.mesh_relay.clone(),
+            ),
             shared_state: Arc::new(Mutex::new(SharedState::new())),
             outbox: HashMap::new(),
             pending_reseal: HashMap::new(),
@@ -1757,6 +1768,10 @@ impl OfflineProtocol {
     fn evict_known_peer(&mut self, peer_id: &str) {
         self.key_package_sent_to.remove(peer_id);
         self.known_peers.remove(peer_id);
+        // Release the forwarding allowance held for this link. A peer that
+        // reconnects starts with a full allowance, which is correct: the limit
+        // exists to pace a live link, not to punish one that came back.
+        self.mesh_relay.forget_peer(peer_id);
     }
 
     /// Establishes a secure MLS session with a peer.
@@ -2284,6 +2299,12 @@ impl OfflineProtocol {
                 return Ok(()); // Don't process if not running
             }
         }
+
+        // Transmit forwards whose hold has elapsed. Runs early and before the
+        // retry ladders: other people's traffic is time-sensitive in a way our
+        // own retries are not — a frame held too long is dropped rather than
+        // sent late.
+        self.flush_mesh_relays();
 
         self.process_retry_queue()?;
         self.process_welcome_retry_queue()?;

@@ -31,6 +31,19 @@ pub(crate) fn create_test_config_for_user(user_id: &str) -> ProtocolConfig {
     config
 }
 
+/// A config whose forwarding holds no frames back, so a test can queue a frame
+/// and flush it in the same breath.
+///
+/// The hold exists to let neighbors cover each other in a real neighborhood;
+/// tests that assert *what* was forwarded rather than *when* would otherwise
+/// have to sleep. Tests covering the hold itself set their own timings.
+pub(crate) fn create_relay_test_config_for_user(user_id: &str) -> ProtocolConfig {
+    let mut config = create_test_config_for_user(user_id);
+    config.mesh_relay.jitter_min = std::time::Duration::from_millis(0);
+    config.mesh_relay.jitter_max = std::time::Duration::from_millis(0);
+    config
+}
+
 #[derive(Default, Clone)]
 struct RecordingMlsEmitter {
     events: Arc<Mutex<Vec<MlsLifecycleEvent>>>,
@@ -21396,7 +21409,7 @@ fn test_reset_tofu_for_peer_allows_repinning() {
 
 #[test]
 fn test_relay_forwards_third_party_message() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
 
     let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
     let relay_events_clone = relay_events.clone();
@@ -21408,6 +21421,10 @@ fn test_relay_forwards_third_party_message() {
 
     let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
+    // Someone to carry it onward: without a neighbor there is nowhere for a
+    // forwarded frame to go.
+    mock.add_connected_peer("carol", -55);
+    let transport_handle = mock.clone();
 
     // Create a message from alice to bob (not for us = user123)
     let msg = Message::new(
@@ -21430,6 +21447,18 @@ fn test_relay_forwards_third_party_message() {
     assert!(
         received.is_none(),
         "Third-party message should be relayed, not returned"
+    );
+
+    // Forwarding goes out from the process tick.
+    protocol.process().unwrap();
+
+    let forwarded = transport_handle.peer_sends();
+    assert_eq!(forwarded.len(), 1, "forwarded to exactly one neighbor");
+    assert_eq!(forwarded[0].0, "carol", "handed to the neighbor");
+    assert_eq!(
+        forwarded[0].1.recipient.as_str(),
+        "bob",
+        "still addressed to its recipient"
     );
 
     // Verify MessageRelayed event was emitted with correct fields
@@ -21462,10 +21491,13 @@ fn relay_restamps_binary_for_capable_third_party() {
     // negotiation for the next hop — not left on whatever codec it arrived with.
     // Here we relay a third-party message to bob, who advertised binary support,
     // and assert the frame that leaves is a binary frame.
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
 
     let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
+    // Bob is our neighbor here, so he is both the recipient and the physical
+    // next hop — the link whose negotiation decides the codec.
+    mock.add_connected_peer("bob", -55);
     let transport_handle = mock.clone();
 
     // From alice to bob — a third party, since we are user123 — so it is relayed
@@ -21491,13 +21523,15 @@ fn relay_restamps_binary_for_capable_third_party() {
         protocol.receive_message().is_none(),
         "third-party message should be relayed, not returned"
     );
+    protocol.process().unwrap();
 
     // Isolate the frame relayed to bob (any incidental control sends go to other
     // recipients) and assert it was re-stamped binary.
-    let sent = transport_handle.sent_messages();
+    let sent = transport_handle.peer_sends();
     let to_bob: Vec<_> = sent
         .iter()
-        .filter(|m| m.recipient.as_str() == "bob")
+        .filter(|(peer, _)| peer == "bob")
+        .map(|(_, message)| message)
         .collect();
     assert_eq!(to_bob.len(), 1, "exactly one frame relayed to bob");
     assert_eq!(to_bob[0].content, "relay me");
@@ -21602,7 +21636,7 @@ fn test_relay_disabled_does_not_forward() {
 
 #[test]
 fn test_relay_preserves_original_sender() {
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
 
     let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
     let relay_events_clone = relay_events.clone();
@@ -21614,6 +21648,8 @@ fn test_relay_preserves_original_sender() {
 
     let mock = MockTransport::new(TransportType::BLE);
     mock.start().unwrap();
+    mock.add_connected_peer("carol", -55);
+    let transport_handle = mock.clone();
 
     let msg = Message::new(
         UserId::new("alice").unwrap(),
@@ -21630,6 +21666,14 @@ fn test_relay_preserves_original_sender() {
     protocol.start().unwrap();
 
     protocol.receive_message();
+    protocol.process().unwrap();
+
+    // The frame that leaves is the original, unmodified apart from its hop
+    // accounting: a carrier must not rewrite what it carries.
+    let forwarded = transport_handle.peer_sends();
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].1.sender.as_str(), "alice");
+    assert_eq!(forwarded[0].1.content, "original content");
 
     let events = relay_events.lock().unwrap();
     assert_eq!(events.len(), 1);

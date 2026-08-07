@@ -2993,15 +2993,98 @@ impl OfflineProtocol {
         // Ensure message is persisted to outbox for recovery
         self.ensure_outbox_entry(message);
 
+        // No transport could reach the recipient directly — but a neighbor
+        // might be able to, or know someone who can. Offer the frame to the
+        // mesh before settling for a retry: this is the case the whole
+        // forwarding path exists for, someone out of our range but inside the
+        // crowd's.
+        //
+        // The outbox entry and retry stay in place regardless. Handing a frame
+        // to neighbors is not proof it arrived, and the acknowledgement coming
+        // back is what settles it.
+        let handed_to_mesh = self.offer_to_mesh(message);
+
         // Schedule retry (enqueue is infallible — no attempt limit)
         let next_retry_at = self.retry_queue.enqueue(message.clone(), 0);
 
         warn!(
             message_id = %message.id,
             transport = ?transport,
+            handed_to_mesh,
             "Deferred message due to send error"
         );
         Ok(next_retry_at)
+    }
+
+    /// Hands a locally-originated frame to nearby devices so it can travel
+    /// toward a recipient we cannot reach ourselves.
+    ///
+    /// Returns how many neighbors took a copy. Zero means we are alone, or
+    /// every neighbor refused the link — in both cases the retry ladder and the
+    /// outbox remain the recovery path, exactly as before.
+    ///
+    /// Unlike a forwarded frame, this one is not held back: the delay before
+    /// forwarding exists so neighbors holding the *same* frame do not all
+    /// transmit at once, and nobody else is holding this one yet.
+    pub(super) fn offer_to_mesh(&mut self, message: &Message) -> usize {
+        if !self.config.relay.allow_relay
+            || self.config.relay.relay_priority
+                == offline_protocol_router::relay::RelayPriority::Never
+        {
+            // A device that does not carry other people's traffic still sends
+            // its own — but sending it *through* other devices is the same
+            // favor in reverse, so honor the same opt-out.
+            return 0;
+        }
+
+        let neighbors = self.transport_manager.mesh_neighbors();
+        if neighbors.is_empty() {
+            return 0;
+        }
+
+        // Ours to originate: record it as handled so a copy coming back to us
+        // through the mesh is recognized and not forwarded again.
+        self.mesh_relay.mark_handled(&message.id.as_str());
+
+        // If the recipient is standing right there, hand it to them. Reached
+        // here it means the ordinary send could not use that link, but trying
+        // it costs one call and beats routing around the destination.
+        let recipient = message.recipient.as_str();
+        let targets = if neighbors.iter().any(|n| n.peer_id == recipient) {
+            vec![recipient.to_string()]
+        } else {
+            self.mesh_relay.select_targets(
+                neighbors.iter().map(|n| n.peer_id.as_str()),
+                &[],
+                &message.id.as_str(),
+            )
+        };
+
+        let mut handed_to = 0usize;
+        for target in targets {
+            match self.transport_manager.send_to_neighbor(&target, message) {
+                Ok(transport) => {
+                    handed_to += 1;
+                    debug!(
+                        message_id = %message.id,
+                        recipient = %message.recipient,
+                        next_hop = %target,
+                        transport = ?transport,
+                        "Handed message to a neighbor to carry"
+                    );
+                }
+                Err(err) => {
+                    debug!(
+                        message_id = %message.id,
+                        next_hop = %target,
+                        error = %err,
+                        "Neighbor could not take the message"
+                    );
+                }
+            }
+        }
+
+        handed_to
     }
 
     /// Confirms that a message was successfully sent by the transport layer.
@@ -3681,7 +3764,23 @@ impl OfflineProtocol {
             inbound_transport = ?inbound_transport,
             "Inbound transport unavailable for ACK, falling back to DORS selection"
         );
-        self.transport_manager.send(&ack_message)
+        if self.transport_manager.send(&ack_message).is_ok() {
+            return Ok(());
+        }
+
+        // The sender is not somewhere we can reach directly. A message that
+        // arrived across several devices has an answer that must travel the
+        // same way back — without this, multi-hop delivery would look like
+        // failure to the sender, who would retransmit a message we already
+        // have.
+        if self.offer_to_mesh(&ack_message) > 0 {
+            return Ok(());
+        }
+
+        Err(Error::Other(format!(
+            "no route back to {} for delivery acknowledgement",
+            ack_message.recipient
+        )))
     }
 
     /// Builds and sends a delivery ACK from the group-message drain, which

@@ -171,6 +171,7 @@ impl OfflineProtocol {
     pub(crate) fn cleanup_expired_entries(&mut self) {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
+        self.mesh_relay.maintain(std::time::Instant::now());
         self.prune_stale_known_peers(std::time::Instant::now());
         self.cleanup_expired_pending_messages_if_due();
         self.cleanup_outbox();
