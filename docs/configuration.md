@@ -285,7 +285,7 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 | `requireEncryption` | boolean | true | Fail send unless encryption is applied (fail-closed) |
 | `compactEnvelopeEnabled` | boolean | true | Emit the compact MLS envelope to recipients that advertise support (kill switch — see [Wire Format Kill Switches](#wire-format-kill-switches)) |
 | `richPayloadEnabled` | boolean | true | Seal rich extras (reply context, media metadata, forward attribution) inside the MLS ciphertext for capable recipients (kill switch — see [Wire Format Kill Switches](#wire-format-kill-switches)) |
-| `cryptoRecoveryEnabled` | boolean | true | Heal a 1:1 session that has fallen out of epoch sync instead of dropping the undecryptable message (kill switch — see [Crypto-Failure Recovery](#crypto-failure-recovery)) |
+| `cryptoRecoveryEnabled` | boolean | true | Recover an undecryptable 1:1 message instead of dropping it and ACKing anyway (kill switch — see [Crypto-Failure Recovery](#crypto-failure-recovery)) |
 | `pendingQueue.maxPendingPerPeer` | number | 64 | Max inbound encrypted messages held per peer awaiting session readiness |
 | `pendingQueue.maxPendingGlobal` | number | 4096 | Max inbound encrypted messages held across all peers |
 | `pendingQueue.pendingTtlMs` | number | 1800000 | TTL for held encrypted messages (30 minutes) |
@@ -392,21 +392,29 @@ disabled fleet interoperates with an enabled one automatically.
 switch. It is not a wire format — nothing is negotiated and no peer has to
 support it — so it degrades independently of the three above.
 
-An *established* 1:1 MLS session can fall out of epoch sync with the peer (the
-two sides disagree on the MLS epoch, e.g. after a fork). The resulting decrypt
+An inbound encrypted message on an *established* 1:1 session can fail to
+decrypt — most importantly when the session has fallen out of epoch sync with
+the peer (the two sides disagree on the MLS epoch, e.g. after a fork). Such a
 failure used to be delivery-ACKed and dropped: silent loss behind an ACK that
 claimed delivery. With the switch on:
 
-- an epoch-mismatch failure **withholds the delivery ACK**, so the sender keeps
-  retrying instead of marking the message delivered;
-- a **rate-limited session re-key** (one per peer per 30 s, via a
-  `session_reset` key package) rebuilds the channel;
+- the failure **withholds the delivery ACK**, so the sender keeps retrying
+  instead of marking the message delivered;
 - the sender **re-seals each resend** against the peer's current session, so the
-  message is delivered rather than merely retried.
+  message is delivered rather than merely retried;
+- *if* the failure is a proven epoch mismatch, a **rate-limited session re-key**
+  (one per peer per 30 s, via a `session_reset` key package) additionally
+  rebuilds the channel.
 
 Failures that are *not* an epoch mismatch — AEAD/authentication failures,
-discarded ratchet generations, malformed frames — are deliberately excluded and
-still fail closed.
+discarded ratchet generations, malformed frames — get the un-ACK and the resend
+re-seal, but never the re-key: turning every malformed frame into a session
+teardown would be an unbounded churn vector.
+
+Because these failures no longer settle the message, `message_decryption_failed`
+is **advisory** and fires once per failed *attempt* (bounded by the sender's ACK
+retry budget), not once per message. The terminal signals remain
+`message_failed` and, for media, `file_receive_failed`.
 
 **The re-key trigger is unauthenticated by construction**: an MLS epoch is
 checked during framing validation, before the sender is verified, so any party
@@ -419,7 +427,7 @@ threat model and the residual.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `encryption.cryptoRecoveryEnabled` | boolean | true | Heal an epoch-desynced 1:1 session (un-ACK + rate-limited re-key + resend re-seal) |
+| `encryption.cryptoRecoveryEnabled` | boolean | true | Recover an undecryptable 1:1 message (un-ACK + resend re-seal; rate-limited re-key on epoch desync only) |
 
 Setting it to `false` reverts to the legacy drop-and-ACK behaviour. Media chunks
 have no resend re-seal (chunks are re-encoded, not replayed) and recover through

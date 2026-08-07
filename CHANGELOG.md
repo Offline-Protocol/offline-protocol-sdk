@@ -24,6 +24,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
   **Python wheels are deliberately not attached.** `python-package` builds four of them, but its `matrix.plat_name` is referenced nowhere and the step captioned "Re-tag the wheel with the correct platform" only prints filenames — and with no ext modules setuptools emits `offline_protocol_sdk-<version>-py3-none-any.whl` for every platform. All four therefore share one filename while carrying different native libraries: attaching them would collide on upload, and any that landed would be a wheel `pip` installs happily on the wrong platform. Correcting the tagging is tracked in [#315](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/315).
 
+### Fixed
+
+- **An inbound message that fails to decrypt is no longer acknowledged as delivered.** The receiver dropped it and sent a delivery ACK anyway, so the sender marked it delivered and stopped retrying: silent loss behind an ACK that claimed the opposite. This was already fixed for one failure class — an epoch desync — in the crypto-failure recovery work; every *other* decrypt failure (an AEAD/authentication failure, a discarded past ratchet generation, a malformed frame) kept the old drop-and-ACK, on all three ACK sites: an inbound DM, an inbound media chunk, and a queued message that fails when the pending-decryption queue drains.
+
+  The boundary was drawn one class too narrow. The same release added the sender-side re-seal that makes exactly these failures recoverable — every resend of an encrypted DM is re-sealed against the peer's current session, so it carries a live ratchet generation rather than replaying bytes that already failed. Withholding the ACK is what lets that resend happen. A message that genuinely cannot be delivered now settles as a `MessageFailed` once the sender's retry budget lapses, instead of being reported delivered.
+
+  Media has no sender-side re-seal (chunks are re-encoded, not replayed), so an undecryptable chunk recovers the way an interrupted transfer already does: the withheld ACK drives the media outbox to surface `MediaResendRequired`, and the app re-supplies the bytes.
+
+  **What did not change is the re-key.** Only a proven epoch mismatch tears down and rebuilds the session. These failures withhold the ACK but never re-key — turning every malformed frame into a session teardown would be an unbounded churn vector, which is why the two classifications exist separately. Both remain under the existing `encryption.cryptoRecoveryEnabled` kill switch (default on); setting it to `false` restores the legacy drop-and-ACK for both.
+
+  **App teams: `messageDecryptionFailed` has changed meaning.** It is now advisory rather than terminal, and fires once per failed *attempt* rather than once per message — bounded by the sender's ACK retry budget. If your UI settles a message on it (marks it lost, drops it from a list), switch to `messageFailed`, or `fileReceiveFailed` for media. The telemetry-side `decryption_failed` record was already rate-limited per peer and failure kind and is unaffected.
+
 ## [0.20.0] — 2026-08-07
 
 > **One breaking change, and it is React Native on iOS only.** iOS autolinking

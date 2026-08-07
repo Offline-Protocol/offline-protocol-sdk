@@ -147,14 +147,16 @@ pub struct EncryptionConfig {
     /// is always on; rich extras are never sent cleartext. (default: true)
     pub rich_payload_enabled: bool,
 
-    /// Heal a 1:1 session that has fallen out of epoch sync with the peer
-    /// rather than dropping the undecryptable message: the delivery ACK is
-    /// withheld and a rate-limited session re-key rebuilds the channel.
-    /// Failures that are not an epoch mismatch (AEAD/authentication,
-    /// discarded ratchet generations, malformed frames) are unaffected and
-    /// still fail closed. The re-key trigger is unauthenticated by
-    /// construction — safe because it is bounded, not because it is
-    /// trusted; see Crypto-Failure Recovery. (default: true)
+    /// Recover an undecryptable 1:1 message rather than dropping it and
+    /// ACKing anyway: the delivery ACK is withheld so the sender keeps
+    /// retrying, and each DM resend is re-sealed against the peer's current
+    /// session. Only an epoch mismatch additionally triggers a rate-limited
+    /// session re-key; other failures (AEAD/authentication, discarded
+    /// ratchet generations, malformed frames) withhold the ACK but never
+    /// re-key. message_decryption_failed is advisory and fires per failed
+    /// attempt; message_failed stays terminal. The re-key trigger is
+    /// unauthenticated by construction — safe because it is bounded, not
+    /// because it is trusted; see Crypto-Failure Recovery. (default: true)
     pub crypto_recovery_enabled: bool,
 }
 ```
