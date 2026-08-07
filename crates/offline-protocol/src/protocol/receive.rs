@@ -589,22 +589,24 @@ impl OfflineProtocol {
             let deliver_direct = targets.first() == Some(&recipient);
 
             if targets.is_empty() {
+                // Nowhere to hand it right now: we hold no link, or the only
+                // ones we hold are the peers this frame must not go back to.
+                // Falls through to the hand-back below rather than being
+                // dropped — a neighbor may well appear within the few seconds
+                // the frame is still worth carrying.
                 debug!(
                     message_id = %message.id,
                     "No onward neighbor for this frame"
                 );
-                continue;
             }
 
             let mut delivered_to = 0usize;
-            let mut out_of_budget = false;
             for target in &targets {
                 // Each link this frame crosses is one transmission against the
                 // device's ceiling. Running out mid-fan-out stops the fan-out
                 // rather than the frame: the neighbors already reached carry it
                 // on, and the sender's retry covers the rest.
                 if !self.mesh_relay.take_send_token() {
-                    out_of_budget = true;
                     debug!(
                         message_id = %message.id,
                         "At the forwarding limit; stopping this fan-out here"
@@ -649,29 +651,32 @@ impl OfflineProtocol {
                 }
             }
 
-            // Nothing reached a neighbor, and the reason was budget rather than
-            // the links: the frames released alongside this one spent the
-            // allowance between them. Hand it back instead of dropping it — its
-            // id is already recorded as handled here, so a drop would lose this
-            // copy *and* refuse both the copies arriving behind it and the
-            // sender's retransmissions, for the whole retention window. It
-            // keeps its due time, so a frame that stays starved is eventually
-            // abandoned rather than retried forever.
-            if delivered_to == 0 && out_of_budget {
+            // Nothing reached a neighbor. Hand it back instead of dropping it:
+            // its id is already recorded as handled here, so a drop would lose
+            // this copy *and* refuse both the copies arriving behind it and the
+            // sender's retransmissions, for the whole retention window.
+            //
+            // Why it got nowhere does not change that. The budget ran out (the
+            // frames released alongside this one spent the allowance between
+            // them), every link chosen for it went away between being picked
+            // and being written to, or there was no usable link to pick. In all
+            // three the frame has travelled nowhere and this queue is the only
+            // thing that still remembers it. It keeps its due time, so one that
+            // stays stuck is abandoned by the overdue cut-off rather than
+            // retried forever.
+            if delivered_to == 0 {
                 self.mesh_relay.requeue(relay);
                 continue;
             }
 
-            if delivered_to > 0 {
-                self.mesh_relay.record_forwarded();
-                self.emit_event(Event::message_relayed(
-                    message.id.as_str(),
-                    message.sender.as_str().to_string(),
-                    recipient,
-                    hop_count,
-                    remaining_ttl,
-                ));
-            }
+            self.mesh_relay.record_forwarded();
+            self.emit_event(Event::message_relayed(
+                message.id.as_str(),
+                message.sender.as_str().to_string(),
+                recipient,
+                hop_count,
+                remaining_ttl,
+            ));
         }
     }
 

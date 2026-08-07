@@ -198,9 +198,10 @@ pub struct MeshRelayCounters {
     /// Counted once per frame carried, not once per link, and never for this
     /// device's own traffic.
     pub forwarded: u64,
-    /// Frames put back on the queue because the device ran out of budget
-    /// before they reached any neighbor.
-    pub requeued_for_budget: u64,
+    /// Frames put back on the queue because they reached no neighbor at all —
+    /// the budget ran out, the links chosen for them went away, or there was
+    /// no usable link to choose.
+    pub requeued: u64,
     /// Queued forwards displaced to make room for a higher-priority frame.
     pub queue_evicted: u64,
     /// Arrivals suppressed as already handled.
@@ -552,11 +553,17 @@ impl MeshRelayGovernor {
     /// Puts a released forward back on the queue, keeping its original due
     /// time.
     ///
-    /// For the frame that reached no neighbor because the budget ran out
-    /// between [`Self::take_due`] releasing it and the radio being asked. It
-    /// keeps its due time deliberately: the overdue cut-off in `take_due` is
-    /// measured from that, so a frame that stays starved is eventually
-    /// abandoned instead of being retried forever.
+    /// For the frame that reached no neighbor at all between [`Self::take_due`]
+    /// releasing it and the radio being asked — because the budget ran out,
+    /// because every link picked for it had gone away, or because there was no
+    /// usable link to pick. All three end the same way: the frame has travelled
+    /// nowhere, its id is already recorded as handled, and dropping it would
+    /// refuse the copies and retransmissions behind it for the whole retention
+    /// window.
+    ///
+    /// It keeps its due time deliberately: the overdue cut-off in `take_due` is
+    /// measured from that, so a frame that stays stuck is eventually abandoned
+    /// instead of being retried forever.
     ///
     /// Refused only if the queue has filled meanwhile, which is the same
     /// bound every other queued frame is subject to.
@@ -565,7 +572,7 @@ impl MeshRelayGovernor {
             self.counters.queue_full = self.counters.queue_full.saturating_add(1);
             return;
         }
-        self.counters.requeued_for_budget = self.counters.requeued_for_budget.saturating_add(1);
+        self.counters.requeued = self.counters.requeued.saturating_add(1);
         self.pending.push(relay);
     }
 
@@ -1084,7 +1091,7 @@ mod tests {
 
         assert!(requeued > 0, "the budget must have run out mid-batch");
         assert_eq!(gov.pending_len(), requeued, "every starved frame is kept");
-        assert_eq!(gov.counters().requeued_for_budget as usize, requeued);
+        assert_eq!(gov.counters().requeued as usize, requeued);
     }
 
     #[test]

@@ -21486,6 +21486,119 @@ fn test_relay_forwards_third_party_message() {
 }
 
 #[test]
+fn a_forward_whose_links_all_failed_is_kept_rather_than_dropped() {
+    // A link can go away between being chosen for a frame and being written to.
+    // The frame has then travelled nowhere — but its id was recorded as handled
+    // when it was admitted, so dropping it here would lose this copy *and*
+    // refuse every copy and retransmission behind it for the whole retention
+    // window. It has to go back on the queue, the same way a frame starved of
+    // budget does.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    // Carol stays listed as a live link throughout: the failure is the write,
+    // not the enumeration, which is exactly the race being covered.
+    mock.add_connected_peer("carol", -55);
+    let transport_handle = mock.clone();
+
+    let msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "carry me",
+    );
+    mock.queue_message(msg);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    assert!(
+        protocol.receive_message().is_none(),
+        "a third-party message is forwarded, not returned"
+    );
+
+    // The one write this flush attempts fails.
+    transport_handle.set_fail_next_sends(1);
+    protocol.process().unwrap();
+
+    assert!(
+        transport_handle.peer_sends().is_empty(),
+        "nothing can have reached a neighbor"
+    );
+    assert_eq!(
+        protocol.mesh_relay_stats().awaiting_transmission,
+        1,
+        "the frame must still be held, not dropped with its id suppressed"
+    );
+    assert_eq!(
+        protocol.mesh_relay_stats().forwarded,
+        0,
+        "a frame that reached nobody was not carried"
+    );
+
+    // The link works on the next tick, and the frame we kept goes out.
+    protocol.process().unwrap();
+
+    let forwarded = transport_handle.peer_sends();
+    assert_eq!(forwarded.len(), 1, "the kept frame is forwarded");
+    assert_eq!(forwarded[0].0, "carol");
+    assert_eq!(forwarded[0].1.recipient.as_str(), "bob");
+    assert_eq!(protocol.mesh_relay_stats().awaiting_transmission, 0);
+    assert_eq!(protocol.mesh_relay_stats().forwarded, 1);
+}
+
+#[test]
+fn a_forward_with_no_usable_neighbor_is_kept_rather_than_dropped() {
+    // Same hazard, reached the other way: the only link this device holds is
+    // the one the frame arrived on, which it must not go back to. There is
+    // nowhere to send it *this* tick — which is not a reason to blackhole the
+    // id for the next ten minutes.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    mock.add_connected_peer("dave", -55);
+    let transport_handle = mock.clone();
+
+    let msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "nowhere to go yet",
+    );
+    // Dave handed it to us, so dave is excluded as a target and no other link
+    // exists.
+    mock.queue_message_from(msg, "dave".to_string());
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    assert!(protocol.receive_message().is_none());
+
+    protocol.process().unwrap();
+    assert!(transport_handle.peer_sends().is_empty());
+    assert_eq!(
+        protocol.mesh_relay_stats().awaiting_transmission,
+        1,
+        "with nowhere to send it, the frame is held rather than dropped"
+    );
+
+    // A second neighbor appears, and the frame we kept can travel.
+    transport_handle.add_connected_peer("erin", -60);
+    protocol.process().unwrap();
+
+    let forwarded = transport_handle.peer_sends();
+    assert_eq!(forwarded.len(), 1, "the frame goes out once a link exists");
+    assert_eq!(forwarded[0].0, "erin");
+    assert_eq!(protocol.mesh_relay_stats().awaiting_transmission, 0);
+}
+
+#[test]
 fn relay_restamps_binary_for_capable_third_party() {
     // A relayed message must be (re-)stamped from the relay's own per-peer
     // negotiation for the next hop — not left on whatever codec it arrived with.
