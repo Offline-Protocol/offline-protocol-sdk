@@ -481,6 +481,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Provenance for both distribution channels. Until now SHA256SUMS.txt was
+      # the only integrity signal, and it sits on the same release page as the
+      # binaries it covers — whoever can replace an asset can replace the
+      # manifest in the same operation. Attestation and npm provenance are
+      # signed by the workflow identity, so neither is forgeable from the
+      # release page.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -525,6 +533,15 @@ jobs:
           path: desktop-libs
           merge-multiple: true
 
+      # Also not consumed by the npm package. The desktop archives carry this
+      # module, because the cdylib alone is not usable: it is what calls into
+      # the library, and until now it shipped only inside the Python wheels.
+      - name: Download Python bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: python-bindings
+          path: bindings/python/offline_protocol_sdk
+
       - name: Verify artifacts
         run: |
           echo "Checking iOS artifacts..."
@@ -558,6 +575,9 @@ jobs:
           test -f desktop-libs/linux-x86_64/liboffline_protocol_uniffi.so
           test -f desktop-libs/linux-aarch64/liboffline_protocol_uniffi.so
           test -f desktop-libs/windows-x86_64/offline_protocol_uniffi.dll
+
+          echo "Checking Python bindings..."
+          test -s bindings/python/offline_protocol_sdk/offline_protocol.py
 
           echo "All artifacts verified."
 
@@ -607,63 +627,25 @@ jobs:
 
       # Runs on dry runs too, so a packaging break surfaces before a tag is cut
       # rather than during one. Only the upload below is gated.
+      #
+      # The packaging itself lives in a script so it can be shellchecked and
+      # exercised on every PR (ci.yml's "Release Packaging" job drives it
+      # against a fixture tree, including the failure paths); this workflow only
+      # ever runs on a `v*` tag, so inline logic would first execute during a
+      # real release.
       - name: Package binary release assets
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
-        run: |
-          set -euo pipefail
-          ASSETS="$GITHUB_WORKSPACE/release-assets"
-          mkdir -p "$ASSETS"
+        run: bash scripts/package-release-assets.sh
 
-          # Every archive carries the licences and the export notice with it. A
-          # binary handed out on its own is an AGPL distribution, and 15 CFR
-          # §742.15(b) attaches to the crypto, not to the npm package that
-          # usually delivers it — so an asset downloaded straight off the
-          # release page must not arrive without either.
-          LEGAL=(LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md)
-
-          # iOS. The XCFramework alone does not build: the generated FFI header,
-          # modulemap and Swift bindings under Generated/ are what an importer
-          # actually needs, and npm is the only place they ship today.
-          stage="$(mktemp -d)"
-          cp -R bindings/react-native/ios/libs/offline_protocol_uniffi.xcframework "$stage/"
-          cp -R bindings/react-native/ios/Generated "$stage/"
-          cp "${LEGAL[@]}" "$stage/"
-          (cd "$stage" && zip -qry "$ASSETS/offline-protocol-$VERSION-ios-xcframework.zip" .)
-          rm -rf "$stage"
-
-          # Android: all four ABIs plus the Kotlin bindings that call them.
-          stage="$(mktemp -d)"
-          mkdir -p "$stage/jniLibs"
-          cp -R bindings/react-native/android/src/main/jniLibs/. "$stage/jniLibs/"
-          cp -R bindings/react-native/android/src/main/java/uniffi "$stage/"
-          cp "${LEGAL[@]}" "$stage/"
-          (cd "$stage" && zip -qry "$ASSETS/offline-protocol-$VERSION-android.zip" .)
-          rm -rf "$stage"
-
-          # Desktop: zip for Windows, tar.gz elsewhere, matching what each
-          # platform's tooling expects to be handed.
-          for spec in macos-arm64:tar linux-x86_64:tar linux-aarch64:tar windows-x86_64:zip; do
-            plat="${spec%%:*}"
-            fmt="${spec##*:}"
-            stage="$(mktemp -d)"
-            cp desktop-libs/"$plat"/* "$stage/"
-            cp "${LEGAL[@]}" "$stage/"
-            if [ "$fmt" = tar ]; then
-              tar -czf "$ASSETS/offline-protocol-$VERSION-$plat.tar.gz" -C "$stage" .
-            else
-              (cd "$stage" && zip -qry "$ASSETS/offline-protocol-$VERSION-$plat.zip" .)
-            fi
-            rm -rf "$stage"
-          done
-
-          # Written outside the directory and moved in, so the manifest can never
-          # race its own glob.
-          (cd "$ASSETS" && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS.txt")
-          mv "$RUNNER_TEMP/SHA256SUMS.txt" "$ASSETS/"
-
-          echo "Release assets:"
-          ls -lh "$ASSETS"
+      # Signed by this workflow's identity, so it does not share the weakness of
+      # SHA256SUMS.txt sitting next to the assets it covers. Consumers verify
+      # with `gh attestation verify <asset> --repo ${{ github.repository }}`.
+      - name: Attest release asset provenance
+        if: inputs.dry_run != true
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: 'release-assets/*'
 
       - name: Create GitHub Release
         if: inputs.dry_run != true
@@ -679,9 +661,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # --provenance is the npm-side counterpart to the attestation above: it
+      # publishes a signed link from the tarball back to this workflow run, so
+      # the registry copy is verifiable too rather than trusted on the strength
+      # of the publishing token alone.
       - name: Publish to npm
         if: inputs.dry_run != true
         working-directory: bindings/react-native
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

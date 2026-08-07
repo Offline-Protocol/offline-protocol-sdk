@@ -225,6 +225,30 @@ jobs:
       - name: Run pytest
         run: pytest bindings/python/tests/ -v
 
+  # release.yml runs only on a `v*` tag, so every line of it used to reach
+  # production untested — the packaging step's first real execution would be
+  # during a release, with a half-built asset set as the failure mode. The
+  # logic lives in scripts/package-release-assets.sh precisely so it can be
+  # driven here against a fixture tree mirroring what the download steps
+  # produce, failure paths included.
+  release-packaging:
+    name: Release Packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # --severity=warning, not the default: this gates on real defects
+      # (unquoted expansions, masked exit codes) without failing the release
+      # pipeline over style preferences on a shellcheck version bump.
+      - name: Shellcheck the packaging scripts
+        run: |
+          shellcheck --severity=warning \
+            scripts/package-release-assets.sh \
+            scripts/tests/test-package-release-assets.sh
+
+      - name: Package release assets against a fixture tree
+        run: bash scripts/tests/test-package-release-assets.sh
+
   react-native-typecheck:
     name: React Native Typecheck
     runs-on: ubuntu-latest
