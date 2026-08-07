@@ -149,6 +149,60 @@ impl TransportMetrics {
     }
 }
 
+/// A live link to a directly connected peer.
+///
+/// This is the per-peer view of a transport's connectivity, as opposed to
+/// [`TransportMetrics`], which aggregates the transport as a whole. It is what
+/// lets a caller address a specific neighbor rather than a final recipient —
+/// see [`Transport::connected_peers`](crate::Transport::connected_peers) and
+/// [`Transport::send_to_peer`](crate::Transport::send_to_peer).
+///
+/// `peer_id` is the **user-level identifier** of the neighbor (the same string
+/// a message would carry as `recipient`), never a raw transport address: it is
+/// the key the send path and the per-peer MTU table are both keyed by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerLink {
+    /// User-level identifier of the directly connected peer.
+    pub peer_id: String,
+    /// Last observed signal strength for this link, when the transport
+    /// measures one. Wi-Fi Direct and non-radio carriers report `None`.
+    pub rssi: Option<i16>,
+}
+
+impl PeerLink {
+    /// Creates a link record for a peer whose signal strength is unknown.
+    pub fn new(peer_id: impl Into<String>) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            rssi: None,
+        }
+    }
+
+    /// Creates a link record carrying a measured signal strength.
+    pub fn with_rssi(peer_id: impl Into<String>, rssi: i16) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+            rssi: Some(rssi),
+        }
+    }
+
+    /// Link quality derived from RSSI, or a neutral mid-scale value when the
+    /// transport reports no signal strength. Keeps callers that score links
+    /// from having to special-case carriers without a radio metric.
+    pub fn link_quality(&self) -> LinkQuality {
+        match self.rssi {
+            Some(rssi) => LinkQuality::from_rssi(rssi),
+            None => LinkQuality::new(DEFAULT_LINK_QUALITY_WITHOUT_RSSI),
+        }
+    }
+}
+
+/// Link quality assumed for a live link whose transport reports no RSSI.
+///
+/// Mid-scale rather than optimistic: an unmeasured link should not outrank a
+/// measured good one, nor be discarded like a measured bad one.
+pub const DEFAULT_LINK_QUALITY_WITHOUT_RSSI: u8 = 50;
+
 /// Link quality score (0-100, where 100 is perfect).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LinkQuality(u8);

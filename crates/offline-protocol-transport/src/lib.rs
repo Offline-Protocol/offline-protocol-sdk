@@ -63,7 +63,10 @@ pub use nostr::{NostrConfig, NostrTransport, NostrTransportBuilder, SignedNostrE
 pub use nostr_crypto::{routing_tag_for_device_id, NostrEvent, NostrKeypair};
 pub use reticulum::{ReticulumConfig, ReticulumTransport};
 pub use traits::{Transport, TransportStatus};
-pub use types::{LinkQuality, SharedCallback, TransportMetrics, TransportType};
+pub use types::{
+    LinkQuality, PeerLink, SharedCallback, TransportMetrics, TransportType,
+    DEFAULT_LINK_QUALITY_WITHOUT_RSSI,
+};
 pub use wifi_direct::{WifiDirectConfig, WifiDirectPeer, WifiDirectTransport};
 
 // MockTransport is only available to this crate's tests or explicit test consumers.
