@@ -187,8 +187,22 @@ pub struct PendingRelay {
 pub struct MeshRelayCounters {
     /// Frames queued for forwarding.
     pub queued: u64,
-    /// Frames transmitted to a neighbor.
+    /// Times a frame was put on a link, counting each link separately.
+    ///
+    /// This is the airtime meter — what the send budget actually bounds — so it
+    /// counts this device handing over its *own* messages too. For "how much
+    /// have I carried for other people", see [`Self::forwarded`].
+    pub transmissions: u64,
+    /// Third-party frames that crossed at least one link on someone's behalf.
+    ///
+    /// Counted once per frame carried, not once per link, and never for this
+    /// device's own traffic.
     pub forwarded: u64,
+    /// Frames put back on the queue because the device ran out of budget
+    /// before they reached any neighbor.
+    pub requeued_for_budget: u64,
+    /// Queued forwards displaced to make room for a higher-priority frame.
+    pub queue_evicted: u64,
     /// Arrivals suppressed as already handled.
     pub duplicates_suppressed: u64,
     /// Pending forwards cancelled because a neighbor covered them.
@@ -212,8 +226,15 @@ pub struct MeshRelayCounters {
 /// A snapshot, safe to poll: every field counts since start-up.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MeshRelayStats {
-    /// Frames transmitted onward to a neighbor.
+    /// Frames carried onward on someone else's behalf, counted once each.
     pub forwarded: u64,
+    /// Times this device put a frame on a link, counting each link separately
+    /// and including hand-offs of its own messages.
+    ///
+    /// This is what the per-second forwarding budget bounds, so it is the
+    /// number to compare against that ceiling — [`Self::forwarded`] is the
+    /// contribution figure to show a user.
+    pub transmissions: u64,
     /// Frames accepted for forwarding.
     pub queued: u64,
     /// Frames waiting to go out right now.
@@ -226,6 +247,10 @@ pub struct MeshRelayStats {
     /// Frames refused because the neighbor sending them was over its share.
     pub peer_rate_limited: u64,
     /// Transmissions held back because this device was at its forwarding rate.
+    ///
+    /// A frame counted here is delayed, not dropped: it goes back on the queue
+    /// and is tried again on the next tick, until it is either sent or has
+    /// waited so long past its turn that carrying it no longer helps.
     pub rate_deferred: u64,
     /// Frames that had travelled as far as they were allowed to.
     pub hop_limit_reached: u64,
@@ -395,6 +420,14 @@ impl MeshRelayGovernor {
         }
 
         // Per-neighbor admission, before the frame can occupy queue space.
+        //
+        // A frame whose arrival link the carrier did not identify skips this
+        // step: there is no link to charge it to, and inventing a shared bucket
+        // for "unknown" would let one such carrier throttle every other. Those
+        // frames are still bounded by the queue capacity and the per-second
+        // send budget below, which is what makes skipping it acceptable — the
+        // per-neighbor limit shapes *fairness between links*, and a frame with
+        // no known link has no share to exceed.
         if let Some(peer) = arrival_peer {
             if !self.take_peer_token(peer, now) {
                 self.counters.peer_rate_limited = self.counters.peer_rate_limited.saturating_add(1);
@@ -410,7 +443,7 @@ impl MeshRelayGovernor {
             return RelayAdmission::Rejected(RelayRejection::HopLimitReached);
         };
 
-        if self.pending.len() >= self.config.queue_capacity && !self.evict_for(&forwarded) {
+        if self.pending.len() >= self.config.queue_capacity && !self.evict_for(&forwarded, now) {
             self.counters.queue_full = self.counters.queue_full.saturating_add(1);
             return RelayAdmission::Rejected(RelayRejection::QueueFull);
         }
@@ -446,6 +479,14 @@ impl MeshRelayGovernor {
     /// undercount by the fan-out — one release from this queue can put the
     /// frame on several links — and the whole point of the ceiling is that it
     /// bounds what reaches the radio.
+    ///
+    /// The check is therefore not a reservation, and cannot be: a released
+    /// frame may still find the budget gone by the time it reaches the radio,
+    /// because the frames released alongside it spend from the same bucket. A
+    /// caller that gets nothing onto a link for that reason must hand the frame
+    /// back with [`Self::requeue`] rather than drop it — the id is already
+    /// recorded as handled here, so dropping it would lose this copy *and*
+    /// refuse the copies and retransmissions that follow.
     pub fn take_due(&mut self, now: Instant) -> Vec<PendingRelay> {
         self.seen.expire(now);
 
@@ -490,12 +531,42 @@ impl MeshRelayGovernor {
     /// transmit.
     pub fn take_send_token(&mut self) -> bool {
         if self.send_budget.try_take(Instant::now()) {
-            self.counters.forwarded = self.counters.forwarded.saturating_add(1);
+            self.counters.transmissions = self.counters.transmissions.saturating_add(1);
             true
         } else {
             self.counters.rate_deferred = self.counters.rate_deferred.saturating_add(1);
             false
         }
+    }
+
+    /// Records that a third-party frame was carried onward.
+    ///
+    /// Separate from [`Self::take_send_token`], which meters airtime for every
+    /// frame this device transmits including its own. Counted once per frame
+    /// carried rather than once per link, so it reads as "messages I moved for
+    /// other people".
+    pub fn record_forwarded(&mut self) {
+        self.counters.forwarded = self.counters.forwarded.saturating_add(1);
+    }
+
+    /// Puts a released forward back on the queue, keeping its original due
+    /// time.
+    ///
+    /// For the frame that reached no neighbor because the budget ran out
+    /// between [`Self::take_due`] releasing it and the radio being asked. It
+    /// keeps its due time deliberately: the overdue cut-off in `take_due` is
+    /// measured from that, so a frame that stays starved is eventually
+    /// abandoned instead of being retried forever.
+    ///
+    /// Refused only if the queue has filled meanwhile, which is the same
+    /// bound every other queued frame is subject to.
+    pub fn requeue(&mut self, relay: PendingRelay) {
+        if self.pending.len() >= self.config.queue_capacity {
+            self.counters.queue_full = self.counters.queue_full.saturating_add(1);
+            return;
+        }
+        self.counters.requeued_for_budget = self.counters.requeued_for_budget.saturating_add(1);
+        self.pending.push(relay);
     }
 
     /// Records an id as handled without forwarding it.
@@ -600,19 +671,36 @@ impl MeshRelayGovernor {
 
     /// Makes room for a higher-priority forward by displacing the
     /// lowest-priority one that is not yet due.
-    fn evict_for(&mut self, candidate: &Message) -> bool {
+    ///
+    /// Frames already past their due time are left alone: they are on their way
+    /// to the radio this tick, so taking one costs a transmission that was
+    /// about to happen while the frame replacing it still has to wait out its
+    /// hold. Only when every lower-priority frame is already due does it
+    /// displace one of those instead of refusing outright.
+    fn evict_for(&mut self, candidate: &Message, now: Instant) -> bool {
         let candidate_rank = priority_rank(candidate.priority);
+        let lower_priority = |p: &PendingRelay| priority_rank(p.message.priority) < candidate_rank;
+
         let victim = self
             .pending
             .iter()
             .enumerate()
-            .filter(|(_, p)| priority_rank(p.message.priority) < candidate_rank)
-            .min_by_key(|(_, p)| priority_rank(p.message.priority));
+            .filter(|(_, p)| lower_priority(p) && p.due_at > now)
+            .min_by_key(|(_, p)| priority_rank(p.message.priority))
+            .map(|(index, _)| index)
+            .or_else(|| {
+                self.pending
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| lower_priority(p))
+                    .min_by_key(|(_, p)| priority_rank(p.message.priority))
+                    .map(|(index, _)| index)
+            });
 
         match victim {
-            Some((index, _)) => {
+            Some(index) => {
                 self.pending.remove(index);
-                self.counters.queue_full = self.counters.queue_full.saturating_add(1);
+                self.counters.queue_evicted = self.counters.queue_evicted.saturating_add(1);
                 true
             }
             None => false,
@@ -625,7 +713,27 @@ impl MeshRelayGovernor {
             // because entries are only created for peers we hold a link to,
             // but churn over a long session can still accumulate.
             if self.peer_budgets.len() >= MAX_RELAY_RATE_PEERS {
-                self.peer_budgets.clear();
+                // Make room by forgetting the link that is spending least,
+                // rather than by clearing the table. A wholesale reset hands
+                // every neighbor a fresh burst — including the noisy one the
+                // per-link limit exists to hold back, which is the entry it can
+                // least afford to lose. The bucket that has recovered the most
+                // tokens is the one whose absence changes the least: at full
+                // capacity it is indistinguishable from a link never tracked.
+                //
+                // Costs a scan of the table, but only once the ceiling is
+                // reached and only when a genuinely new link appears.
+                for bucket in self.peer_budgets.values_mut() {
+                    bucket.refill(now);
+                }
+                let most_recovered = self
+                    .peer_budgets
+                    .iter()
+                    .max_by(|(_, a), (_, b)| a.tokens.total_cmp(&b.tokens))
+                    .map(|(peer, _)| peer.clone());
+                if let Some(peer) = most_recovered {
+                    self.peer_budgets.remove(&peer);
+                }
             }
             self.peer_budgets.insert(
                 peer_id.to_string(),
@@ -657,6 +765,16 @@ impl MeshRelayGovernor {
         Duration::from_millis(min_ms + (hash % span))
     }
 
+    /// Stable hash used to spread delays and fan-out choices.
+    ///
+    /// `DefaultHasher` is unseeded, so this is predictable to anyone who knows
+    /// the inputs — both of which (a message id and a user id) are visible on
+    /// the wire. That is accepted: knowing it buys only the ability to guess
+    /// which neighbor fires first or which three links a frame takes, and every
+    /// path it could steer a frame down is already bounded by the fan-out cap
+    /// and the send budget. It must stay *stable*, which a randomly-seeded
+    /// hasher would not be — a second copy of a frame has to pick the same
+    /// neighbors, or a retransmission widens its own footprint.
     fn hash_of(parts: &[&str]) -> u64 {
         let mut hasher = DefaultHasher::new();
         for part in parts {
@@ -760,7 +878,7 @@ mod tests {
         assert!(gov
             .take_due(Instant::now() + Duration::from_secs(1))
             .is_empty());
-        assert_eq!(gov.counters().forwarded, 0);
+        assert_eq!(gov.counters().transmissions, 0);
     }
 
     #[test]
@@ -892,8 +1010,155 @@ mod tests {
             granted <= DEFAULT_RELAY_BURST as usize + 1,
             "granted {granted} transmissions against a burst of {DEFAULT_RELAY_BURST}"
         );
-        assert_eq!(gov.counters().forwarded as usize, granted);
+        assert_eq!(gov.counters().transmissions as usize, granted);
         assert!(gov.counters().rate_deferred > 0);
+    }
+
+    #[test]
+    fn a_frame_that_reached_no_neighbor_for_budget_goes_back_on_the_queue() {
+        // `take_due` checks the budget without reserving it, so a batch of due
+        // frames can be released against a single token: the first spends it
+        // and the rest reach the radio with nothing left. Those frames have
+        // been forwarded nowhere, and their ids are already recorded as
+        // handled — dropping one would lose this copy and refuse both the
+        // copies behind it and the sender's retransmissions for the whole
+        // retention window. It has to go back on the queue.
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                peer_rate_per_sec: 10_000.0,
+                peer_burst: 10_000.0,
+                ..immediate_config()
+            },
+        );
+
+        for _ in 0..40 {
+            gov.admit(&frame(), Some("b"), 3, false);
+        }
+        let due = gov.take_due(Instant::now());
+        assert!(
+            due.len() > DEFAULT_RELAY_BURST as usize,
+            "the batch must outrun the budget for this to be the case under test"
+        );
+
+        // Drain the budget the way a fan-out does, then hand back everything
+        // that got nowhere.
+        let mut requeued = 0;
+        for relay in due {
+            if gov.take_send_token() {
+                continue;
+            }
+            gov.requeue(relay);
+            requeued += 1;
+        }
+
+        assert!(requeued > 0, "the budget must have run out mid-batch");
+        assert_eq!(gov.pending_len(), requeued, "every starved frame is kept");
+        assert_eq!(gov.counters().requeued_for_budget as usize, requeued);
+    }
+
+    #[test]
+    fn a_requeued_frame_is_still_abandoned_once_it_is_far_past_its_turn() {
+        // Re-queueing must not become an unbounded retry: a frame kept for
+        // budget keeps its original due time, so the overdue cut-off still
+        // reaches it.
+        let mut gov = governor();
+        gov.admit(&frame(), Some("b"), 3, false);
+        let mut due = gov.take_due(Instant::now());
+        assert_eq!(due.len(), 1);
+
+        gov.requeue(due.remove(0));
+        assert_eq!(gov.pending_len(), 1);
+
+        let later = gov.take_due(Instant::now() + RELAY_QUEUE_MAX_OVERDUE + Duration::from_secs(1));
+        assert!(later.is_empty());
+        assert_eq!(gov.counters().abandoned_overdue, 1);
+        assert_eq!(gov.pending_len(), 0);
+    }
+
+    #[test]
+    fn eviction_prefers_a_frame_that_has_not_yet_gone_out() {
+        // A due frame is on its way to the radio this tick; taking it costs a
+        // transmission that was about to happen, while the frame replacing it
+        // still has to wait out its hold.
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                queue_capacity: 2,
+                jitter_min: Duration::from_millis(0),
+                jitter_max: Duration::from_millis(0),
+                peer_rate_per_sec: 10_000.0,
+                peer_burst: 10_000.0,
+                ..Default::default()
+            },
+        );
+
+        // One low-priority frame due immediately.
+        let due_now = frame_with(8, MessagePriority::Low);
+        gov.admit(&due_now, Some("b"), 3, false);
+
+        // A second low-priority frame that is not due for a while.
+        gov.config.jitter_min = Duration::from_millis(500);
+        gov.config.jitter_max = Duration::from_millis(500);
+        let waiting = frame_with(8, MessagePriority::Low);
+        gov.admit(&waiting, Some("b"), 3, false);
+
+        // An urgent frame needs the room.
+        gov.admit(
+            &frame_with(8, MessagePriority::Critical),
+            Some("b"),
+            3,
+            false,
+        );
+
+        assert_eq!(gov.counters().queue_evicted, 1);
+        assert_eq!(
+            gov.counters().queue_full,
+            0,
+            "making room is not the same as refusing"
+        );
+        assert!(
+            gov.pending
+                .iter()
+                .any(|p| p.message.id.as_str() == due_now.id.as_str()),
+            "the frame already due must survive"
+        );
+        assert!(
+            !gov.pending
+                .iter()
+                .any(|p| p.message.id.as_str() == waiting.id.as_str()),
+            "the frame still waiting is the one displaced"
+        );
+    }
+
+    #[test]
+    fn a_full_peer_table_keeps_the_links_that_are_spending() {
+        // Clearing the table wholesale hands every neighbor a fresh burst,
+        // including the noisy one the per-link limit exists to hold back.
+        let mut gov = MeshRelayGovernor::with_config("relay-node", immediate_config());
+
+        // One neighbor spends most of its allowance.
+        for _ in 0..(DEFAULT_RELAY_PEER_BURST as usize - 1) {
+            gov.admit(&frame(), Some("noisy"), 3, false);
+        }
+
+        // Fill the table with links that arrive once and go quiet.
+        for i in 0..MAX_RELAY_RATE_PEERS {
+            gov.admit(&frame(), Some(&format!("idle-{i}")), 3, false);
+        }
+
+        assert!(gov.peer_budgets.len() <= MAX_RELAY_RATE_PEERS);
+        // Still tracked at all: the entry the limit exists to hold back is the
+        // one it can least afford to forget, and it never sends again here, so
+        // an eviction would leave it absent rather than rebuilt.
+        let noisy = gov
+            .peer_budgets
+            .get("noisy")
+            .expect("a link mid-spend must not be forgotten to make room for idle ones");
+        assert!(
+            noisy.tokens < noisy.capacity,
+            "the noisy link kept its spent allowance rather than being handed a fresh burst"
+        );
     }
 
     #[test]

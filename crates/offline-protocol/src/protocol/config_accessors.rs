@@ -172,6 +172,7 @@ impl OfflineProtocol {
         let counters = self.mesh_relay.counters();
         MeshRelayStats {
             forwarded: counters.forwarded,
+            transmissions: counters.transmissions,
             queued: counters.queued,
             awaiting_transmission: self.mesh_relay.pending_len(),
             duplicates_suppressed: counters.duplicates_suppressed,

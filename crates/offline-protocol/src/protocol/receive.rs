@@ -534,9 +534,14 @@ impl OfflineProtocol {
 
         let neighbors = self.transport_manager.mesh_neighbors();
 
+        // `relay` is borrowed rather than destructured throughout: a frame that
+        // reaches no neighbor has to be handed back whole, and cloning the
+        // message to keep that option open would copy the payload — up to a
+        // whole media chunk — on every flush.
         for relay in due {
-            let message = relay.message;
+            let message = &relay.message;
             let recipient = message.recipient.as_str().to_string();
+            let message_id = message.id.as_str();
             let hop_count = message.hop_count.value();
             let remaining_ttl = message.ttl.value();
 
@@ -549,7 +554,7 @@ impl OfflineProtocol {
                     .iter()
                     .map(|n| (n.peer_id.as_str(), n.link_quality())),
                 &exclude,
-                &message.id.as_str(),
+                &message_id,
             );
 
             // If the destination is one of our own neighbors, hand it over
@@ -575,12 +580,14 @@ impl OfflineProtocol {
             }
 
             let mut delivered_to = 0usize;
+            let mut out_of_budget = false;
             for target in &targets {
                 // Each link this frame crosses is one transmission against the
                 // device's ceiling. Running out mid-fan-out stops the fan-out
                 // rather than the frame: the neighbors already reached carry it
                 // on, and the sender's retry covers the rest.
                 if !self.mesh_relay.take_send_token() {
+                    out_of_budget = true;
                     debug!(
                         message_id = %message.id,
                         "At the forwarding limit; stopping this fan-out here"
@@ -588,7 +595,7 @@ impl OfflineProtocol {
                     break;
                 }
 
-                match self.transport_manager.send_to_neighbor(target, &message) {
+                match self.transport_manager.send_to_neighbor(target, message) {
                     Ok(transport) => {
                         delivered_to += 1;
                         // Handing it to the recipient themselves ends the
@@ -625,7 +632,21 @@ impl OfflineProtocol {
                 }
             }
 
+            // Nothing reached a neighbor, and the reason was budget rather than
+            // the links: the frames released alongside this one spent the
+            // allowance between them. Hand it back instead of dropping it — its
+            // id is already recorded as handled here, so a drop would lose this
+            // copy *and* refuse both the copies arriving behind it and the
+            // sender's retransmissions, for the whole retention window. It
+            // keeps its due time, so a frame that stays starved is eventually
+            // abandoned rather than retried forever.
+            if delivered_to == 0 && out_of_budget {
+                self.mesh_relay.requeue(relay);
+                continue;
+            }
+
             if delivered_to > 0 {
+                self.mesh_relay.record_forwarded();
                 self.emit_event(Event::message_relayed(
                     message.id.as_str(),
                     message.sender.as_str().to_string(),
