@@ -21485,6 +21485,140 @@ fn test_relay_forwards_third_party_message() {
     }
 }
 
+/// Drives one third-party frame through a device whose battery reports
+/// `level` and `is_charging`, and returns how many neighbors it was handed to.
+///
+/// The device always has a neighbor to carry it and forwarding is otherwise
+/// allowed, so the only thing deciding the outcome is the battery gate.
+fn neighbors_carried_to_at_battery(level: Option<u8>, is_charging: bool) -> usize {
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    mock.set_metrics(TransportMetrics {
+        battery_level: level,
+        is_charging,
+        ..TransportMetrics::default()
+    });
+    mock.add_connected_peer("carol", -55);
+    let transport_handle = mock.clone();
+
+    mock.queue_message(Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "carry me if you can",
+    ));
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    assert!(
+        protocol.receive_message().is_none(),
+        "a third-party frame is never surfaced to the app"
+    );
+    // Admission (including the battery gate) happens on receive; transmission
+    // happens on the tick.
+    protocol.process().unwrap();
+
+    transport_handle.peer_sends().len()
+}
+
+#[test]
+fn a_healthy_battery_carries_other_peoples_traffic() {
+    assert_eq!(neighbors_carried_to_at_battery(Some(80), false), 1);
+}
+
+#[test]
+fn a_battery_below_the_relay_floor_carries_nothing() {
+    // Carrying other people's messages is the first thing to give up when the
+    // battery is going: a device that spends its last few percent relaying
+    // cannot send its own message when its owner needs to. Default floor is 30.
+    assert_eq!(
+        neighbors_carried_to_at_battery(Some(20), false),
+        0,
+        "below the relay battery floor, nothing is carried for others"
+    );
+}
+
+#[test]
+fn a_charging_device_carries_below_the_floor() {
+    // Plugged in, the soft floor is excused — the same exemption the relay
+    // role itself applies, so the two policies do not disagree about whether
+    // this device should be working for the network.
+    assert_eq!(
+        neighbors_carried_to_at_battery(Some(20), true),
+        1,
+        "a charging device below the soft floor must still carry"
+    );
+}
+
+#[test]
+fn a_critical_battery_carries_nothing_even_while_charging() {
+    // The hard floor beneath the soft one. `CRITICAL_RELAY_BATTERY_LEVEL` is
+    // shared with the relay-role policy, so a device cannot keep carrying
+    // traffic at a level that would have stripped it of the role.
+    assert!(
+        crate::protocol::CRITICAL_RELAY_BATTERY_LEVEL == 15,
+        "the shared critical floor moved; this test's levels assume 15"
+    );
+    assert_eq!(
+        neighbors_carried_to_at_battery(Some(10), true),
+        0,
+        "a critical battery stops carrying even while charging"
+    );
+}
+
+#[test]
+fn an_unknown_battery_level_is_treated_as_willing() {
+    // Most platforms report a level. Refusing to carry anything on a device
+    // that simply does not publish one would quietly remove it from the
+    // network, which is a worse failure than carrying on an unknown battery.
+    assert_eq!(
+        neighbors_carried_to_at_battery(None, false),
+        1,
+        "an unknown battery level must not silently remove a device from the mesh"
+    );
+}
+
+#[test]
+fn a_device_with_infrastructure_does_not_spend_the_mesh_on_its_own_traffic() {
+    // `can_reach_without_carrying` is what keeps a device from handing copies
+    // to its neighbors when a carrier that does its own routing is up. The
+    // swallowing-transport test proves the offer fires when it should; this
+    // proves it stays quiet when it should not.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.add_connected_peer("carol", -55);
+    let ble_handle = ble.clone();
+
+    // An infrastructure carrier that reaches peers we hold no radio link to.
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    // Addressed to someone who is not a neighbor: the relay can route it.
+    protocol
+        .send_message("distant", "over the wire", None, None::<String>)
+        .unwrap();
+
+    assert!(
+        ble_handle.peer_sends().is_empty(),
+        "with a routing carrier up, neighbors must not be asked to carry copies"
+    );
+}
+
 #[test]
 fn a_forward_whose_links_all_failed_is_kept_rather_than_dropped() {
     // A link can go away between being chosen for a frame and being written to.
