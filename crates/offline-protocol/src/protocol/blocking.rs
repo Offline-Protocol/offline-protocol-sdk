@@ -20,7 +20,7 @@ impl OfflineProtocol {
             .map_err(|_| Error::InvalidConfiguration(format!("Invalid user ID: {}", user_id)))?;
 
         // Cannot block self
-        if user_id == self.config.user_id {
+        if user_id == self.local_id {
             return Err(Error::InvalidConfiguration(
                 "Cannot block own user ID".to_string(),
             ));

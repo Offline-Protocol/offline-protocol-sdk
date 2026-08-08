@@ -526,15 +526,21 @@ pub struct ProtocolConfig {
     /// Application identifier (required).
     pub app_id: String,
 
-    /// User identifier (required).
+    /// Local profile selector (required).
     ///
-    /// This exact string is the device's canonical identity on every
-    /// surface: it is stamped as `Message.sender` on outbound frames, it is
-    /// what peers see as `NeighborDiscovered.peer_id` when they discover
-    /// this device (on any transport), and it is the `recipient` string
-    /// others use to reach it. Discovery, blocking, and outbox flushing all
-    /// key on this one namespace.
-    pub user_id: String,
+    /// This string never leaves the device. It selects which stored identity
+    /// this instance runs as — one namespace per `(app_id, profile)` pair —
+    /// so an app hosting several accounts gives each its own value, and an app
+    /// hosting one can pass a constant like `"default"`.
+    ///
+    /// It is **not** the device's identity. The wire identity is the
+    /// self-certifying address derived from the identity key held in this
+    /// profile's storage: it is minted on first start, reported by
+    /// [`crate::OfflineProtocol::local_address`], and it is what gets stamped
+    /// as `Message.sender`, what peers see as `NeighborDiscovered.peer_id`,
+    /// and what others use as `recipient`. An app cannot choose it, because
+    /// choosing it would mean claiming a key one does not hold.
+    pub profile: String,
 
     /// Transport configuration.
     pub transport: TransportConfig,
@@ -579,11 +585,11 @@ impl ProtocolConfig {
     /// # Arguments
     ///
     /// * `app_id` - Application identifier
-    /// * `user_id` - User identifier
-    pub fn new(app_id: impl Into<String>, user_id: impl Into<String>) -> Self {
+    /// * `profile` - Local profile selector (storage namespace, never on the wire)
+    pub fn new(app_id: impl Into<String>, profile: impl Into<String>) -> Self {
         Self {
             app_id: app_id.into(),
-            user_id: user_id.into(),
+            profile: profile.into(),
             transport: TransportConfig::default(),
             dors: DorsConfig::default(),
             relay: RelayConfig::default(),
@@ -598,8 +604,8 @@ impl ProtocolConfig {
     }
 
     /// Creates a builder for more granular configuration.
-    pub fn builder(app_id: impl Into<String>, user_id: impl Into<String>) -> ProtocolConfigBuilder {
-        ProtocolConfigBuilder::new(app_id, user_id)
+    pub fn builder(app_id: impl Into<String>, profile: impl Into<String>) -> ProtocolConfigBuilder {
+        ProtocolConfigBuilder::new(app_id, profile)
     }
 
     /// Validates the configuration.
@@ -608,16 +614,17 @@ impl ProtocolConfig {
     ///
     /// Returns `Ok(())` if valid, `Err` with a description of the problem if invalid.
     pub fn validate(&self) -> crate::Result<()> {
-        // Both ids become storage keys and travel on the wire, so hold them to
-        // the same length cap and charset ban as every other identifier rather
-        // than only rejecting the empty string. Going through the core
-        // constructors keeps one policy instead of a second copy that can
-        // drift. Catching this here turns a later failure deep inside a
-        // storage backend into one clear configuration error.
+        // Both become storage keys — `app_id` and `profile` are the two inputs
+        // to the account namespace — so hold them to the same length cap and
+        // charset ban as every other identifier rather than only rejecting the
+        // empty string. Going through the core constructors keeps one policy
+        // instead of a second copy that can drift. Catching this here turns a
+        // later failure deep inside a storage backend into one clear
+        // configuration error.
         offline_protocol_core::AppId::new(self.app_id.as_str())
             .map_err(|e| crate::Error::InvalidConfiguration(e.to_string()))?;
 
-        offline_protocol_core::UserId::new(self.user_id.as_str())
+        offline_protocol_core::UserId::new(self.profile.as_str())
             .map_err(|e| crate::Error::InvalidConfiguration(e.to_string()))?;
 
         if self.initial_ttl == 0 {
@@ -805,9 +812,9 @@ pub struct ProtocolConfigBuilder {
 
 impl ProtocolConfigBuilder {
     /// Creates a new builder.
-    pub fn new(app_id: impl Into<String>, user_id: impl Into<String>) -> Self {
+    pub fn new(app_id: impl Into<String>, profile: impl Into<String>) -> Self {
         Self {
-            config: ProtocolConfig::new(app_id, user_id),
+            config: ProtocolConfig::new(app_id, profile),
         }
     }
 
@@ -1001,7 +1008,7 @@ mod tests {
     fn test_config_creation() {
         let config = ProtocolConfig::new("test-app", "user123");
         assert_eq!(config.app_id, "test-app");
-        assert_eq!(config.user_id, "user123");
+        assert_eq!(config.profile, "user123");
         assert_eq!(config.initial_ttl, 8);
     }
 

@@ -1039,7 +1039,7 @@ fn test_config_access() {
     let protocol = OfflineProtocol::new(config.clone()).unwrap();
 
     assert_eq!(protocol.config().app_id, config.app_id);
-    assert_eq!(protocol.config().user_id, config.user_id);
+    assert_eq!(protocol.config().profile, config.profile);
 }
 
 #[test]
@@ -2253,7 +2253,7 @@ fn protocol_with_mls_storage(storage: Arc<InMemoryStorage>) -> OfflineProtocol {
 #[cfg(test)]
 fn protocol_with_nostr(user_id: &str) -> OfflineProtocol {
     let mut config = create_test_config();
-    config.user_id = user_id.to_string();
+    config.profile = user_id.to_string();
     config.encryption.enabled = true;
     config.transport.nostr_enabled = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
@@ -13344,6 +13344,27 @@ fn test_reseal_is_noop_without_provenance() {
     );
 }
 
+/// Like [`make_encrypted_protocol`], but takes the **production** identity
+/// path: the address is derived from a freshly minted identity key rather than
+/// forced to the profile string, so the instance runs as a real `off1…`
+/// address the way a shipped build does.
+fn make_addressed_protocol(profile: &str) -> (OfflineProtocol, MockTransport) {
+    let mut config = create_test_config_for_user(profile);
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol
+        .initialize_mls_for_test_derived(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    let handle = transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    (protocol, handle)
+}
+
 /// Creates an MLS-enabled, unstarted protocol paired with a handle to its mock
 /// transport. Left unstarted so the caller can register event handlers first.
 fn make_encrypted_protocol(user_id: &str) -> (OfflineProtocol, MockTransport) {
@@ -13462,7 +13483,7 @@ fn feed_session_reset_key_package(
         internal_prefixes::KEY_PACKAGE,
         serde_json::to_string(&payload).unwrap()
     );
-    let target_id = target.config.user_id.clone();
+    let target_id = target.config.profile.clone();
     let message = Message::new(
         UserId::new(from_id).unwrap(),
         UserId::new(&target_id).unwrap(),
@@ -19101,7 +19122,7 @@ fn test_known_peers_rediscovery_refreshes_last_seen() {
 #[test]
 fn test_known_peers_does_not_track_self() {
     let config = create_test_config();
-    let self_id = config.user_id.clone();
+    let self_id = config.profile.clone();
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     protocol.on_neighbor_discovered(&self_id);
@@ -32299,6 +32320,19 @@ fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
 /// (`require_encryption = false`). This is the only configuration in which the
 /// downgrade gate is load-bearing — with `require_encryption` on (the default)
 /// it short-circuits, and with encryption off `should_auto_encrypt()` is false.
+/// This node's own address: what a peer must put in `recipient` to reach it.
+///
+/// These fixtures go through the production `initialize_mls`, so the identity
+/// is derived from the key in `secure` storage rather than chosen — a frame
+/// addressed to anything else is dropped as not-for-us before any policy runs,
+/// which would silently turn a policy assertion into an addressing one.
+fn local_id(protocol: &OfflineProtocol) -> String {
+    protocol
+        .local_address()
+        .expect("initialize_mls establishes the address")
+        .to_string()
+}
+
 fn mixed_mode_node(
     user_id: &str,
     secure: &Arc<InMemoryStorage>,
@@ -32370,7 +32404,11 @@ fn test_deleted_session_state_record_cannot_reopen_the_plaintext_gate() {
         let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
         establish_session_and_pin(&mut alice, "bob");
 
-        handle.queue_message(plaintext_text_message("bob", "alice", "injected #1"));
+        handle.queue_message(plaintext_text_message(
+            "bob",
+            &local_id(&alice),
+            "injected #1",
+        ));
         assert!(
             alice.receive_message().is_none(),
             "baseline: cleartext claiming to be from a session peer is rejected"
@@ -32409,7 +32447,11 @@ fn test_deleted_session_state_record_cannot_reopen_the_plaintext_gate() {
             "capability must survive a deleted session-state record"
         );
 
-        handle.queue_message(plaintext_text_message("bob", "alice", "injected #2"));
+        handle.queue_message(plaintext_text_message(
+            "bob",
+            &local_id(&alice),
+            "injected #2",
+        ));
         let delivered = alice.receive_message();
         assert!(
             delivered.is_none(),
@@ -32439,7 +32481,11 @@ fn test_plaintext_rejected_from_peer_with_an_unconfirmed_session() {
         "precondition: no confirmed session, so only the capability check can fire"
     );
 
-    handle.queue_message(plaintext_text_message("bob", "alice", "downgrade"));
+    handle.queue_message(plaintext_text_message(
+        "bob",
+        &local_id(&alice),
+        "downgrade",
+    ));
     assert!(
         alice.receive_message().is_none(),
         "an encryption-capable peer's cleartext is a downgrade even unconfirmed"
@@ -32472,7 +32518,11 @@ fn test_encryption_capability_survives_session_teardown() {
         "but NOT capability — a peer that spoke MLS a moment ago still speaks it"
     );
 
-    handle.queue_message(plaintext_text_message("bob", "alice", "post-teardown"));
+    handle.queue_message(plaintext_text_message(
+        "bob",
+        &local_id(&alice),
+        "post-teardown",
+    ));
     assert!(
         alice.receive_message().is_none(),
         "so cleartext after a teardown is still a downgrade"
@@ -32509,7 +32559,11 @@ fn test_capability_survives_restart_through_persisted_tofu_pins() {
         "the restored TOFU pin re-seeds capability"
     );
 
-    handle.queue_message(plaintext_text_message("bob", "alice", "after restart"));
+    handle.queue_message(plaintext_text_message(
+        "bob",
+        &local_id(&alice),
+        "after restart",
+    ));
     assert!(
         alice.receive_message().is_none(),
         "capability must not be forgotten across a restart"
@@ -32533,7 +32587,11 @@ fn test_reset_tofu_for_peer_clears_encryption_capability() {
         "an explicit identity reset forgets capability too"
     );
 
-    handle.queue_message(plaintext_text_message("bob", "alice", "post-reset"));
+    handle.queue_message(plaintext_text_message(
+        "bob",
+        &local_id(&alice),
+        "post-reset",
+    ));
     assert!(
         alice.receive_message().is_some(),
         "after a deliberate reset the peer is a stranger again, so the mixed-mode \
@@ -32551,7 +32609,11 @@ fn test_legacy_plaintext_peer_is_still_accepted_in_mixed_mode() {
     let state = Arc::new(InMemoryStorage::new());
     let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
 
-    handle.queue_message(plaintext_text_message("legacy-peer", "alice", "hello"));
+    handle.queue_message(plaintext_text_message(
+        "legacy-peer",
+        &local_id(&alice),
+        "hello",
+    ));
     let received = alice.receive_message();
     assert_eq!(
         received.map(|m| m.content),
@@ -32594,7 +32656,11 @@ fn test_encryption_capability_set_is_bounded_without_evicting() {
     );
 
     // And the protection that entry buys is still in force.
-    handle.queue_message(plaintext_text_message("bob", "alice", "post-flood"));
+    handle.queue_message(plaintext_text_message(
+        "bob",
+        &local_id(&alice),
+        "post-flood",
+    ));
     assert!(
         alice.receive_message().is_none(),
         "cleartext from the established peer must still be rejected after the flood"
@@ -32764,8 +32830,18 @@ fn test_blocked_users_restore_skips_a_record_naming_the_local_user() {
     // this record. Restoring it would block the local user.
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
+
+    // The local id is derived from the identity key, so it has to be minted
+    // before the record naming it can be planted. Doing it on the same storage
+    // `initialize_mls` will open means the protocol adopts this exact identity.
+    let (_, self_address) = offline_protocol_mls::MlsManager::load_or_create_identity(
+        &(secure.clone() as Arc<dyn MlsStorage>),
+    )
+    .unwrap();
+    let self_id = self_address.to_string();
+
     state
-        .store(storage_keys::BLOCKED_USERS, "alice", &[])
+        .store(storage_keys::BLOCKED_USERS, &self_id, &[])
         .unwrap();
     state
         .store(storage_keys::BLOCKED_USERS, "bob", &[])
@@ -32777,8 +32853,13 @@ fn test_blocked_users_restore_skips_a_record_naming_the_local_user() {
         .initialize_mls(secure_handle, state_handle)
         .unwrap();
 
+    assert_eq!(
+        protocol.local_address(),
+        Some(self_id.as_str()),
+        "the protocol must adopt the identity already in its storage"
+    );
     assert!(
-        !protocol.is_user_blocked("alice"),
+        !protocol.is_user_blocked(&self_id),
         "a planted self-block record must be ignored"
     );
     assert!(
@@ -33116,7 +33197,7 @@ fn nostr_resolution_drops_anything_that_is_not_a_key_package() {
 fn nostr_kill_switches_reach_the_transport_on_start() {
     for (sealing, cold_contact) in [(false, true), (true, false), (false, false)] {
         let mut config = create_test_config();
-        config.user_id = "alice".to_string();
+        config.profile = "alice".to_string();
         config.transport.nostr_enabled = true;
         config.transport.nostr_sealing_enabled = sealing;
         config.transport.nostr_cold_contact_enabled = cold_contact;
@@ -33347,4 +33428,211 @@ fn push_pool_exhaustion_warns_once_per_window() {
          pushes in one suppression window, got {}",
         warnings.len()
     );
+}
+
+// ============================================================================
+// Bootstrap inversion: identity derived from the key, not chosen by the app
+// ============================================================================
+
+/// The whole point of the inversion, end to end: two instances that were never
+/// told who they are mint their own identities, learn their addresses, and
+/// establish a real MLS session addressed entirely by those derived ids — key
+/// package, Welcome, and DM, with no `establish_confirmed_session` shortcut.
+#[test]
+fn test_two_derived_identities_establish_a_session_and_exchange_dms() {
+    let (mut alice, alice_h) = make_addressed_protocol("profile-a");
+    let (mut bob, bob_h) = make_addressed_protocol("profile-b");
+
+    let alice_addr = local_id(&alice);
+    let bob_addr = local_id(&bob);
+
+    // Neither instance was configured with these: they are hashes of keys each
+    // side minted for itself.
+    assert!(alice_addr.starts_with("off1"), "got {alice_addr}");
+    assert!(bob_addr.starts_with("off1"), "got {bob_addr}");
+    assert_ne!(alice_addr, bob_addr);
+    assert!(
+        alice_addr.parse::<offline_protocol_core::Address>().is_ok(),
+        "the address must be canonical"
+    );
+
+    let alice_rx: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_rx: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&alice_rx);
+        alice.on_event(move |e| {
+            if let Event::MessageReceived {
+                content, sender, ..
+            } = e
+            {
+                h.lock().unwrap().push((sender, content));
+            }
+        });
+        let h = Arc::clone(&bob_rx);
+        bob.on_event(move |e| {
+            if let Event::MessageReceived {
+                content, sender, ..
+            } = e
+            {
+                h.lock().unwrap().push((sender, content));
+            }
+        });
+    }
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    // Discovery by address is what kicks off the real key-package exchange.
+    alice.on_neighbor_discovered(&bob_addr);
+    bob.on_neighbor_discovered(&alice_addr);
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    alice
+        .send_message(&bob_addr, "hello-from-alice", None, None::<String>)
+        .unwrap();
+    bob.send_message(&alice_addr, "hello-from-bob", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    let got_bob = bob_rx.lock().unwrap().clone();
+    let got_alice = alice_rx.lock().unwrap().clone();
+
+    assert!(
+        got_bob
+            .iter()
+            .any(|(s, c)| c == "hello-from-alice" && s == &alice_addr),
+        "bob must receive alice's DM attributed to her derived address (got {got_bob:?})"
+    );
+    assert!(
+        got_alice
+            .iter()
+            .any(|(s, c)| c == "hello-from-bob" && s == &bob_addr),
+        "alice must receive bob's DM attributed to his derived address (got {got_alice:?})"
+    );
+}
+
+/// The session slot both sides store is the one `for_session` derives from the
+/// two addresses — in `Address` order, which is what makes the two peers agree.
+#[test]
+fn test_derived_session_slot_is_the_address_ordered_pair() {
+    let (mut alice, alice_h) = make_addressed_protocol("profile-a");
+    let (mut bob, bob_h) = make_addressed_protocol("profile-b");
+    let alice_addr = local_id(&alice);
+    let bob_addr = local_id(&bob);
+
+    alice.start().unwrap();
+    bob.start().unwrap();
+    alice.on_neighbor_discovered(&bob_addr);
+    bob.on_neighbor_discovered(&alice_addr);
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+    alice
+        .send_message(&bob_addr, "establish", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    // Both sides must have converged on one slot, and each must read the other
+    // out of it — which is also what proves the slot parse handles the
+    // address-shaped halves it now carries.
+    for (side, name, peer) in [(&alice, "alice", &bob_addr), (&bob, "bob", &alice_addr)] {
+        let manager = side.mls_manager.as_ref().unwrap().read().unwrap();
+        assert!(
+            manager.has_session(peer).unwrap(),
+            "{name} must hold a session with {peer}"
+        );
+        assert_eq!(
+            manager.list_sessions().unwrap(),
+            vec![peer.clone()],
+            "{name} must report exactly that peer as its session partner"
+        );
+    }
+
+    // And the slot they share is the address-ordered one, from either side.
+    assert_eq!(
+        offline_protocol_mls::GroupId::for_session(&alice_addr, &bob_addr).unwrap(),
+        offline_protocol_mls::GroupId::for_session(&bob_addr, &alice_addr).unwrap(),
+    );
+}
+
+/// The identity is the *stored key's* identity, so a restart of the same
+/// profile comes back as the same device rather than minting a new one.
+#[test]
+fn test_identity_is_stable_across_reinitialization_of_the_same_storage() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let mut first = OfflineProtocol::new(create_test_config_for_user("profile-a")).unwrap();
+    first
+        .initialize_mls_for_test_derived(storage.clone())
+        .unwrap();
+    let first_addr = local_id(&first);
+
+    let mut second = OfflineProtocol::new(create_test_config_for_user("profile-a")).unwrap();
+    second
+        .initialize_mls_for_test_derived(storage.clone())
+        .unwrap();
+
+    assert_eq!(
+        local_id(&second),
+        first_addr,
+        "the same profile storage must yield the same address"
+    );
+}
+
+/// Two profiles are two identities even under one app: the namespace is what
+/// separates them, and each namespace holds its own key.
+#[test]
+fn test_separate_profile_storage_yields_separate_identities() {
+    let mut a = OfflineProtocol::new(create_test_config_for_user("profile-a")).unwrap();
+    a.initialize_mls_for_test_derived(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let mut b = OfflineProtocol::new(create_test_config_for_user("profile-b")).unwrap();
+    b.initialize_mls_for_test_derived(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    assert_ne!(local_id(&a), local_id(&b));
+}
+
+/// Before initialization there is no address to report: the key that defines it
+/// lives in storage, and storage does not arrive until `initialize_mls`.
+#[test]
+fn test_local_address_is_absent_until_mls_is_initialized() {
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("profile-a")).unwrap();
+    assert_eq!(
+        protocol.local_address(),
+        None,
+        "an uninitialized instance has no identity to report"
+    );
+
+    protocol
+        .initialize_mls_for_test_derived(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let address = protocol.local_address().expect("established after init");
+    assert!(address.starts_with("off1"), "got {address}");
+}
+
+/// The address reaches the app as an event too, so a listener registered before
+/// startup does not have to poll for it.
+#[test]
+fn test_identity_ready_event_carries_the_derived_address() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("profile-a")).unwrap();
+    {
+        let h = Arc::clone(&seen);
+        protocol.on_event(move |e| {
+            if let Event::IdentityReady { address } = e {
+                h.lock().unwrap().push(address);
+            }
+        });
+    }
+
+    protocol
+        .initialize_mls_for_test_derived(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let addresses = seen.lock().unwrap().clone();
+    assert_eq!(
+        addresses.len(),
+        1,
+        "exactly one identity_ready per initialization (got {addresses:?})"
+    );
+    assert_eq!(addresses[0], local_id(&protocol));
 }

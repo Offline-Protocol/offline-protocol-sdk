@@ -166,7 +166,7 @@ impl OfflineProtocol {
         }
         self.last_nostr_slot_warning = Some(now);
         self.emit_security_warning(
-            &self.config.user_id.clone(),
+            &self.local_id.clone(),
             SecurityWarningCode::NostrKeyPackageSlotExhausted,
             format!(
                 "could not refill {} Nostr key-package publication slot(s); \
@@ -406,7 +406,7 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::KEY_PACKAGE, serialized);
 
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
         let mut message =
             self.create_message(&self_id, content, Some(MessagePriority::Low), None)?;
         // Nothing ACKs a published record: it is not delivered to anyone, it is

@@ -944,6 +944,23 @@ export interface NeighborLostEvent extends BaseEvent {
 }
 
 /**
+ * This device's own address is known.
+ *
+ * Fires once per successful startup, before any message can be sent. The
+ * address is derived from the identity key held in this profile's storage —
+ * the app does not choose it. It is this device's `sender` on every outbound
+ * frame and the string peers must use as `recipient` to reach it, and it is
+ * stable across restarts of the same `profile`.
+ *
+ * Also readable at any time after startup via `localAddress()`.
+ */
+export interface IdentityReadyEvent extends BaseEvent {
+  type: 'identity_ready';
+  /** This device's self-certifying address (`off1…`). */
+  address: string;
+}
+
+/**
  * Network metrics event
  */
 export interface NetworkMetricsEvent extends BaseEvent {
@@ -2044,6 +2061,7 @@ export type ProtocolEvent =
   | RelayDemotedBatteryEvent
   | NeighborDiscoveredEvent
   | NeighborLostEvent
+  | IdentityReadyEvent
   | NetworkMetricsEvent
   | FileProgressEvent
   | FileReceivedEvent

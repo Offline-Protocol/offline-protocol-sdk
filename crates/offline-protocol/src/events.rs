@@ -516,6 +516,19 @@ pub enum Event {
         peer_id: String,
     },
 
+    /// This device's own address is known: MLS storage was opened and the
+    /// identity key in it derived to `address`.
+    ///
+    /// Fires once per successful `initialize_mls`, before any frame can be
+    /// sent. `address` is this device's `Message.sender` from here on, and what
+    /// peers must be given to reach it. It is stable across restarts of the
+    /// same profile, so an app that already stored it will be handed the same
+    /// value rather than a new one.
+    IdentityReady {
+        /// This device's self-certifying address (`off1…`).
+        address: String,
+    },
+
     /// Network metrics update.
     NetworkMetrics {
         /// Number of active neighbors.
@@ -1519,6 +1532,14 @@ impl Event {
     }
 
     /// Creates a NetworkMetrics event.
+    /// Creates an IdentityReady event.
+    pub fn identity_ready(address: impl Into<String>) -> Self {
+        Self::IdentityReady {
+            address: address.into(),
+        }
+    }
+
+    /// Creates a NetworkMetrics event.
     pub fn network_metrics(
         neighbor_count: usize,
         relay_count: usize,
@@ -2309,6 +2330,7 @@ impl Event {
             Self::RelayDemoted { .. } => "protocol.relay.demoted",
             Self::NeighborDiscovered { .. } => "protocol.neighbor.discovered",
             Self::NeighborLost { .. } => "protocol.neighbor.lost",
+            Self::IdentityReady { .. } => "protocol.identity.ready",
             Self::NetworkMetrics { .. } => "protocol.network.metrics",
             Self::FileProgress { .. } => "protocol.file.progress",
             Self::FileReceived { .. } => "protocol.file.received",
@@ -2545,6 +2567,12 @@ impl fmt::Debug for Event {
             Self::NeighborLost { peer_id: _ } => f
                 .debug_struct("NeighborLost")
                 .field("peer_id", &"[REDACTED]")
+                .finish(),
+            // Redacted like any other identifier: this one names *this* device,
+            // which is the strongest correlator a log can carry.
+            Self::IdentityReady { address: _ } => f
+                .debug_struct("IdentityReady")
+                .field("address", &"[REDACTED]")
                 .finish(),
             Self::NetworkMetrics {
                 neighbor_count,

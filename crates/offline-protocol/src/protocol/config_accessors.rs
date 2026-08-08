@@ -284,7 +284,7 @@ impl OfflineProtocol {
         let peers: Vec<String> = self.known_peers.keys().cloned().collect();
         let result = self
             .mesh_services
-            .discover_services(&self.config.user_id, &peers, service_id)
+            .discover_services(&self.local_id, &peers, service_id)
             .map_err(Error::Service)?;
         let mut send_failures = 0usize;
         for msg in result.messages {

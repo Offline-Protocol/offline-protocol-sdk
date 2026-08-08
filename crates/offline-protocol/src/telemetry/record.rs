@@ -117,6 +117,7 @@ mod tests {
         "protocol.relay.demoted",
         "protocol.neighbor.discovered",
         "protocol.neighbor.lost",
+        "protocol.identity.ready",
         "protocol.network.metrics",
         "protocol.file.progress",
         "protocol.file.received",
@@ -295,6 +296,7 @@ mod tests {
             | Event::RelayDemoted { .. }
             | Event::NeighborDiscovered { .. }
             | Event::NeighborLost { .. }
+            | Event::IdentityReady { .. }
             | Event::NetworkMetrics { .. }
             | Event::FileProgress { .. }
             | Event::FileReceived { .. }
@@ -436,6 +438,9 @@ mod tests {
             },
             Event::NeighborLost {
                 peer_id: String::new(),
+            },
+            Event::IdentityReady {
+                address: String::new(),
             },
             Event::NetworkMetrics {
                 neighbor_count: 0,

@@ -56,11 +56,32 @@ impl GroupId {
 
     /// Builds the deterministic group ID for a 1:1 session, rejecting
     /// storage-hostile user ids (the id becomes a raw storage key).
+    ///
+    /// Both peers must land on the same string, so the two ids are put in a
+    /// canonical order. When both are addresses that order is
+    /// [`Address`](offline_protocol_core::Address) order — the underlying hash
+    /// bytes — because the bech32 charset is not ASCII-monotonic (value 4
+    /// renders as `y` 0x79, value 5 as `9` 0x39), so sorting the rendered
+    /// strings would disagree with every other address comparison in the
+    /// protocol. Ids that are not both addresses fall back to string order,
+    /// which is all a nickname id has.
+    ///
+    /// Either way the result is symmetric in its arguments, which is the
+    /// property peers actually depend on.
     pub fn for_session(user_a: &str, user_b: &str) -> crate::error::Result<Self> {
-        // Create deterministic session ID by sorting user IDs
-        let mut users = [user_a, user_b];
-        users.sort();
-        Self::new(format!("session:{}:{}", users[0], users[1]))
+        use offline_protocol_core::Address;
+
+        let ordered = match (user_a.parse::<Address>(), user_b.parse::<Address>()) {
+            (Ok(addr_a), Ok(addr_b)) if addr_b < addr_a => [user_b, user_a],
+            (Ok(_), Ok(_)) => [user_a, user_b],
+            _ => {
+                let mut users = [user_a, user_b];
+                users.sort();
+                users
+            }
+        };
+
+        Self::new(format!("session:{}:{}", ordered[0], ordered[1]))
     }
 }
 
@@ -739,6 +760,75 @@ impl std::fmt::Display for StorageKeyType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use offline_protocol_core::Address;
+
+    /// Two addresses whose hash-byte order is the reverse of their rendered
+    /// string order.
+    ///
+    /// Hand-constructed rather than searched for, so the disagreement is
+    /// checkable by eye: the data part's second character encodes the version
+    /// byte's low three bits (`0b001`) followed by the hash's top two bits, so
+    /// `hash[0] = 0x00` yields charset value 4 → `y` (0x79) and
+    /// `hash[0] = 0x40` yields value 5 → `9` (0x39). Byte order puts the
+    /// `0x00` address first; ASCII order puts it second.
+    fn disagreeing_addresses() -> (Address, Address) {
+        let mut low_bytes = [0u8; Address::HASH_LEN];
+        low_bytes[0] = 0x00;
+        let mut high_bytes = [0u8; Address::HASH_LEN];
+        high_bytes[0] = 0x40;
+        (
+            Address::from_hash_bytes(low_bytes),
+            Address::from_hash_bytes(high_bytes),
+        )
+    }
+
+    #[test]
+    fn session_id_orders_addresses_by_hash_not_by_string() {
+        let (low, high) = disagreeing_addresses();
+
+        // The premise: the two orders genuinely disagree for this pair.
+        assert!(low < high, "hash-byte order");
+        assert!(
+            low.to_string() > high.to_string(),
+            "rendered-string order must be the opposite, or this test proves nothing"
+        );
+
+        let expected = format!("session:{}:{}", low, high);
+        assert_eq!(
+            GroupId::for_session(&low.to_string(), &high.to_string())
+                .unwrap()
+                .as_str(),
+            expected,
+            "address slots must follow Address order, not string order"
+        );
+    }
+
+    #[test]
+    fn session_id_is_symmetric_for_addresses() {
+        let (low, high) = disagreeing_addresses();
+        let (a, b) = (low.to_string(), high.to_string());
+
+        assert_eq!(
+            GroupId::for_session(&a, &b).unwrap(),
+            GroupId::for_session(&b, &a).unwrap(),
+            "both peers must derive the same slot regardless of argument order"
+        );
+    }
+
+    /// A pair that is not two addresses has no hash order to use, so it keeps
+    /// the string ordering it has always had.
+    #[test]
+    fn session_id_falls_back_to_string_order_for_non_addresses() {
+        assert_eq!(
+            GroupId::for_session("bob", "alice").unwrap().as_str(),
+            "session:alice:bob"
+        );
+
+        let (address, _) = disagreeing_addresses();
+        let mixed = GroupId::for_session("alice", &address.to_string()).unwrap();
+        let mixed_reversed = GroupId::for_session(&address.to_string(), "alice").unwrap();
+        assert_eq!(mixed, mixed_reversed, "mixed pairs must stay symmetric");
+    }
 
     fn sample_encrypted_message() -> EncryptedMessage {
         EncryptedMessage {
