@@ -11,6 +11,7 @@ use crate::types::{
     MlsMessageType, StorageKeyType, WelcomeMessage,
 };
 
+use offline_protocol_core::Address;
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
@@ -18,6 +19,9 @@ use openmls_traits::OpenMlsProvider;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+/// Length of an Ed25519 public key, in bytes.
+const ED25519_PUBLIC_KEY_LEN: usize = 32;
 
 /// Default lifetime for key packages (30 days in seconds).
 const DEFAULT_KEY_PACKAGE_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
@@ -1672,11 +1676,46 @@ impl MlsManager {
         }
     }
 
-    /// Derives a deterministic user ID from a public key.
+    /// Derives the canonical self-certifying address of an Ed25519 identity
+    /// key: `off1…`, the bech32m encoding of
+    /// `0x01 ‖ SHA-256(public_key)[..20]`.
     ///
-    /// The user ID is derived by taking the SHA-256 hash of the public key
-    /// and encoding the first 20 bytes as base58. This produces a short,
-    /// human-readable identifier that is collision-resistant.
+    /// This is the only address derivation in the SDK. Bridges and apps reach
+    /// it through the `derive_address` FFI function rather than reimplementing
+    /// it, so that every platform agrees byte for byte.
+    ///
+    /// # Arguments
+    ///
+    /// * `public_key` - The Ed25519 public key bytes (exactly 32)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MlsError::InvalidPublicKey`] if `public_key` is not 32 bytes.
+    /// The length is part of the format contract: hashing a differently-sized
+    /// input would yield a different address for the same identity. The bytes
+    /// are deliberately *not* checked against the curve — an address is
+    /// defined over key bytes, and what proves ownership is the signature
+    /// verification that accompanies it (see [`Self::verify_signature`]), so
+    /// binding the address format to a signature library's parsing strictness
+    /// would only risk the derivation drifting between versions.
+    pub fn derive_address(public_key: &[u8]) -> Result<Address> {
+        use sha2::{Digest, Sha256};
+
+        if public_key.len() != ED25519_PUBLIC_KEY_LEN {
+            return Err(MlsError::InvalidPublicKey(format!(
+                "Ed25519 public key must be {} bytes, got {}",
+                ED25519_PUBLIC_KEY_LEN,
+                public_key.len()
+            )));
+        }
+
+        let hash = Sha256::digest(public_key);
+        let mut truncated = [0u8; Address::HASH_LEN];
+        truncated.copy_from_slice(&hash[..Address::HASH_LEN]);
+        Ok(Address::from_hash_bytes(truncated))
+    }
+
+    /// Derives a deterministic user ID from a public key.
     ///
     /// # Arguments
     ///
@@ -1684,16 +1723,21 @@ impl MlsManager {
     ///
     /// # Returns
     ///
-    /// Returns a base58-encoded string derived from the public key.
+    /// Returns the derived address in its canonical `off1…` string form.
+    /// Unlike [`Self::derive_address`] this accepts any input length, which
+    /// is precisely why it is deprecated: a caller passing a truncated or
+    /// padded key gets a plausible-looking address for an identity that
+    /// cannot exist.
+    #[deprecated(
+        note = "use derive_address; this returns the self-certifying off1… address, no longer base58"
+    )]
     pub fn derive_user_id_from_public_key(public_key: &[u8]) -> String {
         use sha2::{Digest, Sha256};
 
-        let mut hasher = Sha256::new();
-        hasher.update(public_key);
-        let hash = hasher.finalize();
-
-        // Take first 20 bytes and encode as base58
-        bs58::encode(&hash[..20]).into_string()
+        let hash = Sha256::digest(public_key);
+        let mut truncated = [0u8; Address::HASH_LEN];
+        truncated.copy_from_slice(&hash[..Address::HASH_LEN]);
+        Address::from_hash_bytes(truncated).to_string()
     }
 }
 
@@ -3106,6 +3150,60 @@ mod tests {
         assert!(
             !matches!(res, Ok(Some(_))),
             "generation beyond the tolerance must not decrypt"
+        );
+    }
+
+    /// RFC 8032 §7.1 TEST 1 Ed25519 public key.
+    const RFC8032_TV1_PK: [u8; 32] = [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07,
+        0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
+        0x51, 0x1a,
+    ];
+
+    /// The address of that key, from the BIP-350 reference implementation.
+    /// This literal is the cross-platform contract: bridges and apps must all
+    /// produce it for this key. Re-derive it from the reference implementation
+    /// if it ever needs to change — never edit it to match new code output.
+    const RFC8032_TV1_ADDRESS: &str = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn";
+
+    #[test]
+    fn derive_address_matches_the_pinned_vector() {
+        let address = MlsManager::derive_address(&RFC8032_TV1_PK).expect("32-byte key derives");
+        assert_eq!(address.to_string(), RFC8032_TV1_ADDRESS);
+        // Self-certifying: the rendered form parses back to the same address,
+        // so a peer can check a claimed address against a presented key.
+        assert_eq!(
+            RFC8032_TV1_ADDRESS.parse::<Address>().expect("parses"),
+            address
+        );
+    }
+
+    #[test]
+    fn derive_address_rejects_wrong_key_lengths() {
+        for len in [0usize, 31, 33, 64] {
+            let key = vec![0u8; len];
+            assert!(
+                matches!(
+                    MlsManager::derive_address(&key),
+                    Err(MlsError::InvalidPublicKey(_))
+                ),
+                "{len}-byte key must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecated_derive_agrees_with_derive_address() {
+        // The deprecated entry point must not become a second addressing
+        // format while it still exists.
+        #[allow(deprecated)]
+        let legacy = MlsManager::derive_user_id_from_public_key(&RFC8032_TV1_PK);
+        assert_eq!(legacy, RFC8032_TV1_ADDRESS);
+        assert_eq!(
+            legacy,
+            MlsManager::derive_address(&RFC8032_TV1_PK)
+                .expect("derives")
+                .to_string()
         );
     }
 }

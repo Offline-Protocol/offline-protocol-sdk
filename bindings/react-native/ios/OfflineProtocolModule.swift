@@ -3193,7 +3193,30 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
-    /// Derive a user ID from a public key
+    /// Derive the canonical self-certifying address (`off1…`) from an Ed25519
+    /// public key. Needs no protocol instance, so an invite or QR code can be
+    /// checked before `create()`.
+    ///
+    /// The Swift name differs from the JS name on purpose: an unqualified
+    /// `deriveAddress(publicKey:)` below must resolve to the generated UniFFI
+    /// global, not recurse into this bridge method. The selector React Native
+    /// binds to is pinned by the `@objc` attribute.
+    @objc(deriveAddress:resolver:rejecter:)
+    func deriveAddressBridge(_ publicKey: [NSNumber],
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let publicKeyBytes = publicKey.map { $0.uint8Value }
+            resolver(try deriveAddress(publicKey: publicKeyBytes))
+        } catch {
+            rejecter("ERROR_CRYPTO", "Failed to derive address: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Derive a user ID from a public key.
+    ///
+    /// Deprecated: use `deriveAddress`, which needs no protocol instance and
+    /// rejects keys that are not 32 bytes. Returns the same `off1…` address.
     @objc func deriveUserIdFromPublicKey(_ publicKey: [NSNumber],
                                          resolver: @escaping RCTPromiseResolveBlock,
                                          rejecter: @escaping RCTPromiseRejectBlock) {

@@ -2840,21 +2840,27 @@ extension BleManager: CBPeripheralDelegate {
             if isValid {
                 // Store the verified identity
                 verifiedPeerIdentities[peripheral.identifier] = signedIdentity
-                
-                // Derive the user ID from the public key
-                let derivedUserId = signedIdentity.deriveUserId()
-                print("[BleManager] ✅ Verified peer identity: \(derivedUserId) for \(peripheral.identifier)")
+
+                // Derive the peer's address in Rust — the single implementation
+                // shared by every platform. `decode` already guarantees a
+                // 32-byte key, so the throw is unreachable here.
+                guard let derivedAddress = try? deriveAddress(publicKey: [UInt8](signedIdentity.publicKey)) else {
+                    print("[BleManager] Failed to derive address for \(peripheral.identifier)")
+                    emitDiagnostic("warning", "Failed to derive peer address", context: ["peripheral": peripheral.identifier.uuidString])
+                    return
+                }
+                print("[BleManager] ✅ Verified peer identity: \(derivedAddress) for \(peripheral.identifier)")
                 emitDiagnostic("info", "Verified peer identity", context: [
                     "peripheral": peripheral.identifier.uuidString,
-                    "derivedUserId": derivedUserId
+                    "derivedAddress": derivedAddress
                 ])
-                
-                // Update routing with the cryptographically derived user ID
-                // This ensures routing tables only contain verified peers
+
+                // Update routing with the cryptographically derived address.
+                // This ensures routing tables only contain verified peers.
                 let rssi = peripheralRSSI[peripheral.identifier] ?? -60
                 protocolInstance.learnRoute(
-                    destination: derivedUserId,
-                    nextHop: derivedUserId,
+                    destination: derivedAddress,
+                    nextHop: derivedAddress,
                     hopCount: 1,
                     quality: Float(min(1.0, max(0.0, (Double(rssi) + 100.0) / 80.0))),
                     sequenceNumber: 0

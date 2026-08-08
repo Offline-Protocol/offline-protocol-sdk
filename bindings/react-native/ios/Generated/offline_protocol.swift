@@ -9663,6 +9663,13 @@ fileprivate struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
         return dict
     }
 }
+public func deriveAddress(publicKey: [UInt8])throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_func_derive_address(
+        FfiConverterSequenceUInt8.lower(publicKey),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -9678,6 +9685,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_offline_protocol_uniffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 55050) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 866) {
         return InitializationResult.apiChecksumMismatch

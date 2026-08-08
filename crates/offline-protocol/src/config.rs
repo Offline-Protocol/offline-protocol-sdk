@@ -608,17 +608,17 @@ impl ProtocolConfig {
     ///
     /// Returns `Ok(())` if valid, `Err` with a description of the problem if invalid.
     pub fn validate(&self) -> crate::Result<()> {
-        if self.app_id.is_empty() {
-            return Err(crate::Error::InvalidConfiguration(
-                "app_id cannot be empty".to_string(),
-            ));
-        }
+        // Both ids become storage keys and travel on the wire, so hold them to
+        // the same length cap and charset ban as every other identifier rather
+        // than only rejecting the empty string. Going through the core
+        // constructors keeps one policy instead of a second copy that can
+        // drift. Catching this here turns a later failure deep inside a
+        // storage backend into one clear configuration error.
+        offline_protocol_core::AppId::new(self.app_id.as_str())
+            .map_err(|e| crate::Error::InvalidConfiguration(e.to_string()))?;
 
-        if self.user_id.is_empty() {
-            return Err(crate::Error::InvalidConfiguration(
-                "user_id cannot be empty".to_string(),
-            ));
-        }
+        offline_protocol_core::UserId::new(self.user_id.as_str())
+            .map_err(|e| crate::Error::InvalidConfiguration(e.to_string()))?;
 
         if self.initial_ttl == 0 {
             return Err(crate::Error::InvalidConfiguration(
@@ -1021,6 +1021,47 @@ mod tests {
     fn test_config_validation_empty_user_id() {
         let config = ProtocolConfig::new("test-app", "");
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_validation_enforces_the_id_length_cap() {
+        // An unbounded id becomes an unbounded storage key and an unbounded
+        // wire field; the cap is the same one the core newtypes apply.
+        let at_cap = "a".repeat(offline_protocol_core::MAX_ID_LEN);
+        let over_cap = "a".repeat(offline_protocol_core::MAX_ID_LEN + 1);
+
+        assert!(ProtocolConfig::new("test-app", &at_cap).validate().is_ok());
+        assert!(ProtocolConfig::new(&at_cap, "user123").validate().is_ok());
+        assert!(ProtocolConfig::new("test-app", &over_cap)
+            .validate()
+            .is_err());
+        assert!(ProtocolConfig::new(&over_cap, "user123")
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn config_validation_enforces_the_id_charset() {
+        // Path separators and the KV namespace separator would let an id
+        // escape or collide with another account's storage keys.
+        for hostile in ["a/b", "a\\b", "a:b", ".", "..", "a\u{0}b", "a\nb"] {
+            assert!(
+                ProtocolConfig::new("test-app", hostile).validate().is_err(),
+                "user_id {hostile:?} must be rejected"
+            );
+            assert!(
+                ProtocolConfig::new(hostile, "user123").validate().is_err(),
+                "app_id {hostile:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn config_validation_accepts_an_address_shaped_id() {
+        // The self-certifying address format must pass the id policy: the
+        // bech32m charset is plain lowercase alphanumerics.
+        let address = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn";
+        assert!(ProtocolConfig::new("test-app", address).validate().is_ok());
     }
 
     #[test]

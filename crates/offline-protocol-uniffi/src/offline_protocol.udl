@@ -1,4 +1,17 @@
 namespace offline_protocol {
+    // Derive the canonical self-certifying address of an Ed25519 identity key:
+    // "off1..." (44 chars), the bech32m encoding of
+    // 0x01 || SHA-256(publicKey)[0:20]. The same key always yields the same
+    // address, and an address always yields exactly one string form.
+    //
+    // This is instance-less on purpose: it needs no protocol state, so bridges
+    // and apps can verify an invite or QR code before create(). It is the only
+    // address derivation in the SDK — never reimplement it natively, or the
+    // platforms will disagree.
+    //
+    // Throws if publicKey is not exactly 32 bytes.
+    [Throws=ProtocolError]
+    string derive_address(sequence<u8> public_key);
 };
 
 // ========================================================================
@@ -1364,9 +1377,9 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     sequence<u8> get_identity_public_key();
     
-    // Derive a deterministic user ID from a public key.
-    // Returns a base58-encoded string derived from SHA-256(publicKey)[0:20].
-    // The same public key always produces the same user ID.
+    // DEPRECATED: use the namespace-level derive_address instead.
+    // Returns the same "off1..." address, but accepts any input length rather
+    // than rejecting keys that are not 32 bytes.
     string derive_user_id_from_public_key(sequence<u8> public_key);
     
     // Sign arbitrary data with the identity private key (Ed25519).
