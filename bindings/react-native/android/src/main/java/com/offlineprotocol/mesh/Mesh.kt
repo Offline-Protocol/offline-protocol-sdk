@@ -39,17 +39,11 @@ data class SignedIdentityData(
         return buffer.array()
     }
     
-    /**
-     * Derives a user ID from the public key using SHA256 and base58 encoding.
-     * This produces the same result as the Rust derive_user_id_from_public_key function.
-     */
-    fun deriveUserId(): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        val hash = digest.digest(publicKey)
-        val first20Bytes = hash.copyOf(20)
-        return Base58.encode(first20Bytes)
-    }
-    
+    // The peer's address is NOT derived here. Address derivation lives in Rust
+    // (`deriveAddress`) so every platform produces the same string for the same
+    // key; the hand-rolled Kotlin and Swift copies this file used to carry were
+    // never pinned against it or each other.
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
@@ -83,42 +77,6 @@ data class SignedIdentityData(
             
             return SignedIdentityData(publicKey, signature, advertisementData)
         }
-    }
-}
-
-/**
- * Base58 encoding for user ID derivation (Bitcoin alphabet).
- */
-object Base58 {
-    private const val ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    private val BASE = ALPHABET.length.toBigInteger()
-    
-    fun encode(bytes: ByteArray): String {
-        if (bytes.isEmpty()) return ""
-        
-        // Count leading zeros
-        var leadingZeros = 0
-        for (byte in bytes) {
-            if (byte.toInt() == 0) leadingZeros++
-            else break
-        }
-        
-        // Convert bytes to a big integer
-        var value = java.math.BigInteger(1, bytes)
-        val result = StringBuilder()
-        
-        while (value > java.math.BigInteger.ZERO) {
-            val (quotient, remainder) = value.divideAndRemainder(BASE)
-            result.insert(0, ALPHABET[remainder.toInt()])
-            value = quotient
-        }
-        
-        // Add '1' for each leading zero byte
-        repeat(leadingZeros) {
-            result.insert(0, '1')
-        }
-        
-        return result.toString()
     }
 }
 

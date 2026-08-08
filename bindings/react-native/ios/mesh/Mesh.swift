@@ -49,51 +49,11 @@ struct SignedIdentityData {
             advertisementData: Data(advertisementData)
         )
     }
-    
-    /// Derives a user ID from the public key using SHA256 and base58 encoding.
-    /// This produces the same result as the Rust derive_user_id_from_public_key function.
-    func deriveUserId() -> String {
-        let hash = SHA256.hash(data: publicKey)
-        let first20Bytes = Array(hash.prefix(20))
-        return Base58.encode(first20Bytes)
-    }
-}
 
-/// Base58 encoding for user ID derivation (Bitcoin alphabet).
-enum Base58 {
-    private static let alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    private static let base = UInt(alphabet.count)
-    
-    static func encode(_ bytes: [UInt8]) -> String {
-        var intBytes = bytes.map { UInt($0) }
-        var result = ""
-        
-        // Count leading zeros
-        var leadingZeros = 0
-        for byte in bytes {
-            if byte == 0 { leadingZeros += 1 }
-            else { break }
-        }
-        
-        // Convert to base58
-        while !intBytes.allSatisfy({ $0 == 0 }) {
-            var carry: UInt = 0
-            for i in 0..<intBytes.count {
-                let value = intBytes[i] + carry * 256
-                intBytes[i] = value / base
-                carry = value % base
-            }
-            let char = alphabet[alphabet.index(alphabet.startIndex, offsetBy: Int(carry))]
-            result = String(char) + result
-        }
-        
-        // Add '1' for each leading zero byte
-        for _ in 0..<leadingZeros {
-            result = "1" + result
-        }
-        
-        return result
-    }
+    // The peer's address is NOT derived here. Address derivation lives in Rust
+    // (`deriveAddress`) so every platform produces the same string for the same
+    // key; the hand-rolled Swift and Kotlin copies this file used to carry were
+    // never pinned against it or each other.
 }
 
 /// Shared advertisement payload between iOS and Android mesh implementations.

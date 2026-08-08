@@ -51,6 +51,28 @@ use std::time::{Duration, SystemTime};
 uniffi::include_scaffolding!("offline_protocol");
 
 // ---------------------------------------------------------------------------
+// Namespace-level functions.
+//
+// These carry no protocol state, so callers can reach them before `create()`.
+// ---------------------------------------------------------------------------
+
+/// Derives the canonical self-certifying address of an Ed25519 identity key:
+/// `off1…`, the bech32m encoding of `0x01 ‖ SHA-256(public_key)[..20]`.
+///
+/// The single implementation for every platform — bridges call this rather
+/// than reimplementing the derivation, so an address means the same thing
+/// everywhere.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::MlsError`] if `public_key` is not 32 bytes.
+pub fn derive_address(public_key: Vec<u8>) -> Result<String, ProtocolError> {
+    CoreMlsManager::derive_address(&public_key)
+        .map(|address| address.to_string())
+        .map_err(|e| ProtocolError::MlsError(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
 // Poison-recovery utilities for non-Result methods.
 //
 // The UniFFI layer targets mobile platforms where a process crash is worse
@@ -5370,9 +5392,11 @@ impl OfflineProtocol {
 
     /// Derive a deterministic user ID from a public key.
     ///
-    /// Returns a base58-encoded string derived from `SHA-256(publicKey)[0:20]`.
-    /// The same public key always produces the same user ID.
+    /// Deprecated: use the namespace-level [`derive_address`], which needs no
+    /// protocol instance and rejects keys that are not 32 bytes. This returns
+    /// the same `off1…` address for a well-formed key.
     pub fn derive_user_id_from_public_key(&self, public_key: Vec<u8>) -> String {
+        #[allow(deprecated)]
         CoreMlsManager::derive_user_id_from_public_key(&public_key)
     }
 

@@ -2362,15 +2362,35 @@ export class OfflineProtocol {
   }
 
   /**
-   * Derives a deterministic user ID from a public key.
-   * Returns a base58-encoded string derived from SHA-256(publicKey)[0:20].
-   * The same public key always produces the same user ID.
+   * Derives the canonical self-certifying address of an Ed25519 identity key:
+   * `off1…` (44 characters), the bech32m encoding of
+   * `0x01 || SHA-256(publicKey)[0:20]`.
    *
-   * This allows binding a user's identity to their cryptographic keys,
-   * ensuring that user IDs cannot be forged.
+   * The address is a hash of the key, so it authenticates itself: a peer
+   * claiming an address is checked by re-deriving it from the key they
+   * present. The same key always yields the same address, and every address
+   * has exactly one valid string form.
+   *
+   * Needs no protocol instance — safe to call before `create()`, e.g. to
+   * verify an invite or QR code.
+   *
+   * @param publicKey - The Ed25519 public key bytes (exactly 32)
+   * @returns The derived `off1…` address
+   * @throws If `publicKey` is not 32 bytes
+   */
+  async deriveAddress(publicKey: number[]): Promise<string> {
+    return await OfflineProtocolNativeModule.deriveAddress(publicKey);
+  }
+
+  /**
+   * Derives a deterministic user ID from a public key.
+   *
+   * @deprecated Use {@link deriveAddress}. This returns the same `off1…`
+   * address, but requires an initialized protocol instance and accepts any
+   * input length rather than rejecting keys that are not 32 bytes.
    *
    * @param publicKey - The public key bytes (32 bytes for Ed25519)
-   * @returns The derived user ID string
+   * @returns The derived address string
    */
   async deriveUserIdFromPublicKey(publicKey: number[]): Promise<string> {
     return await OfflineProtocolNativeModule.deriveUserIdFromPublicKey(

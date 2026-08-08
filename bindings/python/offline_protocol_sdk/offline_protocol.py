@@ -509,6 +509,8 @@ def _uniffi_check_contract_api_version(lib):
         raise InternalError("UniFFI contract version mismatch: try cleaning and rebuilding your project")
 
 def _uniffi_check_api_checksums(lib):
+    if lib.uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 55050:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() != 61363:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 65338:
@@ -1314,6 +1316,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttran
     ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolWifiDirectTransportCallback),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_derive_address.argtypes = (
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_derive_address.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2360,6 +2367,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_
 _UniffiLib.ffi_offline_protocol_uniffi_uniffi_contract_version.argtypes = (
 )
 _UniffiLib.ffi_offline_protocol_uniffi_uniffi_contract_version.restype = ctypes.c_uint32
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_derive_address.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_derive_address.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.restype = ctypes.c_uint16
@@ -11894,6 +11904,20 @@ class _UniffiFfiConverterTypeOfflineProtocol:
     @classmethod
     def write(cls, value: OfflineProtocol, buf: _UniffiRustBuffer):
         buf.write_u64(cls.lower(value))
+def derive_address(public_key: typing.List[int]) -> str:
+    
+    _UniffiFfiConverterSequenceUInt8.check_lower(public_key)
+    _uniffi_lowered_args = (
+        _UniffiFfiConverterSequenceUInt8.lower(public_key),
+    )
+    _uniffi_lift_return = _UniffiFfiConverterString.lift
+    _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+    _uniffi_ffi_result = _uniffi_rust_call_with_error(
+        _uniffi_error_converter,
+        _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_derive_address,
+        *_uniffi_lowered_args,
+    )
+    return _uniffi_lift_return(_uniffi_ffi_result)
 
 __all__ = [
     "InternalError",
@@ -11962,6 +11986,7 @@ __all__ = [
     "TelemetryConfig",
     "TransportStateEvent",
     "WifiDirectMessage",
+    "derive_address",
     "MeshServices",
     "MeshServicesProtocol",
     "OfflineProtocol",

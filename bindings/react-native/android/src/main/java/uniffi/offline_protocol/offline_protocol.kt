@@ -882,7 +882,9 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
-    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services(
+    external fun uniffi_offline_protocol_uniffi_checksum_func_derive_address(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service(
 ): Short
@@ -1648,6 +1650,8 @@ external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_telemetrysin
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(`vtable`: UniffiVTableCallbackInterfaceWifiDirectTransportCallback,
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_func_derive_address(`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun ffi_offline_protocol_uniffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun ffi_offline_protocol_uniffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1767,6 +1771,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 55050.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 866.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -11109,4 +11116,15 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
         }
     }
 }
+    @Throws(ProtocolException::class) fun `deriveAddress`(`publicKey`: List<kotlin.UByte>): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_func_derive_address(
+    
+        FfiConverterSequenceUByte.lower(`publicKey`),_status)
+}
+    )
+    }
+    
+
 

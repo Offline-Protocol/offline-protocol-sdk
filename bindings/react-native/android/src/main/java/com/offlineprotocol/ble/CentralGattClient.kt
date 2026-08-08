@@ -16,6 +16,7 @@ import android.util.Log
 import com.offlineprotocol.mesh.MeshController
 import com.offlineprotocol.mesh.SignedIdentityData
 import uniffi.offline_protocol.OfflineProtocol
+import uniffi.offline_protocol.deriveAddress
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -1026,7 +1027,7 @@ internal class CentralGattClient(
 
     /**
      * Verifies a signed identity blob read from a peer. On success the
-     * cryptographically derived user id is used to seed a direct
+     * cryptographically derived address is used to seed a direct
      * routing entry for that peer.
      */
     private fun handleReceivedIdentity(data: ByteArray?, address: String) {
@@ -1045,16 +1046,19 @@ internal class CentralGattClient(
             )
 
             if (isValid) {
-                val derivedUserId = signedIdentity.deriveUserId()
-                Log.i(TAG, "Verified peer identity: $derivedUserId for $address")
+                // Derived in Rust — the single implementation shared by every
+                // platform. `decode` already guarantees a 32-byte key, so this
+                // cannot throw here; a throw would land in the catch below.
+                val derivedAddress = deriveAddress(signedIdentity.publicKey.map { it.toUByte() })
+                Log.i(TAG, "Verified peer identity: $derivedAddress for $address")
                 diagnosticEmitter("info", "Verified peer identity", mapOf(
                     "address" to address,
-                    "derivedUserId" to derivedUserId,
+                    "derivedAddress" to derivedAddress,
                 ))
 
                 val rssi = host.rssiFor(address) ?: (-60).toShort()
                 val quality = minOf(1.0f, maxOf(0.0f, (rssi.toFloat() + 100f) / 80f))
-                host.protocol.learnRoute(derivedUserId, derivedUserId, 1.toUByte(), quality, 0u)
+                host.protocol.learnRoute(derivedAddress, derivedAddress, 1.toUByte(), quality, 0u)
             } else {
                 Log.w(TAG, "Invalid signature for peer $address")
                 diagnosticEmitter("warning", "Invalid peer signature", mapOf("address" to address))

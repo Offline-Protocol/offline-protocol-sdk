@@ -3330,7 +3330,25 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Derive a user ID from a public key
+     * Derive the canonical self-certifying address ("off1...") from an Ed25519
+     * public key. Needs no protocol instance, so an invite or QR code can be
+     * checked before create().
+     */
+    @ReactMethod
+    fun deriveAddress(publicKey: ReadableArray, promise: Promise) {
+        try {
+            val publicKeyBytes = (0 until publicKey.size()).map { publicKey.getInt(it).toUByte() }
+            promise.resolve(uniffi.offline_protocol.deriveAddress(publicKeyBytes))
+        } catch (e: Exception) {
+            promise.reject("ERROR_CRYPTO", "Failed to derive address: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Derive a user ID from a public key.
+     *
+     * Deprecated: use deriveAddress, which needs no protocol instance and
+     * rejects keys that are not 32 bytes. Returns the same "off1..." address.
      */
     @ReactMethod
     fun deriveUserIdFromPublicKey(publicKey: ReadableArray, promise: Promise) {

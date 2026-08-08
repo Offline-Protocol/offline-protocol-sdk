@@ -10,6 +10,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod address;
 pub mod error;
 pub mod message;
 pub mod service;
@@ -17,6 +18,7 @@ pub mod sync;
 pub mod types;
 pub mod wire;
 
+pub use address::{Address, AddressError};
 pub use error::{Error, Result};
 pub use message::{
     ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, ReplyContext,

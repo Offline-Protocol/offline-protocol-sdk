@@ -63,6 +63,9 @@ openmls_traits = "0.4"
 # Encoding
 base64 = "0.22"
 hex = "0.4"
+# Only `alloc` is needed: `std` adds `std::error::Error` impls on bech32's own
+# error types, which never cross this workspace's API surface.
+bech32 = { version = "0.11.1", default-features = false, features = ["alloc"] }
 
 # Crypto
 # `ecdh` backs the NIP-44 v2 conversation key (secp256k1 ECDH, x-coordinate
