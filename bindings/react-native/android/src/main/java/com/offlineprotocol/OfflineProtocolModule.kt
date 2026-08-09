@@ -3338,7 +3338,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun localAddress(promise: Promise) {
-        val proto = protocolInstance
+        val proto = protocol
         if (proto == null) {
             promise.resolve(null)
             return
