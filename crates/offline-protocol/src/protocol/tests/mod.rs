@@ -7,6 +7,7 @@ use crate::mls_observability::{
 use crate::telemetry::{
     MlsVerbosity, NoopTelemetrySink, TelemetryConfig, TelemetryRecord, TelemetrySink,
 };
+use crate::test_identity::{id, session_slot};
 use chrono::Duration as ChronoDuration;
 use offline_protocol_core::{AppId, ContentType, MessagePriority, ServiceDescriptor, UserId};
 use offline_protocol_transport::{
@@ -147,7 +148,7 @@ fn seed_split_sealed_state_record(
 fn pending_test_message(sender: &str, content: &str) -> Message {
     Message::new(
         UserId::new(sender).unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         content,
     )
@@ -382,10 +383,10 @@ fn test_secure_and_protocol_state_storage_are_routed_separately() {
         .unwrap();
     protocol.start().unwrap();
     protocol
-        .send_message("bob", "queued", None, None::<String>)
+        .send_message(&id("bob"), "queued", None, None::<String>)
         .unwrap();
     let outbox_id = protocol
-        .send_connection_request("carol", "Alice", None, None)
+        .send_connection_request(&id("carol"), "Alice", None, None)
         .unwrap();
 
     assert!(secure
@@ -433,10 +434,10 @@ fn test_fresh_protocol_state_does_not_restore_pre_reinstall_pending_messages() {
             .unwrap();
         before_reinstall.start().unwrap();
         before_reinstall
-            .send_message("bob", "stale", None, None::<String>)
+            .send_message(&id("bob"), "stale", None, None::<String>)
             .unwrap();
         before_reinstall
-            .send_connection_request("carol", "Alice", None, None)
+            .send_connection_request(&id("carol"), "Alice", None, None)
             .unwrap();
         assert!(!old_state
             .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
@@ -509,16 +510,19 @@ fn test_pending_session_messages_expire_and_are_deleted_from_state_storage() {
     protocol.start().unwrap();
 
     let message_id = protocol
-        .send_message("bob", "queued", None, None::<String>)
+        .send_message(&id("bob"), "queued", None, None::<String>)
         .unwrap();
-    protocol.pending_encrypted_messages.get_mut("bob").unwrap()[0].queued_at =
-        Utc::now() - ChronoDuration::milliseconds(2);
+    protocol
+        .pending_encrypted_messages
+        .get_mut(&id("bob"))
+        .unwrap()[0]
+        .queued_at = Utc::now() - ChronoDuration::milliseconds(2);
 
     protocol.cleanup_expired_pending_messages();
 
-    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(!protocol.pending_encrypted_messages.contains_key(&id("bob")));
     assert!(state
-        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .load(storage_keys::PENDING_MESSAGES, &id("bob"))
         .unwrap()
         .is_none());
     assert!(events.lock().unwrap().iter().any(|event| matches!(
@@ -822,7 +826,7 @@ fn test_receive_message_surfaces_reply_context_on_event() {
         .clone()
         .flatten()
         .expect("reply_context surfaced on MessageReceived");
-    assert_eq!(rc.sender, "carol");
+    assert_eq!(rc.sender, "carol".to_string());
     assert_eq!(rc.text, "the original");
     assert_eq!(rc.reply_content_type.as_deref(), Some("text"));
 }
@@ -884,21 +888,24 @@ fn test_encrypted_receive_drops_relay_injected_reply_context() {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        let welcome = manager.create_session("bob").unwrap();
+        let welcome = manager.create_session(&id("bob")).unwrap();
         let bob_manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         bob_manager.join_session(&welcome).unwrap();
     }
-    alice.confirm_session_state("bob", "test_setup").unwrap();
-    bob.confirm_session_state("alice", "test_setup").unwrap();
+    alice
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
+    bob.confirm_session_state(&id("alice"), "test_setup")
+        .unwrap();
 
     alice
         .send_message(
-            "bob",
+            &id("bob"),
             "sealed hello",
             None::<MessagePriority>,
             None::<String>,
@@ -913,7 +920,7 @@ fn test_encrypted_receive_drops_relay_injected_reply_context() {
 
     // Hostile relay: splice a forged quote preview onto the sealed message.
     wire_msg.reply_context = Some(offline_protocol_core::ReplyContext {
-        sender: UserId::new("mallory").unwrap(),
+        sender: UserId::new(&id("mallory")).unwrap(),
         text: "forged quote".to_string(),
         timestamp: None,
         reply_media_label: None,
@@ -1188,7 +1195,7 @@ fn test_mls_observability_emits_encryption_used_for_successful_encrypt() {
     protocol.initialize_mls_for_test(storage).unwrap();
 
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let key_package = bob_manager.generate_key_package().unwrap();
 
     {
@@ -1196,19 +1203,19 @@ fn test_mls_observability_emits_encryption_used_for_successful_encrypt() {
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
     protocol
-        .confirm_session_state("bob", "manual_test")
+        .confirm_session_state(&id("bob"), "manual_test")
         .unwrap();
 
     let encrypted = protocol
-        .encrypt_content_for_recipient_strict("bob", "hello secure")
+        .encrypt_content_for_recipient_strict(&id("bob"), "hello secure")
         .unwrap();
     assert!(encrypted.starts_with(internal_prefixes::ENCRYPTED));
 
@@ -1225,7 +1232,7 @@ fn test_mls_observability_emits_decryption_failed_not_initialized() {
     protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
 
     let encrypted = EncryptedMessage {
-        group_id: offline_protocol_mls::GroupId::new("session:alice:bob").unwrap(),
+        group_id: offline_protocol_mls::GroupId::new(&session_slot("alice", "bob")).unwrap(),
         message_type: offline_protocol_mls::MlsMessageType::Application,
         epoch: 1,
         ciphertext: vec![1, 2, 3],
@@ -1266,14 +1273,14 @@ fn test_mls_observability_no_encryption_event_on_aborted_encrypt() {
     protocol.initialize_mls_for_test(storage).unwrap();
 
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: vec![1, 2, 3],
             local_expires_at_ms: (Utc::now().timestamp_millis() as u64).saturating_add(60_000),
         },
     );
 
-    let result = protocol.encrypt_content_for_recipient_strict("bob", "blocked");
+    let result = protocol.encrypt_content_for_recipient_strict(&id("bob"), "blocked");
     assert!(matches!(
         result,
         Err(Error::SessionNotReady(EstablishmentState::HaveKeyPackage))
@@ -1297,16 +1304,16 @@ fn test_mls_observability_session_ready_emits_once_for_idempotent_confirm() {
     protocol.initialize_mls_for_test(storage).unwrap();
 
     protocol.welcome_lifecycles.insert(
-        "bob".to_string(),
+        id("bob"),
         WelcomeLifecycleRecord {
-            peer_id: "bob".to_string(),
-            group_id: "session:user123:bob".to_string(),
+            peer_id: id("bob"),
+            group_id: session_slot("user123", "bob"),
             state: WelcomeDeliveryState::Sent,
             attempt: 1,
             unreachable_parks: 0,
             welcome_message: Message::new(
-                UserId::new("user123").unwrap(),
-                UserId::new("bob").unwrap(),
+                UserId::new(&id("user123")).unwrap(),
+                UserId::new(&id("bob")).unwrap(),
                 AppId::new("test-app").unwrap(),
                 "__MLS_WELCOME__{}",
             ),
@@ -1319,10 +1326,10 @@ fn test_mls_observability_session_ready_emits_once_for_idempotent_confirm() {
     );
 
     assert!(protocol
-        .confirm_session_state("bob", "confirmation_ack_received")
+        .confirm_session_state(&id("bob"), "confirmation_ack_received")
         .unwrap());
     assert!(!protocol
-        .confirm_session_state("bob", "confirmation_ack_received")
+        .confirm_session_state(&id("bob"), "confirmation_ack_received")
         .unwrap());
 
     let events = emitter.take();
@@ -1365,7 +1372,7 @@ fn test_telemetry_sink_receives_protocol_events() {
         .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
         .unwrap();
 
-    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".to_string()));
 
     let records = sink.take();
     assert_eq!(records.len(), 1, "sink should have received one record");
@@ -1547,7 +1554,7 @@ fn test_legacy_event_callback_still_fires_with_sink_installed() {
         .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
         .unwrap();
 
-    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".to_string()));
 
     // Legacy callback receives the raw event.
     let legacy_events = captured.lock().unwrap().clone();
@@ -1582,7 +1589,7 @@ fn test_noop_telemetry_sink_installs_cleanly() {
     protocol
         .install_telemetry_sink(Arc::new(NoopTelemetrySink), TelemetryConfig::default())
         .unwrap();
-    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".to_string()));
     // If we got here, the install + emit path did not panic.
 }
 
@@ -1596,7 +1603,7 @@ fn test_install_telemetry_sink_replaces_previous_sink() {
         .unwrap();
 
     // First sink should observe the pre-swap event.
-    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".to_string()));
 
     let second = RecordingTelemetrySink::default();
     protocol
@@ -1604,7 +1611,7 @@ fn test_install_telemetry_sink_replaces_previous_sink() {
         .unwrap();
 
     // After re-install, only the second sink observes the post-swap event.
-    protocol.emit_event(crate::events::Event::neighbor_lost("bob".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("bob".to_string()));
 
     let first_records = first.take();
     let second_records = second.take();
@@ -1945,7 +1952,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
 #[cfg(test)]
 fn sample_encrypted_message() -> offline_protocol_mls::EncryptedMessage {
     offline_protocol_mls::EncryptedMessage {
-        group_id: offline_protocol_mls::GroupId::new("session:alice:bob").unwrap(),
+        group_id: offline_protocol_mls::GroupId::new(&session_slot("alice", "bob")).unwrap(),
         message_type: offline_protocol_mls::MlsMessageType::Application,
         epoch: 3,
         ciphertext: (0u8..=255).collect(),
@@ -2132,7 +2139,7 @@ fn sample_rich_extras() -> RichSendExtras {
         }),
         media_metadata: Some(media),
         forward_info: Some(offline_protocol_core::ForwardInfo {
-            original_sender: UserId::new("dave").unwrap(),
+            original_sender: UserId::new(&id("dave")).unwrap(),
             original_message_id: MessageId::new(),
             original_timestamp: offline_protocol_core::Timestamp::now(),
             forward_count: 1,
@@ -2230,7 +2237,7 @@ fn feed_key_package_with_caps(
     );
     let message = Message::new(
         UserId::new(sender).unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         &content,
     );
@@ -2257,14 +2264,18 @@ fn protocol_with_nostr(user_id: &str) -> OfflineProtocol {
     config.encryption.enabled = true;
     config.transport.nostr_enabled = true;
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let nostr = NostrTransport::new(user_id).unwrap();
+    // Identity first: `NostrTransport` derives its routing tag and bootstrap
+    // keypair from the id it is built with, so building it before the address
+    // exists would leave it listening on a tag no peer computes. This mirrors
+    // what the FFI does — construct the transports once the address is known.
+    protocol
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let nostr = NostrTransport::new(local_id(&protocol)).unwrap();
     nostr.on_status_changed(TransportStatus::Available);
     protocol
         .transport_manager_mut()
         .add_transport(TransportType::Nostr, Box::new(nostr));
-    protocol
-        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
-        .unwrap();
     protocol
 }
 
@@ -2293,7 +2304,7 @@ fn as_nostr(transport: &Arc<dyn Transport>) -> &NostrTransport {
 fn seal_one_message(nostr: &NostrTransport, recipient: &str) -> (Vec<u8>, String) {
     use base64::Engine;
     let message = Message::new(
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         UserId::new(recipient).unwrap(),
         AppId::new("test-app").unwrap(),
         "hello",
@@ -2386,7 +2397,7 @@ fn feed_key_package_with_nostr_pubkey(
     peer.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let mut message = key_package_message_with_nostr_pubkey(sender, "user123", nostr_pubkey);
+    let mut message = key_package_message_with_nostr_pubkey(sender, &id("user123"), nostr_pubkey);
     peer.sign_control_message(&mut message).unwrap();
     assert!(
         message.metadata.contains_key(CTRL_SIG_META_KEY),
@@ -2881,7 +2892,7 @@ fn attested_rich_gates_group_seal_only_and_persists() {
     // leak into DM sealing (that path always has direct knowledge).
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage.clone());
-    let members = vec!["user123".to_string(), "peer".to_string()];
+    let members = vec![id("user123"), "peer".to_string()];
     assert!(!protocol.group_rich_seal_active(&members));
 
     protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
@@ -2906,8 +2917,8 @@ fn attested_rich_ignores_non_v1_and_self() {
     let mut protocol = protocol_with_mls_storage(storage);
     protocol.record_attested_rich("peer", &[99]);
     assert!(!protocol.peer_rich_attested.contains("peer"));
-    protocol.record_attested_rich("user123", &[RICH_PAYLOAD_V1]);
-    assert!(!protocol.peer_rich_attested.contains("user123"));
+    protocol.record_attested_rich(&id("user123"), &[RICH_PAYLOAD_V1]);
+    assert!(!protocol.peer_rich_attested.contains(&id("user123")));
 }
 
 #[test]
@@ -2917,7 +2928,7 @@ fn direct_key_package_overrides_attested_rich() {
     // and one with it moves the peer to the direct set.
     let storage = Arc::new(InMemoryStorage::new());
     let mut protocol = protocol_with_mls_storage(storage.clone());
-    let members = vec!["user123".to_string(), "peer".to_string()];
+    let members = vec![id("user123"), "peer".to_string()];
 
     protocol.record_attested_rich("peer", &[RICH_PAYLOAD_V1]);
     feed_key_package_with_rich(&mut protocol, "peer", Vec::new());
@@ -3173,7 +3184,7 @@ fn seal_rich_payload_round_trips_through_apply_decrypted_content() {
     let restored = message
         .reply_context
         .expect("sealed reply context restored");
-    assert_eq!(restored.sender.as_str(), "carol");
+    assert_eq!(restored.sender.as_str(), "carol".to_string());
     assert_eq!(restored.text, "the quoted message");
     let media = message
         .media_metadata
@@ -3187,7 +3198,7 @@ fn seal_rich_payload_round_trips_through_apply_decrypted_content() {
     let forward = message
         .forwarded_from
         .expect("sealed forward info restored");
-    assert_eq!(forward.original_sender.as_str(), "dave");
+    assert_eq!(forward.original_sender.as_str(), &id("dave").to_string());
     assert_eq!(
         message.content_type,
         ContentType::Image,
@@ -3573,7 +3584,7 @@ fn test_tofu_key_mismatch_emits_security_warning_with_stable_code() {
             _ => None,
         })
         .expect("a SecurityWarning event should have been emitted on key mismatch");
-    assert_eq!(peer_id, "alice");
+    assert_eq!(peer_id, "alice".to_string());
     assert_eq!(reason_code, SecurityWarningCode::TofuKeyMismatch);
     // The serialized code is the stable string JS consumers match on.
     assert_eq!(reason_code.as_str(), "TOFU_KEY_MISMATCH");
@@ -3749,7 +3760,7 @@ fn test_connection_request_recipient_unreachable_emits_undeliverable() {
             _ => None,
         })
         .expect("recipient_unreachable must emit ConnectionRequestUndeliverable");
-    assert_eq!(undeliverable.0, "bob");
+    assert_eq!(undeliverable.0, "bob".to_string());
     assert_eq!(undeliverable.1, sent_id.as_str());
     assert!(undeliverable.2.starts_with("recipient_unreachable"));
     drop(captured);
@@ -4097,7 +4108,7 @@ fn test_max_retries_settles_pending_connection_request_with_undeliverable() {
             _ => None,
         })
         .expect("retry exhaustion on a pending connection request must emit undeliverable");
-    assert_eq!(undeliverable.0, "bob");
+    assert_eq!(undeliverable.0, "bob".to_string());
     assert_eq!(undeliverable.1, sent_id.as_str());
     assert_eq!(undeliverable.2, "max_retries_exceeded");
     assert!(
@@ -5292,7 +5303,7 @@ fn test_require_encryption_returns_typed_failures() {
         .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let no_key_result =
-        no_key_protocol.send_message("bob", "nkp", None::<MessagePriority>, None::<String>);
+        no_key_protocol.send_message(&id("bob"), "nkp", None::<MessagePriority>, None::<String>);
     assert!(matches!(
         no_key_result,
         Err(Error::SessionNotReady(EstablishmentState::NoKeyPackage))
@@ -5313,7 +5324,7 @@ fn test_require_encryption_returns_typed_failures() {
         .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
     let bob_manager =
-        crate::mls::MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+        crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = pending_protocol
@@ -5324,15 +5335,19 @@ fn test_require_encryption_returns_typed_failures() {
             .unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
-    let pending_result =
-        pending_protocol.send_message("bob", "pending", None::<MessagePriority>, None::<String>);
+    let pending_result = pending_protocol.send_message(
+        &id("bob"),
+        "pending",
+        None::<MessagePriority>,
+        None::<String>,
+    );
     assert!(matches!(
         pending_result,
         Err(Error::SessionNotReady(EstablishmentState::SessionPending))
@@ -5349,7 +5364,7 @@ fn test_require_encryption_returns_typed_failures() {
         .add_transport(TransportType::BLE, Box::new(encrypt_fail_transport));
     encrypt_fail_protocol.start().unwrap();
     let encrypt_fail_result = encrypt_fail_protocol.send_message(
-        "bob",
+        &id("bob"),
         "encrypt-failed",
         None::<MessagePriority>,
         None::<String>,
@@ -5379,14 +5394,19 @@ fn test_require_encryption_queues_when_store_pending_enabled() {
 
     // With store_pending=true, messages should be queued (not error) when
     // session isn't ready, even with require_encryption=true.
-    let result = protocol.send_message("bob", "queued", None::<MessagePriority>, None::<String>);
+    let result = protocol.send_message(
+        &id("bob"),
+        "queued",
+        None::<MessagePriority>,
+        None::<String>,
+    );
     assert!(result.is_ok());
     // Message is queued, NOT sent via transport
     assert_eq!(transport_handle.sent_messages().len(), 0);
     assert_eq!(
         protocol
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .map_or(0, Vec::len),
         1
     );
@@ -5439,10 +5459,10 @@ fn test_require_encryption_queues_message_when_session_pending_with_key_package(
     protocol.start().unwrap();
 
     let bob_manager =
-        crate::mls::MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+        crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -5450,7 +5470,7 @@ fn test_require_encryption_queues_message_when_session_pending_with_key_package(
     );
 
     let result = protocol.send_message(
-        "bob",
+        &id("bob"),
         "pending-with-key-pkg",
         None::<MessagePriority>,
         None::<String>,
@@ -5468,7 +5488,7 @@ fn test_require_encryption_queues_message_when_session_pending_with_key_package(
         .unwrap()
         .read()
         .unwrap()
-        .has_session("bob")
+        .has_session(&id("bob"))
         .unwrap());
     // Two control messages hit the wire: the Welcome from the establishment
     // kick, then the confirmation probe from the post-queue reconciliation.
@@ -5479,11 +5499,11 @@ fn test_require_encryption_queues_message_when_session_pending_with_key_package(
         .content
         .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE));
     // The user message itself is queued, never on the wire.
-    assert!(protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(protocol.pending_encrypted_messages.contains_key(&id("bob")));
     assert_eq!(
         protocol
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .map_or(0, Vec::len),
         1
     );
@@ -5510,7 +5530,7 @@ fn test_require_encryption_queues_for_send_message_via_transport() {
     protocol.start().unwrap();
 
     let result = protocol.send_message_via_transport(
-        "bob",
+        &id("bob"),
         "queued-via-transport",
         None::<MessagePriority>,
         TransportType::BLE,
@@ -5523,7 +5543,7 @@ fn test_require_encryption_queues_for_send_message_via_transport() {
     assert_eq!(
         protocol
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .map_or(0, Vec::len),
         1
     );
@@ -5553,7 +5573,7 @@ fn test_require_encryption_pending_flush_encrypts_and_delivers() {
 
     // Step 1: Send message before session exists — should be queued.
     let result = protocol.send_message(
-        "bob",
+        &id("bob"),
         "hello encrypted",
         None::<MessagePriority>,
         None::<String>,
@@ -5563,36 +5583,38 @@ fn test_require_encryption_pending_flush_encrypts_and_delivers() {
     assert_eq!(
         protocol
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .map_or(0, Vec::len),
         1
     );
 
     // Step 2: Create MLS session (import key package + create session).
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
-    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.generate_key_package().unwrap();
     {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
 
     // Step 3: Confirm the session.
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
 
     // Step 4: Flush pending messages — they should now encrypt and send.
-    protocol.flush_pending_messages("bob").unwrap();
+    protocol.flush_pending_messages(&id("bob")).unwrap();
 
     // Pending queue should be drained.
-    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(!protocol.pending_encrypted_messages.contains_key(&id("bob")));
 
     // The message should have been sent via transport (encrypted).
     let sent = transport_handle.sent_messages();
@@ -5627,28 +5649,30 @@ fn test_flush_pending_message_keeps_queued_id() {
     protocol.start().unwrap();
 
     let queued_id = protocol
-        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
     assert_eq!(transport_handle.sent_messages().len(), 0);
 
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
-    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.generate_key_package().unwrap();
     {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
 
-    protocol.flush_pending_messages("bob").unwrap();
+    protocol.flush_pending_messages(&id("bob")).unwrap();
 
     let sent = transport_handle.sent_messages();
     assert_eq!(sent.len(), 1);
@@ -5656,7 +5680,7 @@ fn test_flush_pending_message_keeps_queued_id() {
         sent[0].id, queued_id,
         "Flushed message must keep the id returned at queue time"
     );
-    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(!protocol.pending_encrypted_messages.contains_key(&id("bob")));
 }
 
 #[test]
@@ -5681,17 +5705,17 @@ fn test_flush_requeue_keeps_queued_id_and_storage() {
     protocol.start().unwrap();
 
     let queued_id = protocol
-        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
     let second_id = protocol
-        .send_message("bob", "world", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "world", None::<MessagePriority>, None::<String>)
         .unwrap();
 
     // Session never established: flush re-queues rather than sending.
-    protocol.flush_pending_messages("bob").unwrap();
+    protocol.flush_pending_messages(&id("bob")).unwrap();
 
     assert_eq!(transport_handle.sent_messages().len(), 0);
-    let pending = protocol.pending_encrypted_messages.get("bob").unwrap();
+    let pending = protocol.pending_encrypted_messages.get(&id("bob")).unwrap();
     assert_eq!(pending.len(), 2);
     assert_eq!(
         pending[0].message_id, queued_id,
@@ -5702,7 +5726,7 @@ fn test_flush_requeue_keeps_queued_id_and_storage() {
         "Re-queue must preserve the original send order"
     );
     let persisted = protocol
-        .load_pending_messages_from_storage("bob")
+        .load_pending_messages_from_storage(&id("bob"))
         .expect("pending messages must remain persisted after a re-queue");
     assert_eq!(persisted.len(), 2);
     assert_eq!(
@@ -6461,7 +6485,7 @@ fn test_blocked_user_listing_failure_fails_init_rather_than_unblocking_everyone(
 
     let backing = Arc::new(crate::mls::InMemoryStorage::new());
     backing
-        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .store(storage_keys::BLOCKED_USERS, &id("mallory"), &[])
         .unwrap();
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -6563,18 +6587,18 @@ fn test_failed_init_does_not_leave_the_previous_stores_record_cipher_installed()
         .write_state_record(
             state_storage.as_ref(),
             storage_keys::PENDING_MESSAGES,
-            "bob",
+            &id("bob"),
             b"payload",
         )
         .expect("the retry must have a usable record key");
     let sealed = store_b
-        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .load(storage_keys::PENDING_MESSAGES, &id("bob"))
         .unwrap()
         .expect("the record must have reached store B");
 
     assert_eq!(
         state_record_cipher_for(&store_b)
-            .open(storage_keys::PENDING_MESSAGES, "bob", &sealed)
+            .open(storage_keys::PENDING_MESSAGES, &id("bob"), &sealed)
             .as_deref(),
         Some(&b"payload"[..]),
         "records must be sealed under the key of the store now attached"
@@ -6584,7 +6608,7 @@ fn test_failed_init_does_not_leave_the_previous_stores_record_cipher_installed()
     key_a_bytes.copy_from_slice(&key_a);
     assert!(
         state_crypto::StateRecordCipher::new(&key_a_bytes)
-            .open(storage_keys::PENDING_MESSAGES, "bob", &sealed)
+            .open(storage_keys::PENDING_MESSAGES, &id("bob"), &sealed)
             .is_none(),
         "the abandoned store's key must not be what sealed the record"
     );
@@ -6729,11 +6753,11 @@ fn test_pre_split_protocol_state_is_adopted_out_of_secure_storage() {
     let state = Arc::new(InMemoryStorage::new());
 
     secure
-        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .store(storage_keys::BLOCKED_USERS, &id("mallory"), &[])
         .unwrap();
     let (pending_id, pending_json) = pending_record("queued before the upgrade");
     secure
-        .store(storage_keys::PENDING_MESSAGES, "bob", &pending_json)
+        .store(storage_keys::PENDING_MESSAGES, &id("bob"), &pending_json)
         .unwrap();
 
     let (secure_handle, state_handle) = split_storage(&secure, &state);
@@ -6743,10 +6767,10 @@ fn test_pre_split_protocol_state_is_adopted_out_of_secure_storage() {
         .unwrap();
 
     assert!(
-        protocol.is_user_blocked("mallory"),
+        protocol.is_user_blocked(&id("mallory")),
         "a block predating the split must survive the upgrade"
     );
-    let restored = protocol.pending_encrypted_messages.get("bob").unwrap();
+    let restored = protocol.pending_encrypted_messages.get(&id("bob")).unwrap();
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].message_id, pending_id);
 
@@ -6754,11 +6778,11 @@ fn test_pre_split_protocol_state_is_adopted_out_of_secure_storage() {
     // credential store indefinitely — the exact resting place the split exists
     // to get it out of.
     assert!(secure
-        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .load(storage_keys::PENDING_MESSAGES, &id("bob"))
         .unwrap()
         .is_none());
     assert!(secure
-        .load(storage_keys::BLOCKED_USERS, "mallory")
+        .load(storage_keys::BLOCKED_USERS, &id("mallory"))
         .unwrap()
         .is_none());
 
@@ -6767,7 +6791,7 @@ fn test_pre_split_protocol_state_is_adopted_out_of_secure_storage() {
     // Adopted *and* migrated forward on the same launch: the legacy
     // per-recipient record is gone and the entry now lives under its own id.
     assert!(state
-        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .load(storage_keys::PENDING_MESSAGES, &id("bob"))
         .unwrap()
         .is_none());
     let adopted = state
@@ -6792,16 +6816,16 @@ fn test_adoption_never_overwrites_post_split_state() {
 
     let (_, legacy_json) = pending_record("stale legacy copy");
     secure
-        .store(storage_keys::PENDING_MESSAGES, "bob", &legacy_json)
+        .store(storage_keys::PENDING_MESSAGES, &id("bob"), &legacy_json)
         .unwrap();
     let (current_id, current_json) = pending_record("current copy");
     let cipher = state_record_cipher_for(&secure);
     state
         .store(
             storage_keys::PENDING_MESSAGES,
-            "bob",
+            &id("bob"),
             &cipher
-                .seal(storage_keys::PENDING_MESSAGES, "bob", &current_json)
+                .seal(storage_keys::PENDING_MESSAGES, &id("bob"), &current_json)
                 .unwrap(),
         )
         .unwrap();
@@ -6812,11 +6836,11 @@ fn test_adoption_never_overwrites_post_split_state() {
         .initialize_mls(secure_handle, state_handle)
         .unwrap();
 
-    let restored = protocol.pending_encrypted_messages.get("bob").unwrap();
+    let restored = protocol.pending_encrypted_messages.get(&id("bob")).unwrap();
     assert_eq!(restored[0].message_id, current_id, "post-split state wins");
     assert!(
         secure
-            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .load(storage_keys::PENDING_MESSAGES, &id("bob"))
             .unwrap()
             .is_some(),
         "a skipped record must be left alone, not deleted"
@@ -6831,24 +6855,24 @@ fn test_adoption_runs_once_and_does_not_resurrect_deleted_state() {
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
     secure
-        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .store(storage_keys::BLOCKED_USERS, &id("mallory"), &[])
         .unwrap();
 
     let (secure_handle, state_handle) = split_storage(&secure, &state);
     let mut first = OfflineProtocol::new(create_test_config()).unwrap();
     first.initialize_mls(secure_handle, state_handle).unwrap();
-    first.unblock_user("mallory").unwrap();
+    first.unblock_user(&id("mallory")).unwrap();
 
     // Put the legacy record back, as an interrupted first sweep might have.
     secure
-        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .store(storage_keys::BLOCKED_USERS, &id("mallory"), &[])
         .unwrap();
 
     let (secure_handle, state_handle) = split_storage(&secure, &state);
     let mut second = OfflineProtocol::new(create_test_config()).unwrap();
     second.initialize_mls(secure_handle, state_handle).unwrap();
     assert!(
-        !second.is_user_blocked("mallory"),
+        !second.is_user_blocked(&id("mallory")),
         "the marker must stop a second sweep from resurrecting adopted state"
     );
 }
@@ -6920,7 +6944,7 @@ fn test_settlements_parked_while_paused_are_drained_on_resume() {
     let events = started_protocol_events(&mut protocol);
     let message_id = MessageId::new();
     protocol.queue_pending_message(
-        "bob",
+        &id("bob"),
         "queued before the pause",
         MessagePriority::Medium,
         message_id.clone(),
@@ -6942,7 +6966,10 @@ fn test_settlements_parked_while_paused_are_drained_on_resume() {
     protocol.update_retry_config(retry).unwrap();
 
     assert!(
-        protocol.pending_encrypted_messages.get("bob").is_none(),
+        protocol
+            .pending_encrypted_messages
+            .get(&id("bob"))
+            .is_none(),
         "the fixture must actually expire the queue"
     );
     assert!(
@@ -6982,9 +7009,9 @@ fn test_unreadable_pending_queue_is_surfaced_per_recipient() {
     state
         .store(
             storage_keys::PENDING_MESSAGES,
-            "bob",
+            &id("bob"),
             &foreign
-                .seal(storage_keys::PENDING_MESSAGES, "bob", b"[]")
+                .seal(storage_keys::PENDING_MESSAGES, &id("bob"), b"[]")
                 .unwrap(),
         )
         .unwrap();
@@ -7000,7 +7027,7 @@ fn test_unreadable_pending_queue_is_surfaced_per_recipient() {
         matches!(
             event,
             Event::ConvergenceDiag { stage, peer_id, .. }
-                if stage == "pending_state_lost" && peer_id == "bob"
+                if stage == "pending_state_lost" && peer_id == &id("bob")
         )
     });
     assert!(
@@ -7219,7 +7246,7 @@ fn test_adoption_settles_legacy_records_too_large_to_migrate() {
         .store(storage_keys::OUTBOX, &message_id.as_str(), &oversized)
         .unwrap();
     secure
-        .store(storage_keys::PENDING_MESSAGES, "bob", &oversized)
+        .store(storage_keys::PENDING_MESSAGES, &id("bob"), &oversized)
         .unwrap();
 
     let (secure_handle, state_handle) = split_storage(&secure, &state);
@@ -7234,7 +7261,7 @@ fn test_adoption_settles_legacy_records_too_large_to_migrate() {
         .unwrap()
         .is_none());
     assert!(secure
-        .load(storage_keys::PENDING_MESSAGES, "bob")
+        .load(storage_keys::PENDING_MESSAGES, &id("bob"))
         .unwrap()
         .is_none());
     assert!(state
@@ -7255,7 +7282,7 @@ fn test_adoption_settles_legacy_records_too_large_to_migrate() {
         events.iter().any(|event| matches!(
             event,
             Event::ConvergenceDiag { stage, peer_id, .. }
-                if stage == "pending_state_lost" && peer_id == "bob"
+                if stage == "pending_state_lost" && peer_id == &id("bob")
         )),
         "a pending queue too large to migrate must be surfaced per recipient"
     );
@@ -7461,7 +7488,7 @@ fn test_not_found_from_a_provider_load_reads_as_absence() {
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
     secure
-        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .store(storage_keys::BLOCKED_USERS, &id("mallory"), &[])
         .unwrap();
 
     let secure_handle: Arc<dyn MlsStorage> = secure.clone();
@@ -7478,7 +7505,7 @@ fn test_not_found_from_a_provider_load_reads_as_absence() {
         "absence reported as NotFound must not settle anything as failed"
     );
     assert!(
-        protocol.is_user_blocked("mallory"),
+        protocol.is_user_blocked(&id("mallory")),
         "the adoption sweep must still run when the marker probe reports NotFound"
     );
     assert!(
@@ -7545,7 +7572,7 @@ fn test_adoption_marker_is_withheld_when_a_category_cannot_be_listed() {
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
     secure
-        .store(storage_keys::BLOCKED_USERS, "mallory", &[])
+        .store(storage_keys::BLOCKED_USERS, &id("mallory"), &[])
         .unwrap();
 
     let failing: Arc<dyn MlsStorage> = Arc::new(FailingListStorage {
@@ -7560,7 +7587,7 @@ fn test_adoption_marker_is_withheld_when_a_category_cannot_be_listed() {
     first.initialize_mls(failing, state_handle).unwrap();
 
     // What could be swept was swept, but the pass is not marked complete.
-    assert!(first.is_user_blocked("mallory"));
+    assert!(first.is_user_blocked(&id("mallory")));
     assert!(
         state
             .load(
@@ -7838,24 +7865,29 @@ fn test_flush_terminal_welcome_failure_drops_pending_without_resurrection() {
     protocol.start().unwrap();
 
     protocol
-        .send_message("bob", "first", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "first", None::<MessagePriority>, None::<String>)
         .unwrap();
     protocol
-        .send_message("bob", "second", None::<MessagePriority>, None::<String>)
+        .send_message(
+            &id("bob"),
+            "second",
+            None::<MessagePriority>,
+            None::<String>,
+        )
         .unwrap();
 
     // The Welcome for bob goes terminal before the flush runs.
     protocol.welcome_lifecycles.insert(
-        "bob".to_string(),
+        id("bob"),
         WelcomeLifecycleRecord {
-            peer_id: "bob".to_string(),
-            group_id: "session:user123:bob".to_string(),
+            peer_id: id("bob"),
+            group_id: session_slot("user123", "bob"),
             state: WelcomeDeliveryState::Expired,
             attempt: 1,
             unreachable_parks: 0,
             welcome_message: Message::new(
-                UserId::new("user123").unwrap(),
-                UserId::new("bob").unwrap(),
+                UserId::new(&id("user123")).unwrap(),
+                UserId::new(&id("bob")).unwrap(),
                 AppId::new("test-app").unwrap(),
                 "__MLS_WELCOME__{}",
             ),
@@ -7867,15 +7899,17 @@ fn test_flush_terminal_welcome_failure_drops_pending_without_resurrection() {
         },
     );
 
-    protocol.flush_pending_messages("bob").unwrap();
+    protocol.flush_pending_messages(&id("bob")).unwrap();
 
     assert_eq!(transport_handle.sent_messages().len(), 0);
     assert!(
-        !protocol.pending_encrypted_messages.contains_key("bob"),
+        !protocol.pending_encrypted_messages.contains_key(&id("bob")),
         "Flush must not resurrect messages the session abort settled"
     );
     assert!(
-        protocol.load_pending_messages_from_storage("bob").is_none(),
+        protocol
+            .load_pending_messages_from_storage(&id("bob"))
+            .is_none(),
         "The aborted queue must stay cleared in storage"
     );
     assert!(
@@ -7917,23 +7951,25 @@ fn test_flush_drops_pending_for_blocked_recipient() {
     protocol.start().unwrap();
 
     let queued_id = protocol
-        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
     assert_eq!(
         protocol
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .map_or(0, Vec::len),
         1
     );
 
-    protocol.block_user("bob").unwrap();
-    protocol.flush_pending_messages("bob").unwrap();
+    protocol.block_user(&id("bob")).unwrap();
+    protocol.flush_pending_messages(&id("bob")).unwrap();
 
     assert_eq!(transport_handle.sent_messages().len(), 0);
-    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(!protocol.pending_encrypted_messages.contains_key(&id("bob")));
     assert!(
-        protocol.load_pending_messages_from_storage("bob").is_none(),
+        protocol
+            .load_pending_messages_from_storage(&id("bob"))
+            .is_none(),
         "Persisted pending messages must be cleared for a blocked recipient"
     );
     let captured = events.lock().unwrap();
@@ -7976,32 +8012,34 @@ fn test_flush_dedup_hit_drops_already_dispatched_message() {
     protocol.start().unwrap();
 
     let queued_id = protocol
-        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
     protocol.deduplicator.mark_seen(queued_id.clone());
 
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
-    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.generate_key_package().unwrap();
     {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
 
-    protocol.flush_pending_messages("bob").unwrap();
+    protocol.flush_pending_messages(&id("bob")).unwrap();
 
     assert_eq!(transport_handle.sent_messages().len(), 0);
     assert!(
-        !protocol.pending_encrypted_messages.contains_key("bob"),
+        !protocol.pending_encrypted_messages.contains_key(&id("bob")),
         "Dedup-hit message must be dropped, not re-queued"
     );
     // Exact-mode hit is authoritative: the id was already settled when it
@@ -8047,16 +8085,16 @@ fn test_flush_bloom_dedup_hit_settles_with_message_failed() {
     protocol.start().unwrap();
 
     let queued_id = protocol
-        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
     protocol.deduplicator.mark_seen(queued_id.clone());
     assert!(!protocol.deduplicator.is_exact());
 
-    protocol.flush_pending_messages("bob").unwrap();
+    protocol.flush_pending_messages(&id("bob")).unwrap();
 
     assert_eq!(transport_handle.sent_messages().len(), 0);
     assert!(
-        !protocol.pending_encrypted_messages.contains_key("bob"),
+        !protocol.pending_encrypted_messages.contains_key(&id("bob")),
         "Bloom dedup-hit message must be dropped, not re-queued"
     );
     let captured = events.lock().unwrap();
@@ -8157,7 +8195,7 @@ fn test_retry_failure_emits_message_retrying() {
         })
         .expect("MessageRetrying must be emitted when a retry attempt fails");
     assert_eq!(retrying.0, message_id.as_str());
-    assert_eq!(retrying.1, "bob");
+    assert_eq!(retrying.1, "bob".to_string());
     assert_eq!(retrying.2, 1);
     assert!(retrying.3 > 0);
 }
@@ -8226,7 +8264,7 @@ fn test_unreachable_relay_verdict_emits_message_undeliverable_non_terminal() {
         })
         .expect("MessageUndeliverable must be emitted for an unreachable DM recipient");
     assert_eq!(undeliverable.0, message_id.as_str());
-    assert_eq!(undeliverable.1, "bob");
+    assert_eq!(undeliverable.1, "bob".to_string());
     assert!(undeliverable.2.starts_with("recipient_unreachable"));
     assert_eq!(undeliverable.3, None);
     drop(captured);
@@ -9334,7 +9372,7 @@ fn test_unpark_cancel_spares_welcome_ack() {
         "bob".to_string(),
         WelcomeLifecycleRecord {
             peer_id: "bob".to_string(),
-            group_id: "session:user123:bob".to_string(),
+            group_id: session_slot("user123", "bob"),
             state: WelcomeDeliveryState::Sent,
             attempt: 1,
             unreachable_parks: 0,
@@ -9748,13 +9786,18 @@ fn test_non_strict_mode_preserves_pending_queue_behavior() {
         .add_transport(TransportType::BLE, Box::new(mock_transport));
     protocol.start().unwrap();
 
-    let result = protocol.send_message("bob", "queued", None::<MessagePriority>, None::<String>);
+    let result = protocol.send_message(
+        &id("bob"),
+        "queued",
+        None::<MessagePriority>,
+        None::<String>,
+    );
     assert!(result.is_ok());
     assert_eq!(transport_handle.sent_messages().len(), 0);
     assert_eq!(
         protocol
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .map_or(0, std::vec::Vec::len),
         1
     );
@@ -9789,7 +9832,7 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
     bob_config.encryption.store_pending = true;
 
     let alice_storage = Arc::new(InMemoryStorage::new());
-    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
 
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
@@ -9820,7 +9863,7 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
         manager.get_or_create_key_package().unwrap()
     };
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -9829,7 +9872,12 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
 
     // This creates session + Welcome and queues plaintext until confirmed.
     let _ = alice
-        .send_message("bob", "bootstrap", None::<MessagePriority>, None::<String>)
+        .send_message(
+            &id("bob"),
+            "bootstrap",
+            None::<MessagePriority>,
+            None::<String>,
+        )
         .unwrap();
 
     let welcome_wire = alice_transport_handle
@@ -9839,16 +9887,21 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
         .map(|msg| msg.content)
         .expect("expected welcome message sent by initiator");
     let welcome_msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &welcome_wire,
     );
     let _ = bob.process_internal_message(&welcome_msg);
 
     // Bob sends encrypted message; Alice decrypts and confirms.
-    bob.send_message("alice", "hello", None::<MessagePriority>, None::<String>)
-        .unwrap();
+    bob.send_message(
+        &id("alice"),
+        "hello",
+        None::<MessagePriority>,
+        None::<String>,
+    )
+    .unwrap();
     let bob_sent = bob_transport_handle.sent_messages();
     let last = bob_sent.last().unwrap().clone();
     let _ = alice.process_internal_message(&last);
@@ -9881,14 +9934,14 @@ fn test_session_confirmation_persists_across_restart_bidirectional_send() {
 
     alice2
         .send_message(
-            "bob",
+            &id("bob"),
             "after-restart-a2b",
             None::<MessagePriority>,
             None::<String>,
         )
         .unwrap();
     bob2.send_message(
-        "alice",
+        &id("alice"),
         "after-restart-b2a",
         None::<MessagePriority>,
         None::<String>,
@@ -9981,7 +10034,7 @@ fn test_initialize_mls_restore_failure_rolls_back_outbox() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Seed an in-memory outbox entry before persistence is wired up.
-    protocol.ensure_outbox_entry(&test_message("bob", "pre-existing"));
+    protocol.ensure_outbox_entry(&test_message(&id("bob"), "pre-existing"));
     assert_eq!(protocol.outbox_entry_count(), 1);
 
     let result = protocol.initialize_mls_for_test(Arc::new(FailingOutboxListStorage::default()));
@@ -10016,20 +10069,23 @@ fn test_auto_send_and_manual_mls_share_single_state_under_concurrency() {
         .add_transport(TransportType::BLE, Box::new(transport));
     protocol.start().unwrap();
 
-    let bob_manager = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let bob_manager =
+        crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
 
     let mls_handle_before = protocol.mls_manager.as_ref().unwrap().clone();
     let sessions_before = {
@@ -10062,7 +10118,12 @@ fn test_auto_send_and_manual_mls_share_single_state_under_concurrency() {
             let content = format!("auto-encrypted-{}", i);
             let mut guard = auto_shared.lock().unwrap();
             guard
-                .send_message("bob", &content, None::<MessagePriority>, None::<String>)
+                .send_message(
+                    &id("bob"),
+                    &content,
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
                 .unwrap();
         }
     });
@@ -10085,7 +10146,7 @@ fn test_auto_send_and_manual_mls_share_single_state_under_concurrency() {
     let sent = transport_handle.sent_messages();
     assert!(sent
         .iter()
-        .filter(|message| message.recipient.as_str() == "bob")
+        .filter(|message| message.recipient.as_str() == &id("bob"))
         .all(|message| message.content.starts_with(internal_prefixes::ENCRYPTED)));
 
     let groups_after = {
@@ -10118,29 +10179,32 @@ fn test_manual_welcome_processing_confirms_session_for_auto_encrypt_flow() {
         .add_transport(TransportType::BLE, Box::new(transport));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let alice_key_package = {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     bob_manager
         .import_key_package(
-            "alice",
+            &id("alice"),
             &alice_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = bob_manager.create_session("alice").unwrap();
+    let welcome = bob_manager.create_session(&id("alice")).unwrap();
 
     protocol.manual_mls_process_welcome(&welcome).unwrap();
 
-    let persisted = protocol.load_session_state_entry("bob").unwrap().unwrap();
+    let persisted = protocol
+        .load_session_state_entry(&id("bob"))
+        .unwrap()
+        .unwrap();
     assert_eq!(persisted, SessionState::Confirmed);
 
     protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "manual-welcome-unblocks-auto-send",
             None::<MessagePriority>,
             None::<String>,
@@ -10150,7 +10214,7 @@ fn test_manual_welcome_processing_confirms_session_for_auto_encrypt_flow() {
     let sent = transport_handle.sent_messages();
     assert!(sent
         .iter()
-        .filter(|message| message.recipient.as_str() == "bob")
+        .filter(|message| message.recipient.as_str() == &id("bob"))
         .any(|message| message.content.starts_with(internal_prefixes::ENCRYPTED)));
 
     protocol.stop().unwrap();
@@ -10167,33 +10231,42 @@ fn test_manual_delete_session_clears_protocol_session_state() {
         .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    let bob_manager = MlsManager::new("bob", Arc::new(InMemoryStorage::new())).unwrap();
+    let bob_manager =
+        crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
     assert_eq!(
-        protocol.load_session_state_entry("bob").unwrap().unwrap(),
+        protocol
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
 
-    protocol.manual_mls_delete_session("bob").unwrap();
+    protocol.manual_mls_delete_session(&id("bob")).unwrap();
 
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
-        assert!(!manager.has_session("bob").unwrap());
+        assert!(!manager.has_session(&id("bob")).unwrap());
     }
-    assert!(!protocol.confirmed_sessions.contains("bob"));
-    assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+    assert!(!protocol.confirmed_sessions.contains(&id("bob")));
+    assert!(protocol
+        .load_session_state_entry(&id("bob"))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -10207,12 +10280,17 @@ fn test_manual_delete_session_failure_keeps_protocol_state_unchanged() {
         .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
     assert_eq!(
-        protocol.load_session_state_entry("bob").unwrap().unwrap(),
+        protocol
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
-    assert!(protocol.confirmed_sessions.contains("bob"));
+    assert!(protocol.confirmed_sessions.contains(&id("bob")));
 
     // Force a deterministic failure path by poisoning the MLS lock.
     let poisoned_handle = protocol.mls_manager.as_ref().unwrap().clone();
@@ -10223,13 +10301,16 @@ fn test_manual_delete_session_failure_keeps_protocol_state_unchanged() {
     .join();
     assert!(poison_result.is_err());
 
-    let result = protocol.manual_mls_delete_session("bob");
+    let result = protocol.manual_mls_delete_session(&id("bob"));
     assert!(result.is_err());
     assert_eq!(
-        protocol.load_session_state_entry("bob").unwrap().unwrap(),
+        protocol
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
-    assert!(protocol.confirmed_sessions.contains("bob"));
+    assert!(protocol.confirmed_sessions.contains(&id("bob")));
 }
 
 #[test]
@@ -10246,27 +10327,35 @@ fn test_is_session_confirmed_trusts_cache_and_encrypt_evicts_stale() {
         .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
     assert_eq!(
-        protocol.load_session_state_entry("bob").unwrap().unwrap(),
+        protocol
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
 
     // Fast path trusts the cache — returns true even without an MLS session
-    assert!(protocol.is_session_confirmed("bob").unwrap());
-    assert!(protocol.confirmed_sessions.contains("bob"));
+    assert!(protocol.is_session_confirmed(&id("bob")).unwrap());
+    assert!(protocol.confirmed_sessions.contains(&id("bob")));
 
     // But encryption will fail because there's no actual MLS session,
     // which evicts the cache entry and returns SessionNotReady (queueable).
     let mls = protocol.mls_manager.as_ref().unwrap().clone();
-    let result = protocol.encrypt_bytes_confirmed_session(&mls, "bob", b"test");
+    let result = protocol.encrypt_bytes_confirmed_session(&mls, &id("bob"), b"test");
     assert!(matches!(result, Err(Error::SessionNotReady(_))));
-    assert!(!protocol.confirmed_sessions.contains("bob"));
+    assert!(!protocol.confirmed_sessions.contains(&id("bob")));
 
     // After cache eviction, is_session_confirmed falls through to storage.
     // The storage path detects no MLS session and cleans up stale state.
-    assert!(!protocol.is_session_confirmed("bob").unwrap());
-    assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+    assert!(!protocol.is_session_confirmed(&id("bob")).unwrap());
+    assert!(protocol
+        .load_session_state_entry(&id("bob"))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -10283,41 +10372,43 @@ fn test_encrypt_confirmed_session_transient_error_preserves_cache() {
 
     // Create a real MLS session
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
-    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.generate_key_package().unwrap();
     {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
-    assert!(protocol.confirmed_sessions.contains("bob"));
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
+    assert!(protocol.confirmed_sessions.contains(&id("bob")));
 
     // Encrypt succeeds on the fast path
     let mls = protocol.mls_manager.as_ref().unwrap().clone();
-    let result = protocol.encrypt_bytes_confirmed_session(&mls, "bob", b"hello");
+    let result = protocol.encrypt_bytes_confirmed_session(&mls, &id("bob"), b"hello");
     assert!(result.is_ok());
     // Cache still intact after successful encrypt
-    assert!(protocol.confirmed_sessions.contains("bob"));
+    assert!(protocol.confirmed_sessions.contains(&id("bob")));
 
     // Now delete the session from MLS to simulate external wipe
     {
         let manager = mls.read().unwrap();
-        manager.delete_session("bob").unwrap();
+        manager.delete_session(&id("bob")).unwrap();
     }
 
     // Encrypt fails with SessionNotReady (queueable) — cache should be evicted
-    let result2 = protocol.encrypt_bytes_confirmed_session(&mls, "bob", b"hello again");
+    let result2 = protocol.encrypt_bytes_confirmed_session(&mls, &id("bob"), b"hello again");
     assert!(matches!(result2, Err(Error::SessionNotReady(_))));
     assert!(
-        !protocol.confirmed_sessions.contains("bob"),
+        !protocol.confirmed_sessions.contains(&id("bob")),
         "SessionNotFound must evict the cache"
     );
 }
@@ -10346,34 +10437,36 @@ fn test_externally_deleted_confirmed_session_queues_message() {
 
     // Create a real MLS session and confirm it
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
-    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.generate_key_package().unwrap();
     {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
-    assert!(protocol.confirmed_sessions.contains("bob"));
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
+    assert!(protocol.confirmed_sessions.contains(&id("bob")));
 
     // Externally delete the MLS session (simulating storage corruption)
     {
         let mls = protocol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
-        manager.delete_session("bob").unwrap();
+        manager.delete_session(&id("bob")).unwrap();
     }
 
     // Send a message — should be queued (not dropped), because the
     // SessionNotReady error from encrypt_confirmed_session is queueable.
     let result = protocol.send_message(
-        "bob",
+        &id("bob"),
         "should be queued",
         None::<MessagePriority>,
         None::<String>,
@@ -10387,18 +10480,20 @@ fn test_externally_deleted_confirmed_session_queues_message() {
     assert_eq!(
         protocol
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .map_or(0, Vec::len),
         1,
         "Message should be in the pending queue"
     );
     // Cache should be evicted so future sends go through the full path
-    assert!(!protocol.confirmed_sessions.contains("bob"));
+    assert!(!protocol.confirmed_sessions.contains(&id("bob")));
 }
 
 #[test]
 fn test_session_group_detection_for_manual_decrypt_confirmation() {
-    assert!(OfflineProtocol::is_session_group_id("session:alice:bob"));
+    assert!(OfflineProtocol::is_session_group_id(&session_slot(
+        "alice", "bob"
+    )));
     assert!(!OfflineProtocol::is_session_group_id("group:team"));
 }
 
@@ -10413,24 +10508,26 @@ fn test_confirmation_crash_recovery_before_first_send() {
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Build a real session in MLS storage without using protocol transport.
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        let welcome = manager.create_session("bob").unwrap();
+        let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
     }
 
     // Persist confirmation and "crash" before first outbound post-confirm send.
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
 
     let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     restarted.config.encryption.enabled = true;
@@ -10446,7 +10543,7 @@ fn test_confirmation_crash_recovery_before_first_send() {
 
     restarted
         .send_message(
-            "bob",
+            &id("bob"),
             "post-crash-send",
             None::<MessagePriority>,
             None::<String>,
@@ -10504,11 +10601,11 @@ fn test_pending_session_state_blocks_send_until_confirmed() {
     protocol.start().unwrap();
 
     // Provide a key package so first send creates a session and persists Pending.
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -10516,21 +10613,34 @@ fn test_pending_session_state_blocks_send_until_confirmed() {
     );
 
     protocol
-        .send_message("bob", "queued-1", None::<MessagePriority>, None::<String>)
+        .send_message(
+            &id("bob"),
+            "queued-1",
+            None::<MessagePriority>,
+            None::<String>,
+        )
         .unwrap();
     protocol
-        .send_message("bob", "queued-2", None::<MessagePriority>, None::<String>)
+        .send_message(
+            &id("bob"),
+            "queued-2",
+            None::<MessagePriority>,
+            None::<String>,
+        )
         .unwrap();
 
     assert_eq!(
         protocol
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .unwrap()
             .len(),
         2
     );
-    let persisted = protocol.load_session_state_entry("bob").unwrap().unwrap();
+    let persisted = protocol
+        .load_session_state_entry(&id("bob"))
+        .unwrap()
+        .unwrap();
     assert_eq!(persisted, SessionState::Pending);
 }
 
@@ -10561,11 +10671,11 @@ fn test_welcome_send_failure_keeps_session_pending_and_emits_reason_code() {
 
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -10574,7 +10684,7 @@ fn test_welcome_send_failure_keeps_session_pending_and_emits_reason_code() {
 
     let _ = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "queued-after-welcome-fail",
             None::<MessagePriority>,
             None::<String>,
@@ -10582,14 +10692,17 @@ fn test_welcome_send_failure_keeps_session_pending_and_emits_reason_code() {
         .unwrap();
 
     assert_eq!(
-        protocol.load_session_state_entry("bob").unwrap().unwrap(),
+        protocol
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Pending
     );
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert!(protocol
         .pending_encrypted_messages
-        .get("bob")
+        .get(&id("bob"))
         .is_some_and(|messages| !messages.is_empty()));
 
     let events = observed_events.lock().unwrap();
@@ -10631,11 +10744,11 @@ fn test_welcome_retry_exhaustion_expires_and_aborts_pending_queue() {
 
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -10643,20 +10756,23 @@ fn test_welcome_retry_exhaustion_expires_and_aborts_pending_queue() {
     );
 
     let result = protocol.send_message(
-        "bob",
+        &id("bob"),
         "should-fail-terminally",
         None::<MessagePriority>,
         None::<String>,
     );
     assert!(result.is_err());
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Expired);
     assert_eq!(
-        protocol.load_session_state_entry("bob").unwrap().unwrap(),
+        protocol
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Pending
     );
-    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+    assert!(!protocol.pending_encrypted_messages.contains_key(&id("bob")));
 
     let events = observed_events.lock().unwrap();
     assert!(events.iter().any(|event| matches!(
@@ -10689,11 +10805,11 @@ fn test_welcome_partial_success_after_retry_reaches_sent() {
 
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -10702,14 +10818,14 @@ fn test_welcome_partial_success_after_retry_reaches_sent() {
 
     let _ = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "queued-after-flaky-send",
             None::<MessagePriority>,
             None::<String>,
         )
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Failed
     );
 
@@ -10720,17 +10836,17 @@ fn test_welcome_partial_success_after_retry_reaches_sent() {
     // successful (retried) transport send leaves the lifecycle SendAttempted
     // with a confirm timeout, so a lost fragment keeps being re-sent instead of
     // being falsely marked delivered.
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::SendAttempted);
     assert!(lifecycle.next_retry_at.is_some());
 
     // The peer's session proof (here an ack) confirms the session and marks the
     // welcome Sent, ending the retries.
     protocol
-        .confirm_session_state("bob", "confirmation_ack_received")
+        .confirm_session_state(&id("bob"), "confirmation_ack_received")
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Sent
     );
 }
@@ -10752,11 +10868,11 @@ fn test_welcome_internet_requires_async_confirmation_before_sent() {
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -10765,7 +10881,7 @@ fn test_welcome_internet_requires_async_confirmation_before_sent() {
 
     let _ = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "queued-over-internet",
             None::<MessagePriority>,
             None::<String>,
@@ -10774,19 +10890,19 @@ fn test_welcome_internet_requires_async_confirmation_before_sent() {
 
     let welcome_message_id = protocol
         .welcome_lifecycles
-        .get("bob")
+        .get(&id("bob"))
         .unwrap()
         .welcome_message
         .id
         .as_str()
         .to_string();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::SendAttempted
     );
     assert!(protocol
         .welcome_lifecycles
-        .get("bob")
+        .get(&id("bob"))
         .unwrap()
         .next_retry_at
         .is_some());
@@ -10795,7 +10911,7 @@ fn test_welcome_internet_requires_async_confirmation_before_sent() {
         .on_transport_send_confirmed(&welcome_message_id)
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Sent
     );
 }
@@ -10818,11 +10934,11 @@ fn test_on_transport_send_confirmed_sends_immediate_probe() {
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -10831,7 +10947,7 @@ fn test_on_transport_send_confirmed_sends_immediate_probe() {
 
     let _ = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "probe-after-confirm",
             None::<MessagePriority>,
             None::<String>,
@@ -10840,7 +10956,7 @@ fn test_on_transport_send_confirmed_sends_immediate_probe() {
 
     let welcome_message_id = protocol
         .welcome_lifecycles
-        .get("bob")
+        .get(&id("bob"))
         .unwrap()
         .welcome_message
         .id
@@ -10898,11 +11014,11 @@ fn test_mesh_welcome_sender_probes_for_confirmation() {
     protocol.start().unwrap();
 
     // Peer key package available, as after accepting a connection request.
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -10913,10 +11029,10 @@ fn test_mesh_welcome_sender_probes_for_confirmation() {
     // queue an app message, so it does not borrow the initiator's
     // queue_message_for_session_establishment -> kick-reconciliation path; the
     // probe must be seeded by the Welcome send itself.
-    protocol.establish_secure_session("bob").unwrap();
+    protocol.establish_secure_session(&id("bob")).unwrap();
 
     assert!(
-        protocol.confirmation_probe_due_at.contains_key("bob"),
+        protocol.confirmation_probe_due_at.contains_key(&id("bob")),
         "Welcome send should seed the confirmation-probe scheduler for the pending peer"
     );
 
@@ -10963,22 +11079,23 @@ fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
         .add_transport(TransportType::BLE, Box::new(bob_transport));
     bob.start().unwrap();
 
-    // Owner "zoe" (lexicographically greater than "bob") creates the group and
+    // Owner &id("zoe") (lexicographically greater than &id("bob")) creates the group and
     // the Welcome. bob never creates its own group — it only joins zoe's, so bob
     // has no outbound welcome lifecycle for zoe.
-    let zoe_manager = MlsManager::new("zoe", Arc::new(InMemoryStorage::new())).unwrap();
+    let zoe_manager =
+        crate::test_identity::manager_for("zoe", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     zoe_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = zoe_manager.create_session("bob").unwrap();
+    let welcome = zoe_manager.create_session(&id("bob")).unwrap();
     let welcome_content = format!(
         "{}{}",
         internal_prefixes::WELCOME,
@@ -10986,8 +11103,8 @@ fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
     );
     let make_welcome_msg = || {
         Message::new(
-            UserId::new("zoe").unwrap(),
-            UserId::new("bob").unwrap(),
+            UserId::new(&id("zoe")).unwrap(),
+            UserId::new(&id("bob")).unwrap(),
             AppId::new("test-app").unwrap(),
             &welcome_content,
         )
@@ -10996,7 +11113,7 @@ fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
     // First Welcome: bob joins and proactively confirms its own side.
     bob.process_internal_message(&make_welcome_msg());
     assert!(
-        bob.confirmed_sessions.contains("zoe"),
+        bob.confirmed_sessions.contains(&id("zoe")),
         "adopter should confirm its session on first Welcome receipt"
     );
 
@@ -11012,7 +11129,7 @@ fn test_adopter_resends_confirm_on_welcome_retransmit_without_owner_keep() {
 
     // Must NOT be misclassified as a both-create owner.
     assert!(
-        !bob.both_create_awaiting_decrypt.contains("zoe"),
+        !bob.both_create_awaiting_decrypt.contains(&id("zoe")),
         "adopter retransmit must not enter owner_keep / poison both_create_awaiting_decrypt"
     );
 
@@ -11039,23 +11156,27 @@ fn test_welcome_terminal_lifecycle_can_be_overwritten() {
     protocol.initialize_mls_for_test(storage).unwrap();
 
     let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         "__MLS_WELCOME__dummy".to_string(),
     );
     protocol
-        .upsert_welcome_lifecycle("bob", "session:bob:1", message.clone(), "test_created")
+        .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message.clone(), "test_created")
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+        .transition_welcome_state(
+            &id("bob"),
+            WelcomeDeliveryState::SendAttempted,
+            "test_attempted",
+        )
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::Sent, "test_sent")
+        .transition_welcome_state(&id("bob"), WelcomeDeliveryState::Sent, "test_sent")
         .unwrap();
 
     let overwrite =
-        protocol.upsert_welcome_lifecycle("bob", "session:bob:2", message, "test_overwrite");
+        protocol.upsert_welcome_lifecycle(&id("bob"), "session:bob:2", message, "test_overwrite");
     assert!(overwrite.is_ok());
 }
 
@@ -11070,20 +11191,24 @@ fn test_welcome_non_terminal_lifecycle_cannot_be_overwritten() {
     protocol.initialize_mls_for_test(storage).unwrap();
 
     let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         "__MLS_WELCOME__dummy".to_string(),
     );
     protocol
-        .upsert_welcome_lifecycle("bob", "session:bob:1", message.clone(), "test_created")
+        .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message.clone(), "test_created")
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+        .transition_welcome_state(
+            &id("bob"),
+            WelcomeDeliveryState::SendAttempted,
+            "test_attempted",
+        )
         .unwrap();
 
     let overwrite =
-        protocol.upsert_welcome_lifecycle("bob", "session:bob:2", message, "test_overwrite");
+        protocol.upsert_welcome_lifecycle(&id("bob"), "session:bob:2", message, "test_overwrite");
     assert!(overwrite.is_err());
 }
 
@@ -11104,11 +11229,11 @@ fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
         .add_transport(TransportType::BLE, Box::new(mock_transport));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -11117,7 +11242,7 @@ fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
 
     let _ = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "welcome-sent",
             None::<MessagePriority>,
             None::<String>,
@@ -11126,21 +11251,21 @@ fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
     // A mesh welcome is non-terminal until the peer proves the session; the
     // peer's confirmation drives it to the terminal Sent state under test here.
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::SendAttempted
     );
     protocol
-        .confirm_session_state("bob", "confirmation_ack_received")
+        .confirm_session_state(&id("bob"), "confirmation_ack_received")
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Sent
     );
 
     // Sent → SendAttempted must never happen directly: a re-send always
     // goes through a rebuild (Created) or a corrective Failed first.
     let illegal = protocol.transition_welcome_state(
-        "bob",
+        &id("bob"),
         WelcomeDeliveryState::SendAttempted,
         "test_illegal_transition",
     );
@@ -11150,10 +11275,14 @@ fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
     // the relay's DeliveryError authoritatively proves a wire-confirmed
     // frame was dropped (see apply_recipient_unreachable_failure).
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "recipient_unreachable")
+        .transition_welcome_state(
+            &id("bob"),
+            WelcomeDeliveryState::Failed,
+            "recipient_unreachable",
+        )
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Failed
     );
 }
@@ -11178,11 +11307,11 @@ fn test_welcome_restart_recovery_restores_failed_lifecycle() {
         .add_transport(TransportType::BLE, Box::new(flaky));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -11191,20 +11320,20 @@ fn test_welcome_restart_recovery_restores_failed_lifecycle() {
 
     let _ = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "restart-recovery",
             None::<MessagePriority>,
             None::<String>,
         )
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Failed
     );
 
     let mut restarted = OfflineProtocol::new(config).unwrap();
     restarted.initialize_mls_for_test(storage).unwrap();
-    let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+    let restored = restarted.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(restored.state, WelcomeDeliveryState::Failed);
     assert!(restored.next_retry_at.is_some());
 }
@@ -11220,34 +11349,42 @@ fn test_welcome_restore_repairs_failed_without_retry_schedule() {
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         "__MLS_WELCOME__dummy".to_string(),
     );
     protocol
-        .upsert_welcome_lifecycle("bob", "session:bob:1", message, "test_created")
+        .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message, "test_created")
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+        .transition_welcome_state(
+            &id("bob"),
+            WelcomeDeliveryState::SendAttempted,
+            "test_attempted",
+        )
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_failed")
+        .transition_welcome_state(&id("bob"), WelcomeDeliveryState::Failed, "test_failed")
         .unwrap();
 
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.last_reason_code = Some(crate::events::WelcomeReasonCode::TransportUnavailable);
         record.next_retry_at = None;
     }
-    let persisted = protocol.welcome_lifecycles.get("bob").cloned().unwrap();
+    let persisted = protocol
+        .welcome_lifecycles
+        .get(&id("bob"))
+        .cloned()
+        .unwrap();
     protocol
         .persist_welcome_lifecycle_entry(&persisted)
         .unwrap();
 
     let mut restarted = OfflineProtocol::new(config).unwrap();
     restarted.initialize_mls_for_test(storage).unwrap();
-    let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+    let restored = restarted.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(restored.state, WelcomeDeliveryState::Failed);
     assert!(restored.next_retry_at.is_some());
 }
@@ -11263,34 +11400,42 @@ fn test_welcome_restore_promotes_retry_exhausted_failed_to_expired() {
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         "__MLS_WELCOME__dummy".to_string(),
     );
     protocol
-        .upsert_welcome_lifecycle("bob", "session:bob:1", message, "test_created")
+        .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message, "test_created")
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+        .transition_welcome_state(
+            &id("bob"),
+            WelcomeDeliveryState::SendAttempted,
+            "test_attempted",
+        )
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_failed")
+        .transition_welcome_state(&id("bob"), WelcomeDeliveryState::Failed, "test_failed")
         .unwrap();
 
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.last_reason_code = Some(crate::events::WelcomeReasonCode::RetryExhausted);
         record.next_retry_at = None;
     }
-    let persisted = protocol.welcome_lifecycles.get("bob").cloned().unwrap();
+    let persisted = protocol
+        .welcome_lifecycles
+        .get(&id("bob"))
+        .cloned()
+        .unwrap();
     protocol
         .persist_welcome_lifecycle_entry(&persisted)
         .unwrap();
 
     let mut restarted = OfflineProtocol::new(config).unwrap();
     restarted.initialize_mls_for_test(storage).unwrap();
-    let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+    let restored = restarted.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(restored.state, WelcomeDeliveryState::Expired);
     assert!(restored.next_retry_at.is_none());
 }
@@ -11316,11 +11461,11 @@ fn test_welcome_no_carrier_ticks_keep_lifecycle_alive() {
     });
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -11328,7 +11473,7 @@ fn test_welcome_no_carrier_ticks_keep_lifecycle_alive() {
     );
 
     let _ = protocol.send_message(
-        "bob",
+        &id("bob"),
         "queued-offline",
         None::<MessagePriority>,
         None::<String>,
@@ -11337,10 +11482,10 @@ fn test_welcome_no_carrier_ticks_keep_lifecycle_alive() {
     // Far more no-carrier attempts than max_retries — none may expire the
     // Welcome, and the retry budget must not accumulate.
     for _ in 0..10 {
-        let _ = protocol.try_send_welcome("bob", "test_no_carrier_tick");
+        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick");
     }
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_ne!(
         lifecycle.state,
         WelcomeDeliveryState::Expired,
@@ -11389,11 +11534,11 @@ fn test_no_carrier_welcome_parks_without_churn() {
     });
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -11401,16 +11546,16 @@ fn test_no_carrier_welcome_parks_without_churn() {
     );
 
     let _ = protocol.send_message(
-        "bob",
+        &id("bob"),
         "queued-offline",
         None::<MessagePriority>,
         None::<String>,
     );
     for _ in 0..10 {
-        let _ = protocol.try_send_welcome("bob", "test_no_carrier_tick");
+        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick");
     }
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     // Parked, not aged: still non-terminal and no attempt consumed.
     assert_ne!(lifecycle.state, WelcomeDeliveryState::Expired);
     assert_eq!(
@@ -11460,30 +11605,32 @@ fn test_both_create_gate_survives_owner_restart() {
 
     let mut owner = OfflineProtocol::new(config.clone()).unwrap();
     owner.initialize_mls_for_test(storage.clone()).unwrap();
-    owner.mark_both_create_awaiting_decrypt("bob");
-    assert!(owner.both_create_awaiting_decrypt.contains("bob"));
+    owner.mark_both_create_awaiting_decrypt(&id("bob"));
+    assert!(owner.both_create_awaiting_decrypt.contains(&id("bob")));
     // The gate blocks a plaintext-ack confirmation (only a decrypt is accepted).
-    assert!(!owner.can_confirm_from_source("bob", "confirmation_ack_received"));
+    assert!(!owner.can_confirm_from_source(&id("bob"), "confirmation_ack_received"));
 
     // Restart with the same storage: the gate must be restored.
     let mut restarted = OfflineProtocol::new(config.clone()).unwrap();
     restarted.initialize_mls_for_test(storage.clone()).unwrap();
     assert!(
-        restarted.both_create_awaiting_decrypt.contains("bob"),
+        restarted.both_create_awaiting_decrypt.contains(&id("bob")),
         "both-create owner gate must survive a restart"
     );
     assert!(
-        !restarted.can_confirm_from_source("bob", "confirmation_ack_received"),
+        !restarted.can_confirm_from_source(&id("bob"), "confirmation_ack_received"),
         "restored gate must still block a plaintext-ack confirmation"
     );
 
     // Convergence clears it from storage too, so a later restart does not revive
     // it (which would wrongly keep blocking confirmation of a converged peer).
-    restarted.clear_both_create_awaiting_decrypt("bob");
+    restarted.clear_both_create_awaiting_decrypt(&id("bob"));
     let mut after_converge = OfflineProtocol::new(config).unwrap();
     after_converge.initialize_mls_for_test(storage).unwrap();
     assert!(
-        !after_converge.both_create_awaiting_decrypt.contains("bob"),
+        !after_converge
+            .both_create_awaiting_decrypt
+            .contains(&id("bob")),
         "a cleared gate must not be restored after convergence"
     );
 }
@@ -11500,19 +11647,19 @@ fn test_both_create_gate_cleared_on_session_delete() {
 
     let mut owner = OfflineProtocol::new(config.clone()).unwrap();
     owner.initialize_mls_for_test(storage.clone()).unwrap();
-    owner.mark_both_create_awaiting_decrypt("bob");
-    assert!(owner.both_create_awaiting_decrypt.contains("bob"));
-    assert!(!owner.can_confirm_from_source("bob", "welcome_received"));
+    owner.mark_both_create_awaiting_decrypt(&id("bob"));
+    assert!(owner.both_create_awaiting_decrypt.contains(&id("bob")));
+    assert!(!owner.can_confirm_from_source(&id("bob"), "welcome_received"));
 
     // Tearing the session down clears the gate from memory AND storage.
-    owner.manual_mls_delete_session("bob").unwrap();
+    owner.manual_mls_delete_session(&id("bob")).unwrap();
     assert!(
-        !owner.both_create_awaiting_decrypt.contains("bob"),
+        !owner.both_create_awaiting_decrypt.contains(&id("bob")),
         "session delete must clear the both-create owner gate in memory"
     );
     // The peer is now confirmable via a fresh Welcome again.
     assert!(
-        owner.can_confirm_from_source("bob", "welcome_received"),
+        owner.can_confirm_from_source(&id("bob"), "welcome_received"),
         "a re-paired peer must not be blocked by a stale gate"
     );
 
@@ -11520,7 +11667,7 @@ fn test_both_create_gate_cleared_on_session_delete() {
     let mut restarted = OfflineProtocol::new(config).unwrap();
     restarted.initialize_mls_for_test(storage).unwrap();
     assert!(
-        !restarted.both_create_awaiting_decrypt.contains("bob"),
+        !restarted.both_create_awaiting_decrypt.contains(&id("bob")),
         "a deleted gate must not be restored after restart"
     );
 }
@@ -11539,11 +11686,11 @@ fn test_welcome_sends_when_carrier_appears() {
     protocol.initialize_mls_for_test(storage).unwrap();
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -11552,13 +11699,13 @@ fn test_welcome_sends_when_carrier_appears() {
 
     // Phase 1: no carrier — the Welcome stalls (non-terminal) without expiring.
     let _ = protocol.send_message(
-        "bob",
+        &id("bob"),
         "queued-offline",
         None::<MessagePriority>,
         None::<String>,
     );
     assert_ne!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Expired
     );
 
@@ -11571,10 +11718,10 @@ fn test_welcome_sends_when_carrier_appears() {
         .add_transport(TransportType::BLE, Box::new(mock));
 
     protocol
-        .try_send_welcome("bob", "test_carrier_appeared")
+        .try_send_welcome(&id("bob"), "test_carrier_appeared")
         .unwrap();
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(
         lifecycle.state,
         WelcomeDeliveryState::SendAttempted,
@@ -11603,27 +11750,35 @@ fn test_welcome_restart_keeps_no_carrier_lifecycle_alive() {
     // A Welcome that stalled with no carrier and then aged past its TTL while
     // the device was offline, with no retry scheduled.
     let message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         "__MLS_WELCOME__dummy".to_string(),
     );
     protocol
-        .upsert_welcome_lifecycle("bob", "session:bob:1", message, "test_created")
+        .upsert_welcome_lifecycle(&id("bob"), "session:bob:1", message, "test_created")
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+        .transition_welcome_state(
+            &id("bob"),
+            WelcomeDeliveryState::SendAttempted,
+            "test_attempted",
+        )
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_failed")
+        .transition_welcome_state(&id("bob"), WelcomeDeliveryState::Failed, "test_failed")
         .unwrap();
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.last_reason_code = Some(crate::events::WelcomeReasonCode::TransportUnavailable);
         record.next_retry_at = None;
         record.expires_at = Utc::now() - ChronoDuration::seconds(1_000);
     }
-    let persisted = protocol.welcome_lifecycles.get("bob").cloned().unwrap();
+    let persisted = protocol
+        .welcome_lifecycles
+        .get(&id("bob"))
+        .cloned()
+        .unwrap();
     protocol
         .persist_welcome_lifecycle_entry(&persisted)
         .unwrap();
@@ -11632,7 +11787,7 @@ fn test_welcome_restart_keeps_no_carrier_lifecycle_alive() {
     let mut restarted = OfflineProtocol::new(config).unwrap();
     restarted.initialize_mls_for_test(storage).unwrap();
 
-    let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+    let restored = restarted.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(
         restored.state,
         WelcomeDeliveryState::Failed,
@@ -11667,11 +11822,11 @@ fn test_welcome_expired_rearms_on_peer_rediscovery() {
         .add_transport(TransportType::BLE, Box::new(mock));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -11679,22 +11834,22 @@ fn test_welcome_expired_rearms_on_peer_rediscovery() {
     );
 
     let _ = protocol.send_message(
-        "bob",
+        &id("bob"),
         "should-expire-then-recover",
         None::<MessagePriority>,
         None::<String>,
     );
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Expired,
         "carrier-present exhaustion should expire the Welcome"
     );
 
     // Sends now succeed (the single forced failure is spent). Rediscovering the
     // peer must re-arm and re-send the expired Welcome.
-    protocol.on_neighbor_discovered("bob");
+    protocol.on_neighbor_discovered(&id("bob"));
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_ne!(
         lifecycle.state,
         WelcomeDeliveryState::Expired,
@@ -11724,11 +11879,11 @@ fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -11737,7 +11892,7 @@ fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
 
     let _ = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "queued-over-internet",
             None::<MessagePriority>,
             None::<String>,
@@ -11745,7 +11900,7 @@ fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
         .unwrap();
     let welcome_message_id = protocol
         .welcome_lifecycles
-        .get("bob")
+        .get(&id("bob"))
         .unwrap()
         .welcome_message
         .id
@@ -11759,7 +11914,7 @@ fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
         )
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Failed
     );
 
@@ -11767,7 +11922,7 @@ fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
         .on_transport_send_confirmed(&welcome_message_id)
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Sent
     );
 
@@ -11778,7 +11933,7 @@ fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
         )
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Sent
     );
 }
@@ -11808,11 +11963,11 @@ fn test_welcome_dropped_confirmation_expires_with_explicit_failure_events() {
 
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -11821,7 +11976,7 @@ fn test_welcome_dropped_confirmation_expires_with_explicit_failure_events() {
 
     let _ = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "welcome-confirmation-never-arrives",
             None::<MessagePriority>,
             None::<String>,
@@ -11829,18 +11984,18 @@ fn test_welcome_dropped_confirmation_expires_with_explicit_failure_events() {
         .unwrap();
 
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.next_retry_at = Some(Utc::now() - ChronoDuration::milliseconds(1));
     }
 
     protocol.process().unwrap();
 
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Expired
     );
-    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
-    assert!(!protocol.confirmed_sessions.contains("bob"));
+    assert!(!protocol.pending_encrypted_messages.contains_key(&id("bob")));
+    assert!(!protocol.confirmed_sessions.contains(&id("bob")));
 
     let captured = events.lock().unwrap();
     assert!(captured.iter().any(|event| matches!(
@@ -11853,7 +12008,7 @@ fn test_welcome_dropped_confirmation_expires_with_explicit_failure_events() {
     assert!(captured.iter().any(|event| matches!(
         event,
         Event::SecureSessionFailed { peer_id, reason }
-            if peer_id == "bob" && reason.contains("Welcome delivery failed")
+            if peer_id == &id("bob") && reason.contains("Welcome delivery failed")
     )));
     assert!(!captured
         .iter()
@@ -11883,54 +12038,63 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
     protocol.start().unwrap();
 
     // Set up Bob's MLS session
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
     protocol
-        .ensure_session_state_entry("bob", "test_setup")
+        .ensure_session_state_entry(&id("bob"), "test_setup")
         .unwrap();
 
     // Simulate: welcome lifecycle is stuck at SendAttempted (DORS fell back to
     // Internet, or BLE delivery not confirmed yet).
     let welcome_msg = protocol
-        .create_message("bob", "placeholder", Some(MessagePriority::High), None)
+        .create_message(&id("bob"), "placeholder", Some(MessagePriority::High), None)
         .unwrap();
     protocol
-        .upsert_welcome_lifecycle("bob", "session:bob:user123", welcome_msg, "test_setup")
+        .upsert_welcome_lifecycle(
+            &id("bob"),
+            &session_slot("bob", "user123"),
+            welcome_msg,
+            "test_setup",
+        )
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_setup")
+        .transition_welcome_state(
+            &id("bob"),
+            WelcomeDeliveryState::SendAttempted,
+            "test_setup",
+        )
         .unwrap();
 
     // Queue a message — it should be pending because session is not confirmed
     let _msg_id = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "hello-over-ble",
             None::<MessagePriority>,
             None::<String>,
         )
         .unwrap();
     assert!(
-        protocol.pending_encrypted_messages.contains_key("bob"),
+        protocol.pending_encrypted_messages.contains_key(&id("bob")),
         "Message should be queued pending session establishment"
     );
 
     // Simulate: Bob received our welcome and sends a confirmation ack
     let ack_msg = Message::new(
-        UserId::new("bob").unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("bob")).unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         internal_prefixes::SESSION_CONFIRM_ACK,
     );
@@ -11939,11 +12103,11 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
 
     // Session should now be confirmed and pending messages flushed
     assert!(
-        protocol.confirmed_sessions.contains("bob"),
+        protocol.confirmed_sessions.contains(&id("bob")),
         "Session should be confirmed after receiving ack with SendAttempted welcome"
     );
     assert!(
-        !protocol.pending_encrypted_messages.contains_key("bob"),
+        !protocol.pending_encrypted_messages.contains_key(&id("bob")),
         "Pending messages should be flushed after session confirmation"
     );
 }
@@ -11966,50 +12130,59 @@ fn test_both_create_owner_confirms_via_decrypt_after_welcome_expired() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls_for_test(storage).unwrap();
 
-    // We are the both-create owner: we created our own group for "bob" and sent a
+    // We are the both-create owner: we created our own group for &id("bob") and sent a
     // Welcome that never reached `Sent` — retries exhausted it to `Expired`.
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
     protocol
-        .ensure_session_state_entry("bob", "test_setup")
+        .ensure_session_state_entry(&id("bob"), "test_setup")
         .unwrap();
 
     let welcome_msg = protocol
-        .create_message("bob", "placeholder", Some(MessagePriority::High), None)
+        .create_message(&id("bob"), "placeholder", Some(MessagePriority::High), None)
         .unwrap();
     protocol
-        .upsert_welcome_lifecycle("bob", "session:bob:user123", welcome_msg, "test_setup")
+        .upsert_welcome_lifecycle(
+            &id("bob"),
+            &session_slot("bob", "user123"),
+            welcome_msg,
+            "test_setup",
+        )
         .unwrap();
     // Drive the welcome through to the terminal Expired state along its legal
     // lifecycle path (SendAttempted -> Failed -> Expired) — what a Welcome that
     // times out after retry exhaustion actually does.
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_setup")
+        .transition_welcome_state(
+            &id("bob"),
+            WelcomeDeliveryState::SendAttempted,
+            "test_setup",
+        )
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_setup")
+        .transition_welcome_state(&id("bob"), WelcomeDeliveryState::Failed, "test_setup")
         .unwrap();
     protocol
-        .transition_welcome_state("bob", WelcomeDeliveryState::Expired, "test_setup")
+        .transition_welcome_state(&id("bob"), WelcomeDeliveryState::Expired, "test_setup")
         .unwrap();
     // Both-create owner: confirmation is gated on a group-aware decrypt.
-    protocol.mark_both_create_awaiting_decrypt("bob");
+    protocol.mark_both_create_awaiting_decrypt(&id("bob"));
 
     // A plaintext probe is NOT proof of adoption — the gate must still reject it.
     assert!(
-        !protocol.can_confirm_from_source("bob", "confirmation_probe_received"),
+        !protocol.can_confirm_from_source(&id("bob"), "confirmation_probe_received"),
         "a plaintext probe must not confirm a both-create owner"
     );
 
@@ -12017,18 +12190,18 @@ fn test_both_create_owner_confirms_via_decrypt_after_welcome_expired() {
     // our local Welcome is Expired. Pre-fix this returned false, leaving the owner
     // permanently able to receive but never send.
     assert!(
-        protocol.can_confirm_from_source("bob", "decrypt_success"),
+        protocol.can_confirm_from_source(&id("bob"), "decrypt_success"),
         "a group decrypt must confirm the owner regardless of an expired local Welcome"
     );
     assert!(
         matches!(
-            protocol.confirm_session_state("bob", "decrypt_success"),
+            protocol.confirm_session_state(&id("bob"), "decrypt_success"),
             Ok(true)
         ),
         "confirm_session_state must transition Pending->Confirmed on decrypt_success"
     );
     assert!(
-        protocol.confirmed_sessions.contains("bob"),
+        protocol.confirmed_sessions.contains(&id("bob")),
         "session must be confirmed so outbound sends stop failing SessionNotReady"
     );
 }
@@ -12055,7 +12228,7 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
     bob_config.encryption.store_pending = true;
 
     let alice_storage = Arc::new(InMemoryStorage::new());
-    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
 
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
     let mut bob = OfflineProtocol::new(bob_config).unwrap();
@@ -12091,14 +12264,19 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
         manager.get_or_create_key_package().unwrap()
     };
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
         },
     );
     alice
-        .send_message("bob", "bootstrap", None::<MessagePriority>, None::<String>)
+        .send_message(
+            &id("bob"),
+            "bootstrap",
+            None::<MessagePriority>,
+            None::<String>,
+        )
         .unwrap();
 
     // Bob adopts Alice's group from the Welcome.
@@ -12109,8 +12287,8 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
         .map(|msg| msg.content)
         .expect("expected welcome message sent by owner");
     let welcome_msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &welcome_wire,
     );
@@ -12119,13 +12297,18 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
     // The owner has only SENT a Welcome — it must stay Pending (and silent) until a
     // group-aware decrypt proves the peer adopted the group.
     assert!(
-        !alice.confirmed_sessions.contains("bob"),
+        !alice.confirmed_sessions.contains(&id("bob")),
         "owner must stay Pending until it decrypts a group-aware message from the peer"
     );
 
     // Bob sends an encrypted message; Alice (owner) decrypts it and confirms.
-    bob.send_message("alice", "hello", None::<MessagePriority>, None::<String>)
-        .unwrap();
+    bob.send_message(
+        &id("alice"),
+        "hello",
+        None::<MessagePriority>,
+        None::<String>,
+    )
+    .unwrap();
     let encrypted_from_bob = bob_transport_handle
         .sent_messages()
         .into_iter()
@@ -12135,7 +12318,7 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
     let _ = alice.process_internal_message(&encrypted_from_bob);
 
     assert!(
-        alice.confirmed_sessions.contains("bob"),
+        alice.confirmed_sessions.contains(&id("bob")),
         "owner must confirm the session on decrypt_success"
     );
     let captured = events.lock().unwrap();
@@ -12147,7 +12330,7 @@ fn test_session_owner_emits_established_on_decrypt_confirmation() {
                 is_session,
                 initiated_by_local,
                 ..
-            } if peer_id == "bob" && *is_session && *initiated_by_local
+            } if peer_id == &id("bob") && *is_session && *initiated_by_local
         )),
         "owner must emit SecureSessionEstablished so the app learns the 1:1 session exists"
     );
@@ -12171,11 +12354,11 @@ fn test_welcome_delayed_confirmation_after_timeout_converges_to_sent() {
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -12184,7 +12367,7 @@ fn test_welcome_delayed_confirmation_after_timeout_converges_to_sent() {
 
     let _ = protocol
         .send_message(
-            "bob",
+            &id("bob"),
             "welcome-confirmation-delayed",
             None::<MessagePriority>,
             None::<String>,
@@ -12193,20 +12376,20 @@ fn test_welcome_delayed_confirmation_after_timeout_converges_to_sent() {
 
     let welcome_message_id = protocol
         .welcome_lifecycles
-        .get("bob")
+        .get(&id("bob"))
         .unwrap()
         .welcome_message
         .id
         .as_str()
         .to_string();
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.next_retry_at = Some(Utc::now() - ChronoDuration::milliseconds(1));
     }
 
     protocol.process().unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Failed
     );
 
@@ -12214,10 +12397,10 @@ fn test_welcome_delayed_confirmation_after_timeout_converges_to_sent() {
         .on_transport_send_confirmed(&welcome_message_id)
         .unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Sent
     );
-    assert!(!protocol.confirmed_sessions.contains("bob"));
+    assert!(!protocol.confirmed_sessions.contains(&id("bob")));
 }
 
 #[test]
@@ -12236,26 +12419,27 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
         events_handle.lock().unwrap().push(event);
     });
 
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let encrypted = alice_manager
-        .encrypt_for_user("bob", b"encrypted-before-welcome")
+        .encrypt_for_user(&id("bob"), b"encrypted-before-welcome")
         .unwrap();
 
     let encrypted_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12264,8 +12448,8 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
         ),
     );
     let welcome_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12279,16 +12463,16 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
         encrypted_result,
         Some(InternalMessageResult::Deferred)
     ));
-    assert!(bob.pending_queue.contains_peer("alice"));
-    assert!(!bob.confirmed_sessions.contains("alice"));
+    assert!(bob.pending_queue.contains_peer(&id("alice")));
+    assert!(!bob.confirmed_sessions.contains(&id("alice")));
 
     let welcome_result = bob.process_internal_message(&welcome_wire);
     assert!(matches!(
         welcome_result,
         Some(InternalMessageResult::Consumed)
     ));
-    assert!(bob.confirmed_sessions.contains("alice"));
-    assert!(!bob.pending_queue.contains_peer("alice"));
+    assert!(bob.confirmed_sessions.contains(&id("alice")));
+    assert!(!bob.pending_queue.contains_peer(&id("alice")));
 
     let delayed_received = bob
         .receive_message()
@@ -12305,7 +12489,7 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
     let captured = events.lock().unwrap();
     assert!(captured.iter().any(|event| matches!(
         event,
-        Event::SecureSessionEstablished { peer_id, .. } if peer_id == "alice"
+        Event::SecureSessionEstablished { peer_id, .. } if peer_id == &id("alice")
     )));
 }
 
@@ -12343,27 +12527,28 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
 
     // Alice builds a real session to bob plus one encrypted message and the
     // matching Welcome, all at the MLS-manager level.
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let encrypted = alice_manager
-        .encrypt_for_user("bob", b"before-welcome")
+        .encrypt_for_user(&id("bob"), b"before-welcome")
         .unwrap();
 
     // One encrypted wire message, cloned for every resend so the id is stable.
     let encrypted_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12386,7 +12571,7 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
     // 1) First delivery, session not ready: queued, unmarked, NOT ACKed, not surfaced.
     bob_handle.queue_message(encrypted_wire.clone());
     while bob.receive_message().is_some() {}
-    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
     assert!(
         !bob.deduplicator.is_duplicate(&msg_id),
         "a deferred message must be unmarked so a resend can re-enter processing"
@@ -12406,7 +12591,7 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
     bob_handle.queue_message(encrypted_wire.clone());
     while bob.receive_message().is_some() {}
     assert_eq!(
-        bob.pending_queue.peer_queue_len("alice"),
+        bob.pending_queue.peer_queue_len(&id("alice")),
         1,
         "resends of the same id must not stack queue entries"
     );
@@ -12415,8 +12600,8 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
 
     // 3) Welcome arrives: session confirmed, queue drains, message surfaces once.
     let welcome_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12427,7 +12612,7 @@ fn test_deferred_encrypted_dm_defers_ack_then_recovers_without_loss_or_dup() {
     bob_handle.queue_message(welcome_wire);
     while bob.receive_message().is_some() {}
     assert!(
-        !bob.pending_queue.contains_peer("alice"),
+        !bob.pending_queue.contains_peer(&id("alice")),
         "queue must drain on Welcome"
     );
     assert_eq!(
@@ -12490,22 +12675,23 @@ fn test_crypto_recovery_disabled_falls_back_to_drop_and_ack() {
     bob.start().unwrap();
 
     // Establish bob's session with alice via a real Welcome.
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let welcome_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12518,14 +12704,14 @@ fn test_crypto_recovery_disabled_falls_back_to_drop_and_ack() {
 
     // Fork the session so alice's next message cannot decrypt (WrongEpoch).
     alice_manager
-        .update_keys(&offline_protocol_mls::GroupId::new("session:alice:bob").unwrap())
+        .update_keys(&offline_protocol_mls::GroupId::new(&session_slot("alice", "bob")).unwrap())
         .unwrap();
     let encrypted = alice_manager
-        .encrypt_for_user("bob", b"after-fork")
+        .encrypt_for_user(&id("bob"), b"after-fork")
         .unwrap();
     let encrypted_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12555,7 +12741,8 @@ fn test_crypto_recovery_disabled_falls_back_to_drop_and_ack() {
     let rekeys = sent
         .iter()
         .filter(|m| {
-            m.content.starts_with(internal_prefixes::KEY_PACKAGE) && m.recipient.as_str() == "alice"
+            m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+                && m.recipient.as_str() == &id("alice")
         })
         .count();
     assert_eq!(
@@ -12601,22 +12788,23 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
     bob.start().unwrap();
 
     // Establish bob's session with alice via a real Welcome.
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let welcome_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12631,14 +12819,14 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
     // seeing the commit, then encrypts at the new epoch. Bob is now one epoch
     // behind → the message cannot decrypt (WrongEpoch → SessionDesync).
     alice_manager
-        .update_keys(&offline_protocol_mls::GroupId::new("session:alice:bob").unwrap())
+        .update_keys(&offline_protocol_mls::GroupId::new(&session_slot("alice", "bob")).unwrap())
         .unwrap();
     let encrypted = alice_manager
-        .encrypt_for_user("bob", b"after-fork")
+        .encrypt_for_user(&id("bob"), b"after-fork")
         .unwrap();
     let encrypted_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12666,14 +12854,15 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
         "an undecryptable desync DM must not surface to the app"
     );
     assert!(
-        !bob.pending_queue.contains_peer("alice"),
+        !bob.pending_queue.contains_peer(&id("alice")),
         "a desync DM must NOT be enqueued (its ciphertext can never drain)"
     );
 
     let rekeys = sent
         .iter()
         .filter(|m| {
-            m.content.starts_with(internal_prefixes::KEY_PACKAGE) && m.recipient.as_str() == "alice"
+            m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+                && m.recipient.as_str() == &id("alice")
         })
         .count();
     assert_eq!(
@@ -12705,22 +12894,23 @@ fn hard_failure_pair(
         .add_transport(TransportType::BLE, Box::new(bob_transport));
     bob.start().unwrap();
 
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let welcome_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12742,8 +12932,8 @@ fn encrypted_wire(
     reuse_id: Option<MessageId>,
 ) -> Message {
     let mut wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -12760,7 +12950,9 @@ fn encrypted_wire(
 /// A structurally valid envelope for the live session whose MLS ciphertext is
 /// garbage — an AEAD/parse failure, NOT an epoch desync and NOT session-not-ready.
 fn corrupt_ciphertext_for(alice_manager: &MlsManager) -> offline_protocol_mls::EncryptedMessage {
-    let mut encrypted = alice_manager.encrypt_for_user("bob", b"payload").unwrap();
+    let mut encrypted = alice_manager
+        .encrypt_for_user(&id("bob"), b"payload")
+        .unwrap();
     encrypted.ciphertext = vec![0u8; 24];
     encrypted
 }
@@ -12873,7 +13065,9 @@ fn test_hard_decrypt_failure_recovers_on_resealed_resend() {
     assert!(received.lock().unwrap().is_empty());
 
     // The Tier 2 resend: same id, ciphertext re-sealed at a live generation.
-    let resealed = alice_manager.encrypt_for_user("bob", b"recovered").unwrap();
+    let resealed = alice_manager
+        .encrypt_for_user(&id("bob"), b"recovered")
+        .unwrap();
     bob_handle.queue_message(encrypted_wire(&resealed, Some(msg_id.clone())));
     while bob.receive_message().is_some() {}
 
@@ -13046,7 +13240,9 @@ fn test_unparseable_mls_envelope_withholds_ack_and_recovers_on_resend() {
     assert!(received.lock().unwrap().is_empty(), "nothing surfaces");
 
     // The resend under the same id carries a well-formed envelope and delivers.
-    let resent = alice_manager.encrypt_for_user("bob", b"recovered").unwrap();
+    let resent = alice_manager
+        .encrypt_for_user(&id("bob"), b"recovered")
+        .unwrap();
     bob_handle.queue_message(encrypted_wire(&resent, Some(msg_id.clone())));
     while bob.receive_message().is_some() {}
 
@@ -13075,8 +13271,8 @@ fn test_unparseable_mls_envelope_disabled_falls_back_to_drop_and_ack() {
     let (mut bob, bob_handle, _alice_manager) = hard_failure_pair(false);
 
     let unparseable = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!("{}!!!not-an-envelope!!!", internal_prefixes::ENCRYPTED),
     );
@@ -13126,14 +13322,15 @@ fn test_desync_rekey_is_rate_limited() {
 
     // Five rapid triggers for the same peer, well inside REKEY_INTERVAL_SECS.
     for _ in 0..5 {
-        bob.schedule_session_rekey("alice");
+        bob.schedule_session_rekey(&id("alice"));
     }
 
     let rekeys = bob_handle
         .sent_messages()
         .into_iter()
         .filter(|m| {
-            m.content.starts_with(internal_prefixes::KEY_PACKAGE) && m.recipient.as_str() == "alice"
+            m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+                && m.recipient.as_str() == &id("alice")
         })
         .count();
     assert_eq!(
@@ -13167,29 +13364,30 @@ fn test_desync_rekey_floor_not_reset_by_successful_decrypt() {
     bob_handle.clear_sent_messages();
 
     // First desync → one re-key, floor armed.
-    bob.schedule_session_rekey("alice");
+    bob.schedule_session_rekey(&id("alice"));
     assert!(
-        bob.rekey_due_at.contains_key("alice"),
+        bob.rekey_due_at.contains_key(&id("alice")),
         "re-key must arm the rate-limit floor"
     );
 
     // Simulate the channel healing and a real message decrypting on the rebuilt
     // session — the successful-decrypt confirmation path. Historically this
     // cleared the floor; it must no longer, even for a now-confirmed peer.
-    bob.confirm_session_from_successful_decrypt("alice", "session:alice:bob");
+    bob.confirm_session_from_successful_decrypt(&id("alice"), &session_slot("alice", "bob"));
     assert!(
-        bob.rekey_due_at.contains_key("alice"),
+        bob.rekey_due_at.contains_key(&id("alice")),
         "a successful decrypt on the healed session must NOT reset the re-key floor"
     );
 
     // A second desync trigger inside the window (the replay) must still be
     // suppressed — exactly one re-key total across the heal.
-    bob.schedule_session_rekey("alice");
+    bob.schedule_session_rekey(&id("alice"));
     let rekeys = bob_handle
         .sent_messages()
         .into_iter()
         .filter(|m| {
-            m.content.starts_with(internal_prefixes::KEY_PACKAGE) && m.recipient.as_str() == "alice"
+            m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+                && m.recipient.as_str() == &id("alice")
         })
         .count();
     assert_eq!(
@@ -13223,13 +13421,13 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
     alice.start().unwrap();
 
     // Bob as a bare manager; establish a real 1:1 session alice -> bob.
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_kp = bob_manager.get_or_create_key_package().unwrap();
     {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
         mgr.import_key_package(
-            "bob",
+            &id("bob"),
             &bob_kp.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
@@ -13237,14 +13435,14 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
     }
     let welcome = {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
-        mgr.create_session("bob").unwrap()
+        mgr.create_session(&id("bob")).unwrap()
     };
     bob_manager.join_session(&welcome).unwrap();
     // Force the session confirmed so the send encrypts now instead of queueing.
-    alice.confirmed_sessions.insert("bob".to_string());
+    alice.confirmed_sessions.insert(id("bob"));
 
     let msg_id = alice
-        .send_message("bob", "hello", None, None::<String>)
+        .send_message(&id("bob"), "hello", None, None::<String>)
         .unwrap();
 
     let entry = alice
@@ -13268,13 +13466,13 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
     // Re-key: tear down both sessions and rebuild a fresh one at a new epoch,
     // exactly as the desync heal does. The outbox entry (and its in-memory
     // re-seal provenance) survives the teardown.
-    alice.manual_mls_delete_session("bob").unwrap();
-    bob_manager.delete_session("alice").unwrap();
+    alice.manual_mls_delete_session(&id("bob")).unwrap();
+    bob_manager.delete_session(&id("alice")).unwrap();
     let bob_kp2 = bob_manager.get_or_create_key_package().unwrap();
     {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
         mgr.import_key_package(
-            "bob",
+            &id("bob"),
             &bob_kp2.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
@@ -13282,15 +13480,17 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
     }
     let welcome2 = {
         let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
-        mgr.create_session("bob").unwrap()
+        mgr.create_session(&id("bob")).unwrap()
     };
     bob_manager.join_session(&welcome2).unwrap();
-    alice.confirmed_sessions.insert("bob".to_string());
+    alice.confirmed_sessions.insert(id("bob"));
 
     // The original bytes are now permanently undecryptable on the new session —
     // proving a verbatim replay would be silent loss.
     assert!(
-        bob_manager.decrypt_from_user(&c1_enc, "alice").is_err(),
+        bob_manager
+            .decrypt_from_user(&c1_enc, &id("alice"))
+            .is_err(),
         "the pre-rekey ciphertext must be dead on the rebuilt session"
     );
 
@@ -13313,7 +13513,7 @@ fn test_reseal_on_resend_recovers_after_recipient_rekeys_to_new_epoch() {
         .strip_prefix(internal_prefixes::ENCRYPTED)
         .unwrap();
     let enc: offline_protocol_mls::EncryptedMessage = serde_json::from_str(json).unwrap();
-    let pt = bob_manager.decrypt_from_user(&enc, "alice").unwrap();
+    let pt = bob_manager.decrypt_from_user(&enc, &id("alice")).unwrap();
     assert_eq!(
         pt.as_deref(),
         Some(&b"hello"[..]),
@@ -13331,8 +13531,8 @@ fn test_reseal_is_noop_without_provenance() {
         .unwrap();
 
     let mut plain = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         "not encrypted",
     );
@@ -13419,7 +13619,7 @@ fn establish_confirmed_session(
 /// Advances one side's 1:1 epoch without the peer merging the commit, forking
 /// the shared `session:alice:bob` group so the peer can no longer decrypt.
 fn fork_session_epoch(ahead: &mut OfflineProtocol) {
-    let gid = offline_protocol_mls::GroupId::new("session:alice:bob").unwrap();
+    let gid = offline_protocol_mls::GroupId::new(&session_slot("alice", "bob")).unwrap();
     let m = ahead.mls_manager.as_ref().unwrap().read().unwrap();
     m.update_keys(&gid).unwrap();
 }
@@ -13524,24 +13724,24 @@ fn test_session_reset_retains_pending_outbound_and_delivers_after_rebuild() {
     alice.start().unwrap();
     bob.start().unwrap();
 
-    establish_confirmed_session(&mut alice, "alice", &mut bob, "bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
 
     // The window the bug lives in: the MLS session exists (so the reset branch
     // fires at all) but is not confirmed, so alice's sends queue as plaintext
     // rather than going out.
-    alice.confirmed_sessions.remove("bob");
+    alice.confirmed_sessions.remove(&id("bob"));
     alice
-        .send_message("bob", "queued-before-reset", None, None::<String>)
+        .send_message(&id("bob"), "queued-before-reset", None, None::<String>)
         .unwrap();
     assert!(
-        alice.pending_encrypted_messages.contains_key("bob"),
+        alice.pending_encrypted_messages.contains_key(&id("bob")),
         "precondition: the message must be queued, not sent"
     );
 
-    feed_session_reset_key_package(&mut alice, &mut bob, "bob");
+    feed_session_reset_key_package(&mut alice, &mut bob, &id("bob"));
 
     assert!(
-        alice.pending_encrypted_messages.contains_key("bob"),
+        alice.pending_encrypted_messages.contains_key(&id("bob")),
         "a session reset must not discard queued outbound plaintext"
     );
     assert!(
@@ -13604,7 +13804,7 @@ fn test_rekey_emits_security_warning() {
     }
     alice.start().unwrap();
 
-    alice.schedule_session_rekey("bob");
+    alice.schedule_session_rekey(&id("bob"));
 
     assert!(
         warnings
@@ -13639,17 +13839,20 @@ fn test_aborted_session_settles_pending_queue_with_message_failed() {
     alice.start().unwrap();
 
     let queued_id = alice
-        .send_message("bob", "never-deliverable", None, None::<String>)
+        .send_message(&id("bob"), "never-deliverable", None, None::<String>)
         .unwrap();
     assert!(
-        alice.pending_encrypted_messages.contains_key("bob"),
+        alice.pending_encrypted_messages.contains_key(&id("bob")),
         "precondition: the message must be queued, not sent"
     );
 
-    alice.abort_pending_session_for_peer("bob", crate::events::WelcomeReasonCode::RetryExhausted);
+    alice.abort_pending_session_for_peer(
+        &id("bob"),
+        crate::events::WelcomeReasonCode::RetryExhausted,
+    );
 
     assert!(
-        !alice.pending_encrypted_messages.contains_key("bob"),
+        !alice.pending_encrypted_messages.contains_key(&id("bob")),
         "an aborted session must clear the queue"
     );
     let settled = failed.lock().unwrap();
@@ -13667,7 +13870,7 @@ fn test_aborted_session_settles_pending_queue_with_message_failed() {
 }
 
 /// End-to-end heal, detector id > peer id (single-round convergence). Alice
-/// (the peer) forks ahead; Bob (the detector, "bob" > "alice") fails to decrypt,
+/// (the peer) forks ahead; Bob (the detector, &id("bob") > &id("alice")) fails to decrypt,
 /// re-keys, and — being the greater id — adopts Alice's returning Welcome in one
 /// round. A fresh message each way then flows, proving the channel healed.
 #[test]
@@ -13694,12 +13897,12 @@ fn test_desync_dm_heals_end_to_end_when_detector_id_is_greater() {
     alice.start().unwrap();
     bob.start().unwrap();
 
-    establish_confirmed_session(&mut alice, "alice", &mut bob, "bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
 
     // Fork: Alice advances her epoch; Bob is now behind and can't decrypt her.
     fork_session_epoch(&mut alice);
     alice
-        .send_message("bob", "trigger-fork", None, None::<String>)
+        .send_message(&id("bob"), "trigger-fork", None, None::<String>)
         .unwrap();
 
     // Pump the heal to convergence.
@@ -13707,9 +13910,9 @@ fn test_desync_dm_heals_end_to_end_when_detector_id_is_greater() {
 
     // The channel is healed: a fresh message each way is delivered.
     alice
-        .send_message("bob", "healed-a2b", None, None::<String>)
+        .send_message(&id("bob"), "healed-a2b", None, None::<String>)
         .unwrap();
-    bob.send_message("alice", "healed-b2a", None, None::<String>)
+    bob.send_message(&id("alice"), "healed-b2a", None, None::<String>)
         .unwrap();
     pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
 
@@ -13726,7 +13929,7 @@ fn test_desync_dm_heals_end_to_end_when_detector_id_is_greater() {
 }
 
 /// End-to-end heal, detector id < peer id (the fragile two-round path). Bob
-/// (the peer) forks ahead; Alice (the detector, "alice" < "bob") fails to
+/// (the peer) forks ahead; Alice (the detector, &id("alice") < &id("bob")) fails to
 /// decrypt and re-keys, but — being the smaller id — keeps her stale session on
 /// Bob's returning Welcome. Her old-epoch traffic then makes Bob detect a desync
 /// in turn and re-key back, forcing Alice to reset; the both-create tiebreaker
@@ -13755,11 +13958,11 @@ fn test_desync_dm_heals_end_to_end_when_detector_id_is_smaller() {
     alice.start().unwrap();
     bob.start().unwrap();
 
-    establish_confirmed_session(&mut alice, "alice", &mut bob, "bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
 
     // Fork: Bob advances his epoch; Alice is now behind and can't decrypt him.
     fork_session_epoch(&mut bob);
-    bob.send_message("alice", "trigger-fork", None, None::<String>)
+    bob.send_message(&id("alice"), "trigger-fork", None, None::<String>)
         .unwrap();
 
     // Pump the heal to convergence (may take the extra round for alice < bob).
@@ -13767,9 +13970,9 @@ fn test_desync_dm_heals_end_to_end_when_detector_id_is_smaller() {
 
     // The channel is healed: a fresh message each way is delivered.
     alice
-        .send_message("bob", "healed-a2b", None, None::<String>)
+        .send_message(&id("bob"), "healed-a2b", None, None::<String>)
         .unwrap();
-    bob.send_message("alice", "healed-b2a", None, None::<String>)
+    bob.send_message(&id("alice"), "healed-b2a", None, None::<String>)
         .unwrap();
     pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 60);
 
@@ -13820,35 +14023,36 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
     });
     bob.start().unwrap();
 
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome = alice_manager.create_session(&id("bob")).unwrap();
 
     // Encrypt the evictor FIRST (lower MLS generation) so that after it drains
     // it has been consumed in order, and the later-recovered evicted message
     // (higher generation) decrypts forward — no reliance on the out-of-order
     // ratchet window.
     let encrypted_evictor = alice_manager
-        .encrypt_for_user("bob", b"evictor-msg")
+        .encrypt_for_user(&id("bob"), b"evictor-msg")
         .unwrap();
     let encrypted_evicted = alice_manager
-        .encrypt_for_user("bob", b"evicted-msg")
+        .encrypt_for_user(&id("bob"), b"evicted-msg")
         .unwrap();
 
     let wire = |encrypted: &_| {
         Message::new(
-            UserId::new("alice").unwrap(),
-            UserId::new("bob").unwrap(),
+            UserId::new(&id("alice")).unwrap(),
+            UserId::new(&id("bob")).unwrap(),
             AppId::new("test-app").unwrap(),
             &format!(
                 "{}{}",
@@ -13874,13 +14078,13 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
     // 1) Evicted message arrives, session not ready: queued, unmarked, not ACKed.
     bob_handle.queue_message(evicted_wire.clone());
     while bob.receive_message().is_some() {}
-    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
 
     // 2) Evictor arrives: displaces the evicted entry under DropOldest.
     bob_handle.queue_message(evictor_wire);
     while bob.receive_message().is_some() {}
     assert_eq!(
-        bob.pending_queue.peer_queue_len("alice"),
+        bob.pending_queue.peer_queue_len(&id("alice")),
         1,
         "the 1-slot queue holds only the evictor now"
     );
@@ -13897,8 +14101,8 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
     // 3) Welcome establishes the session and drains the queue. Only the evictor
     //    surfaces; the evicted message is provably gone (never delivered).
     let welcome_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -13984,14 +14188,19 @@ fn test_pending_queue_drains_on_decrypt_confirmation_owner_path() {
         manager.get_or_create_key_package().unwrap()
     };
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
         },
     );
     alice
-        .send_message("bob", "bootstrap", None::<MessagePriority>, None::<String>)
+        .send_message(
+            &id("bob"),
+            "bootstrap",
+            None::<MessagePriority>,
+            None::<String>,
+        )
         .unwrap();
 
     // Bob adopts alice's group from the Welcome.
@@ -14002,20 +14211,20 @@ fn test_pending_queue_drains_on_decrypt_confirmation_owner_path() {
         .expect("owner should have sent a Welcome");
     let _ = bob.process_internal_message(&welcome_wire);
     assert!(
-        !alice.confirmed_sessions.contains("bob"),
+        !alice.confirmed_sessions.contains(&id("bob")),
         "owner stays Pending until it decrypts a group-aware message"
     );
 
     // Bob sends two encrypted messages; capture their wires.
     bob.send_message(
-        "alice",
+        &id("alice"),
         "queued-earlier",
         None::<MessagePriority>,
         None::<String>,
     )
     .unwrap();
     bob.send_message(
-        "alice",
+        &id("alice"),
         "confirming",
         None::<MessagePriority>,
         None::<String>,
@@ -14034,18 +14243,18 @@ fn test_pending_queue_drains_on_decrypt_confirmation_owner_path() {
     let m1 = encrypted.pop().unwrap();
 
     // Simulate m1 having been queued on the owner before the group existed.
-    alice.enqueue_pending_decryption("bob", &m1);
-    assert!(alice.pending_queue.contains_peer("bob"));
+    alice.enqueue_pending_decryption(&id("bob"), &m1);
+    assert!(alice.pending_queue.contains_peer(&id("bob")));
 
     // Confirming decrypt of m2: this is the ONLY drain trigger available to the
     // owner (no Welcome/probe/ack is ever received here).
     let _ = alice.process_internal_message(&m2);
     assert!(
-        alice.confirmed_sessions.contains("bob"),
+        alice.confirmed_sessions.contains(&id("bob")),
         "owner must confirm via decrypt_success"
     );
     assert!(
-        !alice.pending_queue.contains_peer("bob"),
+        !alice.pending_queue.contains_peer(&id("bob")),
         "the decrypt-confirmation must drain the pending queue (change-6)"
     );
     assert!(
@@ -14078,14 +14287,16 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&id("bob")).unwrap()
     };
-    alice.confirm_session_state("bob", "test_setup").unwrap();
+    alice
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
 
     let file_events: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let file_events_handle = Arc::clone(&file_events);
@@ -14097,7 +14308,7 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
 
     // Single small chunk so the transfer completes in one message.
     alice
-        .send_media("bob", vec![7u8; 512], "s.bin", ContentType::File, None)
+        .send_media(&id("bob"), vec![7u8; 512], "s.bin", ContentType::File, None)
         .unwrap();
     let chunk_wire = alice_handle
         .sent_messages()
@@ -14117,7 +14328,7 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
     // 1) Chunk arrives before session ready: queued, unmarked, not ACKed.
     bob_handle.queue_message(chunk_wire.clone());
     while bob.receive_message().is_some() {}
-    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
     assert!(!bob.deduplicator.is_duplicate(&chunk_id));
     assert_eq!(
         acks_for_chunk(&bob_handle),
@@ -14129,13 +14340,13 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
     // 2) Resend before ready: reprocessed, still one queue entry, still no ACK.
     bob_handle.queue_message(chunk_wire.clone());
     while bob.receive_message().is_some() {}
-    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
     assert_eq!(acks_for_chunk(&bob_handle), 0);
 
     // 3) Welcome establishes the session and drains the chunk to completion.
     let welcome_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -14146,7 +14357,7 @@ fn test_deferred_media_chunk_defers_ack_then_recovers() {
     bob_handle.queue_message(welcome_wire);
     while bob.receive_message().is_some() {}
     assert!(
-        !bob.pending_queue.contains_peer("alice"),
+        !bob.pending_queue.contains_peer(&id("alice")),
         "chunk queue must drain on Welcome"
     );
     assert_eq!(
@@ -14199,26 +14410,27 @@ fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
         .add_transport(TransportType::BLE, Box::new(bob_transport));
     bob.start().unwrap();
 
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let encrypted = alice_manager
-        .encrypt_for_user("bob", b"before-welcome")
+        .encrypt_for_user(&id("bob"), b"before-welcome")
         .unwrap();
 
     let encrypted_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -14238,7 +14450,7 @@ fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
     // Deferred before the session is ready: queued, not ACKed.
     bob_handle.queue_message(encrypted_wire);
     while bob.receive_message().is_some() {}
-    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
     assert_eq!(
         acks_for_msg(&bob_handle),
         0,
@@ -14248,8 +14460,8 @@ fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
     // Welcome drains the queue. The drain must ACK the surfaced message on its
     // recorded arrival transport — with NO resend from the sender.
     let welcome_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -14259,7 +14471,7 @@ fn test_deferred_dm_is_acked_on_drain_without_a_resend() {
     );
     bob_handle.queue_message(welcome_wire);
     while bob.receive_message().is_some() {}
-    assert!(!bob.pending_queue.contains_peer("alice"));
+    assert!(!bob.pending_queue.contains_peer(&id("alice")));
     assert_eq!(
         acks_for_msg(&bob_handle),
         1,
@@ -14309,8 +14521,8 @@ fn test_plaintext_media_chunk_rejected_withholds_ack_and_unmarks() {
         file_checksum: "abc".to_string(),
     };
     let chunk_wire = Message::builder(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
     )
     .content(chunk.to_json().unwrap())
@@ -14366,22 +14578,23 @@ fn test_welcome_duplicate_delivery_emits_single_established_event() {
 
     bob.start().unwrap();
 
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let welcome = alice_manager.create_session("bob").unwrap();
+    let welcome = alice_manager.create_session(&id("bob")).unwrap();
     let welcome_wire = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -14394,14 +14607,14 @@ fn test_welcome_duplicate_delivery_emits_single_established_event() {
     bob_transport_handle.queue_message(welcome_wire);
     assert!(bob.receive_message().is_none());
 
-    assert!(bob.confirmed_sessions.contains("alice"));
+    assert!(bob.confirmed_sessions.contains(&id("alice")));
     let captured = events.lock().unwrap();
     let established_count = captured
         .iter()
         .filter(|event| {
             matches!(
                 event,
-                Event::SecureSessionEstablished { peer_id, .. } if peer_id == "alice"
+                Event::SecureSessionEstablished { peer_id, .. } if peer_id == &id("alice")
             )
         })
         .count();
@@ -14419,30 +14632,36 @@ fn test_restore_session_state_migrates_legacy_session_to_pending_without_inferen
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Build a real session in MLS storage but leave session state absent.
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        let welcome = manager.create_session("bob").unwrap();
+        let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
     }
 
-    assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+    assert!(protocol
+        .load_session_state_entry(&id("bob"))
+        .unwrap()
+        .is_none());
 
     let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     restarted.config.encryption.enabled = true;
     restarted.config.encryption.store_pending = true;
     restarted.initialize_mls_for_test(storage).unwrap();
 
-    let restored = restarted.load_session_state_entry("bob").unwrap().unwrap();
+    let restored = restarted
+        .load_session_state_entry(&id("bob"))
+        .unwrap()
+        .unwrap();
     assert_eq!(restored, SessionState::Pending);
 }
 
@@ -14457,7 +14676,7 @@ fn test_corrupt_welcome_lifecycle_record_does_not_fail_initialization() {
     // integrity protection, and it now lives in the app container.
     let storage = Arc::new(InMemoryStorage::new());
     storage
-        .store(storage_keys::WELCOME_LIFECYCLES, "bob", b"not json")
+        .store(storage_keys::WELCOME_LIFECYCLES, &id("bob"), b"not json")
         .unwrap();
 
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
@@ -14486,24 +14705,24 @@ fn test_corrupt_session_state_record_does_not_fail_initialization() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        let welcome = manager.create_session("bob").unwrap();
+        let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
     }
 
     storage
-        .store(storage_keys::SESSION_STATES, "bob", b"not json")
+        .store(storage_keys::SESSION_STATES, &id("bob"), b"not json")
         .unwrap();
 
     let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
@@ -14516,7 +14735,10 @@ fn test_corrupt_session_state_record_does_not_fail_initialization() {
     // Dropped, then re-bootstrapped the safe way round: a session whose
     // confirmation cannot be read comes back Pending, never Confirmed.
     assert_eq!(
-        restarted.load_session_state_entry("bob").unwrap().unwrap(),
+        restarted
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Pending
     );
 }
@@ -14533,16 +14755,16 @@ fn test_corrupt_session_state_still_fails_closed_on_the_send_path() {
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     storage
-        .store(storage_keys::SESSION_STATES, "bob", b"not json")
+        .store(storage_keys::SESSION_STATES, &id("bob"), b"not json")
         .unwrap();
 
     assert!(
-        protocol.load_session_state_entry("bob").is_err(),
+        protocol.load_session_state_entry(&id("bob")).is_err(),
         "the send-path loader must fail closed on a record that will not decode"
     );
     assert!(
         storage
-            .load(storage_keys::SESSION_STATES, "bob")
+            .load(storage_keys::SESSION_STATES, &id("bob"))
             .unwrap()
             .is_some(),
         "the strict loader must not delete: only the restore walk may drop it"
@@ -14560,24 +14782,24 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Build a real session in MLS storage but leave session state absent.
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        let welcome = manager.create_session("bob").unwrap();
+        let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
     }
 
     protocol.queue_pending_message(
-        "bob",
+        &id("bob"),
         "queued-before-restart",
         MessagePriority::Medium,
         MessageId::new(),
@@ -14587,19 +14809,25 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
         None,
         None,
     );
-    assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+    assert!(protocol
+        .load_session_state_entry(&id("bob"))
+        .unwrap()
+        .is_none());
 
     let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     restarted.config.encryption.enabled = true;
     restarted.config.encryption.store_pending = true;
     restarted.initialize_mls_for_test(storage).unwrap();
 
-    let restored = restarted.load_session_state_entry("bob").unwrap().unwrap();
+    let restored = restarted
+        .load_session_state_entry(&id("bob"))
+        .unwrap()
+        .unwrap();
     assert_eq!(restored, SessionState::Pending);
     assert_eq!(
         restarted
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .unwrap()
             .len(),
         1
@@ -14617,25 +14845,27 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     // Build a real session and mark it confirmed.
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        let welcome = manager.create_session("bob").unwrap();
+        let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
     }
-    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    protocol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
 
     protocol.queue_pending_message(
-        "bob",
+        &id("bob"),
         "queued-before-crash",
         MessagePriority::Medium,
         MessageId::new(),
@@ -14659,9 +14889,11 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
         .add_transport(TransportType::BLE, Box::new(transport));
     restarted.start().unwrap();
 
-    assert!(!restarted.pending_encrypted_messages.contains_key("bob"));
+    assert!(!restarted
+        .pending_encrypted_messages
+        .contains_key(&id("bob")));
     assert!(restarted
-        .load_pending_messages_from_storage("bob")
+        .load_pending_messages_from_storage(&id("bob"))
         .is_none());
 
     let sent = transport_handle.sent_messages();
@@ -14682,7 +14914,7 @@ fn test_pending_sessions_reconcile_via_probe_after_restart() {
     bob_config.encryption.store_pending = true;
 
     let alice_storage = Arc::new(InMemoryStorage::new());
-    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
 
     // Build a durable MLS session on both peers, but leave confirmation Pending.
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
@@ -14700,21 +14932,21 @@ fn test_pending_sessions_reconcile_via_probe_after_restart() {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&id("bob")).unwrap()
     };
     {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.join_session(&welcome).unwrap();
     }
     alice
-        .ensure_session_state_entry("bob", "test_setup")
+        .ensure_session_state_entry(&id("bob"), "test_setup")
         .unwrap();
-    bob.ensure_session_state_entry("alice", "test_setup")
+    bob.ensure_session_state_entry(&id("alice"), "test_setup")
         .unwrap();
 
     // Restart both peers with the same storage to simulate a crash/restart cycle.
@@ -14783,18 +15015,23 @@ fn test_pending_sessions_reconcile_via_probe_after_restart() {
     let _ = alice2.process_internal_message(&ack_from_bob);
 
     assert_eq!(
-        alice2.load_session_state_entry("bob").unwrap().unwrap(),
+        alice2
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
     assert_eq!(
-        bob2.load_session_state_entry("alice").unwrap().unwrap(),
+        bob2.load_session_state_entry(&id("alice"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
 
     alice2
-        .send_message("bob", "a2b", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "a2b", None::<MessagePriority>, None::<String>)
         .unwrap();
-    bob2.send_message("alice", "b2a", None::<MessagePriority>, None::<String>)
+    bob2.send_message(&id("alice"), "b2a", None::<MessagePriority>, None::<String>)
         .unwrap();
 
     assert!(alice_transport_handle
@@ -14821,7 +15058,7 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
     bob_config.encryption.store_pending = true;
 
     let alice_storage = Arc::new(InMemoryStorage::new());
-    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
 
     // Build a durable MLS session on both peers, but leave confirmation Pending.
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
@@ -14839,21 +15076,21 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&id("bob")).unwrap()
     };
     {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.join_session(&welcome).unwrap();
     }
     alice
-        .ensure_session_state_entry("bob", "test_setup")
+        .ensure_session_state_entry(&id("bob"), "test_setup")
         .unwrap();
-    bob.ensure_session_state_entry("alice", "test_setup")
+    bob.ensure_session_state_entry(&id("alice"), "test_setup")
         .unwrap();
 
     // Restart both peers with the same storage to simulate a crash/restart cycle.
@@ -14885,16 +15122,21 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
     // reconciliation can retry without depending on process().
     alice2
         .confirmation_probe_due_at
-        .insert("bob".to_string(), Utc::now() - ChronoDuration::seconds(1));
+        .insert(id("bob"), Utc::now() - ChronoDuration::seconds(1));
     bob2.confirmation_probe_due_at
-        .insert("alice".to_string(), Utc::now() - ChronoDuration::seconds(1));
+        .insert(id("alice"), Utc::now() - ChronoDuration::seconds(1));
 
     // Active sends while pending should queue and trigger a fresh probe attempt.
     alice2
-        .send_message("bob", "queued-a2b", None::<MessagePriority>, None::<String>)
+        .send_message(
+            &id("bob"),
+            "queued-a2b",
+            None::<MessagePriority>,
+            None::<String>,
+        )
         .unwrap();
     bob2.send_message(
-        "alice",
+        &id("alice"),
         "queued-b2a",
         None::<MessagePriority>,
         None::<String>,
@@ -14946,15 +15188,20 @@ fn test_pending_sessions_reconcile_on_send_without_process_tick() {
     let _ = alice2.process_internal_message(&ack_from_bob);
 
     assert_eq!(
-        alice2.load_session_state_entry("bob").unwrap().unwrap(),
+        alice2
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
     assert_eq!(
-        bob2.load_session_state_entry("alice").unwrap().unwrap(),
+        bob2.load_session_state_entry(&id("alice"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
-    assert!(!alice2.pending_encrypted_messages.contains_key("bob"));
-    assert!(!bob2.pending_encrypted_messages.contains_key("alice"));
+    assert!(!alice2.pending_encrypted_messages.contains_key(&id("bob")));
+    assert!(!bob2.pending_encrypted_messages.contains_key(&id("alice")));
 
     assert!(alice_transport_handle
         .sent_messages()
@@ -14976,7 +15223,7 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
     bob_config.encryption.store_pending = true;
 
     let alice_storage = Arc::new(InMemoryStorage::new());
-    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
 
     // Build a durable MLS session on both peers, but leave confirmation Pending.
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
@@ -14994,21 +15241,21 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&id("bob")).unwrap()
     };
     {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.join_session(&welcome).unwrap();
     }
     alice
-        .ensure_session_state_entry("bob", "test_setup")
+        .ensure_session_state_entry(&id("bob"), "test_setup")
         .unwrap();
-    bob.ensure_session_state_entry("alice", "test_setup")
+    bob.ensure_session_state_entry(&id("alice"), "test_setup")
         .unwrap();
 
     // Restart both peers with the same storage to simulate a crash/restart cycle.
@@ -15042,9 +15289,9 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
     bob_transport_handle.clear_sent_messages();
     alice2
         .confirmation_probe_due_at
-        .insert("bob".to_string(), Utc::now() - ChronoDuration::seconds(1));
+        .insert(id("bob"), Utc::now() - ChronoDuration::seconds(1));
     bob2.confirmation_probe_due_at
-        .insert("alice".to_string(), Utc::now() - ChronoDuration::seconds(1));
+        .insert(id("alice"), Utc::now() - ChronoDuration::seconds(1));
 
     // Start both sends at the same instant to make the race deterministic.
     let alice_shared = Arc::new(Mutex::new(alice2));
@@ -15059,7 +15306,7 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
             .lock()
             .unwrap()
             .send_message(
-                "bob",
+                &id("bob"),
                 "queued-a2b-concurrent",
                 None::<MessagePriority>,
                 None::<String>,
@@ -15075,7 +15322,7 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
             .lock()
             .unwrap()
             .send_message(
-                "alice",
+                &id("alice"),
                 "queued-b2a-concurrent",
                 None::<MessagePriority>,
                 None::<String>,
@@ -15147,7 +15394,7 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
         alice_shared
             .lock()
             .unwrap()
-            .load_session_state_entry("bob")
+            .load_session_state_entry(&id("bob"))
             .unwrap()
             .unwrap(),
         SessionState::Confirmed
@@ -15156,7 +15403,7 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
         bob_shared
             .lock()
             .unwrap()
-            .load_session_state_entry("alice")
+            .load_session_state_entry(&id("alice"))
             .unwrap()
             .unwrap(),
         SessionState::Confirmed
@@ -15165,12 +15412,12 @@ fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
         .lock()
         .unwrap()
         .pending_encrypted_messages
-        .contains_key("bob"));
+        .contains_key(&id("bob")));
     assert!(!bob_shared
         .lock()
         .unwrap()
         .pending_encrypted_messages
-        .contains_key("alice"));
+        .contains_key(&id("alice")));
 
     assert!(alice_transport_handle
         .sent_messages()
@@ -15200,11 +15447,11 @@ fn test_send_message_via_transport_respects_session_confirmation_gating() {
         .add_transport(TransportType::BLE, Box::new(transport));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -15213,7 +15460,7 @@ fn test_send_message_via_transport_respects_session_confirmation_gating() {
 
     protocol
         .send_message_via_transport(
-            "bob",
+            &id("bob"),
             "forced-transport-pending",
             None::<MessagePriority>,
             TransportType::BLE,
@@ -15224,13 +15471,16 @@ fn test_send_message_via_transport_respects_session_confirmation_gating() {
     assert_eq!(
         protocol
             .pending_encrypted_messages
-            .get("bob")
+            .get(&id("bob"))
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        protocol.load_session_state_entry("bob").unwrap().unwrap(),
+        protocol
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Pending
     );
     assert!(!transport_handle
@@ -15258,27 +15508,32 @@ fn test_send_message_fails_closed_when_confirmation_state_is_corrupted() {
     protocol.start().unwrap();
 
     // Create a real MLS session to ensure send path reaches confirmation-state read.
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     {
         let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        let welcome = manager.create_session("bob").unwrap();
+        let welcome = manager.create_session(&id("bob")).unwrap();
         bob_manager.join_session(&welcome).unwrap();
     }
 
     storage
-        .store(storage_keys::SESSION_STATES, "bob", b"not-valid-json")
+        .store(storage_keys::SESSION_STATES, &id("bob"), b"not-valid-json")
         .unwrap();
 
-    let result = protocol.send_message("bob", "sensitive", None::<MessagePriority>, None::<String>);
+    let result = protocol.send_message(
+        &id("bob"),
+        "sensitive",
+        None::<MessagePriority>,
+        None::<String>,
+    );
     assert!(result.is_err());
     assert!(!transport_handle
         .sent_messages()
@@ -15296,7 +15551,7 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
     bob_config.encryption.store_pending = true;
 
     let alice_storage = Arc::new(InMemoryStorage::new());
-    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
 
     // Build a durable MLS session on both peers, but leave confirmation Pending.
     let mut alice = OfflineProtocol::new(alice_config).unwrap();
@@ -15314,27 +15569,27 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&id("bob")).unwrap()
     };
     {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.join_session(&welcome).unwrap();
     }
     alice
-        .ensure_session_state_entry("bob", "test_setup")
+        .ensure_session_state_entry(&id("bob"), "test_setup")
         .unwrap();
-    bob.ensure_session_state_entry("alice", "test_setup")
+    bob.ensure_session_state_entry(&id("alice"), "test_setup")
         .unwrap();
 
     // Queue pending messages before restart so we can verify they flush
     // after poll-driven reconciliation.
     alice.queue_pending_message(
-        "bob",
+        &id("bob"),
         "queued-before-restart-a2b",
         MessagePriority::Medium,
         MessageId::new(),
@@ -15345,7 +15600,7 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
         None,
     );
     bob.queue_pending_message(
-        "alice",
+        &id("alice"),
         "queued-before-restart-b2a",
         MessagePriority::Medium,
         MessageId::new(),
@@ -15385,9 +15640,9 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
     bob_transport_handle.clear_sent_messages();
     alice2
         .confirmation_probe_due_at
-        .insert("bob".to_string(), Utc::now() - ChronoDuration::seconds(1));
+        .insert(id("bob"), Utc::now() - ChronoDuration::seconds(1));
     bob2.confirmation_probe_due_at
-        .insert("alice".to_string(), Utc::now() - ChronoDuration::seconds(1));
+        .insert(id("alice"), Utc::now() - ChronoDuration::seconds(1));
 
     // No process() calls and no new sends here.
     let _ = alice2.receive_message();
@@ -15434,15 +15689,20 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
     let _ = alice2.process_internal_message(&ack_from_bob);
 
     assert_eq!(
-        alice2.load_session_state_entry("bob").unwrap().unwrap(),
+        alice2
+            .load_session_state_entry(&id("bob"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
     assert_eq!(
-        bob2.load_session_state_entry("alice").unwrap().unwrap(),
+        bob2.load_session_state_entry(&id("alice"))
+            .unwrap()
+            .unwrap(),
         SessionState::Confirmed
     );
-    assert!(!alice2.pending_encrypted_messages.contains_key("bob"));
-    assert!(!bob2.pending_encrypted_messages.contains_key("alice"));
+    assert!(!alice2.pending_encrypted_messages.contains_key(&id("bob")));
+    assert!(!bob2.pending_encrypted_messages.contains_key(&id("alice")));
     assert!(alice_transport_handle
         .sent_messages()
         .iter()
@@ -15578,9 +15838,13 @@ fn test_encrypted_message_before_session_queued() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Create an encrypted message with the proper format
+    // The receive path binds the envelope's slot to the claimed sender, so the
+    // slot has to be the one those two ids actually derive — not a literal.
+    let slot = offline_protocol_mls::GroupId::for_session(&id("user123"), "sender123").unwrap();
     let encrypted_content = format!(
-        "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
-        internal_prefixes::ENCRYPTED
+        "{}{{\"group_id\":\"{}\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+        internal_prefixes::ENCRYPTED,
+        slot
     );
 
     let message = Message::new(
@@ -15636,23 +15900,26 @@ fn test_mls_pipeline_happy_path_init_send_encrypted_receive_decrypted() {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&id("bob")).unwrap()
     };
     {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.join_session(&welcome).unwrap();
     }
-    alice.confirm_session_state("bob", "test_setup").unwrap();
-    bob.confirm_session_state("alice", "test_setup").unwrap();
+    alice
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
+    bob.confirm_session_state(&id("alice"), "test_setup")
+        .unwrap();
 
     alice
         .send_message(
-            "bob",
+            &id("bob"),
             "hello-through-mls",
             None::<MessagePriority>,
             None::<String>,
@@ -15702,26 +15969,31 @@ fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
     bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    alice_manager.create_session("bob").unwrap();
+    alice_manager.create_session(&id("bob")).unwrap();
 
-    let encrypted_one = alice_manager.encrypt_for_user("bob", b"first").unwrap();
-    let encrypted_two = alice_manager.encrypt_for_user("bob", b"second").unwrap();
+    let encrypted_one = alice_manager
+        .encrypt_for_user(&id("bob"), b"first")
+        .unwrap();
+    let encrypted_two = alice_manager
+        .encrypt_for_user(&id("bob"), b"second")
+        .unwrap();
 
     let first_message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -15730,8 +16002,8 @@ fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
         ),
     );
     let second_message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -15751,10 +16023,10 @@ fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
         second_result,
         Some(InternalMessageResult::Deferred)
     ));
-    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
     assert_eq!(
         bob.pending_queue
-            .peek_entry("alice", 0)
+            .peek_entry(&id("alice"), 0)
             .unwrap()
             .message
             .id
@@ -15781,9 +16053,13 @@ fn test_encrypted_message_decryption_failure_emits_app_error_event() {
         events_handle.lock().unwrap().push(event);
     });
 
+    // The receive path binds the envelope's slot to the claimed sender, so the
+    // slot has to be the one those two ids actually derive — not a literal.
+    let slot = offline_protocol_mls::GroupId::for_session(&id("user123"), "sender123").unwrap();
     let encrypted_content = format!(
-        "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
-        internal_prefixes::ENCRYPTED
+        "{}{{\"group_id\":\"{}\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+        internal_prefixes::ENCRYPTED,
+        slot
     );
     let message = Message::new(
         UserId::new("sender123").unwrap(),
@@ -15945,9 +16221,13 @@ fn test_receive_message_decrypt_failure_emits_error_without_message_received() {
 
     let mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
+    // The receive path binds the envelope's slot to the claimed sender, so the
+    // slot has to be the one those two ids actually derive — not a literal.
+    let slot = offline_protocol_mls::GroupId::for_session(&id("user123"), "sender123").unwrap();
     let encrypted_content = format!(
-        "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
-        internal_prefixes::ENCRYPTED
+        "{}{{\"group_id\":\"{}\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+        internal_prefixes::ENCRYPTED,
+        slot
     );
     let message = Message::new(
         UserId::new("sender123").unwrap(),
@@ -15992,14 +16272,18 @@ fn test_encrypted_message_group_not_found_is_queued_with_typed_classification() 
         .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
+    // The receive path binds the envelope's slot to the claimed sender, so the
+    // slot has to be the one those two ids actually derive — not a literal.
+    let slot = offline_protocol_mls::GroupId::for_session(&id("user123"), "sender123").unwrap();
     let encrypted_content = format!(
-        "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
-        internal_prefixes::ENCRYPTED
+        "{}{{\"group_id\":\"{}\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+        internal_prefixes::ENCRYPTED,
+        slot
     );
 
     let message = Message::new(
         UserId::new("sender123").unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         &encrypted_content,
     );
@@ -16056,8 +16340,10 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
         .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
+    let early_slot =
+        offline_protocol_mls::GroupId::for_session(&id("user123"), "sender123").unwrap();
     let valid_early_encrypted = format!(
-        "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+        "{}{{\"group_id\":\"{early_slot}\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
         internal_prefixes::ENCRYPTED
     );
     let malformed_variants = [
@@ -16084,7 +16370,7 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
 
         let message = Message::new(
             UserId::new("sender123").unwrap(),
-            UserId::new("user123").unwrap(),
+            UserId::new(&id("user123")).unwrap(),
             AppId::new("test-app").unwrap(),
             content,
         );
@@ -16253,22 +16539,23 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
     bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+    let alice_manager =
+        crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     let welcome = alice_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
-        .and_then(|_| alice_manager.create_session("bob"))
+        .and_then(|_| alice_manager.create_session(&id("bob")))
         .unwrap();
 
     let encrypted = alice_manager
-        .encrypt_for_user("bob", b"queued secret")
+        .encrypt_for_user(&id("bob"), b"queued secret")
         .unwrap();
     let encrypted_payload = format!(
         "{}{}",
@@ -16276,23 +16563,23 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
         serde_json::to_string(&encrypted).unwrap()
     );
     let incoming = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &encrypted_payload,
     );
 
     let result = bob.process_internal_message(&incoming);
     assert!(matches!(result, Some(InternalMessageResult::Deferred)));
-    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
 
     {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.join_session(&welcome).unwrap();
     }
 
-    bob.process_pending_decryption("alice");
-    assert!(!bob.pending_queue.contains_peer("alice"));
+    bob.process_pending_decryption(&id("alice"));
+    assert!(!bob.pending_queue.contains_peer(&id("alice")));
     let metrics = bob.pending_queue_metrics();
     assert_eq!(metrics.pending_messages_received_total, 1);
 }
@@ -16923,8 +17210,8 @@ fn test_key_package_expired_discarded() {
 #[test]
 fn test_peer_key_package_persisted_and_restored_after_restart() {
     let storage = Arc::new(InMemoryStorage::new());
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
 
     // First session: receive key package — auto_key_exchange causes
@@ -16934,7 +17221,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls_for_test(storage.clone()).unwrap();
         let key_pkg_payload = KeyPackagePayload {
-            user_id: "bob".to_string(),
+            user_id: id("bob"),
             key_package_data: bob_key_package.key_package_data.clone(),
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
@@ -16950,19 +17237,19 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             serde_json::to_string(&key_pkg_payload).unwrap()
         );
         let message = Message::new(
-            UserId::new("bob").unwrap(),
-            UserId::new("alice").unwrap(),
+            UserId::new(&id("bob")).unwrap(),
+            UserId::new(&id("alice")).unwrap(),
             AppId::new("test-app").unwrap(),
             &content,
         );
         let _ = protocol.process_internal_message(&message);
         // Session is auto-established, key package consumed
         assert!(
-            !protocol.pending_key_packages.contains_key("bob"),
+            !protocol.pending_key_packages.contains_key(&id("bob")),
             "Key package should be consumed by auto-establish"
         );
         assert!(
-            protocol.has_mls_session("bob").unwrap(),
+            protocol.has_mls_session(&id("bob")).unwrap(),
             "Session should be auto-established after key package exchange"
         );
     }
@@ -16973,7 +17260,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls_for_test(storage.clone()).unwrap();
         // Session already exists from the first instance (shared storage)
-        let welcome = protocol.establish_secure_session("bob").unwrap();
+        let welcome = protocol.establish_secure_session(&id("bob")).unwrap();
         assert!(
             welcome.is_none(),
             "Session already exists, no new welcome needed"
@@ -17042,7 +17329,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
     );
     let message = Message::new(
         UserId::new("attacker").unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         &content,
     );
@@ -17096,7 +17383,7 @@ fn test_received_key_package_lifetime_is_clamped() {
     );
     let message = Message::new(
         UserId::new("attacker").unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         &content,
     );
@@ -17898,7 +18185,8 @@ fn test_session_state_restore_deletes_come_out_of_the_shared_pool() {
     // all: these deletes now come out of the *shared* pool, so the walk after
     // this one sees a pool three smaller. Against the unbudgeted code the
     // key-package walk gets its full share and this fails.
-    let sessions = ["bob", "carol", "dave"];
+    let session_labels = ["bob", "carol", "dave"];
+    let sessions = session_labels.map(id);
 
     let secure = Arc::new(InMemoryStorage::new());
     let state = Arc::new(InMemoryStorage::new());
@@ -17907,9 +18195,11 @@ fn test_session_state_restore_deletes_come_out_of_the_shared_pool() {
         let (secure_handle, state_handle) = split_storage(&secure, &state);
         let mut writer = OfflineProtocol::new(create_test_config()).unwrap();
         writer.initialize_mls(secure_handle, state_handle).unwrap();
-        for peer in sessions {
-            let peer_storage = Arc::new(InMemoryStorage::new());
-            let peer_manager = MlsManager::new(peer, peer_storage).unwrap();
+        for label in session_labels {
+            let peer = id(label);
+            let peer: &str = &peer;
+            let peer_manager =
+                crate::test_identity::manager_for(label, Arc::new(InMemoryStorage::new()));
             let key_package = peer_manager.get_or_create_key_package().unwrap();
             let manager = writer.mls_manager.as_ref().unwrap().read().unwrap();
             manager
@@ -17926,7 +18216,7 @@ fn test_session_state_restore_deletes_come_out_of_the_shared_pool() {
 
     // Unsealed category, so these bytes reach serde exactly as written and take
     // the drop inside `load_restorable_state_record`. One delete per session.
-    for peer in sessions {
+    for peer in sessions.iter() {
         state
             .store(storage_keys::SESSION_STATES, peer, b"{not json")
             .unwrap();
@@ -17973,7 +18263,7 @@ fn test_session_state_restore_deletes_come_out_of_the_shared_pool() {
     // write repairs the record whether or not the delete was funded.
     for peer in sessions {
         let record = state
-            .load(storage_keys::SESSION_STATES, peer)
+            .load(storage_keys::SESSION_STATES, peer.as_str())
             .unwrap()
             .expect("the bootstrap must have re-persisted a record");
         assert!(
@@ -18431,7 +18721,7 @@ fn test_unreadable_welcome_lifecycle_record_does_not_fail_initialization() {
         attempt: 1,
         unreachable_parks: 0,
         welcome_message: Message::new(
-            UserId::new("user123").unwrap(),
+            UserId::new(&id("user123")).unwrap(),
             UserId::new(peer).unwrap(),
             AppId::new("test-app").unwrap(),
             "__MLS_WELCOME__{}",
@@ -18442,7 +18732,7 @@ fn test_unreadable_welcome_lifecycle_record_does_not_fail_initialization() {
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::seconds(60),
     };
-    for peer in ["bob", "carol"] {
+    for peer in [&id("bob"), &id("carol")] {
         state
             .store(
                 storage_keys::WELCOME_LIFECYCLES,
@@ -18455,7 +18745,7 @@ fn test_unreadable_welcome_lifecycle_record_does_not_fail_initialization() {
     let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(FailingRecordLoadStorage {
         inner: state.clone(),
         fail_type: storage_keys::WELCOME_LIFECYCLES,
-        fail_id: "bob".to_string(),
+        fail_id: id("bob"),
     });
     let secure_handle: Arc<dyn MlsStorage> = secure.clone();
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -18464,16 +18754,16 @@ fn test_unreadable_welcome_lifecycle_record_does_not_fail_initialization() {
         .expect("one unreadable Welcome lifecycle must not fail initialization");
 
     assert!(
-        !protocol.welcome_lifecycles.contains_key("bob"),
+        !protocol.welcome_lifecycles.contains_key(&id("bob")),
         "the unreadable record restores nothing this session"
     );
     assert!(
-        protocol.welcome_lifecycles.contains_key("carol"),
+        protocol.welcome_lifecycles.contains_key(&id("carol")),
         "the walk must continue past it, not abort"
     );
     assert!(
         state
-            .load(storage_keys::WELCOME_LIFECYCLES, "bob")
+            .load(storage_keys::WELCOME_LIFECYCLES, &id("bob"))
             .unwrap()
             .is_some(),
         "an unreadable-this-session record is left on disk for a later launch"
@@ -18497,35 +18787,35 @@ fn test_unreadable_session_state_record_is_neither_fatal_nor_overwritten() {
             .initialize_mls(secure_handle, state_handle)
             .unwrap();
 
-        let bob_storage = Arc::new(InMemoryStorage::new());
-        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+        let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
         let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
         {
             let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
             manager
                 .import_key_package(
-                    "bob",
+                    &id("bob"),
                     &bob_key_package.key_package_data,
                     offline_protocol_mls::KeyPackageTrust::FirstUse,
                 )
                 .unwrap();
-            let welcome = manager.create_session("bob").unwrap();
+            let welcome = manager.create_session(&id("bob")).unwrap();
             bob_manager.join_session(&welcome).unwrap();
         }
         protocol
-            .persist_session_state("bob", SessionState::Confirmed, "test")
+            .persist_session_state(&id("bob"), SessionState::Confirmed, "test")
             .unwrap();
     }
 
     let confirmed = state
-        .load(storage_keys::SESSION_STATES, "bob")
+        .load(storage_keys::SESSION_STATES, &id("bob"))
         .unwrap()
         .expect("precondition: a Confirmed record is on disk");
 
     let state_handle: Arc<dyn crate::ProtocolStateStorage> = Arc::new(FailingRecordLoadStorage {
         inner: state.clone(),
         fail_type: storage_keys::SESSION_STATES,
-        fail_id: "bob".to_string(),
+        fail_id: id("bob"),
     });
     let secure_handle: Arc<dyn MlsStorage> = secure.clone();
     let mut restarted = OfflineProtocol::new(create_test_config()).unwrap();
@@ -18534,11 +18824,13 @@ fn test_unreadable_session_state_record_is_neither_fatal_nor_overwritten() {
         .expect("one unreadable session state must not fail initialization");
 
     assert!(
-        !restarted.confirmed_sessions.contains("bob"),
+        !restarted.confirmed_sessions.contains(&id("bob")),
         "a confirmation that could not be read must not be assumed"
     );
     assert_eq!(
-        state.load(storage_keys::SESSION_STATES, "bob").unwrap(),
+        state
+            .load(storage_keys::SESSION_STATES, &id("bob"))
+            .unwrap(),
         Some(confirmed),
         "the record is left exactly as it was, so a later launch still reads \
          Confirmed rather than a Pending this launch wrote over it"
@@ -18548,8 +18840,8 @@ fn test_unreadable_session_state_record_is_neither_fatal_nor_overwritten() {
 #[test]
 fn test_establishment_state_returns_correct_states() {
     let storage = Arc::new(InMemoryStorage::new());
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
 
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -18557,20 +18849,20 @@ fn test_establishment_state_returns_correct_states() {
 
     // No key package, no session
     assert_eq!(
-        protocol.get_establishment_state("bob").unwrap(),
+        protocol.get_establishment_state(&id("bob")).unwrap(),
         EstablishmentState::NoKeyPackage
     );
 
     // Add key package -> HaveKeyPackage
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data.clone(),
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
         },
     );
     assert_eq!(
-        protocol.get_establishment_state("bob").unwrap(),
+        protocol.get_establishment_state(&id("bob")).unwrap(),
         EstablishmentState::HaveKeyPackage
     );
 
@@ -18580,23 +18872,25 @@ fn test_establishment_state_returns_correct_states() {
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
-    protocol.ensure_session_state_entry("bob", "test").unwrap();
+    protocol
+        .ensure_session_state_entry(&id("bob"), "test")
+        .unwrap();
     assert_eq!(
-        protocol.get_establishment_state("bob").unwrap(),
+        protocol.get_establishment_state(&id("bob")).unwrap(),
         EstablishmentState::SessionPending
     );
 
     // Confirm -> SessionConfirmed
-    protocol.confirm_session_state("bob", "test").unwrap();
+    protocol.confirm_session_state(&id("bob"), "test").unwrap();
     assert_eq!(
-        protocol.get_establishment_state("bob").unwrap(),
+        protocol.get_establishment_state(&id("bob")).unwrap(),
         EstablishmentState::SessionConfirmed
     );
 }
@@ -18604,8 +18898,8 @@ fn test_establishment_state_returns_correct_states() {
 #[test]
 fn test_establish_secure_session_loads_from_storage_after_restart() {
     let storage = Arc::new(InMemoryStorage::new());
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
 
     // First session: receive key package — auto-establish creates the session
@@ -18614,7 +18908,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls_for_test(storage.clone()).unwrap();
         let key_pkg_payload = KeyPackagePayload {
-            user_id: "bob".to_string(),
+            user_id: id("bob"),
             key_package_data: bob_key_package.key_package_data.clone(),
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
@@ -18630,15 +18924,15 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             serde_json::to_string(&key_pkg_payload).unwrap()
         );
         let message = Message::new(
-            UserId::new("bob").unwrap(),
-            UserId::new("alice").unwrap(),
+            UserId::new(&id("bob")).unwrap(),
+            UserId::new(&id("alice")).unwrap(),
             AppId::new("test-app").unwrap(),
             &content,
         );
         let _ = protocol.process_internal_message(&message);
         // Auto-establish consumed the key package and created the session
         assert!(
-            protocol.has_mls_session("bob").unwrap(),
+            protocol.has_mls_session(&id("bob")).unwrap(),
             "Session should be auto-established after key package receipt"
         );
     }
@@ -18648,7 +18942,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls_for_test(storage.clone()).unwrap();
         // Session already exists from the first instance
-        let result = protocol.establish_secure_session("bob");
+        let result = protocol.establish_secure_session(&id("bob"));
         assert!(
             result.is_ok(),
             "establish_secure_session should succeed, got {:?}",
@@ -19709,9 +20003,9 @@ fn test_canonical_signing_payload_is_length_prefixed() {
     }
 
     assert_eq!(fields.len(), 4, "canonical payload should have 4 fields");
-    assert_eq!(fields[0], "alice");
+    assert_eq!(fields[0], "alice".to_string());
     assert_eq!(fields[1], msg.id.as_str());
-    assert_eq!(fields[2], "bob");
+    assert_eq!(fields[2], "bob".to_string());
     assert_eq!(fields[3], "__CONN_REQ__payload");
 }
 
@@ -19797,10 +20091,10 @@ fn test_sign_and_verify_control_message_roundtrip() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls_for_test(storage).unwrap();
 
-    // Create a control message from "alice"
+    // Create a control message from &id("alice")
     let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
@@ -19841,8 +20135,8 @@ fn test_sign_and_verify_rejects_tampered_content() {
     protocol.initialize_mls_for_test(storage).unwrap();
 
     let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!(
             "{}{{\"data\":\"original\"}}",
@@ -19964,12 +20258,12 @@ fn test_verify_control_message_signature_without_public_key() {
 
 #[test]
 fn test_integration_signed_control_message_via_mock_transport() {
-    // Set up "alice" as the sender with MLS initialized so she can sign.
+    // Set up &id("alice") as the sender with MLS initialized so she can sign.
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
     alice.initialize_mls_for_test(storage_a).unwrap();
 
-    // Set up "bob" as the receiver with MLS initialized so he can verify.
+    // Set up &id("bob") as the receiver with MLS initialized so he can verify.
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     bob.initialize_mls_for_test(storage_b).unwrap();
@@ -19979,8 +20273,8 @@ fn test_integration_signed_control_message_via_mock_transport() {
 
     // Alice creates and signs a control message destined for bob.
     let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"hello\"}}", internal_prefixes::CONN_REQUEST),
     );
@@ -19991,7 +20285,7 @@ fn test_integration_signed_control_message_via_mock_transport() {
     );
 
     // Enqueue the signed message on bob's transport with alice's identity.
-    mock_transport.queue_message_from(msg, "alice".to_string());
+    mock_transport.queue_message_from(msg, id("alice"));
 
     // Wire up bob's transport manager.
     bob.transport_manager_mut()
@@ -20009,14 +20303,14 @@ fn test_integration_signed_control_message_via_mock_transport() {
 
     // Alice's key should now be TOFU-pinned in bob's store.
     assert!(
-        bob.known_peer_public_keys.contains_key("alice"),
+        bob.known_peer_public_keys.contains_key(&id("alice")),
         "Bob should have TOFU-pinned alice's public key"
     );
 }
 
 #[test]
 fn test_integration_spoofed_transport_identity_rejected() {
-    // A signed control message claiming to be from "alice" but delivered
+    // A signed control message claiming to be from &id("alice") but delivered
     // by transport peer "eve" must be rejected.
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
@@ -20030,8 +20324,8 @@ fn test_integration_spoofed_transport_identity_rejected() {
     mock_transport.start().unwrap();
 
     let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"evil\"}}", internal_prefixes::CONN_REQUEST),
     );
@@ -20050,7 +20344,7 @@ fn test_integration_spoofed_transport_identity_rejected() {
         "Spoofed message should be consumed (dropped)"
     );
     assert!(
-        !bob.known_peer_public_keys.contains_key("alice"),
+        !bob.known_peer_public_keys.contains_key(&id("alice")),
         "Spoofed message must not TOFU-pin alice's key"
     );
 }
@@ -20146,8 +20440,8 @@ fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
     // --- Step 1: Alice sends a signed control message (key package) ---
     // Manually create and sign a CONN_REQUEST from Alice to Bob.
     let mut ctrl_msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!(
             "{}{{\"sender_name\":\"alice\",\"timestamp_ms\":1234}}",
@@ -20161,12 +20455,12 @@ fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
     );
 
     // Bob receives it — this will TOFU-pin Alice's public key.
-    bob_transport_handle.queue_message_from(ctrl_msg, "alice".to_string());
+    bob_transport_handle.queue_message_from(ctrl_msg, id("alice"));
     let _ = bob.receive_message(); // consumed internally
 
     // Verify Alice's key is now TOFU-pinned at Bob.
     assert!(
-        bob.known_peer_public_keys.contains_key("alice"),
+        bob.known_peer_public_keys.contains_key(&id("alice")),
         "Alice's key should be TOFU-pinned at Bob after signed control message"
     );
 
@@ -20179,22 +20473,25 @@ fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_key_package.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        let welcome = manager.create_session("bob").unwrap();
+        let welcome = manager.create_session(&id("bob")).unwrap();
         let bob_manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         bob_manager.join_session(&welcome).unwrap();
     }
-    alice.confirm_session_state("bob", "test_setup").unwrap();
-    bob.confirm_session_state("alice", "test_setup").unwrap();
+    alice
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
+    bob.confirm_session_state(&id("alice"), "test_setup")
+        .unwrap();
 
     // --- Step 3: Alice sends an encrypted message ---
     alice
         .send_message(
-            "bob",
+            &id("bob"),
             "hello after TOFU pin",
             None::<MessagePriority>,
             None::<String>,
@@ -20474,15 +20771,15 @@ fn test_signature_downgrade_detection_for_tofu_pinned_peer() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls_for_test(storage).unwrap();
 
-    // Set up "alice" as a sender with MLS so she can sign.
+    // Set up &id("alice") as a sender with MLS so she can sign.
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
     alice.initialize_mls_for_test(storage_a).unwrap();
 
     // Alice creates and signs a control message.
     let mut signed_msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"first\"}}", internal_prefixes::CONN_REQUEST),
     );
@@ -20496,14 +20793,14 @@ fn test_signature_downgrade_detection_for_tofu_pinned_peer() {
         "First signed message should verify"
     );
     assert!(
-        protocol.known_peer_public_keys.contains_key("alice"),
+        protocol.known_peer_public_keys.contains_key(&id("alice")),
         "Alice's key should be TOFU-pinned"
     );
 
-    // Now "alice" (or an impersonator) sends an unsigned control message.
+    // Now &id("alice") (or an impersonator) sends an unsigned control message.
     let unsigned_msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!(
             "{}{{\"data\":\"unsigned\"}}",
@@ -20537,8 +20834,8 @@ fn test_second_signed_message_from_tofu_pinned_peer_passes_gate() {
 
     // First signed message — pins alice's key.
     let mut msg1 = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"first\"}}", internal_prefixes::CONN_REQUEST),
     );
@@ -20549,12 +20846,12 @@ fn test_second_signed_message_from_tofu_pinned_peer_passes_gate() {
         matches!(gate1, ControlGateOutcome::Proceed { signed: true }),
         "First signed message should pass the security gate"
     );
-    assert!(protocol.known_peer_public_keys.contains_key("alice"));
+    assert!(protocol.known_peer_public_keys.contains_key(&id("alice")));
 
     // Second signed message — same key, should also pass.
     let mut msg2 = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"second\"}}", internal_prefixes::CONN_ACCEPT),
     );
@@ -20579,10 +20876,10 @@ fn test_security_rejected_does_not_send_ack() {
     mock_transport.start().unwrap();
     let transport_handle = mock_transport.clone();
 
-    // Create a spoofed control message: sender says "alice", transport says "eve"
+    // Create a spoofed control message: sender says &id("alice"), transport says "eve"
     let mut spoofed = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"evil\"}}", internal_prefixes::CONN_REQUEST),
     );
@@ -20613,7 +20910,7 @@ fn test_security_rejected_does_not_send_ack() {
 fn test_mls_enc_spoofed_sender_security_rejected() {
     // SEC-M1 on the __MLS_ENC__ path: a valid 1:1 ciphertext delivered under
     // a spoofed wire sender must map to SecurityRejected — the MLS credential
-    // authenticates "bob", so an envelope claiming "mallory" must not be
+    // authenticates &id("bob"), so an envelope claiming &id("mallory") must not be
     // surfaced. (SecurityRejected → no delivery ACK is covered by
     // test_security_rejected_does_not_send_ack.)
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
@@ -20621,7 +20918,7 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
     alice.initialize_mls_for_test(storage).unwrap();
 
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_kp = bob_manager.generate_key_package().unwrap();
 
     // Establish a converged alice <-> bob session.
@@ -20630,27 +20927,29 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&id("bob")).unwrap()
     };
     bob_manager.join_session(&welcome).unwrap();
 
     // Bob encrypts a legitimate message for alice...
-    let encrypted = bob_manager.encrypt_for_user("alice", b"hi alice").unwrap();
+    let encrypted = bob_manager
+        .encrypt_for_user(&id("alice"), b"hi alice")
+        .unwrap();
     let content = format!(
         "{}{}",
         internal_prefixes::ENCRYPTED,
         serde_json::to_string(&encrypted).unwrap()
     );
 
-    // ...but the wire envelope claims it came from "mallory".
+    // ...but the wire envelope claims it came from &id("mallory").
     let message = Message::new(
-        UserId::new("mallory").unwrap(),
-        UserId::new("alice").unwrap(),
+        UserId::new(&id("mallory")).unwrap(),
+        UserId::new(&id("alice")).unwrap(),
         AppId::new("test-app").unwrap(),
         &content,
     );
@@ -20664,15 +20963,17 @@ fn test_mls_enc_spoofed_sender_security_rejected() {
     // The same ciphertext under the true sender still decrypts: the spoofed
     // attempt must not have destroyed alice's ability to attribute honestly
     // delivered messages.
-    let encrypted2 = bob_manager.encrypt_for_user("alice", b"hi again").unwrap();
+    let encrypted2 = bob_manager
+        .encrypt_for_user(&id("alice"), b"hi again")
+        .unwrap();
     let content2 = format!(
         "{}{}",
         internal_prefixes::ENCRYPTED,
         serde_json::to_string(&encrypted2).unwrap()
     );
     let honest = Message::new(
-        UserId::new("bob").unwrap(),
-        UserId::new("alice").unwrap(),
+        UserId::new(&id("bob")).unwrap(),
+        UserId::new(&id("alice")).unwrap(),
         AppId::new("test-app").unwrap(),
         &content2,
     );
@@ -20701,7 +21002,7 @@ fn test_mls_enc_non_utf8_plaintext_rejected() {
     });
 
     let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_kp = bob_manager.generate_key_package().unwrap();
 
     // Establish a converged alice <-> bob session.
@@ -20710,18 +21011,18 @@ fn test_mls_enc_non_utf8_plaintext_rejected() {
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&id("bob")).unwrap()
     };
     bob_manager.join_session(&welcome).unwrap();
 
     // Bob encrypts bytes that are not valid UTF-8.
     let encrypted = bob_manager
-        .encrypt_for_user("alice", &[0xFF, 0xFE, 0xFD])
+        .encrypt_for_user(&id("alice"), &[0xFF, 0xFE, 0xFD])
         .unwrap();
     let content = format!(
         "{}{}",
@@ -20729,8 +21030,8 @@ fn test_mls_enc_non_utf8_plaintext_rejected() {
         serde_json::to_string(&encrypted).unwrap()
     );
     let message = Message::new(
-        UserId::new("bob").unwrap(),
-        UserId::new("alice").unwrap(),
+        UserId::new(&id("bob")).unwrap(),
+        UserId::new(&id("alice")).unwrap(),
         AppId::new("test-app").unwrap(),
         &content,
     );
@@ -20763,21 +21064,22 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
     bob.initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
         .unwrap();
 
-    let zoe_manager = MlsManager::new("zoe", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let zoe_manager =
+        crate::test_identity::manager_for("zoe", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_key_package = {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
         manager.get_or_create_key_package().unwrap()
     };
     zoe_manager
         .import_key_package(
-            "bob",
+            &id("bob"),
             &bob_key_package.key_package_data,
             offline_protocol_mls::KeyPackageTrust::FirstUse,
         )
         .unwrap();
-    let mut welcome = zoe_manager.create_session("bob").unwrap();
+    let mut welcome = zoe_manager.create_session(&id("bob")).unwrap();
     // Tamper: the payload claims a different inviter than the wire sender.
-    welcome.inviter_id = "mallory".to_string();
+    welcome.inviter_id = id("mallory");
 
     let content = format!(
         "{}{}",
@@ -20785,8 +21087,8 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
         serde_json::to_string(&welcome).unwrap()
     );
     let message = Message::new(
-        UserId::new("zoe").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("zoe")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &content,
     );
@@ -20794,7 +21096,7 @@ fn test_welcome_with_mismatched_inviter_id_rejected() {
 
     let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
     assert!(
-        !manager.has_session("zoe").unwrap(),
+        !manager.has_session(&id("zoe")).unwrap(),
         "a Welcome with mismatched inviter_id must not create a session"
     );
 }
@@ -20809,13 +21111,15 @@ fn test_tofu_entries_persisted_via_storage() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
-    // Pin a key for "alice"
+    // Pin a key for &id("alice")
     let pk = vec![42u8; 32];
-    protocol.tofu_check_or_pin("alice", pk.clone()).unwrap();
+    protocol
+        .tofu_check_or_pin(&id("alice"), pk.clone())
+        .unwrap();
 
     // Verify the entry was persisted to raw storage
     let raw = storage
-        .load(storage_keys::TOFU_KEYS, "alice")
+        .load(storage_keys::TOFU_KEYS, &id("alice"))
         .unwrap()
         .expect("TOFU entry should be persisted");
     let restored: TofuEntry = serde_json::from_slice(&raw).unwrap();
@@ -20826,12 +21130,12 @@ fn test_tofu_entries_persisted_via_storage() {
 fn test_tofu_entries_restored_on_restart() {
     let storage = Arc::new(crate::mls::InMemoryStorage::new());
 
-    // Protocol A pins a key for "alice"
+    // Protocol A pins a key for &id("alice")
     {
         let mut protocol_a = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
         protocol_a.initialize_mls_for_test(storage.clone()).unwrap();
         protocol_a
-            .tofu_check_or_pin("alice", vec![10u8; 32])
+            .tofu_check_or_pin(&id("alice"), vec![10u8; 32])
             .unwrap();
     }
 
@@ -20841,16 +21145,16 @@ fn test_tofu_entries_restored_on_restart() {
 
     // The restored TOFU store should contain alice's pinned key
     assert!(
-        protocol_b.known_peer_public_keys.contains_key("alice"),
+        protocol_b.known_peer_public_keys.contains_key(&id("alice")),
         "TOFU entry for alice should be restored from storage"
     );
     assert_eq!(
-        protocol_b.known_peer_public_keys["alice"].public_key,
+        protocol_b.known_peer_public_keys[&id("alice")].public_key,
         vec![10u8; 32]
     );
 
     // A different key for alice should be rejected (TOFU mismatch)
-    let result = protocol_b.tofu_check_or_pin("alice", vec![99u8; 32]);
+    let result = protocol_b.tofu_check_or_pin(&id("alice"), vec![99u8; 32]);
     assert!(
         result.is_err(),
         "TOFU mismatch should be detected after restore"
@@ -20916,10 +21220,12 @@ fn test_tofu_last_seen_update_persisted() {
     protocol.initialize_mls_for_test(storage.clone()).unwrap();
 
     let pk = vec![7u8; 32];
-    protocol.tofu_check_or_pin("carol", pk.clone()).unwrap();
+    protocol
+        .tofu_check_or_pin(&id("carol"), pk.clone())
+        .unwrap();
 
     let raw1 = storage
-        .load(storage_keys::TOFU_KEYS, "carol")
+        .load(storage_keys::TOFU_KEYS, &id("carol"))
         .unwrap()
         .unwrap();
     let entry1: TofuEntry = serde_json::from_slice(&raw1).unwrap();
@@ -20927,10 +21233,10 @@ fn test_tofu_last_seen_update_persisted() {
 
     // Re-verify the same key (updates last_seen)
     std::thread::sleep(std::time::Duration::from_millis(5));
-    protocol.tofu_check_or_pin("carol", pk).unwrap();
+    protocol.tofu_check_or_pin(&id("carol"), pk).unwrap();
 
     let raw2 = storage
-        .load(storage_keys::TOFU_KEYS, "carol")
+        .load(storage_keys::TOFU_KEYS, &id("carol"))
         .unwrap()
         .unwrap();
     let entry2: TofuEntry = serde_json::from_slice(&raw2).unwrap();
@@ -21030,8 +21336,8 @@ fn test_security_gate_rejects_missing_transport_id_when_required() {
     alice.initialize_mls_for_test(storage_a).unwrap();
 
     let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
@@ -21062,13 +21368,13 @@ fn test_security_gate_passes_with_matching_transport_id_when_required() {
     alice.initialize_mls_for_test(storage_a).unwrap();
 
     let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
     alice.sign_control_message(&mut msg).unwrap();
-    msg.set_transport_peer_id("alice".to_string()).unwrap();
+    msg.set_transport_peer_id(id("alice")).unwrap();
 
     let result = protocol.security_gate_control_message(&msg);
     assert!(
@@ -21126,8 +21432,8 @@ fn test_relayed_signed_control_passes_when_identity_required() {
     alice.initialize_mls_for_test(storage_a).unwrap();
 
     let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
     );
@@ -21162,8 +21468,8 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
     // Pin alice's key first — any prior signed control contact does this,
     // which is what made the unsigned relay-native rebuild undeliverable.
     let mut pin_msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         format!("{}{{\"data\":\"first\"}}", internal_prefixes::CONN_REQUEST),
     );
@@ -21172,7 +21478,7 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
         protocol.verify_control_message(&pin_msg),
         Ok(true)
     ));
-    assert!(protocol.known_peer_public_keys.contains_key("alice"));
+    assert!(protocol.known_peer_public_keys.contains_key(&id("alice")));
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let events_handle = Arc::clone(&events);
@@ -21187,8 +21493,8 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
         initial_message: None,
     };
     let mut message = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "{}{}",
@@ -21197,7 +21503,7 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
         ),
     );
     alice.sign_control_message(&mut message).unwrap();
-    message.set_transport_peer_id("alice".to_string()).unwrap();
+    message.set_transport_peer_id(id("alice")).unwrap();
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -21207,7 +21513,7 @@ fn test_signed_conn_request_from_pinned_sender_with_internet_identity() {
         captured.iter().any(|e| matches!(
             e,
             Event::ConnectionRequestReceived { sender, sender_name, .. }
-                if sender == "alice" && sender_name == "Alice"
+                if sender == &id("alice") && sender_name == "Alice"
         )),
         "signed conn request from pinned sender must emit ConnectionRequestReceived"
     );
@@ -21225,7 +21531,7 @@ fn test_enable_message_persistence_restores_tofu_keys() {
     storage
         .store(
             storage_keys::TOFU_KEYS,
-            "dave",
+            &id("dave"),
             &serde_json::to_vec(&entry).unwrap(),
         )
         .unwrap();
@@ -21237,11 +21543,11 @@ fn test_enable_message_persistence_restores_tofu_keys() {
         .unwrap();
 
     assert!(
-        protocol.known_peer_public_keys.contains_key("dave"),
+        protocol.known_peer_public_keys.contains_key(&id("dave")),
         "TOFU entry should be restored via enable_message_persistence path"
     );
     assert_eq!(
-        protocol.known_peer_public_keys["dave"].public_key,
+        protocol.known_peer_public_keys[&id("dave")].public_key,
         vec![55u8; 32]
     );
 }
@@ -21475,7 +21781,11 @@ fn test_relay_forwards_third_party_message() {
 
     let forwarded = transport_handle.peer_sends();
     assert_eq!(forwarded.len(), 1, "forwarded to exactly one neighbor");
-    assert_eq!(forwarded[0].0, "carol", "handed to the neighbor");
+    assert_eq!(
+        forwarded[0].0,
+        "carol".to_string(),
+        "handed to the neighbor"
+    );
     assert_eq!(
         forwarded[0].1.recipient.as_str(),
         "bob",
@@ -21699,8 +22009,8 @@ fn a_forward_whose_links_all_failed_is_kept_rather_than_dropped() {
 
     let forwarded = transport_handle.peer_sends();
     assert_eq!(forwarded.len(), 1, "the kept frame is forwarded");
-    assert_eq!(forwarded[0].0, "carol");
-    assert_eq!(forwarded[0].1.recipient.as_str(), "bob");
+    assert_eq!(forwarded[0].0, "carol".to_string());
+    assert_eq!(forwarded[0].1.recipient.as_str(), "bob".to_string());
     assert_eq!(protocol.mesh_relay_stats().awaiting_transmission, 0);
     assert_eq!(protocol.mesh_relay_stats().forwarded, 1);
 }
@@ -21940,7 +22250,7 @@ fn test_relay_preserves_original_sender() {
     // accounting: a carrier must not rewrite what it carries.
     let forwarded = transport_handle.peer_sends();
     assert_eq!(forwarded.len(), 1);
-    assert_eq!(forwarded[0].1.sender.as_str(), "alice");
+    assert_eq!(forwarded[0].1.sender.as_str(), "alice".to_string());
     assert_eq!(forwarded[0].1.content, "original content");
 
     let events = relay_events.lock().unwrap();
@@ -23231,7 +23541,7 @@ fn test_cleanup_outbox_expiry_settles_pending_connection_request() {
             _ => None,
         })
         .expect("connection request expiry must emit undeliverable");
-    assert_eq!(undeliverable.0, "bob");
+    assert_eq!(undeliverable.0, "bob".to_string());
     assert_eq!(undeliverable.1, sent_id.as_str());
     assert_eq!(undeliverable.2, "outbox_lifetime_exceeded");
     drop(captured);
@@ -23362,7 +23672,7 @@ fn test_outbox_capacity_eviction_settles_pending_connection_request() {
             _ => None,
         })
         .expect("connection request eviction must emit undeliverable");
-    assert_eq!(undeliverable.0, "bob");
+    assert_eq!(undeliverable.0, "bob".to_string());
     assert_eq!(undeliverable.1, sent_id.as_str());
     assert_eq!(undeliverable.2, "outbox_capacity_exceeded");
     drop(captured);
@@ -23432,7 +23742,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
     // lifetime 1s → absolute cap 4s.
     let lifetime_ms = 1000;
 
-    let dead = test_message("bob", "past the absolute cap");
+    let dead = test_message(&id("bob"), "past the absolute cap");
     let dead_id = dead.id.clone();
     store_outbox_entry(
         &storage,
@@ -23446,7 +23756,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
         },
     );
 
-    let lapsed = test_message("bob", "lapsed but within the cap");
+    let lapsed = test_message(&id("bob"), "lapsed but within the cap");
     let lapsed_id = lapsed.id.clone();
     store_outbox_entry(
         &storage,
@@ -24531,12 +24841,12 @@ fn test_sink_panic_in_protocol_event_does_not_poison_shared_state() {
         .unwrap();
 
     // First emit: sink panics, must be isolated.
-    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".to_string()));
 
     // Second emit: lock must not be poisoned. If the panic had unwound
     // through the live `MutexGuard`, this call would fail to acquire the
     // lock and the legacy handler below would be missing the second event.
-    protocol.emit_event(crate::events::Event::neighbor_lost("bob".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("bob".to_string()));
 
     let legacy_events = legacy.lock().unwrap().clone();
     assert_eq!(
@@ -24548,7 +24858,7 @@ fn test_sink_panic_in_protocol_event_does_not_poison_shared_state() {
 
     // And the protocol's lock is observably healthy: emit a third event
     // and verify it lands.
-    protocol.emit_event(crate::events::Event::neighbor_lost("carol".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("carol".to_string()));
     let post_count = legacy.lock().unwrap().len();
     assert_eq!(
         post_count, 3,
@@ -24603,7 +24913,7 @@ fn test_sink_panic_in_routing_decision_does_not_poison_shared_state() {
     let legacy: Arc<Mutex<Vec<crate::events::Event>>> = Arc::new(Mutex::new(Vec::new()));
     let legacy_handler = legacy.clone();
     protocol.on_event(move |event| legacy_handler.lock().unwrap().push(event));
-    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".to_string()));
 
     let count = legacy.lock().unwrap().len();
     assert_eq!(
@@ -24682,7 +24992,7 @@ fn test_legacy_event_handler_panic_does_not_poison_shared_state() {
     protocol.on_event(move |event| surviving_handle.lock().unwrap().push(event));
 
     // First emit triggers the panic from handler 1.
-    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".to_string()));
 
     assert!(
         panicked.load(std::sync::atomic::Ordering::SeqCst),
@@ -24700,7 +25010,7 @@ fn test_legacy_event_handler_panic_does_not_poison_shared_state() {
     );
 
     // Second emit proves the lock is not poisoned.
-    protocol.emit_event(crate::events::Event::neighbor_lost("bob".into()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("bob".to_string()));
     let post_count = surviving.lock().unwrap().len();
     assert_eq!(
         post_count, 2,
@@ -25410,6 +25720,12 @@ fn media_test_protocol_with_recovery(
 /// Establishes a real, confirmed 1:1 MLS session between two protocol
 /// instances by wiring the key package and Welcome at the manager level.
 fn establish_media_session(alice: &mut OfflineProtocol, bob: &mut OfflineProtocol) {
+    // Read the two identities off the instances rather than assuming their
+    // labels: the key package carries a credential that must match the id it
+    // is imported under, and that id is now derived.
+    let alice_id = local_id(alice);
+    let bob_id = local_id(bob);
+
     let bob_kp = {
         let mls = bob.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
@@ -25420,20 +25736,20 @@ fn establish_media_session(alice: &mut OfflineProtocol, bob: &mut OfflineProtoco
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &bob_id,
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&bob_id).unwrap()
     };
     {
         let mls = bob.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager.process_welcome(&welcome).unwrap();
     }
-    alice.confirm_session_state("bob", "test_setup").unwrap();
-    bob.confirm_session_state("alice", "test_setup").unwrap();
+    alice.confirm_session_state(&bob_id, "test_setup").unwrap();
+    bob.confirm_session_state(&alice_id, "test_setup").unwrap();
 }
 
 type ReceivedFile = (
@@ -25526,11 +25842,11 @@ fn compact_envelope_end_to_end_with_negotiated_peers() {
     establish_media_session(&mut alice, &mut bob);
 
     // Alice learned bob's compact-envelope capability from his key package.
-    feed_key_package_with_env(&mut alice, "bob", vec![MLS_ENVELOPE_COMPACT_V1]);
+    feed_key_package_with_env(&mut alice, &id("bob"), vec![MLS_ENVELOPE_COMPACT_V1]);
 
     alice
         .send_message(
-            "bob",
+            &id("bob"),
             "hello over compact",
             None::<MessagePriority>,
             None::<String>,
@@ -25569,7 +25885,7 @@ fn compact_envelope_interop_legacy_recipient_and_ungated_parsing() {
 
     alice
         .send_message(
-            "bob",
+            &id("bob"),
             "hello legacy",
             None::<MessagePriority>,
             None::<String>,
@@ -25615,24 +25931,27 @@ fn compact_envelope_interop_legacy_recipient_and_ungated_parsing() {
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "carol",
+                &id("carol"),
                 &carol_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("carol").unwrap()
+        manager.create_session(&id("carol")).unwrap()
     };
     {
         let mls = carol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager.process_welcome(&welcome).unwrap();
     }
-    dave.confirm_session_state("carol", "test_setup").unwrap();
-    carol.confirm_session_state("dave", "test_setup").unwrap();
-    feed_key_package_with_env(&mut dave, "carol", vec![MLS_ENVELOPE_COMPACT_V1]);
+    dave.confirm_session_state(&id("carol"), "test_setup")
+        .unwrap();
+    carol
+        .confirm_session_state(&id("dave"), "test_setup")
+        .unwrap();
+    feed_key_package_with_env(&mut dave, &id("carol"), vec![MLS_ENVELOPE_COMPACT_V1]);
 
     dave.send_message(
-        "carol",
+        &id("carol"),
         "compact anyway",
         None::<MessagePriority>,
         None::<String>,
@@ -25662,12 +25981,12 @@ fn rich_payload_end_to_end_with_negotiated_peer() {
     establish_media_session(&mut alice, &mut bob);
 
     // Alice learned bob's rich-payload capability from his key package.
-    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut alice, &id("bob"), vec![RICH_PAYLOAD_V1]);
 
     let extras = sample_rich_extras();
     alice
         .send_message_with(
-            "bob",
+            &id("bob"),
             "hello rich",
             SendMessageOptions {
                 reply_context: extras.reply_context.clone(),
@@ -25718,7 +26037,7 @@ fn rich_payload_end_to_end_with_negotiated_peer() {
             .forwarded_from
             .as_ref()
             .map(|f| f.original_sender.as_str()),
-        Some("dave")
+        Some(id("dave").as_str())
     );
 }
 
@@ -25732,7 +26051,7 @@ fn rich_payload_degrades_to_plain_text_for_legacy_recipient() {
     let extras = sample_rich_extras();
     alice
         .send_message_with(
-            "bob",
+            &id("bob"),
             "hello plain",
             SendMessageOptions {
                 reply_context: extras.reply_context.clone(),
@@ -25768,12 +26087,12 @@ fn rich_payload_flush_pending_seals_with_current_capability() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
     let (mut bob, _bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
-    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut alice, &id("bob"), vec![RICH_PAYLOAD_V1]);
 
     // Queue a rich message as if the session had not been ready at send
     // time; the extras ride the pending queue in `PendingMessage::rich`.
     alice.queue_pending_message(
-        "bob",
+        &id("bob"),
         "queued rich",
         MessagePriority::Medium,
         MessageId::new(),
@@ -25783,7 +26102,7 @@ fn rich_payload_flush_pending_seals_with_current_capability() {
         None,
         Some(sample_rich_extras()),
     );
-    alice.flush_pending_messages("bob").unwrap();
+    alice.flush_pending_messages(&id("bob")).unwrap();
 
     let sent = alice_handle.sent_messages();
     let enc = sent
@@ -25820,7 +26139,7 @@ fn rich_payload_flush_pending_drops_extras_for_legacy_recipient() {
     // Bob never fed alice a rich-capable key package.
 
     alice.queue_pending_message(
-        "bob",
+        &id("bob"),
         "queued rich",
         MessagePriority::Medium,
         MessageId::new(),
@@ -25830,7 +26149,7 @@ fn rich_payload_flush_pending_drops_extras_for_legacy_recipient() {
         None,
         Some(sample_rich_extras()),
     );
-    alice.flush_pending_messages("bob").unwrap();
+    alice.flush_pending_messages(&id("bob")).unwrap();
 
     let sent = alice_handle.sent_messages();
     let enc = sent
@@ -25863,11 +26182,11 @@ fn rich_send_seals_content_type_against_relay_rewrite() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
     let (mut bob, _bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
-    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut alice, &id("bob"), vec![RICH_PAYLOAD_V1]);
 
     alice
         .send_message_with(
-            "bob",
+            &id("bob"),
             "look at this",
             SendMessageOptions {
                 content_type: Some(ContentType::Image),
@@ -25927,10 +26246,10 @@ fn forward_message_seals_media_secrets_for_capable_recipient() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
     let (mut bob, _bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
-    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut alice, &id("bob"), vec![RICH_PAYLOAD_V1]);
 
-    let original = cloud_media_original("dave", "alice");
-    alice.forward_message(&original, "bob", None).unwrap();
+    let original = cloud_media_original(&id("dave"), &id("alice"));
+    alice.forward_message(&original, &id("bob"), None).unwrap();
 
     let sent = alice_handle.sent_messages();
     let enc = sent
@@ -25961,7 +26280,7 @@ fn forward_message_seals_media_secrets_for_capable_recipient() {
     let fwd = delivered
         .forwarded_from
         .expect("attribution restored from the sealed body");
-    assert_eq!(fwd.original_sender.as_str(), "dave");
+    assert_eq!(fwd.original_sender.as_str(), id("dave"));
     assert_eq!(fwd.forward_count, 1);
     assert_eq!(
         delivered.content_type,
@@ -25981,8 +26300,8 @@ fn forward_message_outer_fallback_for_legacy_recipient() {
     establish_media_session(&mut alice, &mut bob);
     // Bob never fed alice a rich-capable key package.
 
-    let original = cloud_media_original("dave", "alice");
-    alice.forward_message(&original, "bob", None).unwrap();
+    let original = cloud_media_original(&id("dave"), &id("alice"));
+    alice.forward_message(&original, &id("bob"), None).unwrap();
 
     let sent = alice_handle.sent_messages();
     let enc = sent
@@ -25993,7 +26312,7 @@ fn forward_message_outer_fallback_for_legacy_recipient() {
     // Outer fallback: attribution and non-secret metadata preserved for the
     // legacy recipient.
     let outer_fwd = enc.forwarded_from.as_ref().expect("outer attribution");
-    assert_eq!(outer_fwd.original_sender.as_str(), "dave");
+    assert_eq!(outer_fwd.original_sender.as_str(), id("dave"));
     let outer_media = enc.media_metadata.as_ref().expect("outer media metadata");
     assert_eq!(
         outer_media.download_url.as_deref(),
@@ -26017,9 +26336,9 @@ fn forwarded_media_flush_seals_secrets_for_capable_recipient() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
     let (mut bob, _bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
-    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut alice, &id("bob"), vec![RICH_PAYLOAD_V1]);
 
-    let original = cloud_media_original("dave", "alice");
+    let original = cloud_media_original(&id("dave"), &id("alice"));
     let forward_info = offline_protocol_core::ForwardInfo::from_message(&original);
     let rich = RichSendExtras {
         reply_context: None,
@@ -26027,7 +26346,7 @@ fn forwarded_media_flush_seals_secrets_for_capable_recipient() {
         forward_info: Some(forward_info.clone()),
     };
     alice.queue_pending_message(
-        "bob",
+        &id("bob"),
         &original.content,
         MessagePriority::Medium,
         MessageId::new(),
@@ -26037,7 +26356,7 @@ fn forwarded_media_flush_seals_secrets_for_capable_recipient() {
         original.media_metadata.clone(),
         Some(rich),
     );
-    alice.flush_pending_messages("bob").unwrap();
+    alice.flush_pending_messages(&id("bob")).unwrap();
 
     let sent = alice_handle.sent_messages();
     let enc = sent
@@ -26067,11 +26386,13 @@ fn forward_message_rejects_oversized_media_metadata() {
     // flush time and re-queue forever.
     let (mut alice, _alice_handle) = media_test_protocol("alice");
 
-    let mut original = cloud_media_original("dave", "alice");
+    let mut original = cloud_media_original(&id("dave"), &id("alice"));
     if let Some(media) = original.media_metadata.as_mut() {
         media.thumbnail_base64 = Some("x".repeat(MAX_RICH_EXTRAS_BYTES + 1));
     }
-    let err = alice.forward_message(&original, "bob", None).unwrap_err();
+    let err = alice
+        .forward_message(&original, &id("bob"), None)
+        .unwrap_err();
     assert!(
         matches!(err, crate::Error::InvalidArgument(_)),
         "oversized forward extras must be rejected, got: {err:?}"
@@ -26086,9 +26407,11 @@ fn forward_message_rejects_file_chunk_content_type() {
     // manager. Rejected at the boundary, like `send_message_with`.
     let (mut alice, _alice_handle) = media_test_protocol("alice");
 
-    let mut original = cloud_media_original("dave", "alice");
+    let mut original = cloud_media_original(&id("dave"), &id("alice"));
     original.content_type = ContentType::FileChunk;
-    let err = alice.forward_message(&original, "bob", None).unwrap_err();
+    let err = alice
+        .forward_message(&original, &id("bob"), None)
+        .unwrap_err();
     assert!(
         matches!(err, crate::Error::InvalidArgument(_)),
         "FileChunk forward must be rejected, got: {err:?}"
@@ -26105,11 +26428,11 @@ fn content_type_only_send_seals_hint_against_relay_rewrite() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
     let (mut bob, _bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
-    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut alice, &id("bob"), vec![RICH_PAYLOAD_V1]);
 
     alice
         .send_message_with(
-            "bob",
+            &id("bob"),
             "voice caption",
             SendMessageOptions {
                 content_type: Some(ContentType::VoiceNote),
@@ -26151,10 +26474,10 @@ fn plain_text_send_without_extras_stays_bare() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
     let (mut bob, _bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
-    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut alice, &id("bob"), vec![RICH_PAYLOAD_V1]);
 
     alice
-        .send_message_with("bob", "just text", SendMessageOptions::default())
+        .send_message_with(&id("bob"), "just text", SendMessageOptions::default())
         .unwrap();
 
     let sent = alice_handle.sent_messages();
@@ -26187,10 +26510,10 @@ fn rich_payload_flush_after_restart_seals_with_restored_capability() {
 
     let (mut bob, _bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
-    feed_key_package_with_rich(&mut alice, "bob", vec![RICH_PAYLOAD_V1]);
+    feed_key_package_with_rich(&mut alice, &id("bob"), vec![RICH_PAYLOAD_V1]);
 
     alice.queue_pending_message(
-        "bob",
+        &id("bob"),
         "queued rich",
         MessagePriority::Medium,
         MessageId::new(),
@@ -26208,7 +26531,7 @@ fn rich_payload_flush_after_restart_seals_with_restored_capability() {
     let mut alice2 = OfflineProtocol::new(alice2_config).unwrap();
     alice2.initialize_mls_for_test(alice_storage).unwrap();
     assert!(
-        alice2.peer_supports_rich_payload("bob"),
+        alice2.peer_supports_rich_payload(&id("bob")),
         "restored capability must be visible before the flush runs"
     );
     let transport = MockTransport::new(TransportType::BLE);
@@ -26252,7 +26575,7 @@ fn flush_pending_preserves_content_type_without_rich_extras() {
     // which must restore the stored content_type instead of resetting to
     // Text.
     alice.queue_pending_message(
-        "bob",
+        &id("bob"),
         "queued image caption",
         MessagePriority::Medium,
         MessageId::new(),
@@ -26262,7 +26585,7 @@ fn flush_pending_preserves_content_type_without_rich_extras() {
         None,
         None,
     );
-    alice.flush_pending_messages("bob").unwrap();
+    alice.flush_pending_messages(&id("bob")).unwrap();
 
     let sent = alice_handle.sent_messages();
     let enc = sent
@@ -26389,7 +26712,7 @@ fn wire_size_and_fragment_report_for_encrypted_dms() {
 fn test_send_media_requires_confirmed_session() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
 
-    let result = alice.send_media("bob", vec![1, 2, 3], "f.bin", ContentType::File, None);
+    let result = alice.send_media(&id("bob"), vec![1, 2, 3], "f.bin", ContentType::File, None);
 
     assert!(matches!(result, Err(Error::SessionNotReady(_))));
     assert!(
@@ -26426,7 +26749,7 @@ fn test_send_media_encrypts_chunks_and_metadata_on_wire() {
     let file_data = vec![0xAB; 2048]; // single chunk (< 4 KB BLE chunk size)
     alice
         .send_media(
-            "bob",
+            &id("bob"),
             file_data.clone(),
             "secret-photo.jpg",
             ContentType::Image,
@@ -26476,7 +26799,7 @@ fn test_media_end_to_end_encrypted_transfer() {
     let file_data: Vec<u8> = (0..10_240u32).map(|i| (i % 251) as u8).collect();
     alice
         .send_media(
-            "bob",
+            &id("bob"),
             file_data.clone(),
             "secret-photo.jpg",
             ContentType::Image,
@@ -26511,7 +26834,7 @@ fn test_media_end_to_end_encrypted_transfer() {
     assert_eq!(got.len(), 1);
     let (file_name, sender, content_type, media_metadata, data) = &got[0];
     assert_eq!(file_name, "secret-photo.jpg");
-    assert_eq!(sender, "alice");
+    assert_eq!(sender, &id("alice"));
     assert_eq!(content_type, &ContentType::Image.to_string());
     assert_eq!(data, &file_data);
     let meta = media_metadata.as_ref().expect("metadata must survive E2E");
@@ -26527,14 +26850,14 @@ fn sample_media_rich_options(reply_to: &str) -> MediaSendOptions {
         caption: Some("vacation shot".to_string()),
         reply_to_msg: Some(reply_to.to_string()),
         reply_context: Some(offline_protocol_core::ReplyContext {
-            sender: UserId::new("bob").unwrap(),
+            sender: UserId::new(&id("bob")).unwrap(),
             text: "quoted text".to_string(),
             timestamp: None,
             reply_media_label: None,
             reply_content_type: Some("text".to_string()),
         }),
         forward_info: Some(offline_protocol_core::ForwardInfo {
-            original_sender: UserId::new("dave").unwrap(),
+            original_sender: UserId::new(&id("dave")).unwrap(),
             original_message_id: offline_protocol_core::MessageId::new(),
             original_timestamp: offline_protocol_core::Timestamp::now(),
             forward_count: 2,
@@ -26563,7 +26886,7 @@ fn test_send_media_rich_e2e_seals_extras_and_bumps_chunk0_envelope() {
     let (mut alice, alice_handle) = media_test_protocol("alice");
     let (mut bob, bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
-    alice.peer_rich_payload.insert("bob".to_string());
+    alice.peer_rich_payload.insert(id("bob"));
 
     let received = capture_file_received_events(&mut bob);
 
@@ -26574,7 +26897,7 @@ fn test_send_media_rich_e2e_seals_extras_and_bumps_chunk0_envelope() {
     let reply_id = options.reply_to_msg.clone().unwrap();
     alice
         .send_media_with(
-            "bob",
+            &id("bob"),
             file_data.clone(),
             "rich-photo.jpg",
             ContentType::Image,
@@ -26599,7 +26922,7 @@ fn test_send_media_rich_e2e_seals_extras_and_bumps_chunk0_envelope() {
                 let wire = serde_json::to_string(&msg).unwrap();
                 assert!(!wire.contains("vacation shot"));
                 assert!(!wire.contains("quoted text"));
-                assert!(!wire.contains("dave"));
+                assert!(!wire.contains(&id("dave")));
             }
             bob_handle.queue_message(msg);
         }
@@ -26643,15 +26966,15 @@ fn test_send_media_rich_e2e_seals_extras_and_bumps_chunk0_envelope() {
             ..
         } => {
             assert_eq!(file_name, "rich-photo.jpg");
-            assert_eq!(sender, "alice");
+            assert_eq!(sender, &id("alice"));
             assert_eq!(content_type, &ContentType::Image.to_string());
             assert_eq!(caption.as_deref(), Some("vacation shot"));
             assert_eq!(reply_to_msg.as_deref(), Some(reply_id.as_str()));
             let rc = reply_context.as_ref().expect("reply context must survive");
-            assert_eq!(rc.sender, "bob");
+            assert_eq!(rc.sender, id("bob"));
             assert_eq!(rc.text, "quoted text");
             let fwd = forward_info.as_ref().expect("forward info must survive");
-            assert_eq!(fwd.original_sender, "dave");
+            assert_eq!(fwd.original_sender, id("dave"));
             assert_eq!(fwd.forward_count, 2);
             assert!(
                 timestamp.is_some(),
@@ -26677,7 +27000,7 @@ fn test_send_media_rich_extras_dropped_for_non_capable_peer() {
 
     alice
         .send_media_with(
-            "bob",
+            &id("bob"),
             vec![0xAB; 1024],
             "plain-photo.jpg",
             ContentType::Image,
@@ -26745,11 +27068,11 @@ fn test_send_media_rich_extras_dropped_when_kill_switch_off() {
     let (mut bob, _bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
     // Even a recorded peer capability must not override the kill switch.
-    alice.peer_rich_payload.insert("bob".to_string());
+    alice.peer_rich_payload.insert(id("bob"));
 
     alice
         .send_media_with(
-            "bob",
+            &id("bob"),
             vec![0xCD; 512],
             "gated.jpg",
             ContentType::Image,
@@ -26809,7 +27132,7 @@ fn test_send_media_rich_invalid_reply_to_rejected() {
     establish_media_session(&mut alice, &mut bob);
 
     let result = alice.send_media_with(
-        "bob",
+        &id("bob"),
         vec![1, 2, 3],
         "f.bin",
         ContentType::File,
@@ -26828,7 +27151,7 @@ fn test_send_media_rich_oversized_extras_rejected() {
     establish_media_session(&mut alice, &mut bob);
 
     let result = alice.send_media_with(
-        "bob",
+        &id("bob"),
         vec![1, 2, 3],
         "f.bin",
         ContentType::File,
@@ -26848,7 +27171,7 @@ fn test_send_media_custom_file_id_honored_and_validated() {
 
     let file_id = alice
         .send_media_with(
-            "bob",
+            &id("bob"),
             vec![1u8; 64],
             "custom.bin",
             ContentType::File,
@@ -26862,7 +27185,7 @@ fn test_send_media_custom_file_id_honored_and_validated() {
 
     // Reusing the id while the transfer is active must fail...
     let collision = alice.send_media_with(
-        "bob",
+        &id("bob"),
         vec![2u8; 64],
         "again.bin",
         ContentType::File,
@@ -26876,7 +27199,7 @@ fn test_send_media_custom_file_id_honored_and_validated() {
     // ...as must out-of-bounds ids.
     for bad in [String::new(), "x".repeat(4097)] {
         let result = alice.send_media_with(
-            "bob",
+            &id("bob"),
             vec![3u8; 64],
             "bad.bin",
             ContentType::File,
@@ -27026,7 +27349,7 @@ fn test_media_resend_required_after_restart_with_checksum_validation() {
         })
         .expect("MediaResendRequired must be emitted on start() after a mid-transfer restart");
     assert_eq!(resend.0, file_id);
-    assert_eq!(resend.1, "bob");
+    assert_eq!(resend.1, "bob".to_string());
     assert_eq!(resend.2, "photo.bin");
     assert_eq!(resend.3, 256);
 
@@ -27178,7 +27501,7 @@ fn test_plaintext_media_rejected_once_session_confirmed() {
     establish_media_session(&mut alice, &mut bob);
 
     let received = capture_file_received(&mut bob);
-    bob_handle.queue_message(legacy_chunk_message("alice", "bob", &[7u8; 128]));
+    bob_handle.queue_message(legacy_chunk_message(&id("alice"), &id("bob"), &[7u8; 128]));
     while bob.receive_message().is_some() {}
 
     assert!(
@@ -27194,7 +27517,7 @@ fn test_plaintext_media_accepted_without_session_when_not_required() {
     let (mut bob, bob_handle) = media_test_protocol("bob");
 
     let received = capture_file_received(&mut bob);
-    bob_handle.queue_message(legacy_chunk_message("alice", "bob", &[7u8; 128]));
+    bob_handle.queue_message(legacy_chunk_message(&id("alice"), &id("bob"), &[7u8; 128]));
     while bob.receive_message().is_some() {}
 
     let got = received.lock().unwrap();
@@ -27219,7 +27542,7 @@ fn test_plaintext_media_rejected_when_encryption_required() {
     bob.start().unwrap();
 
     let received = capture_file_received(&mut bob);
-    bob_handle.queue_message(legacy_chunk_message("alice", "bob", &[7u8; 128]));
+    bob_handle.queue_message(legacy_chunk_message(&id("alice"), &id("bob"), &[7u8; 128]));
     while bob.receive_message().is_some() {}
 
     assert!(
@@ -27273,7 +27596,7 @@ fn test_plaintext_text_rejected_when_encryption_required() {
         _ => {}
     });
 
-    let mut injected = plaintext_text_message("alice", "bob", "injected cleartext");
+    let mut injected = plaintext_text_message(&id("alice"), &id("bob"), "injected cleartext");
     injected.requires_ack = true;
     bob_handle.queue_message(injected);
     assert!(
@@ -27283,7 +27606,7 @@ fn test_plaintext_text_rejected_when_encryption_required() {
 
     // A second injection from the same peer is also dropped, but the
     // security warning stays once-per-peer.
-    bob_handle.queue_message(plaintext_text_message("alice", "bob", "again"));
+    bob_handle.queue_message(plaintext_text_message(&id("alice"), &id("bob"), "again"));
     assert!(bob.receive_message().is_none());
 
     assert!(
@@ -27294,7 +27617,7 @@ fn test_plaintext_text_rejected_when_encryption_required() {
     assert_eq!(
         got_warnings.as_slice(),
         &[(
-            "alice".to_string(),
+            id("alice"),
             crate::events::SecurityWarningCode::PlaintextReceiveRejected
         )],
         "exactly one PlaintextReceiveRejected warning per peer"
@@ -27311,7 +27634,11 @@ fn test_plaintext_text_rejected_once_session_confirmed() {
     let (mut bob, bob_handle) = media_test_protocol("bob");
     establish_media_session(&mut alice, &mut bob);
 
-    bob_handle.queue_message(plaintext_text_message("alice", "bob", "downgrade attempt"));
+    bob_handle.queue_message(plaintext_text_message(
+        &id("alice"),
+        &id("bob"),
+        "downgrade attempt",
+    ));
     assert!(
         bob.receive_message().is_none(),
         "plaintext text from a session-confirmed peer must be rejected (downgrade/forgery)"
@@ -27332,7 +27659,11 @@ fn test_plaintext_text_accepted_without_session_when_not_required() {
         }
     });
 
-    bob_handle.queue_message(plaintext_text_message("alice", "bob", "legacy hello"));
+    bob_handle.queue_message(plaintext_text_message(
+        &id("alice"),
+        &id("bob"),
+        "legacy hello",
+    ));
     let received = bob
         .receive_message()
         .expect("legacy plaintext interop must be preserved under the opt-out");
@@ -27391,21 +27722,23 @@ fn test_plaintext_rejected_warning_fires_per_distinct_peer() {
     let (mut bob, bob_handle) = strict_text_protocol("bob", true);
     let warnings = capture_security_warnings(&mut bob);
 
-    bob_handle.queue_message(plaintext_text_message("alice", "bob", "from alice"));
-    bob_handle.queue_message(plaintext_text_message("carol", "bob", "from carol"));
+    bob_handle.queue_message(plaintext_text_message(
+        &id("alice"),
+        &id("bob"),
+        "from alice",
+    ));
+    bob_handle.queue_message(plaintext_text_message(
+        &id("carol"),
+        &id("bob"),
+        "from carol",
+    ));
     assert!(bob.receive_message().is_none());
 
     assert_eq!(
         warnings.lock().unwrap().as_slice(),
         &[
-            (
-                "alice".to_string(),
-                SecurityWarningCode::PlaintextReceiveRejected
-            ),
-            (
-                "carol".to_string(),
-                SecurityWarningCode::PlaintextReceiveRejected
-            ),
+            (id("alice"), SecurityWarningCode::PlaintextReceiveRejected),
+            (id("carol"), SecurityWarningCode::PlaintextReceiveRejected),
         ],
         "each distinct peer gets its own once-per-peer warning"
     );
@@ -27443,7 +27776,7 @@ fn test_rejected_plaintext_replay_is_not_reacked() {
     let (mut bob, bob_handle) = strict_text_protocol("bob", true);
     let warnings = capture_security_warnings(&mut bob);
 
-    let mut injected = plaintext_text_message("alice", "bob", "replayed injection");
+    let mut injected = plaintext_text_message(&id("alice"), &id("bob"), "replayed injection");
     injected.requires_ack = true;
 
     // Exact replay: the same wire message (same id) delivered twice. The
@@ -27544,20 +27877,22 @@ fn test_encrypted_media_chunk_queued_until_session_ready() {
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap()
+        manager.create_session(&id("bob")).unwrap()
     };
-    alice.confirm_session_state("bob", "test_setup").unwrap();
+    alice
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
 
     let received = capture_file_received(&mut bob);
     let file_data = vec![5u8; 512];
     alice
         .send_media(
-            "bob",
+            &id("bob"),
             file_data.clone(),
             "queued.bin",
             ContentType::File,
@@ -27580,8 +27915,9 @@ fn test_encrypted_media_chunk_queued_until_session_ready() {
         let manager = mls.read().unwrap();
         manager.process_welcome(&welcome).unwrap();
     }
-    bob.confirm_session_state("alice", "test_setup").unwrap();
-    bob.process_pending_decryption("alice");
+    bob.confirm_session_state(&id("alice"), "test_setup")
+        .unwrap();
+    bob.process_pending_decryption(&id("alice"));
 
     let got = received.lock().unwrap();
     assert_eq!(
@@ -27601,7 +27937,7 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
     use sha2::{Digest, Sha256};
 
     // Carol holds a real, confirmed MLS session with bob. A valid ciphertext
-    // from that session delivered under wire sender "alice" must be rejected:
+    // from that session delivered under wire sender &id("alice") must be rejected:
     // MLS authenticates group membership, not the wire sender claim.
     let (mut bob, bob_handle) = media_test_protocol("bob");
     let (mut carol, _carol_handle) = media_test_protocol("carol");
@@ -27618,19 +27954,22 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
             let manager = mls.read().unwrap();
             manager
                 .import_key_package(
-                    "bob",
+                    &id("bob"),
                     &bob_kp.key_package_data,
                     offline_protocol_mls::KeyPackageTrust::FirstUse,
                 )
                 .unwrap();
-            manager.create_session("bob").unwrap()
+            manager.create_session(&id("bob")).unwrap()
         };
         let mls = bob.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager.process_welcome(&welcome).unwrap();
     }
-    carol.confirm_session_state("bob", "test_setup").unwrap();
-    bob.confirm_session_state("carol", "test_setup").unwrap();
+    carol
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
+    bob.confirm_session_state(&id("carol"), "test_setup")
+        .unwrap();
 
     let received = capture_file_received(&mut bob);
     let warnings: Arc<Mutex<Vec<(String, SecurityWarningCode)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -27670,14 +28009,14 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
         let mls = carol.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
         manager
-            .encrypt_for_user("bob", &inner.encode().unwrap())
+            .encrypt_for_user(&id("bob"), &inner.encode().unwrap())
             .unwrap()
     };
 
-    // ...delivered with wire sender "alice".
+    // ...delivered with wire sender &id("alice").
     let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         "",
     );
@@ -27698,7 +28037,7 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
             .lock()
             .unwrap()
             .iter()
-            .any(|(peer, code)| peer == "alice"
+            .any(|(peer, code)| peer == &id("alice")
                 && *code == SecurityWarningCode::MediaSenderGroupMismatch),
         "a MediaSenderGroupMismatch security warning must be emitted"
     );
@@ -27717,7 +28056,7 @@ fn test_send_media_caps_concurrent_transfers_per_peer() {
     for i in 0..MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
         alice
             .send_media(
-                "bob",
+                &id("bob"),
                 vec![i as u8; 512],
                 &format!("f{}.bin", i),
                 ContentType::File,
@@ -27729,7 +28068,7 @@ fn test_send_media_caps_concurrent_transfers_per_peer() {
     // One more must be rejected: the combined in-flight windows would exceed
     // the receiver's sender-ratchet out-of-order tolerance budget.
     let result = alice.send_media(
-        "bob",
+        &id("bob"),
         vec![9u8; 512],
         "overflow.bin",
         ContentType::File,
@@ -27743,7 +28082,13 @@ fn test_send_media_caps_concurrent_transfers_per_peer() {
 
     // A different recipient is not affected by bob's cap.
     // (No session with carol -> SessionNotReady, NOT MediaTransferLimit.)
-    let other = alice.send_media("carol", vec![1u8; 64], "c.bin", ContentType::File, None);
+    let other = alice.send_media(
+        &id("carol"),
+        vec![1u8; 64],
+        "c.bin",
+        ContentType::File,
+        None,
+    );
     assert!(matches!(other, Err(Error::SessionNotReady(_))));
 }
 
@@ -27787,14 +28132,16 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
         let manager = mls.read().unwrap();
         manager
             .import_key_package(
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        manager.create_session("bob").unwrap();
+        manager.create_session(&id("bob")).unwrap();
     }
-    alice.confirm_session_state("bob", "test_setup").unwrap();
+    alice
+        .confirm_session_state(&id("bob"), "test_setup")
+        .unwrap();
 
     let dropped_events: Arc<Mutex<Vec<(String, DecryptionFailureCode)>>> =
         Arc::new(Mutex::new(Vec::new()));
@@ -27809,7 +28156,7 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
     // alone overflows bob's 1-slot queue, evicting the first chunk.
     let file_data = vec![0x5Au8; 9 * 1024];
     alice
-        .send_media("bob", file_data, "big.bin", ContentType::File, None)
+        .send_media(&id("bob"), file_data, "big.bin", ContentType::File, None)
         .unwrap();
 
     let mut rounds = 0;
@@ -27846,7 +28193,7 @@ fn test_dropped_pending_media_chunk_fails_loudly() {
 
     let events = dropped_events.lock().unwrap();
     assert!(
-        events.iter().any(|(sender, code)| sender == "alice"
+        events.iter().any(|(sender, code)| sender == &id("alice")
             && *code == DecryptionFailureCode::PendingQueueDropped),
         "the dropped chunk must be attributed to its sender, got {:?}",
         events
@@ -27887,7 +28234,11 @@ fn test_plaintext_json_media_rejected_once_session_confirmed() {
     establish_media_session(&mut alice, &mut bob);
 
     let received = capture_file_received(&mut bob);
-    bob_handle.queue_message(legacy_json_chunk_message("alice", "bob", &[7u8; 64]));
+    bob_handle.queue_message(legacy_json_chunk_message(
+        &id("alice"),
+        &id("bob"),
+        &[7u8; 64],
+    ));
     while bob.receive_message().is_some() {}
 
     assert!(
@@ -27901,7 +28252,11 @@ fn test_plaintext_json_media_accepted_without_session_when_not_required() {
     let (mut bob, bob_handle) = media_test_protocol("bob");
 
     let received = capture_file_received(&mut bob);
-    bob_handle.queue_message(legacy_json_chunk_message("alice", "bob", &[7u8; 64]));
+    bob_handle.queue_message(legacy_json_chunk_message(
+        &id("alice"),
+        &id("bob"),
+        &[7u8; 64],
+    ));
     while bob.receive_message().is_some() {}
 
     let got = received.lock().unwrap();
@@ -27936,14 +28291,14 @@ fn test_media_transfer_encryption_failure_aborts_loudly() {
     // 9 KB over 4 KB BLE chunks (window 2): chunk 2 is sent by a later pump.
     let file_data = vec![0x77u8; 9 * 1024];
     let file_id = alice
-        .send_media("bob", file_data, "wedge.bin", ContentType::File, None)
+        .send_media(&id("bob"), file_data, "wedge.bin", ContentType::File, None)
         .unwrap();
 
     // Invalidate the session mid-transfer; the next pumped batch cannot encrypt.
     {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
-        manager.delete_session("bob").unwrap();
+        manager.delete_session(&id("bob")).unwrap();
     }
 
     // Ferry the initial window to bob, ferry his ACKs back, then pump.
@@ -27970,7 +28325,7 @@ fn test_media_transfer_encryption_failure_aborts_loudly() {
             got
         );
         assert_eq!(got[0].0, file_id);
-        assert_eq!(got[0].1, "bob");
+        assert_eq!(got[0].1, id("bob"));
     }
     assert!(
         alice.outbound_media_transfers.is_empty(),
@@ -27979,7 +28334,13 @@ fn test_media_transfer_encryption_failure_aborts_loudly() {
 
     // The freed slot means a retry is gated on the missing session — it must
     // never be rejected with MediaTransferLimit by the dead transfer.
-    let retry = alice.send_media("bob", vec![1u8; 64], "retry.bin", ContentType::File, None);
+    let retry = alice.send_media(
+        &id("bob"),
+        vec![1u8; 64],
+        "retry.bin",
+        ContentType::File,
+        None,
+    );
     assert!(
         matches!(retry, Err(Error::SessionNotReady(_))),
         "retry after abort must be gated on the session, got {:?}",
@@ -27997,8 +28358,8 @@ fn test_send_media_initial_encryption_failure_leaves_no_zombie_transfer() {
     // real MLS session) must never accumulate transfers toward the per-peer
     // cap: each failed send aborts and frees its slot.
     for _ in 0..=MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
-        alice.confirmed_sessions.insert("bob".to_string());
-        let result = alice.send_media("bob", vec![1u8; 64], "z.bin", ContentType::File, None);
+        alice.confirmed_sessions.insert(id("bob"));
+        let result = alice.send_media(&id("bob"), vec![1u8; 64], "z.bin", ContentType::File, None);
         assert!(
             matches!(result, Err(Error::SessionNotReady(_))),
             "failed initial batch must return SessionNotReady (never MediaTransferLimit), got {:?}",
@@ -28047,13 +28408,13 @@ fn test_media_chunk_hard_decrypt_failure_emits_decryption_failed_event() {
     let mut encrypted = {
         let mls = alice.mls_manager.as_ref().unwrap().clone();
         let manager = mls.read().unwrap();
-        manager.encrypt_for_user("bob", b"payload").unwrap()
+        manager.encrypt_for_user(&id("bob"), b"payload").unwrap()
     };
     encrypted.ciphertext = vec![0u8; 24];
 
     let mut msg = Message::new(
-        UserId::new("alice").unwrap(),
-        UserId::new("bob").unwrap(),
+        UserId::new(&id("alice")).unwrap(),
+        UserId::new(&id("bob")).unwrap(),
         AppId::new("test-app").unwrap(),
         "",
     );
@@ -28072,9 +28433,10 @@ fn test_media_chunk_hard_decrypt_failure_emits_decryption_failed_event() {
     // the delivery contract behind that wording.
     let got = failures.lock().unwrap();
     assert!(
-        got.iter().any(|(sender, code, reason)| sender == "alice"
-            && *code != DecryptionFailureCode::PendingQueueDropped
-            && reason.contains("stalled until the sender resends")),
+        got.iter()
+            .any(|(sender, code, reason)| sender == &id("alice")
+                && *code != DecryptionFailureCode::PendingQueueDropped
+                && reason.contains("stalled until the sender resends")),
         "hard decrypt failure of a media chunk must surface MessageDecryptionFailed, got {:?}",
         got
     );
@@ -28108,7 +28470,7 @@ fn test_media_chunk_hard_decrypt_failure_withholds_ack_and_recovers() {
     // A real single-chunk transfer, then the same chunk with its MLS ciphertext
     // corrupted in flight — the shape a bit-flip or a spent generation produces.
     alice
-        .send_media("bob", vec![3u8; 512], "s.bin", ContentType::File, None)
+        .send_media(&id("bob"), vec![3u8; 512], "s.bin", ContentType::File, None)
         .unwrap();
     let chunk_wire = alice_handle
         .sent_messages()
@@ -28147,7 +28509,7 @@ fn test_media_chunk_hard_decrypt_failure_withholds_ack_and_recovers() {
         "the chunk id must be unmarked so a resend re-enters processing"
     );
     assert!(
-        !bob.pending_queue.contains_peer("alice"),
+        !bob.pending_queue.contains_peer(&id("alice")),
         "an undecryptable chunk must NOT be enqueued: it could never drain"
     );
     assert_eq!(*files.lock().unwrap(), 0, "nothing completes yet");
@@ -28156,7 +28518,7 @@ fn test_media_chunk_hard_decrypt_failure_withholds_ack_and_recovers() {
     // chunks, encrypted at a live generation. The transfer completes.
     alice_handle.clear_sent_messages();
     alice
-        .send_media("bob", vec![3u8; 512], "s.bin", ContentType::File, None)
+        .send_media(&id("bob"), vec![3u8; 512], "s.bin", ContentType::File, None)
         .unwrap();
     let resent = alice_handle
         .sent_messages()
@@ -28197,7 +28559,7 @@ fn test_media_chunk_naming_foreign_slot_withholds_ack_and_unmarks() {
     });
 
     alice
-        .send_media("bob", vec![7u8; 512], "s.bin", ContentType::File, None)
+        .send_media(&id("bob"), vec![7u8; 512], "s.bin", ContentType::File, None)
         .unwrap();
     let chunk_wire = alice_handle
         .sent_messages()
@@ -28218,7 +28580,7 @@ fn test_media_chunk_naming_foreign_slot_withholds_ack_and_unmarks() {
     // mallory — so it names a slot that is not the claimed sender's. This is
     // reachable by anyone who can capture and re-address a frame.
     let mut foreign = chunk_wire.clone();
-    foreign.sender = UserId::new("mallory").unwrap();
+    foreign.sender = UserId::new(&id("mallory")).unwrap();
 
     bob_handle.clear_sent_messages();
     bob_handle.queue_message(foreign);
@@ -28287,8 +28649,8 @@ fn test_media_security_rejection_classifies_both_identity_mismatches() {
     );
     assert!(
         is_media_security_rejection(&MlsError::SessionIdentityMismatch {
-            expected: "session:alice:bob".to_string(),
-            found: "session:bob:mallory".to_string(),
+            expected: session_slot("alice", "bob"),
+            found: session_slot("bob", "mallory"),
         }),
         "an envelope naming a foreign session slot is a security rejection"
     );
@@ -28329,7 +28691,7 @@ fn test_undecodable_media_envelope_withholds_ack_and_recovers() {
     });
 
     alice
-        .send_media("bob", vec![5u8; 512], "s.bin", ContentType::File, None)
+        .send_media(&id("bob"), vec![5u8; 512], "s.bin", ContentType::File, None)
         .unwrap();
     let chunk_wire = alice_handle
         .sent_messages()
@@ -28365,7 +28727,7 @@ fn test_undecodable_media_envelope_withholds_ack_and_recovers() {
         "the id must be unmarked so a resend re-enters processing"
     );
     assert!(
-        !bob.pending_queue.contains_peer("alice"),
+        !bob.pending_queue.contains_peer(&id("alice")),
         "an undecodable frame must NOT be enqueued: it could never become decodable"
     );
     assert_eq!(*files.lock().unwrap(), 0, "nothing completes yet");
@@ -28389,7 +28751,7 @@ fn test_undecodable_media_envelope_disabled_falls_back_to_drop_and_ack() {
     establish_media_session(&mut alice, &mut bob);
 
     alice
-        .send_media("bob", vec![5u8; 512], "s.bin", ContentType::File, None)
+        .send_media(&id("bob"), vec![5u8; 512], "s.bin", ContentType::File, None)
         .unwrap();
     let chunk_wire = alice_handle
         .sent_messages()
@@ -28438,7 +28800,7 @@ fn test_drained_media_chunk_that_hard_fails_is_not_acked() {
     establish_media_session(&mut alice, &mut bob);
 
     alice
-        .send_media("bob", vec![9u8; 512], "s.bin", ContentType::File, None)
+        .send_media(&id("bob"), vec![9u8; 512], "s.bin", ContentType::File, None)
         .unwrap();
     let chunk_wire = alice_handle
         .sent_messages()
@@ -28459,11 +28821,11 @@ fn test_drained_media_chunk_that_hard_fails_is_not_acked() {
     // Queued *with* a recorded arrival transport: with `received_via: None` the
     // drain's ACK is a no-op and the no-ACK assertion below would pass
     // vacuously.
-    bob.enqueue_pending_decryption_via("alice", &corrupt, Some(TransportType::BLE));
-    assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
+    bob.enqueue_pending_decryption_via(&id("alice"), &corrupt, Some(TransportType::BLE));
+    assert_eq!(bob.pending_queue.peer_queue_len(&id("alice")), 1);
 
     bob_handle.clear_sent_messages();
-    bob.process_pending_decryption("alice");
+    bob.process_pending_decryption(&id("alice"));
 
     assert_eq!(
         bob_handle
@@ -28479,7 +28841,7 @@ fn test_drained_media_chunk_that_hard_fails_is_not_acked() {
         "it must stay unmarked so the sender's resend still recovers the transfer"
     );
     assert!(
-        !bob.pending_queue.contains_peer("alice"),
+        !bob.pending_queue.contains_peer(&id("alice")),
         "the dead chunk must not be re-queued: the drain removed it, so a \
          re-enqueue would restart its TTL on every drain"
     );
@@ -28742,7 +29104,7 @@ fn test_group_registration_enqueue_does_not_mark_relay_synced() {
     // bridge adapter) that understands the prefix...
     let sent = internet_handle.sent_messages();
     assert!(
-        sent.iter().any(|m| m.recipient.as_str() == "user123"
+        sent.iter().any(|m| m.recipient.as_str() == &id("user123")
             && m.content
                 .starts_with(internal_prefixes::GROUP_RELAY_REGISTER)),
         "expected a __GRP_RELAY_REG__ frame to self"
@@ -28805,7 +29167,7 @@ fn test_group_send_takes_broadcast_path_only_when_relay_synced() {
         .unwrap();
     assert_eq!(ids.len(), 1);
     let sent = internet_handle.sent_messages();
-    assert!(sent.iter().any(|m| m.recipient.as_str() == "user123"
+    assert!(sent.iter().any(|m| m.recipient.as_str() == &id("user123")
         && m.content
             .starts_with(internal_prefixes::GROUP_RELAY_BROADCAST)));
 
@@ -28830,11 +29192,11 @@ fn test_recipient_unreachable_reason_parks_welcome_without_burning_budget() {
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -28842,10 +29204,10 @@ fn test_recipient_unreachable_reason_parks_welcome_without_burning_budget() {
     );
 
     let _ = protocol
-        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     let welcome_id = lifecycle.welcome_message.id.as_str().to_string();
     assert_eq!(lifecycle.attempt, 1);
     assert_eq!(lifecycle.state, WelcomeDeliveryState::SendAttempted);
@@ -28863,7 +29225,7 @@ fn test_recipient_unreachable_reason_parks_welcome_without_burning_budget() {
         )
         .unwrap();
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(lifecycle.attempt, 0, "speculative attempt must roll back");
     assert_eq!(
@@ -28902,11 +29264,11 @@ fn test_carrier_backed_failure_still_burns_welcome_budget() {
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -28914,11 +29276,11 @@ fn test_carrier_backed_failure_still_burns_welcome_budget() {
     );
 
     let _ = protocol
-        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
     let welcome_id = protocol
         .welcome_lifecycles
-        .get("bob")
+        .get(&id("bob"))
         .unwrap()
         .welcome_message
         .id
@@ -28932,7 +29294,7 @@ fn test_carrier_backed_failure_still_burns_welcome_budget() {
         .on_transport_send_failed(&welcome_id, Some("socket write failed".to_string()))
         .unwrap();
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Expired);
     assert_eq!(
         lifecycle.last_reason_code,
@@ -28960,11 +29322,11 @@ fn setup_internet_protocol_with_pending_welcome() -> (OfflineProtocol, MockTrans
         .add_transport(TransportType::Internet, Box::new(internet));
     protocol.start().unwrap();
 
-    let bob_storage = Arc::new(InMemoryStorage::new());
-    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_key_package.key_package_data,
             local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
@@ -28972,11 +29334,11 @@ fn setup_internet_protocol_with_pending_welcome() -> (OfflineProtocol, MockTrans
     );
 
     let _ = protocol
-        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .send_message(&id("bob"), "hello", None::<MessagePriority>, None::<String>)
         .unwrap();
     let welcome_id = protocol
         .welcome_lifecycles
-        .get("bob")
+        .get(&id("bob"))
         .unwrap()
         .welcome_message
         .id
@@ -28994,7 +29356,7 @@ fn test_peer_presence_offline_parks_failed_welcome() {
     protocol
         .on_transport_send_failed(&welcome_id, Some("network blip".to_string()))
         .unwrap();
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(lifecycle.attempt, 1);
 
@@ -29002,9 +29364,9 @@ fn test_peer_presence_offline_parks_failed_welcome() {
     // the truthful reason, without touching the burned-budget counter and
     // without scheduling a timed retry (which would re-send over the healthy
     // socket into another DeliveryError).
-    protocol.on_peer_presence("bob", false, Some(1_000));
+    protocol.on_peer_presence(&id("bob"), false, Some(1_000));
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(lifecycle.attempt, 1);
     assert_eq!(
@@ -29031,7 +29393,7 @@ fn test_internet_only_welcome_probe_escalates_and_resets_on_edge() {
             Some("recipient_unreachable: Recipient is offline".to_string()),
         )
         .unwrap();
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.unreachable_parks, 1);
     let first_retry = lifecycle
         .next_retry_at
@@ -29044,7 +29406,7 @@ fn test_internet_only_welcome_probe_escalates_and_resets_on_edge() {
             Some("recipient_unreachable: Recipient is offline".to_string()),
         )
         .unwrap();
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.unreachable_parks, 2);
     let second_retry = lifecycle
         .next_retry_at
@@ -29057,8 +29419,8 @@ fn test_internet_only_welcome_probe_escalates_and_resets_on_edge() {
     );
 
     // A reachability edge resets the escalation.
-    protocol.on_neighbor_discovered("bob");
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    protocol.on_neighbor_discovered(&id("bob"));
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.unreachable_parks, 0);
 
     protocol.stop().unwrap();
@@ -29083,14 +29445,14 @@ fn test_presence_offline_does_not_cancel_welcome_unreachable_probe() {
         .unwrap();
     let scheduled = protocol
         .welcome_lifecycles
-        .get("bob")
+        .get(&id("bob"))
         .unwrap()
         .next_retry_at
         .expect("verdict must schedule a probe");
 
-    protocol.on_peer_presence("bob", false, Some(1_000));
+    protocol.on_peer_presence(&id("bob"), false, Some(1_000));
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(
         lifecycle.next_retry_at,
         Some(scheduled),
@@ -29125,7 +29487,7 @@ fn test_welcome_unreachable_probe_survives_its_own_escalated_interval() {
                 Some("recipient_unreachable: Recipient is offline".to_string()),
             )
             .unwrap();
-        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
         assert_eq!(lifecycle.unreachable_parks, parks);
         let next_retry = lifecycle
             .next_retry_at
@@ -29140,7 +29502,7 @@ fn test_welcome_unreachable_probe_survives_its_own_escalated_interval() {
     }
 
     // Past the point where the old fixed 300s TTL would have lapsed first.
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert!(
         lifecycle.next_retry_at.unwrap() > Utc::now() + ChronoDuration::seconds(300),
         "the ladder must have escalated beyond the base TTL for this to bite"
@@ -29148,12 +29510,12 @@ fn test_welcome_unreachable_probe_survives_its_own_escalated_interval() {
 
     // Run the probe when it comes due: it must send, not expire.
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
     }
     protocol.process_welcome_retry_queue().unwrap();
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(
         lifecycle.state,
         WelcomeDeliveryState::SendAttempted,
@@ -29219,7 +29581,7 @@ fn test_welcome_probe_confirm_timeout_reparks_instead_of_expiring() {
     assert_eq!(
         protocol
             .welcome_lifecycles
-            .get("bob")
+            .get(&id("bob"))
             .unwrap()
             .unreachable_parks,
         1
@@ -29228,9 +29590,9 @@ fn test_welcome_probe_confirm_timeout_reparks_instead_of_expiring() {
     // Well past max_retries (3 in this helper), which is what used to settle
     // the record terminally.
     for round in 1..=8 {
-        run_accepted_welcome_probe_round(&mut protocol, "bob");
+        run_accepted_welcome_probe_round(&mut protocol, &id("bob"));
 
-        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
         assert_eq!(
             lifecycle.state,
             WelcomeDeliveryState::Failed,
@@ -29315,7 +29677,7 @@ fn test_wire_confirmed_welcome_probe_reparks_instead_of_going_quiet() {
     assert_eq!(
         protocol
             .welcome_lifecycles
-            .get("bob")
+            .get(&id("bob"))
             .unwrap()
             .unreachable_parks,
         1
@@ -29323,18 +29685,18 @@ fn test_wire_confirmed_welcome_probe_reparks_instead_of_going_quiet() {
 
     // The probe comes due and fires.
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
     }
     protocol.process_welcome_retry_queue().unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::SendAttempted
     );
 
     // The bridge wire-confirms the socket write.
     protocol.on_transport_send_confirmed(&welcome_id).unwrap();
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(
         lifecycle.state,
         WelcomeDeliveryState::SendAttempted,
@@ -29356,12 +29718,12 @@ fn test_wire_confirmed_welcome_probe_reparks_instead_of_going_quiet() {
     // The relay accepted the frame, so no verdict ever arrives; the confirm
     // deadline lapses instead.
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.next_retry_at = Some(Utc::now() - ChronoDuration::seconds(1));
     }
     protocol.process_welcome_retry_queue().unwrap();
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(
         lifecycle.state,
         WelcomeDeliveryState::Failed,
@@ -29415,14 +29777,14 @@ fn test_welcome_probe_repark_stops_shielding_once_the_record_ages_out() {
         .unwrap();
 
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.created_at =
             Utc::now() - ChronoDuration::seconds(super::types::WELCOME_WATCHLIST_MAX_AGE_SECS + 1);
     }
 
-    run_accepted_welcome_probe_round(&mut protocol, "bob");
+    run_accepted_welcome_probe_round(&mut protocol, &id("bob"));
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(
         lifecycle.last_reason_code,
         Some(crate::events::WelcomeReasonCode::Timeout),
@@ -29458,7 +29820,7 @@ fn test_presence_offline_still_parks_carrier_backed_retry_after_a_verdict() {
     assert_eq!(
         protocol
             .welcome_lifecycles
-            .get("bob")
+            .get(&id("bob"))
             .unwrap()
             .unreachable_parks,
         1
@@ -29467,13 +29829,13 @@ fn test_presence_offline_still_parks_carrier_backed_retry_after_a_verdict() {
     // Age it past the point where the probe track shields it, then let a probe
     // fire and be accepted by the relay so no verdict comes back.
     {
-        let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+        let record = protocol.welcome_lifecycles.get_mut(&id("bob")).unwrap();
         record.created_at =
             Utc::now() - ChronoDuration::seconds(super::types::WELCOME_WATCHLIST_MAX_AGE_SECS + 1);
     }
-    run_accepted_welcome_probe_round(&mut protocol, "bob");
+    run_accepted_welcome_probe_round(&mut protocol, &id("bob"));
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(
         lifecycle.last_reason_code,
@@ -29488,9 +29850,9 @@ fn test_presence_offline_still_parks_carrier_backed_retry_after_a_verdict() {
     );
 
     // The presence-offline answer must park THIS retry.
-    protocol.on_peer_presence("bob", false, Some(1_000));
+    protocol.on_peer_presence(&id("bob"), false, Some(1_000));
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert!(
         lifecycle.next_retry_at.is_none(),
         "a carrier-backed data-plane retry must still be cancelled by the park"
@@ -29516,29 +29878,29 @@ fn test_peer_presence_online_resends_unconfirmed_sent_welcome() {
     // content may have been dropped (recipient offline, push-only delivery).
     protocol.on_transport_send_confirmed(&welcome_id).unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Sent
     );
     let welcomes_before = internet_handle
         .sent_messages()
         .iter()
         .filter(|m| {
-            m.recipient.as_str() == "bob" && m.content.starts_with(internal_prefixes::WELCOME)
+            m.recipient.as_str() == &id("bob") && m.content.starts_with(internal_prefixes::WELCOME)
         })
         .count();
 
     // The peer is provably online and the session was never proven: rebuild
     // and re-send (receiver dedups by message id if the original landed).
-    protocol.on_peer_presence("bob", true, None);
+    protocol.on_peer_presence(&id("bob"), true, None);
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::SendAttempted);
     assert_eq!(lifecycle.attempt, 1);
     let welcomes_after = internet_handle
         .sent_messages()
         .iter()
         .filter(|m| {
-            m.recipient.as_str() == "bob" && m.content.starts_with(internal_prefixes::WELCOME)
+            m.recipient.as_str() == &id("bob") && m.content.starts_with(internal_prefixes::WELCOME)
         })
         .count();
     assert_eq!(welcomes_after, welcomes_before + 1);
@@ -29571,7 +29933,7 @@ fn test_peer_presence_emits_unified_event_with_last_seen() {
             _ => None,
         })
         .expect("presence_updated event must be emitted");
-    assert_eq!(presence.0, "carol");
+    assert_eq!(presence.0, "carol".to_string());
     assert_eq!(presence.1, PresenceStatus::Offline);
     assert_eq!(presence.2, Some(98_765));
     assert_eq!(presence.3, PresenceSource::Internet);
@@ -29636,16 +29998,16 @@ fn test_peer_presence_unchanged_status_reemits_event() {
 fn test_welcome_pending_peers_tracks_unconfirmed_sessions() {
     let (mut protocol, _internet, welcome_id) = setup_internet_protocol_with_pending_welcome();
 
-    assert_eq!(protocol.welcome_pending_peers(), vec!["bob".to_string()]);
+    assert_eq!(protocol.welcome_pending_peers(), vec![id("bob")]);
 
     // Still pending after wire-confirm: Sent is not session-proven, and only
     // presence can rescue a false Sent over a store-less relay.
     protocol.on_transport_send_confirmed(&welcome_id).unwrap();
-    assert_eq!(protocol.welcome_pending_peers(), vec!["bob".to_string()]);
+    assert_eq!(protocol.welcome_pending_peers(), vec![id("bob")]);
 
     // The peer proving the session ends the watch.
     protocol
-        .confirm_session_state("bob", "confirmation_ack_received")
+        .confirm_session_state(&id("bob"), "confirmation_ack_received")
         .unwrap();
     assert!(protocol.welcome_pending_peers().is_empty());
 
@@ -29913,7 +30275,7 @@ fn test_group_created_ack_gates_relay_sync() {
     // never registered the group.
     let ack = Message::new(
         UserId::new("relay").unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "__GROUP_CREATED__{{\"group_id\":\"{}\",\"name\":\"ack-gate-group\"}}",
@@ -29950,7 +30312,7 @@ fn test_group_created_ack_gates_relay_sync() {
     // An ack for a group we don't track locally must not create sync state.
     let foreign_ack = Message::new(
         UserId::new("relay").unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         "__GROUP_CREATED__{\"group_id\":\"someone-elses-group\",\"name\":\"x\"}",
     );
@@ -29964,7 +30326,7 @@ fn test_group_created_ack_gates_relay_sync() {
     // correlation: fall back to per-member.
     let error = Message::new(
         UserId::new("relay").unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "__GROUP_ERROR__{{\"reason\":\"Only admins can sync this group\",\"group_id\":\"{}\"}}",
@@ -30097,7 +30459,7 @@ fn test_unanswered_relay_registration_expires_and_retries() {
 
     let forged_ack = Message::new(
         UserId::new("relay").unwrap(),
-        UserId::new("user123").unwrap(),
+        UserId::new(&id("user123")).unwrap(),
         AppId::new("test-app").unwrap(),
         &format!(
             "__GROUP_CREATED__{{\"group_id\":\"{}\",\"name\":\"ack-timeout-group\"}}",
@@ -30128,7 +30490,7 @@ fn test_delivery_error_after_wire_confirm_corrects_false_sent() {
     // This is the production ordering; the failure must not no-op on it.
     protocol.on_transport_send_confirmed(&welcome_id).unwrap();
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Sent
     );
 
@@ -30141,7 +30503,7 @@ fn test_delivery_error_after_wire_confirm_corrects_false_sent() {
 
     // The false Sent is corrected: parked Failed, attempt refunded, and an
     // escalating probe scheduled (not due for 15s — see below).
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(lifecycle.attempt, 0, "the peer never saw the frame");
     assert_eq!(
@@ -30184,9 +30546,9 @@ fn test_delivery_error_after_wire_confirm_corrects_false_sent() {
     assert_eq!(welcomes_after, welcomes_before);
 
     // The presence-online edge is what re-arms it.
-    protocol.on_peer_presence("bob", true, None);
+    protocol.on_peer_presence(&id("bob"), true, None);
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::SendAttempted
     );
 
@@ -30211,7 +30573,7 @@ fn test_late_wire_confirm_does_not_resurrect_unreachable_verdict() {
             Some("recipient_unreachable: Recipient is offline".to_string()),
         )
         .unwrap();
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(
         lifecycle.last_reason_code,
@@ -30224,7 +30586,7 @@ fn test_late_wire_confirm_does_not_resurrect_unreachable_verdict() {
     // legal) nor emit a welcome_send_succeeded contradicting the corrective
     // welcome_send_failed the app already saw.
     protocol.on_transport_send_confirmed(&welcome_id).unwrap();
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(
         lifecycle.last_reason_code,
@@ -30240,9 +30602,9 @@ fn test_late_wire_confirm_does_not_resurrect_unreachable_verdict() {
     );
 
     // The peer stays rescuable: the presence-online edge re-arms as usual.
-    protocol.on_peer_presence("bob", true, None);
+    protocol.on_peer_presence(&id("bob"), true, None);
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::SendAttempted
     );
 
@@ -30273,7 +30635,7 @@ fn test_delivery_error_with_mesh_carrier_keeps_timed_retry() {
     // The false Sent is still corrected and the attempt refunded, but the
     // record keeps a timed retry instead of parking edge-only: relay
     // presence is only authoritative for the internet path.
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(lifecycle.attempt, 0, "the peer never saw the frame");
     assert_eq!(
@@ -30311,7 +30673,7 @@ fn test_unreachable_parks_escalate_and_reset_on_presence() {
                 Some("recipient_unreachable: Recipient is offline".to_string()),
             )
             .unwrap();
-        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
         assert_eq!(lifecycle.unreachable_parks, round);
         let delay = (lifecycle.next_retry_at.unwrap() - Utc::now()).num_seconds();
         assert!(
@@ -30324,11 +30686,11 @@ fn test_unreachable_parks_escalate_and_reset_on_presence() {
     }
 
     // A reachability edge resets the ladder...
-    protocol.on_peer_presence("bob", true, None);
+    protocol.on_peer_presence(&id("bob"), true, None);
     assert_eq!(
         protocol
             .welcome_lifecycles
-            .get("bob")
+            .get(&id("bob"))
             .unwrap()
             .unreachable_parks,
         0
@@ -30342,7 +30704,7 @@ fn test_unreachable_parks_escalate_and_reset_on_presence() {
             Some("recipient_unreachable: Recipient is offline".to_string()),
         )
         .unwrap();
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.unreachable_parks, 1);
     let delay = (lifecycle.next_retry_at.unwrap() - Utc::now()).num_seconds();
     assert!(
@@ -30378,7 +30740,7 @@ fn test_unreachable_park_probe_is_carrier_agnostic() {
         )
         .unwrap();
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
     assert_eq!(
         lifecycle.last_reason_code,
@@ -30409,7 +30771,7 @@ fn test_delivery_error_after_session_confirmed_is_ignored() {
     // corrupt the converged lifecycle — flipping it to Failed, refunding an
     // attempt, and emitting welcome_send_failed AFTER the app already saw
     // secure_session_established.
-    protocol.confirmed_sessions.insert("bob".to_string());
+    protocol.confirmed_sessions.insert(id("bob"));
 
     let events = Arc::new(Mutex::new(Vec::<Event>::new()));
     let events_clone = events.clone();
@@ -30426,7 +30788,7 @@ fn test_delivery_error_after_session_confirmed_is_ignored() {
         )
         .unwrap();
 
-    let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+    let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(
         lifecycle.state,
         WelcomeDeliveryState::Sent,
@@ -30443,7 +30805,7 @@ fn test_delivery_error_after_session_confirmed_is_ignored() {
 #[test]
 fn test_watchlist_excludes_stale_welcome_lifecycles() {
     let (mut protocol, _internet, _welcome_id) = setup_internet_protocol_with_pending_welcome();
-    assert_eq!(protocol.welcome_pending_peers(), vec!["bob".to_string()]);
+    assert_eq!(protocol.welcome_pending_peers(), vec![id("bob")]);
 
     // A permanently-dead peer must not hold a watch-rotation slot forever:
     // past the age limit the peer drops off the watchlist, offline answers
@@ -30452,7 +30814,7 @@ fn test_watchlist_excludes_stale_welcome_lifecycles() {
     // discovery, both of which rebuild the lifecycle.
     protocol
         .welcome_lifecycles
-        .get_mut("bob")
+        .get_mut(&id("bob"))
         .unwrap()
         .created_at = Utc::now() - ChronoDuration::days(15);
     assert!(protocol.welcome_pending_peers().is_empty());
@@ -30475,9 +30837,9 @@ fn test_presence_online_rescue_backoff() {
     protocol.on_transport_send_confirmed(&welcome_id).unwrap();
 
     // First online answer: the rescue is free.
-    protocol.on_peer_presence("bob", true, None);
+    protocol.on_peer_presence(&id("bob"), true, None);
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::SendAttempted
     );
     protocol.on_transport_send_confirmed(&welcome_id).unwrap();
@@ -30487,9 +30849,9 @@ fn test_presence_online_rescue_backoff() {
     // is online but never proves the session (stale key package after a
     // reinstall) must NOT be re-sent the welcome every tick: the second
     // consecutive online answer is throttled.
-    protocol.on_peer_presence("bob", true, None);
+    protocol.on_peer_presence(&id("bob"), true, None);
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::Sent,
         "second immediate online answer must not rescue again"
     );
@@ -30498,12 +30860,12 @@ fn test_presence_online_rescue_backoff() {
     // Once the backoff window elapses, the rescue runs again.
     protocol
         .welcome_presence_rescue
-        .get_mut("bob")
+        .get_mut(&id("bob"))
         .expect("throttle entry for bob")
         .next_allowed_at = Utc::now() - ChronoDuration::seconds(1);
-    protocol.on_peer_presence("bob", true, None);
+    protocol.on_peer_presence(&id("bob"), true, None);
     assert_eq!(
-        protocol.welcome_lifecycles.get("bob").unwrap().state,
+        protocol.welcome_lifecycles.get(&id("bob")).unwrap().state,
         WelcomeDeliveryState::SendAttempted
     );
     assert_eq!(count_welcomes(&internet_handle), welcomes_after_first + 1);
@@ -30511,7 +30873,11 @@ fn test_presence_online_rescue_backoff() {
     // Only executed rescues count toward the doubling backoff — the
     // throttled tick in between must not inflate it.
     assert_eq!(
-        protocol.welcome_presence_rescue.get("bob").unwrap().rescues,
+        protocol
+            .welcome_presence_rescue
+            .get(&id("bob"))
+            .unwrap()
+            .rescues,
         2
     );
 
@@ -30533,15 +30899,15 @@ fn test_peer_presence_offline_defers_to_mesh_carrier() {
     protocol
         .on_transport_send_failed(&welcome_id, Some("network blip".to_string()))
         .unwrap();
-    let before = protocol.welcome_lifecycles.get("bob").unwrap().clone();
+    let before = protocol.welcome_lifecycles.get(&id("bob")).unwrap().clone();
     assert_eq!(before.state, WelcomeDeliveryState::Failed);
     assert!(before.next_retry_at.is_some());
 
     // Relay presence is only authoritative for the internet path: with BLE
     // also available the offline answer must not touch the retry track —
     // the peer may be sitting right next to us.
-    protocol.on_peer_presence("bob", false, None);
-    let after = protocol.welcome_lifecycles.get("bob").unwrap();
+    protocol.on_peer_presence(&id("bob"), false, None);
+    let after = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
     assert_eq!(after.state, WelcomeDeliveryState::Failed);
     assert_eq!(after.next_retry_at, before.next_retry_at);
     assert_eq!(after.last_reason_code, before.last_reason_code);
@@ -30707,7 +31073,7 @@ fn test_tofu_restore_stops_at_the_category_bound_without_pruning() {
     .unwrap();
     counting
         .inner
-        .store(storage_keys::TOFU_KEYS, "bob", &entry)
+        .store(storage_keys::TOFU_KEYS, &id("bob"), &entry)
         .unwrap();
 
     let secure_handle: Arc<dyn MlsStorage> = counting.clone();
@@ -30731,7 +31097,7 @@ fn test_tofu_restore_stops_at_the_category_bound_without_pruning() {
     assert!(
         counting
             .inner
-            .load(storage_keys::TOFU_KEYS, "bob")
+            .load(storage_keys::TOFU_KEYS, &id("bob"))
             .unwrap()
             .is_some(),
         "a bounded TOFU walk must not prune the store it could not finish reading"
@@ -31233,7 +31599,7 @@ fn test_legacy_pending_queue_is_migrated_to_per_message_records() {
         &secure,
         &state,
         storage_keys::PENDING_MESSAGES,
-        "bob",
+        &id("bob"),
         &queue,
     );
 
@@ -31245,7 +31611,7 @@ fn test_legacy_pending_queue_is_migrated_to_per_message_records() {
 
     let restored = protocol
         .pending_encrypted_messages
-        .get("bob")
+        .get(&id("bob"))
         .expect("the migrated queue must be in memory");
     assert_eq!(
         restored
@@ -31258,7 +31624,7 @@ fn test_legacy_pending_queue_is_migrated_to_per_message_records() {
 
     assert!(
         state
-            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .load(storage_keys::PENDING_MESSAGES, &id("bob"))
             .unwrap()
             .is_none(),
         "the legacy record must be dropped once its entries are re-filed"
@@ -31290,7 +31656,7 @@ fn test_migration_does_not_resurrect_an_id_the_first_pass_settled() {
         &secure,
         &state,
         storage_keys::PENDING_MESSAGES,
-        "bob",
+        &id("bob"),
         &queue,
     );
 
@@ -31327,7 +31693,7 @@ fn test_migration_does_not_resurrect_an_id_the_first_pass_settled() {
 
     let queued: Vec<String> = protocol
         .pending_encrypted_messages
-        .get("bob")
+        .get(&id("bob"))
         .map(|messages| messages.iter().map(|m| m.message_id.as_str()).collect())
         .unwrap_or_default();
     assert_eq!(
@@ -31350,7 +31716,7 @@ fn test_migration_that_died_before_its_delete_does_not_double_restore() {
         &secure,
         &state,
         storage_keys::PENDING_MESSAGES,
-        "bob",
+        &id("bob"),
         &queue,
     );
 
@@ -31358,7 +31724,7 @@ fn test_migration_that_died_before_its_delete_does_not_double_restore() {
     let entries: Vec<PendingMessage> = serde_json::from_slice(&queue).unwrap();
     for message in &entries {
         let record = serde_json::to_vec(&PendingMessageRecord {
-            recipient: "bob".to_string(),
+            recipient: id("bob"),
             message: message.clone(),
         })
         .unwrap();
@@ -31379,7 +31745,7 @@ fn test_migration_that_died_before_its_delete_does_not_double_restore() {
 
     let restored = protocol
         .pending_encrypted_messages
-        .get("bob")
+        .get(&id("bob"))
         .expect("the queue must be restored");
     assert_eq!(
         restored.len(),
@@ -31388,7 +31754,7 @@ fn test_migration_that_died_before_its_delete_does_not_double_restore() {
     );
     assert!(
         state
-            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .load(storage_keys::PENDING_MESSAGES, &id("bob"))
             .unwrap()
             .is_none(),
         "the finishing launch must complete the interrupted delete"
@@ -31421,7 +31787,7 @@ fn test_unreadable_pending_record_settles_the_exact_message_id() {
     };
     readable.measure();
     let record = serde_json::to_vec(&PendingMessageRecord {
-        recipient: "bob".to_string(),
+        recipient: id("bob"),
         message: readable,
     })
     .unwrap();
@@ -31468,7 +31834,10 @@ fn test_unreadable_pending_record_settles_the_exact_message_id() {
         "a readable sibling in the same queue must survive its neighbour's loss"
     );
     assert_eq!(
-        protocol.pending_encrypted_messages.get("bob").map(Vec::len),
+        protocol
+            .pending_encrypted_messages
+            .get(&id("bob"))
+            .map(Vec::len),
         Some(1),
         "the readable entry must still be queued"
     );
@@ -31490,7 +31859,7 @@ fn test_restored_queue_order_survives_shuffled_enumeration() {
     let entries: Vec<PendingMessage> = serde_json::from_slice(&queue).unwrap();
     for message in entries.iter().rev() {
         let record = serde_json::to_vec(&PendingMessageRecord {
-            recipient: "bob".to_string(),
+            recipient: id("bob"),
             message: message.clone(),
         })
         .unwrap();
@@ -31510,7 +31879,7 @@ fn test_restored_queue_order_survives_shuffled_enumeration() {
         .unwrap();
 
     assert_eq!(
-        protocol.pending_encrypted_messages["bob"]
+        protocol.pending_encrypted_messages[&id("bob")]
             .iter()
             .map(|m| m.message_id.clone())
             .collect::<Vec<_>>(),
@@ -31590,7 +31959,7 @@ fn test_enqueue_writes_only_its_own_record() {
     for index in 0..8 {
         ids.push(
             protocol
-                .send_message("bob", &format!("msg {index}"), None, None::<String>)
+                .send_message(&id("bob"), &format!("msg {index}"), None, None::<String>)
                 .unwrap(),
         );
     }
@@ -31623,7 +31992,7 @@ fn test_flushed_pending_message_leaves_no_record_behind() {
 
     let queued_id = MessageId::new();
     alice.queue_pending_message(
-        "bob",
+        &id("bob"),
         "queued",
         MessagePriority::Medium,
         queued_id.clone(),
@@ -31642,9 +32011,9 @@ fn test_flushed_pending_message_leaves_no_record_behind() {
         "the enqueue must have written a record to delete"
     );
 
-    alice.flush_pending_messages("bob").unwrap();
+    alice.flush_pending_messages(&id("bob")).unwrap();
 
-    assert!(alice.pending_encrypted_messages.get("bob").is_none());
+    assert!(alice.pending_encrypted_messages.get(&id("bob")).is_none());
     assert!(
         state
             .list_keys(storage_keys::PENDING_MESSAGE_ENTRIES)
@@ -31685,7 +32054,7 @@ fn test_pending_record_that_does_not_name_its_own_key_is_dropped() {
     };
     message.measure();
     let record = serde_json::to_vec(&PendingMessageRecord {
-        recipient: "bob".to_string(),
+        recipient: id("bob"),
         message,
     })
     .unwrap();
@@ -31748,7 +32117,7 @@ fn test_migration_does_not_persist_entries_the_caps_drop() {
         &secure,
         &state,
         storage_keys::PENDING_MESSAGES,
-        "bob",
+        &id("bob"),
         &queue,
     );
 
@@ -31760,7 +32129,7 @@ fn test_migration_does_not_persist_entries_the_caps_drop() {
     let events = started_protocol_events(&mut protocol);
 
     assert_eq!(
-        protocol.pending_encrypted_messages["bob"].len(),
+        protocol.pending_encrypted_messages[&id("bob")].len(),
         MAX_PENDING_MESSAGES_PER_PEER,
         "the restored queue is held to the live per-peer cap"
     );
@@ -31774,7 +32143,7 @@ fn test_migration_does_not_persist_entries_the_caps_drop() {
     );
     assert!(
         state
-            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .load(storage_keys::PENDING_MESSAGES, &id("bob"))
             .unwrap()
             .is_none(),
         "the legacy record still goes, once its survivors are durable"
@@ -31898,7 +32267,7 @@ fn test_legacy_queue_whose_delete_failed_is_not_migrated_at_all() {
         &secure,
         &state,
         storage_keys::PENDING_MESSAGES,
-        "bob",
+        &id("bob"),
         &queue,
     );
 
@@ -31916,7 +32285,10 @@ fn test_legacy_queue_whose_delete_failed_is_not_migrated_at_all() {
 
     // The queue stays in exactly one place: the legacy record it was already in.
     assert!(
-        protocol.pending_encrypted_messages.get("bob").is_none(),
+        protocol
+            .pending_encrypted_messages
+            .get(&id("bob"))
+            .is_none(),
         "entries whose legacy record survived must not stay in memory to flush"
     );
     assert!(
@@ -31928,7 +32300,7 @@ fn test_legacy_queue_whose_delete_failed_is_not_migrated_at_all() {
     );
     assert!(
         state
-            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .load(storage_keys::PENDING_MESSAGES, &id("bob"))
             .unwrap()
             .is_some(),
         "the legacy record is what still holds the queue"
@@ -31946,7 +32318,7 @@ fn test_legacy_queue_whose_delete_failed_is_not_migrated_at_all() {
         .unwrap();
 
     assert_eq!(
-        later.pending_encrypted_messages["bob"]
+        later.pending_encrypted_messages[&id("bob")]
             .iter()
             .map(|m| m.message_id.clone())
             .collect::<Vec<_>>(),
@@ -31955,7 +32327,7 @@ fn test_legacy_queue_whose_delete_failed_is_not_migrated_at_all() {
     );
     assert!(
         state
-            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .load(storage_keys::PENDING_MESSAGES, &id("bob"))
             .unwrap()
             .is_none(),
         "and complete the delete this time"
@@ -31980,7 +32352,7 @@ fn test_capacity_drop_from_an_unmigrated_queue_is_not_settled() {
         &secure,
         &state,
         storage_keys::PENDING_MESSAGES,
-        "bob",
+        &id("bob"),
         &queue,
     );
 
@@ -32067,7 +32439,7 @@ fn test_migration_whose_writes_fail_keeps_the_legacy_record_and_settles_nothing(
         &secure,
         &state,
         storage_keys::PENDING_MESSAGES,
-        "bob",
+        &id("bob"),
         &queue,
     );
 
@@ -32085,7 +32457,7 @@ fn test_migration_whose_writes_fail_keeps_the_legacy_record_and_settles_nothing(
 
     assert!(
         state
-            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .load(storage_keys::PENDING_MESSAGES, &id("bob"))
             .unwrap()
             .is_some(),
         "the legacy record must survive a migration whose writes failed"
@@ -32098,7 +32470,10 @@ fn test_migration_whose_writes_fail_keeps_the_legacy_record_and_settles_nothing(
         "no half-written per-message records may be left behind"
     );
     assert!(
-        protocol.pending_encrypted_messages.get("bob").is_none(),
+        protocol
+            .pending_encrypted_messages
+            .get(&id("bob"))
+            .is_none(),
         "entries whose legacy record survived must not stay in memory to flush"
     );
     let settled: Vec<String> = protocol
@@ -32126,7 +32501,7 @@ fn test_migration_whose_writes_fail_keeps_the_legacy_record_and_settles_nothing(
         )
         .unwrap();
     assert_eq!(
-        later.pending_encrypted_messages["bob"]
+        later.pending_encrypted_messages[&id("bob")]
             .iter()
             .map(|m| m.message_id.clone())
             .collect::<Vec<_>>(),
@@ -32135,7 +32510,7 @@ fn test_migration_whose_writes_fail_keeps_the_legacy_record_and_settles_nothing(
     );
     assert!(
         state
-            .load(storage_keys::PENDING_MESSAGES, "bob")
+            .load(storage_keys::PENDING_MESSAGES, &id("bob"))
             .unwrap()
             .is_none(),
         "and complete the migration this time"
@@ -32159,7 +32534,7 @@ fn test_settlement_is_withheld_while_a_surviving_legacy_record_can_refile_the_id
         &secure,
         &state,
         storage_keys::PENDING_MESSAGES,
-        "bob",
+        &id("bob"),
         &queue,
     );
     // An interrupted earlier migration wrote ids[0]'s per-message record, and
@@ -32208,7 +32583,7 @@ fn test_settlement_is_withheld_while_a_surviving_legacy_record_can_refile_the_id
         )
         .unwrap();
     assert_eq!(
-        later.pending_encrypted_messages["bob"]
+        later.pending_encrypted_messages[&id("bob")]
             .iter()
             .map(|m| m.message_id.clone())
             .collect::<Vec<_>>(),
@@ -32242,7 +32617,7 @@ fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
         .pending_message_max_lifetime_ms;
     let expired_id = MessageId::new();
     alice.queue_pending_message_at(
-        "bob",
+        &id("bob"),
         "expired",
         MessagePriority::Medium,
         expired_id.clone(),
@@ -32255,7 +32630,7 @@ fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
     );
     let fresh_id = MessageId::new();
     alice.queue_pending_message(
-        "bob",
+        &id("bob"),
         "fresh",
         MessagePriority::Medium,
         fresh_id.clone(),
@@ -32270,7 +32645,7 @@ fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
     let handle = Arc::clone(&events);
     alice.on_event(move |event| handle.lock().unwrap().push(event));
 
-    alice.flush_pending_messages("bob").unwrap();
+    alice.flush_pending_messages(&id("bob")).unwrap();
 
     assert!(
         alice.outbox.contains_key(&fresh_id),
@@ -32281,19 +32656,22 @@ fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
         "a past-deadline entry must never reach dispatch"
     );
     assert_eq!(
-        alice.pending_encrypted_messages.get("bob").map(|messages| {
-            messages
-                .iter()
-                .map(|m| m.message_id.clone())
-                .collect::<Vec<_>>()
-        }),
+        alice
+            .pending_encrypted_messages
+            .get(&id("bob"))
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(|m| m.message_id.clone())
+                    .collect::<Vec<_>>()
+            }),
         Some(vec![expired_id.clone()]),
         "it stays queued, record intact, for the expiry pass to settle"
     );
 
     alice.cleanup_expired_pending_messages();
     assert!(
-        alice.pending_encrypted_messages.get("bob").is_none(),
+        alice.pending_encrypted_messages.get(&id("bob")).is_none(),
         "the expiry pass drains it"
     );
     assert!(
@@ -32359,8 +32737,10 @@ fn mixed_mode_node(
 
 /// Builds a real 1:1 MLS session between the node and `peer`, and pins the
 /// peer's identity key the way a signed key-package exchange would.
-fn establish_session_and_pin(protocol: &mut OfflineProtocol, peer: &str) {
-    let peer_storage = Arc::new(crate::mls::InMemoryStorage::new());
+fn establish_session_and_pin(protocol: &mut OfflineProtocol, peer_label: &str) {
+    let peer = id(peer_label);
+    let peer: &str = &peer;
+    let peer_storage = crate::test_identity::seeded_storage(peer_label);
     let peer_manager = MlsManager::new(peer, peer_storage).unwrap();
     let peer_kp = peer_manager.get_or_create_key_package().unwrap();
     let peer_identity = peer_manager.get_identity_public_key().unwrap();
@@ -32405,7 +32785,7 @@ fn test_deleted_session_state_record_cannot_reopen_the_plaintext_gate() {
         establish_session_and_pin(&mut alice, "bob");
 
         handle.queue_message(plaintext_text_message(
-            "bob",
+            &id("bob"),
             &local_id(&alice),
             "injected #1",
         ));
@@ -32418,12 +32798,14 @@ fn test_deleted_session_state_record_cannot_reopen_the_plaintext_gate() {
     // The attacker's move: delete the record, nothing else.
     assert!(
         state
-            .load(storage_keys::SESSION_STATES, "bob")
+            .load(storage_keys::SESSION_STATES, &id("bob"))
             .unwrap()
             .is_some(),
         "precondition: the session-state record exists"
     );
-    state.delete(storage_keys::SESSION_STATES, "bob").unwrap();
+    state
+        .delete(storage_keys::SESSION_STATES, &id("bob"))
+        .unwrap();
 
     {
         let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
@@ -32431,24 +32813,24 @@ fn test_deleted_session_state_record_cannot_reopen_the_plaintext_gate() {
         // The deletion did land: restore wrote a fresh `Pending` over the hole,
         // so the old confirmation signal really is gone.
         assert_eq!(
-            alice.load_session_state_entry("bob").unwrap(),
+            alice.load_session_state_entry(&id("bob")).unwrap(),
             Some(SessionState::Pending),
             "restore re-bootstrapped the deleted record as Pending"
         );
         assert!(
-            !alice.confirmed_sessions.contains("bob"),
+            !alice.confirmed_sessions.contains(&id("bob")),
             "and the peer is no longer confirmed"
         );
 
         // But capability came back from the credential store, which the app
         // container cannot reach.
         assert!(
-            alice.is_encryption_capable("bob"),
+            alice.is_encryption_capable(&id("bob")),
             "capability must survive a deleted session-state record"
         );
 
         handle.queue_message(plaintext_text_message(
-            "bob",
+            &id("bob"),
             &local_id(&alice),
             "injected #2",
         ));
@@ -32475,14 +32857,14 @@ fn test_plaintext_rejected_from_peer_with_an_unconfirmed_session() {
     let state = Arc::new(InMemoryStorage::new());
     let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
 
-    alice.mark_encryption_capable("bob");
+    alice.mark_encryption_capable(&id("bob"));
     assert!(
-        !alice.confirmed_sessions.contains("bob"),
+        !alice.confirmed_sessions.contains(&id("bob")),
         "precondition: no confirmed session, so only the capability check can fire"
     );
 
     handle.queue_message(plaintext_text_message(
-        "bob",
+        &id("bob"),
         &local_id(&alice),
         "downgrade",
     ));
@@ -32507,19 +32889,19 @@ fn test_encryption_capability_survives_session_teardown() {
     establish_session_and_pin(&mut alice, "bob");
 
     alice
-        .manual_mls_delete_session("bob")
+        .manual_mls_delete_session(&id("bob"))
         .expect("session teardown succeeds");
     assert!(
-        !alice.confirmed_sessions.contains("bob"),
+        !alice.confirmed_sessions.contains(&id("bob")),
         "teardown clears confirmation"
     );
     assert!(
-        alice.is_encryption_capable("bob"),
+        alice.is_encryption_capable(&id("bob")),
         "but NOT capability — a peer that spoke MLS a moment ago still speaks it"
     );
 
     handle.queue_message(plaintext_text_message(
-        "bob",
+        &id("bob"),
         &local_id(&alice),
         "post-teardown",
     ));
@@ -32542,7 +32924,7 @@ fn test_capability_survives_restart_through_persisted_tofu_pins() {
         let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
         establish_session_and_pin(&mut alice, "bob");
         alice
-            .manual_mls_delete_session("bob")
+            .manual_mls_delete_session(&id("bob"))
             .expect("session teardown succeeds");
     }
 
@@ -32550,17 +32932,17 @@ fn test_capability_survives_restart_through_persisted_tofu_pins() {
     {
         let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
         assert!(
-            !manager.has_session("bob").unwrap(),
+            !manager.has_session(&id("bob")).unwrap(),
             "precondition: no MLS session survives, so only the pin can carry capability"
         );
     }
     assert!(
-        alice.is_encryption_capable("bob"),
+        alice.is_encryption_capable(&id("bob")),
         "the restored TOFU pin re-seeds capability"
     );
 
     handle.queue_message(plaintext_text_message(
-        "bob",
+        &id("bob"),
         &local_id(&alice),
         "after restart",
     ));
@@ -32581,14 +32963,14 @@ fn test_reset_tofu_for_peer_clears_encryption_capability() {
     let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
     establish_session_and_pin(&mut alice, "bob");
 
-    assert!(alice.reset_tofu_for_peer("bob"), "an entry was pinned");
+    assert!(alice.reset_tofu_for_peer(&id("bob")), "an entry was pinned");
     assert!(
-        !alice.is_encryption_capable("bob"),
+        !alice.is_encryption_capable(&id("bob")),
         "an explicit identity reset forgets capability too"
     );
 
     handle.queue_message(plaintext_text_message(
-        "bob",
+        &id("bob"),
         &local_id(&alice),
         "post-reset",
     ));
@@ -32610,7 +32992,7 @@ fn test_legacy_plaintext_peer_is_still_accepted_in_mixed_mode() {
     let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
 
     handle.queue_message(plaintext_text_message(
-        "legacy-peer",
+        &id("legacy-peer"),
         &local_id(&alice),
         "hello",
     ));
@@ -32639,7 +33021,7 @@ fn test_encryption_capability_set_is_bounded_without_evicting() {
     let state = Arc::new(InMemoryStorage::new());
     let (mut alice, handle) = mixed_mode_node("alice", &secure, &state);
     establish_session_and_pin(&mut alice, "bob");
-    assert!(alice.is_encryption_capable("bob"), "precondition");
+    assert!(alice.is_encryption_capable(&id("bob")), "precondition");
 
     for i in 0..(MAX_ENCRYPTION_CAPABLE_PEERS + 50) {
         alice.mark_encryption_capable(&format!("flood-{i}"));
@@ -32651,13 +33033,13 @@ fn test_encryption_capability_set_is_bounded_without_evicting() {
         alice.encryption_capable_peers.len()
     );
     assert!(
-        alice.is_encryption_capable("bob"),
+        alice.is_encryption_capable(&id("bob")),
         "a flood must not displace a peer already known to run MLS"
     );
 
     // And the protection that entry buys is still in force.
     handle.queue_message(plaintext_text_message(
-        "bob",
+        &id("bob"),
         &local_id(&alice),
         "post-flood",
     ));
@@ -32690,17 +33072,23 @@ fn test_ffi_key_package_import_is_checked_against_the_pin() {
     let state = Arc::new(InMemoryStorage::new());
     let (mut alice, _handle) = mixed_mode_node("alice", &secure, &state);
 
-    let real_bob = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
-    let impostor = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let real_bob =
+        crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
+    // A genuinely different identity. It cannot *run as* bob — an address is
+    // its own key's hash — so the substitution it can still attempt is to
+    // offer its own key package under bob's id.
+    let impostor =
+        crate::test_identity::manager_for("mallory", Arc::new(crate::mls::InMemoryStorage::new()));
     let pin = real_bob.get_identity_public_key().unwrap();
-    alice.tofu_check_or_pin("bob", pin).unwrap();
+    alice.tofu_check_or_pin(&id("bob"), pin).unwrap();
 
     let impostor_kp = impostor.get_or_create_key_package().unwrap();
     let err = alice
-        .manual_mls_import_key_package("bob", &impostor_kp.key_package_data)
+        .manual_mls_import_key_package(&id("bob"), &impostor_kp.key_package_data)
         .unwrap_err();
     assert!(
-        err.to_string().contains("does not match the pinned key"),
+        err.to_string().contains("does not match the pinned key")
+            || err.to_string().contains("Credential identity mismatch"),
         "a substituted key package must be refused, got: {}",
         err
     );
@@ -32708,7 +33096,7 @@ fn test_ffi_key_package_import_is_checked_against_the_pin() {
     // The real peer's package still imports against the same pin.
     let real_kp = real_bob.get_or_create_key_package().unwrap();
     alice
-        .manual_mls_import_key_package("bob", &real_kp.key_package_data)
+        .manual_mls_import_key_package(&id("bob"), &real_kp.key_package_data)
         .expect("the genuine key package matches its pin");
 }
 
@@ -32721,16 +33109,17 @@ fn test_key_package_records_are_sealed_at_rest() {
     let state = Arc::new(InMemoryStorage::new());
     let (alice, _handle) = mixed_mode_node("alice", &secure, &state);
 
-    let bob = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let bob =
+        crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_kp = bob.get_or_create_key_package().unwrap();
     let pkg = ReceivedKeyPackage {
         key_package_data: bob_kp.key_package_data.clone(),
         local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 600_000,
     };
-    alice.persist_peer_key_package("bob", &pkg);
+    alice.persist_peer_key_package(&id("bob"), &pkg);
 
     let raw = state
-        .load(storage_keys::PEER_KEY_PACKAGES, "bob")
+        .load(storage_keys::PEER_KEY_PACKAGES, &id("bob"))
         .unwrap()
         .expect("a record was written");
     assert!(
@@ -32739,16 +33128,20 @@ fn test_key_package_records_are_sealed_at_rest() {
         "the raw key package bytes must not sit in the container in the clear"
     );
     assert!(
-        alice.load_peer_key_package_from_storage("bob").is_some(),
+        alice
+            .load_peer_key_package_from_storage(&id("bob"))
+            .is_some(),
         "and it must still read back through the seal"
     );
 
     // Moved to another peer's slot, the AAD binding refuses it.
     state
-        .store(storage_keys::PEER_KEY_PACKAGES, "carol", &raw)
+        .store(storage_keys::PEER_KEY_PACKAGES, &id("carol"), &raw)
         .unwrap();
     assert!(
-        alice.load_peer_key_package_from_storage("carol").is_none(),
+        alice
+            .load_peer_key_package_from_storage(&id("carol"))
+            .is_none(),
         "a record lifted into another peer's slot must not open"
     );
 }
@@ -32764,7 +33157,8 @@ fn test_legacy_unsealed_key_package_record_is_dropped_not_fatal() {
     let state = Arc::new(InMemoryStorage::new());
     let (alice, _handle) = mixed_mode_node("alice", &secure, &state);
 
-    let bob = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+    let bob =
+        crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
     let bob_kp = bob.get_or_create_key_package().unwrap();
     let legacy = serde_json::to_vec(&ReceivedKeyPackage {
         key_package_data: bob_kp.key_package_data,
@@ -32772,11 +33166,13 @@ fn test_legacy_unsealed_key_package_record_is_dropped_not_fatal() {
     })
     .unwrap();
     state
-        .store(storage_keys::PEER_KEY_PACKAGES, "bob", &legacy)
+        .store(storage_keys::PEER_KEY_PACKAGES, &id("bob"), &legacy)
         .unwrap();
 
     assert!(
-        alice.load_peer_key_package_from_storage("bob").is_none(),
+        alice
+            .load_peer_key_package_from_storage(&id("bob"))
+            .is_none(),
         "an unsealed legacy record is not accepted at face value"
     );
 
@@ -32844,7 +33240,7 @@ fn test_blocked_users_restore_skips_a_record_naming_the_local_user() {
         .store(storage_keys::BLOCKED_USERS, &self_id, &[])
         .unwrap();
     state
-        .store(storage_keys::BLOCKED_USERS, "bob", &[])
+        .store(storage_keys::BLOCKED_USERS, &id("bob"), &[])
         .unwrap();
 
     let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
@@ -32863,7 +33259,7 @@ fn test_blocked_users_restore_skips_a_record_naming_the_local_user() {
         "a planted self-block record must be ignored"
     );
     assert!(
-        protocol.is_user_blocked("bob"),
+        protocol.is_user_blocked(&id("bob")),
         "and genuine entries still restore"
     );
 }
@@ -33042,7 +33438,7 @@ fn nostr_resolution_arms_the_reverse_exchange_that_heals_a_replayed_record() {
     let bob_handle = nostr_transport_of(&bob);
     let bob_nostr = as_nostr(&bob_handle);
 
-    bob_nostr.request_peer_key_packages("alice");
+    bob_nostr.request_peer_key_packages(&id("alice"));
     let query = bob_nostr.next_query().unwrap().unwrap();
     let (_author, plaintext) = bob_nostr
         .open_query_event(&query.query_id, &event_json)
@@ -33050,14 +33446,14 @@ fn nostr_resolution_arms_the_reverse_exchange_that_heals_a_replayed_record() {
         .expect("the record opens with alice's derivable key");
 
     assert!(
-        !bob.key_package_sent_to.contains("alice"),
+        !bob.key_package_sent_to.contains(&id("alice")),
         "precondition: bob has not pushed his package to alice yet"
     );
 
     bob.handle_resolved_key_package(&plaintext).unwrap();
 
     assert!(
-        bob.key_package_sent_to.contains("alice"),
+        bob.key_package_sent_to.contains(&id("alice")),
         "resolving must push our own key package back — that reverse exchange \
          is the only thing that heals a resolved-but-consumed package, and \
          nothing at resolution time can tell a spent record from a live one"
@@ -33099,10 +33495,10 @@ fn nostr_published_record_is_signed_self_addressed_and_unacked() {
     let plaintext = nostr.unseal_event_payload(event["pubkey"].as_str().unwrap(), &sealed);
 
     let message = nostr.deserialize_message(&plaintext).unwrap();
-    assert_eq!(message.sender.as_str(), "alice");
+    assert_eq!(message.sender.as_str(), id("alice"));
     assert_eq!(
         message.recipient.as_str(),
-        "alice",
+        &id("alice"),
         "a published record has no recipient in advance; it is self-addressed"
     );
     assert!(
@@ -33141,7 +33537,7 @@ fn nostr_resolution_registers_the_publishers_key_end_to_end() {
     let bob_handle = nostr_transport_of(&bob);
     let bob_nostr = as_nostr(&bob_handle);
 
-    bob_nostr.request_peer_key_packages("alice");
+    bob_nostr.request_peer_key_packages(&id("alice"));
     let query = bob_nostr.next_query().unwrap().unwrap();
     let (_author, plaintext) = bob_nostr
         .open_query_event(&query.query_id, &event_json)
@@ -33151,7 +33547,7 @@ fn nostr_resolution_registers_the_publishers_key_end_to_end() {
     bob.handle_resolved_key_package(&plaintext).unwrap();
 
     let caps = bob
-        .load_peer_capabilities_record("alice")
+        .load_peer_capabilities_record(&id("alice"))
         .expect("alice's capabilities recorded");
     assert_eq!(
         caps.nostr_pubkey.as_deref(),
@@ -33532,7 +33928,10 @@ fn test_derived_session_slot_is_the_address_ordered_pair() {
     // Both sides must have converged on one slot, and each must read the other
     // out of it — which is also what proves the slot parse handles the
     // address-shaped halves it now carries.
-    for (side, name, peer) in [(&alice, "alice", &bob_addr), (&bob, "bob", &alice_addr)] {
+    for (side, name, peer) in [
+        (&alice, &id("alice"), &bob_addr),
+        (&bob, &id("bob"), &alice_addr),
+    ] {
         let manager = side.mls_manager.as_ref().unwrap().read().unwrap();
         assert!(
             manager.has_session(peer).unwrap(),

@@ -39,5 +39,12 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 offline-protocol-transport = { workspace = true, features = ["test-utils"] }
+# Test identities are seeded from their label so that ordering-dependent
+# fixtures (leave election, admin promotion, fork leader) are reproducible:
+# addresses sort by key hash, so a randomly minted key would reshuffle them
+# on every run.
+ed25519-dalek = { version = "3.0" }
+openmls_basic_credential = { workspace = true }
+openmls_traits = { workspace = true }
 
 [lib]

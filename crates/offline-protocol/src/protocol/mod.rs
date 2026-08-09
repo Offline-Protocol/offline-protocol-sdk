@@ -1007,11 +1007,13 @@ impl OfflineProtocol {
         let protocol_state_storage = Arc::new(TestProtocolStateStorage {
             storage: storage.clone(),
         });
-        // Runs as the profile string, so fixtures keep their readable
-        // `"alice"`/`"bob"` identities. `initialize_mls_for_test_derived` is
-        // the fixture that exercises the production derivation.
-        let forced_id = self.config.profile.clone();
-        self.initialize_mls_inner(storage, protocol_state_storage, false, Some(forced_id))
+        // Give the storage the identity this fixture's profile label stands
+        // for, then take the production path over it. The instance comes up as
+        // a genuine derived address, and it is the *same* address every time a
+        // fixture says `"alice"` — which is what lets tests keep readable
+        // labels while still exercising derived identity.
+        crate::test_identity::seed_identity(&storage, &self.config.profile);
+        self.initialize_mls_inner(storage, protocol_state_storage, false, None)
     }
 
     /// Test-only init that takes the **production** identity path: the address

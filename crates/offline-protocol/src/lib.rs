@@ -49,6 +49,8 @@ pub use visualization::{
 mod dors_integration_tests;
 #[cfg(test)]
 mod group_mesh_tests;
+#[cfg(test)]
+mod test_identity;
 
 // Re-export reliability types for configuration and telemetry frames
 pub use offline_protocol_reliability::{
