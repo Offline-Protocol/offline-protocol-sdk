@@ -12,7 +12,8 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 {
   // Required fields
   appId: string,
-  userId: string,
+  profile: string,        // Local namespace selector — NOT your identity.
+                          // Your address is derived; read it with localAddress().
   
   // Optional configurations
   transports?: TransportsConfig,
@@ -35,7 +36,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 ```typescript
 {
   appId: 'emergency-responder',
-  userId: userId,
+  profile: profile,
   
   transports: {
     ble: { enabled: true },
@@ -81,7 +82,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 ```typescript
 {
   appId: 'chat-app',
-  userId: userId,
+  profile: profile,
   
   transports: {
     ble: { enabled: true },
@@ -123,7 +124,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 ```typescript
 {
   appId: 'file-share',
-  userId: userId,
+  profile: profile,
   
   transports: {
     ble: { enabled: false },  // BLE too slow for large files
@@ -156,7 +157,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 ```typescript
 {
   appId: 'disaster-response',
-  userId: userId,
+  profile: profile,
 
   transports: {
     ble: { enabled: true },
@@ -190,7 +191,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 ```typescript
 {
   appId: 'battery-saver-app',
-  userId: userId,
+  profile: profile,
 
   transports: {
     ble: { enabled: true },  // Low power
@@ -223,7 +224,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 ```typescript
 {
   appId: 'event-app',
-  userId: userId,
+  profile: profile,
   
   transports: {
     ble: { enabled: true },
@@ -615,7 +616,7 @@ work. Nothing is partially applied.
 **Identity and routing**
 
 1. `appId` must not be empty
-2. `userId` must not be empty
+2. `profile` must not be empty
 3. `initialTtl` must be > 0
 4. At least one transport must be enabled
 

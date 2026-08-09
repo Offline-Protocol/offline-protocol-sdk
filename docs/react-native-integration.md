@@ -41,7 +41,7 @@ import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'com.example.app',
-  userId: 'user-42',
+  profile: 'default',
   network: { initialTtl: 8 },
   transports: {
     ble: { enabled: true },
@@ -374,7 +374,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 **Event types**: `message_sent`, `message_received`, `message_delivered`, `message_failed`, `transport_switched`, `relay_promoted`, `relay_demoted`, `neighbor_discovered`, `neighbor_lost`, `network_metrics`, `file_progress`, `file_received`, `diagnostic`, `secure_session_established`, `secure_session_failed`, `connection_request_received`, `connection_request_undeliverable`, `connection_accepted`, `connection_rejected`, `connection_request_cancelled`, `group_created`, `group_message_received`, `group_member_added`, `group_member_removed`, `group_unauthorized_membership_change`, `group_message_sent`, `group_message_partial_failure`, `group_message_delivery_report`, `group_epoch_fork_detected`, `group_epoch_fork_resolved`, `group_role_changed`, `service_discovered`, `service_request_received`, `service_response_received`, `presence_updated`, `typing_indicator_received`, `read_receipt_received`, `message_relayed`, `message_deferred`.
 
-**Identity**: `neighbor_discovered.peer_id` is the peer's canonical user id — the same value the peer supplied as `ProtocolConfig.userId`, on every transport — and is what you pass as `recipient` to `sendMessage` / `sendConnectionRequest`.
+**Identity**: `neighbor_discovered.peer_id` is the peer's canonical address — the `off1…` value that peer derived from its own identity key, on every transport — and is what you pass as `recipient` to `sendMessage` / `sendConnectionRequest`. Your own is `localAddress()`; no app chooses its address, so a peer claiming one can be checked by re-deriving it from the key it presents.
 
 ---
 
@@ -534,7 +534,7 @@ Parse the raw event and check the server frame's `type` before consuming extensi
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | **initializeMlsWithSecureStorage** | `initializeMlsWithSecureStorage(): Promise<void>` | Initialises MLS key material in iOS Keychain / Android EncryptedSharedPreferences and message-plane state in the app container. Called automatically by `start()` when encryption enabled. |
-| **wipePersistedState** | `wipePersistedState(appId, userId): Promise<void>` | Erases all persisted state for one account — namespaced secure store, protocol-state directory, and the pre-namespace store when this account owns it or nobody does. Call on logout/username switch, **after** `destroy()`; rejects if the account named is the one currently running. Irreversible, and rotates the MLS and Nostr identities. See [UPGRADING §10](./UPGRADING.md#logging-out-and-switching-accounts). |
+| **wipePersistedState** | `wipePersistedState(appId, profile): Promise<void>` | Erases all persisted state for one account — namespaced secure store, protocol-state directory, and the pre-namespace store when this account owns it or nobody does. Call on logout/username switch, **after** `destroy()`; rejects if the account named is the one currently running. Irreversible, and rotates the MLS and Nostr identities. See [UPGRADING §10](./UPGRADING.md#logging-out-and-switching-accounts). |
 | **isMlsInitialized** | `isMlsInitialized(): Promise<boolean>` | Whether MLS is ready. |
 | **mlsGenerateKeyPackage** | `mlsGenerateKeyPackage(): Promise<MlsKeyPackage>` | Generates a new key package. |
 | **mlsGetOrCreateKeyPackage** | `mlsGetOrCreateKeyPackage(): Promise<MlsKeyPackage>` | Gets or creates key package. |
@@ -596,6 +596,7 @@ High-level group methods that handle MLS encryption and per-member fan-out autom
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
+| **localAddress** | `localAddress(): Promise<string \| null>` | This device's `off1…` address — its `sender` on every frame and what peers pass as `recipient` to reach it. Derived from the identity key in this profile's storage, so the app does not choose it, and stable across restarts of the same `profile`. `null` until startup completes; the `identity_ready` event carries the same value the moment it is known. |
 | **blockUser** | `blockUser(userId: string): Promise<void>` | Blocks a user (silently drops their messages). |
 | **unblockUser** | `unblockUser(userId: string): Promise<void>` | Unblocks a user. |
 | **getBlockedUsers** | `getBlockedUsers(): Promise<string[]>` | Returns all blocked user IDs. |
