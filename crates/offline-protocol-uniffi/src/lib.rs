@@ -2474,38 +2474,50 @@ impl OfflineProtocol {
     /// mean nothing ever arrives. Rebuilding is therefore the correction, not
     /// a refresh.
     ///
-    /// Safe to do here because it runs before `start()`: the transports are
-    /// inert shells until then, and the platform bridges populate their peer
-    /// state afterwards.
+    /// Only correct while the protocol is stopped, which the caller enforces.
+    /// `add_transport` *replaces* the entry, and a running instance's
+    /// transports are not interchangeable with fresh ones: the platform
+    /// bridges have already reported connection status onto them and filled
+    /// their queues, and a replacement starts Disconnected and empty. (Their
+    /// `start()` is a no-op — the platform owns the connection — so there is no
+    /// re-start that would recover that state.)
+    ///
+    /// Every replacement is constructed before any is installed, so the one
+    /// fallible construction cannot leave half the set rebuilt and half still
+    /// on the profile.
     fn rebuild_transports_for_identity(
         protocol: &mut CoreProtocol,
         enabled: EnabledTransports,
         address: &str,
     ) -> Result<(), ProtocolError> {
+        let mut rebuilt: Vec<(CoreTransportType, Box<dyn Transport>)> = Vec::new();
+
         if enabled.ble {
-            protocol
-                .transport_manager_mut()
-                .add_transport(CoreTransportType::BLE, Box::new(BleTransport::new(address)));
+            rebuilt.push((CoreTransportType::BLE, Box::new(BleTransport::new(address))));
         }
         if enabled.internet {
-            protocol.transport_manager_mut().add_transport(
+            rebuilt.push((
                 CoreTransportType::Internet,
                 Box::new(InternetTransport::new(address)),
-            );
+            ));
         }
         if enabled.reticulum {
-            protocol.transport_manager_mut().add_transport(
+            rebuilt.push((
                 CoreTransportType::Reticulum,
                 Box::new(ReticulumTransport::new(address)),
-            );
+            ));
         }
         if enabled.nostr {
             let nostr = NostrTransport::new(address).map_err(|e| {
                 ProtocolError::InvalidConfiguration(format!("Failed to create Nostr keypair: {e}"))
             })?;
+            rebuilt.push((CoreTransportType::Nostr, Box::new(nostr)));
+        }
+
+        for (transport_type, transport) in rebuilt {
             protocol
                 .transport_manager_mut()
-                .add_transport(CoreTransportType::Nostr, Box::new(nostr));
+                .add_transport(transport_type, transport);
         }
         Ok(())
     }
@@ -5167,6 +5179,27 @@ impl OfflineProtocol {
         if protocol.is_mls_initialized() {
             return Ok(());
         }
+
+        // First initialization derives this device's address, and the
+        // transports have to be rebuilt to carry it — which replaces the
+        // objects the platform bridges have been reporting status onto. That
+        // is only safe before `start()`, so refuse the wrong order here,
+        // *before* MLS is touched: an app that reorders its two calls gets a
+        // working instance, where a rebuild against a running protocol would
+        // silently strip every transport back to Disconnected with an empty
+        // queue and no error. (Initializing MLS first is the required order
+        // anyway — key-package exchange has to be armed before discovery can
+        // fire.)
+        let state = *recover_rwlock_read(&self.state, "state");
+        if state != ProtocolState::Stopped {
+            return Err(ProtocolError::InvalidState(format!(
+                "initialize_mls must be called before start(): the protocol is {:?}, \
+                 and deriving this device's address here would replace transports \
+                 the platform has already connected",
+                state
+            )));
+        }
+
         protocol
             .initialize_mls(secure_wrapper, state_wrapper)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
@@ -9850,6 +9883,98 @@ mod tests {
             kotlin.contains("private fun sendEvent(eventName: String, params: Any?): Boolean"),
             "OfflineProtocolModule.kt sendEvent must keep returning Boolean — the two platforms \
              report hand-over the same way or neither claim means anything"
+        );
+    }
+
+    /// The one transport for which the post-identity rebuild is load-bearing.
+    ///
+    /// `NostrTransport` computes its routing tag from the id it is constructed
+    /// with, and that tag is the address peers publish to. Built in `new()` the
+    /// id is still the profile, so without the rebuild this device subscribes
+    /// to a tag nobody writes to and every Nostr-carried frame is simply never
+    /// seen — no error anywhere. The assertion that matters is the second one:
+    /// the tag actually *moved* off the profile.
+    #[test]
+    fn test_nostr_routing_tag_follows_the_derived_address_after_mls_init() {
+        let config = ProtocolConfig {
+            profile: "nostr-profile".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        };
+        let profile = config.profile.clone();
+        let protocol = OfflineProtocol::new(config).unwrap();
+
+        let profile_tag = offline_protocol_transport::routing_tag_for_device_id(&profile).unwrap();
+        assert_eq!(
+            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
+            Some(profile_tag.clone()),
+            "before init the transport can only know the profile"
+        );
+
+        protocol
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .unwrap();
+
+        let address = protocol.local_address().expect("address after init");
+        let address_tag = offline_protocol_transport::routing_tag_for_device_id(&address).unwrap();
+
+        assert_eq!(
+            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
+            Some(address_tag),
+            "the Nostr transport must listen on the tag derived from this device's address"
+        );
+        assert_ne!(
+            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
+            Some(profile_tag),
+            "a tag still derived from the profile is the silent-delivery failure this rebuild exists to prevent"
+        );
+    }
+
+    /// The rebuild replaces live transport objects, so it cannot run against a
+    /// started protocol: the replacements come up `Disconnected` with empty
+    /// queues, and their `start()` is a no-op because the platform owns the
+    /// connection — nothing would ever restore the status the bridge had
+    /// already reported. Refused before MLS is touched, so the instance is
+    /// left in a state the app can still fix by reordering its two calls.
+    #[test]
+    fn test_initialize_mls_after_start_is_refused_and_changes_nothing() {
+        let protocol = OfflineProtocol::new(ProtocolConfig {
+            profile: "late-init".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+
+        let tag_before = protocol.with_nostr_transport(|nt| nt.routing_tag().to_string());
+        protocol.start().unwrap();
+
+        let err = protocol
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .expect_err("initializing MLS after start() must not silently swap the transports");
+        assert!(
+            matches!(err, ProtocolError::InvalidState(_)),
+            "expected InvalidState, got {err:?}"
+        );
+
+        assert!(
+            !protocol.is_mls_initialized(),
+            "the refusal must come before MLS is initialized, so no half-state is left behind"
+        );
+        assert_eq!(
+            protocol.local_address(),
+            None,
+            "no address may be published for an initialization that was refused"
+        );
+        assert_eq!(
+            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
+            tag_before,
+            "the running transports must be left exactly as they were"
         );
     }
 }

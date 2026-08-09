@@ -55,6 +55,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   profile, or a replaced key — instead of building a credential the device
   cannot prove it owns.
 
+- `initialize_mls` must now be called **before** `start()` and returns
+  `InvalidState` otherwise. Deriving the address is what lets the transports be
+  rebuilt to carry it, and rebuilding replaces transport objects the platform
+  has already reported connection status onto — against a running protocol that
+  would strip every transport back to disconnected-with-an-empty-queue and
+  report nothing. React Native already calls them in this order inside
+  `start()`; direct UniFFI and Python embedders that call `start()` first get a
+  clear error instead of dead transports.
+
 ### Fixed
 
 - `listSessions` no longer reports a peer for a session slot that names two
