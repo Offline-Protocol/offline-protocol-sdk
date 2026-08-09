@@ -386,7 +386,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
-            userId: raw["userId"] as? String ?? raw["user_id"] as? String ?? "",
+            profile: raw["profile"] as? String ?? "",
             bleEnabled: raw["bleEnabled"] as? Bool ?? raw["ble_enabled"] as? Bool ?? true,
             wifiDirectEnabled: raw["wifiDirectEnabled"] as? Bool ?? raw["wifi_direct_enabled"] as? Bool ?? true,
             internetEnabled: raw["internetEnabled"] as? Bool ?? raw["internet_enabled"] as? Bool ?? true,
@@ -575,7 +575,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             currentConfig = config
             emitDiagnostic(level: "info", message: "Protocol core created", context: [
                 "appId": config.appId,
-                "userId": config.userId,
+                "userId": config.profile,
                 "bleEnabled": config.bleEnabled,
                 "wifiDirectEnabled": config.wifiDirectEnabled,
                 "internetEnabled": config.internetEnabled,
@@ -590,9 +590,21 @@ class OfflineProtocolModule: RCTEventEmitter {
             protocolInstance = proto
             meshServicesInstance = try MeshServices(protocol: proto)
 
+            // The native transport managers are still seeded with the profile
+            // rather than this device's address. The address does not exist
+            // yet — it is derived when `initializeMlsWithSecureStorage` opens
+            // storage — and `deviceId` is immutable on these managers because
+            // it seeds `MeshController(selfId:)` at init. Moving the transport
+            // surfaces onto the address (BLE `DEVICE_ID`, its cross-check
+            // against the IDENTITY characteristic, and the Wi-Fi Direct peer
+            // id) is a change to what each transport advertises, and is made
+            // as one piece rather than split across the identity work.
+            // Until then the Rust side is authoritative: it stamps
+            // `localAddress()` on every frame.
+
             // Initialize BLE manager if BLE is enabled
             if config.bleEnabled {
-                let manager = BleManager(protocol: proto, deviceId: config.userId)
+                let manager = BleManager(protocol: proto, deviceId: config.profile)
                 manager.delegate = self
                 bleManager = manager
                 
@@ -600,19 +612,19 @@ class OfflineProtocolModule: RCTEventEmitter {
                 // When Rust enqueues a fragment, this callback fires and Swift sends immediately.
                 proto.setBleTransportCallback(callback: BleTransportCallbackImpl(bleManager: manager))
                 
-                print("[OfflineProtocolModule] BLE Manager initialized for user: \(config.userId)")
+                print("[OfflineProtocolModule] BLE Manager initialized for user: \(config.profile)")
                 emitDiagnostic(level: "info", message: "BLE manager initialized", context: [
-                    "userId": config.userId
+                    "userId": config.profile
                 ])
             } else {
                 emitDiagnostic(level: "warning", message: "BLE disabled in configuration", context: [
-                    "userId": config.userId
+                    "userId": config.profile
                 ])
             }
             
             // Initialize Internet manager if internet is enabled
             if config.internetEnabled {
-                internetManager = InternetManager(protocol: proto, deviceId: config.userId)
+                internetManager = InternetManager(protocol: proto, deviceId: config.profile)
                 internetManager?.delegate = self
                 internetManager?.serverMessageEmitter = { [weak self] rawJson in
                     self?.emitServerMessageEvent(rawJson)
@@ -623,7 +635,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                 internetManager?.supersededEmitter = { [weak self] reason in
                     self?.emitInternetSupersededEvent(reason: reason)
                 }
-                print("[OfflineProtocolModule] Internet Manager initialized for user: \(config.userId)")
+                print("[OfflineProtocolModule] Internet Manager initialized for user: \(config.profile)")
                 
                 // Extract and store internet config for use during start()
                 if let transportsDict = parsed.raw["transports"] as? [String: Any],
@@ -634,25 +646,25 @@ class OfflineProtocolModule: RCTEventEmitter {
                 }
                 
                 emitDiagnostic(level: "info", message: "Internet manager initialized", context: [
-                    "userId": config.userId,
+                    "userId": config.profile,
                     "serverUrl": internetServerUrl ?? "not configured"
                 ])
             } else {
                 emitDiagnostic(level: "info", message: "Internet disabled in configuration", context: [
-                    "userId": config.userId
+                    "userId": config.profile
                 ])
             }
 
             // Initialize Reticulum manager if reticulum is enabled
             if config.reticulumEnabled {
-                let retManager = ReticulumManager(protocol: proto, deviceId: config.userId)
+                let retManager = ReticulumManager(protocol: proto, deviceId: config.profile)
                 retManager.delegate = self
                 reticulumManager = retManager
 
                 // Register event-driven transport callback — replaces timer-based polling.
                 proto.setReticulumTransportCallback(callback: ReticulumTransportCallbackImpl(reticulumManager: retManager))
 
-                print("[OfflineProtocolModule] Reticulum Manager initialized for user: \(config.userId)")
+                print("[OfflineProtocolModule] Reticulum Manager initialized for user: \(config.profile)")
 
                 // Extract and store reticulum config for use during start()
                 if let transportsDict = parsed.raw["transports"] as? [String: Any],
@@ -664,24 +676,24 @@ class OfflineProtocolModule: RCTEventEmitter {
                 }
 
                 emitDiagnostic(level: "info", message: "Reticulum manager initialized", context: [
-                    "userId": config.userId
+                    "userId": config.profile
                 ])
             } else {
                 emitDiagnostic(level: "info", message: "Reticulum disabled in configuration", context: [
-                    "userId": config.userId
+                    "userId": config.profile
                 ])
             }
 
             // Initialize Nostr manager if nostr is enabled
             if config.nostrEnabled {
-                let nostrMgr = NostrManager(protocol: proto, deviceId: config.userId)
+                let nostrMgr = NostrManager(protocol: proto, deviceId: config.profile)
                 nostrMgr.delegate = self
                 nostrManager = nostrMgr
 
                 // Register event-driven transport callback
                 proto.setNostrTransportCallback(callback: NostrTransportCallbackImpl(nostrManager: nostrMgr))
 
-                print("[OfflineProtocolModule] Nostr Manager initialized for user: \(config.userId)")
+                print("[OfflineProtocolModule] Nostr Manager initialized for user: \(config.profile)")
 
                 // Extract and store nostr config for use during start()
                 if let transportsDict = parsed.raw["transports"] as? [String: Any],
@@ -694,11 +706,11 @@ class OfflineProtocolModule: RCTEventEmitter {
                 }
 
                 emitDiagnostic(level: "info", message: "Nostr manager initialized", context: [
-                    "userId": config.userId
+                    "userId": config.profile
                 ])
             } else {
                 emitDiagnostic(level: "info", message: "Nostr disabled in configuration", context: [
-                    "userId": config.userId
+                    "userId": config.profile
                 ])
             }
 
@@ -1703,12 +1715,12 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// races those writes and leaves a partially repopulated container. Call
     /// `destroy()` first.
     @objc func wipePersistedState(_ appId: String,
-                                  userId: String,
+                                  profile: String,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        let namespace = StorageNamespace.account(appId: appId, userId: userId)
+        let namespace = StorageNamespace.account(appId: appId, profile: profile)
         if let config = currentConfig,
-           StorageNamespace.account(appId: config.appId, userId: config.userId) == namespace {
+           StorageNamespace.account(appId: config.appId, profile: config.profile) == namespace {
             rejecter(
                 "ERROR_WIPE_STATE",
                 "Refusing to wipe storage for the account this instance is running. "
@@ -1764,7 +1776,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                     // and gates LeaveGroup on it, so a placeholder would
                     // silently corrupt relay group state. Mirrors the
                     // Android module's guard.
-                    guard let userId = currentConfig?.userId else {
+                    guard let userId = currentConfig?.profile else {
                         throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [
                             NSLocalizedDescriptionKey: "Cannot enable Internet transport before initialize(config)"
                         ])
@@ -1802,7 +1814,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                 // Configure and start WiFi Direct transport via WifiDirectManager
                 if wifiDirectManager == nil {
                     // Create manager if not already created
-                    let newManager = WifiDirectManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    let newManager = WifiDirectManager(protocol: proto, deviceId: currentConfig?.profile ?? "unknown")
                     newManager.delegate = self
                     wifiDirectManager = newManager
                     proto.setWifiDirectTransportCallback(callback: WifiDirectTransportCallbackImpl(wifiDirectManager: newManager))
@@ -1824,7 +1836,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             case "ble":
                 // Start BLE manager if stopped
                 if bleManager == nil {
-                    let newManager = BleManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    let newManager = BleManager(protocol: proto, deviceId: currentConfig?.profile ?? "unknown")
                     newManager.delegate = self
                     bleManager = newManager
                     proto.setBleTransportCallback(callback: BleTransportCallbackImpl(bleManager: newManager))
@@ -1842,7 +1854,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             case "reticulum":
                 if reticulumManager == nil {
-                    let newManager = ReticulumManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    let newManager = ReticulumManager(protocol: proto, deviceId: currentConfig?.profile ?? "unknown")
                     newManager.delegate = self
                     reticulumManager = newManager
                     proto.setReticulumTransportCallback(callback: ReticulumTransportCallbackImpl(reticulumManager: newManager))
@@ -1862,7 +1874,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             case "nostr":
                 if nostrManager == nil {
-                    let newManager = NostrManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    let newManager = NostrManager(protocol: proto, deviceId: currentConfig?.profile ?? "unknown")
                     newManager.delegate = self
                     nostrManager = newManager
                     proto.setNostrTransportCallback(callback: NostrTransportCallbackImpl(nostrManager: newManager))
@@ -3111,7 +3123,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         do {
             let accountNamespace = StorageNamespace.account(
                 appId: config.appId,
-                userId: config.userId
+                profile: config.profile
             )
             let secureStorage = try MlsSecureStorage(
                 accountNamespace: accountNamespace
@@ -3193,6 +3205,21 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
+    /// This device's own address (`off1…`), or `nil` before MLS is
+    /// initialized.
+    ///
+    /// Derived from the identity key in this profile's storage, so the app
+    /// does not choose it; it is stable across restarts of the same profile.
+    /// This is the string peers must be given to reach this device.
+    @objc func localAddress(_ resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            resolver(nil)
+            return
+        }
+        resolver(proto.localAddress())
+    }
+
     /// Derive the canonical self-certifying address (`off1…`) from an Ed25519
     /// public key. Needs no protocol instance, so an invite or QR code can be
     /// checked before `create()`.
@@ -4181,7 +4208,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
         let payload: [String: Any] = [
             "timestamp": Int(Date().timeIntervalSince1970),
-            "local_user_id": currentConfig?.userId ?? "",
+            "local_user_id": currentConfig?.profile ?? "",
             "nodes": nodesArray,
             "links": linksArray,
             "stats": stats

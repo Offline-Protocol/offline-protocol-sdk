@@ -515,7 +515,10 @@ dictionary EncryptionConfig {
 // Extended configuration for protocol creation
 dictionary ProtocolConfig {
     string app_id;
-    string user_id;
+    // Local profile selector: picks which stored identity this instance runs
+    // as. Never on the wire — the wire identity is `local_address()`, derived
+    // from the identity key in this profile's storage.
+    string profile;
     boolean ble_enabled;
     boolean wifi_direct_enabled;
     boolean internet_enabled;
@@ -630,7 +633,8 @@ dictionary ProtocolConfig {
 // Extended protocol configuration with all options
 dictionary ProtocolConfigExtended {
     string app_id;
-    string user_id;
+    // See ProtocolConfig.profile.
+    string profile;
     TransportConfig transport;
     DorsConfig dors;
     RelayConfig relay;
@@ -951,6 +955,15 @@ interface OfflineProtocol {
     // secret failed this session (the id would not be stable across launches,
     // so none is exposed). Unaffected by installing a telemetry sink or by an
     // app-supplied scrub secret.
+    // This device's self-certifying address (`off1…`): its `sender` on every
+    // outbound frame, and what peers must use as `recipient` to reach it.
+    //
+    // Derived from the identity key held in this profile's storage, so it is
+    // not chosen by the app and is stable across restarts of the same profile.
+    // Returns null before `initialize_mls`, which is where that storage — and
+    // therefore the key — first becomes available.
+    string? local_address();
+
     string? telemetry_install_id();
 
     // Messaging

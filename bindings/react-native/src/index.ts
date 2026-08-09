@@ -117,7 +117,7 @@ interface InitialRuntimeConfig {
  */
 interface NativeConfig {
   appId: string;
-  userId: string;
+  profile: string;
   bleEnabled: boolean;
   wifiDirectEnabled: boolean;
   internetEnabled: boolean;
@@ -284,6 +284,14 @@ export class OfflineProtocol {
    */
   private droppedEventTypesWarned: Set<string> = new Set();
   private config: ProtocolConfig;
+
+  /**
+   * This device's derived address, once known.
+   *
+   * Cached from the `identity_ready` event so callers that need to compare
+   * against "us" do not have to await a native round-trip.
+   */
+  private cachedLocalAddress: string | null = null;
   private isCreated: boolean = false;
   private initialRuntimeConfig: InitialRuntimeConfig | null = null;
   private initialRuntimeConfigApplied: boolean = false;
@@ -386,7 +394,7 @@ export class OfflineProtocol {
 
     const nativeConfig: NativeConfig = {
       appId: this.config.appId,
-      userId: this.config.userId,
+      profile: this.config.profile,
       bleEnabled: this.config.transports?.ble?.enabled ?? true,
       wifiDirectEnabled: this.config.transports?.wifiDirect?.enabled ?? false,
       internetEnabled: this.config.transports?.internet?.enabled ?? false,
@@ -651,6 +659,10 @@ export class OfflineProtocol {
    * with both listener maps empty. See {@link on} for the redelivery half.
    */
   private emitEvent(event: ProtocolEvent): void {
+    if (event.type === 'identity_ready') {
+      this.cachedLocalAddress = event.address;
+    }
+
     let delivered = false;
 
     // Call event-specific listeners
@@ -2383,6 +2395,28 @@ export class OfflineProtocol {
   }
 
   /**
+   * This device's own address (`off1…`), or `null` before startup completes.
+   *
+   * Derived from the identity key held in this profile's storage — the app
+   * does not choose it, and it is stable across restarts of the same
+   * `profile`. This is the string to show the user, put in an invite or QR
+   * code, and what peers pass as the recipient to reach this device.
+   *
+   * `null` until MLS is initialized (which `start()` does), because the key
+   * that defines it lives in storage that is not open before then. The
+   * `identity_ready` event carries the same value at the moment it is known.
+   */
+  async localAddress(): Promise<string | null> {
+    if (this.cachedLocalAddress !== null) {
+      return this.cachedLocalAddress;
+    }
+    const address =
+      (await OfflineProtocolNativeModule.localAddress()) ?? null;
+    this.cachedLocalAddress = address;
+    return address;
+  }
+
+  /**
    * Derives a deterministic user ID from a public key.
    *
    * @deprecated Use {@link deriveAddress}. This returns the same `off1…`
@@ -2588,7 +2622,7 @@ export class OfflineProtocol {
   private toMlsSessionInfo(raw: any): MlsSessionInfo {
     const members: string[] = raw.memberIds ?? raw.members ?? [];
     const otherUserId =
-      members.find(memberId => memberId !== this.config.userId) ?? '';
+      members.find(memberId => memberId !== this.cachedLocalAddress) ?? '';
     return {
       otherUserId,
       groupId: raw.groupId,
@@ -3160,8 +3194,8 @@ export class OfflineProtocol {
    * @param appId - The `appId` the protocol was created with
    * @param userId - The `userId` the protocol was created with
    */
-  async wipePersistedState(appId: string, userId: string): Promise<void> {
-    await OfflineProtocolNativeModule.wipePersistedState(appId, userId);
+  async wipePersistedState(appId: string, profile: string): Promise<void> {
+    await OfflineProtocolNativeModule.wipePersistedState(appId, profile);
   }
 
   // ─── Presence, Typing, Read Receipts ────────────────────────

@@ -155,9 +155,9 @@ class ProtocolManager:
         self._config = config
         self._event_handler = event_handler
 
-        device_id = config.user_id  # type: ignore[union-attr]
+        profile = config.profile  # type: ignore[union-attr]
         app_id = getattr(config, "app_id", "offline-messenger")
-        storage_namespace = account_storage_namespace(app_id, device_id)
+        storage_namespace = account_storage_namespace(app_id, profile)
         self._storage = (
             storage
             if storage is not None
@@ -171,6 +171,12 @@ class ProtocolManager:
 
         # Create the core protocol instance
         self._protocol = OfflineProtocol(config)
+
+        # Transport managers still carry the profile rather than this device's
+        # address: the address is derived when `start()` initialises MLS, which
+        # is after this point. Moving the transport surfaces onto the address
+        # is done as one piece with the rest of the transport identity work.
+        device_id = profile
 
         # Transport managers
         self.ble: BleManager | None = None
@@ -199,6 +205,15 @@ class ProtocolManager:
         return self._protocol
 
     # -- lifecycle ------------------------------------------------------------
+
+    @property
+    def local_address(self) -> str | None:
+        """This device's derived ``off1…`` address, or ``None`` before start.
+
+        Derived from the identity key in this profile's storage rather than
+        chosen by the caller, and stable across restarts of the same profile.
+        """
+        return self._protocol.local_address()
 
     async def start(self) -> None:
         """Wire callbacks, initialise MLS, and start the processing loop."""
@@ -258,7 +273,7 @@ class ProtocolManager:
         # Start the 100 ms processing loop
         self._process_task = asyncio.ensure_future(self._process_loop())
 
-        logger.info("ProtocolManager started (user_id=%s)", self._config.user_id)  # type: ignore[union-attr]
+        logger.info("ProtocolManager started (address=%s)", self.local_address)
 
     async def stop(self) -> None:
         """Stop all transports and the processing loop."""

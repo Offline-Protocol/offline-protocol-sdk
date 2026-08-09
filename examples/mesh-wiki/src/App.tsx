@@ -411,7 +411,7 @@ const App = () => {
   useEffect(() => {
     const proto = new OfflineProtocol({
       appId: 'mesh-wiki',
-      userId,
+      profile: userId,
       transports: {
         ble: {enabled: true},
         internet: {enabled: false},

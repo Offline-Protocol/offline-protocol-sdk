@@ -446,8 +446,19 @@ export interface PendingQueueConfig {
 export interface ProtocolConfig {
   /** Application identifier */
   appId: string;
-  /** User identifier */
-  userId: string;
+  /**
+   * Local profile selector: which stored identity this instance runs as.
+   *
+   * Never leaves the device and is not this device's identity. It picks a
+   * storage namespace — one per `(appId, profile)` — so an app hosting several
+   * accounts gives each its own value, and an app hosting one can pass a
+   * constant such as `'default'`.
+   *
+   * The wire identity is the self-certifying address derived from the identity
+   * key in that namespace: read it with `localAddress()` or from the
+   * `identity_ready` event. An app cannot choose it.
+   */
+  profile: string;
   /** Transport configuration (optional) */
   transports?: TransportsConfig;
   /**

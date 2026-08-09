@@ -943,7 +943,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
     const config = {
       ...PROTOCOL_CONFIG,
-      userId: uid,
+      profile: uid,
     };
 
     const proto = new OfflineProtocol(config);

@@ -581,6 +581,9 @@ RCT_EXTERN_METHOD(sendReadReceipt:(NSString *)recipient
 RCT_EXTERN_METHOD(getIdentityPublicKey:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(localAddress:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(deriveAddress:(NSArray *)publicKey
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)

@@ -331,7 +331,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
     const proto = new OfflineProtocol({
       ...PROTOCOL_CONFIG,
-      userId: uid,
+      profile: uid,
     });
     protocolRef.current = proto;
     setProtocol(proto);

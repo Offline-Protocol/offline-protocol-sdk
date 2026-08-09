@@ -13,9 +13,9 @@ internal object StorageNamespace {
     private const val HEX = "0123456789abcdef"
     private val accountPattern = Regex("account-[0-9a-f]{64}")
 
-    fun account(appId: String, userId: String): String {
+    fun account(appId: String, profile: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(
-            "$DOMAIN\u0000$appId\u0000$userId".toByteArray(Charsets.UTF_8)
+            "$DOMAIN\u0000$appId\u0000$profile".toByteArray(Charsets.UTF_8)
         )
         return buildString(8 + digest.size * 2) {
             append("account-")
