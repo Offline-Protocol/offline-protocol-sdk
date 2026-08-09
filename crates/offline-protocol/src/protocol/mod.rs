@@ -88,8 +88,15 @@ pub struct OfflineProtocol {
     /// Until then it holds [`ProtocolConfig::profile`], which is *not* an
     /// address and is never a peer's real identity. That fallback keeps the
     /// pre-MLS surface (transport wiring, local bookkeeping) working on an
-    /// instance that has not been initialized; anything that reaches the wire
-    /// happens after initialization, because sending requires MLS.
+    /// instance that has not been initialized.
+    ///
+    /// One configuration can put the fallback on the wire: the explicit
+    /// `require_encryption = false` opt-out lets a send go out in plaintext
+    /// with MLS never initialized, and such a frame is stamped with the
+    /// profile. It is the same fall-through that already emits
+    /// [`crate::events::SecurityWarningCode::PlaintextSend`], so the condition
+    /// is reported rather than silent. The default config forbids it —
+    /// `require_encryption` is `true`, which fails the send closed.
     pub(crate) local_id: String,
 
     /// Whether [`Self::local_id`] is the derived address rather than the
@@ -755,7 +762,7 @@ impl OfflineProtocol {
         secure_storage: Arc<dyn MlsStorage>,
         protocol_state_storage: Arc<dyn ProtocolStateStorage>,
     ) -> Result<()> {
-        self.initialize_mls_inner(secure_storage, protocol_state_storage, true, None)
+        self.initialize_mls_inner(secure_storage, protocol_state_storage, true)
     }
 
     /// Returns this device's address, once it has one.
@@ -773,17 +780,15 @@ impl OfflineProtocol {
     /// on a shared backend would mean deleting a record through the same store
     /// it was just read from.
     ///
-    /// `forced_id` is the test-fixture escape hatch: `None` takes the
-    /// production path (derive the address from storage's identity key), while
-    /// `Some(id)` runs as that literal id, which is how the suites that predate
-    /// derived addressing keep their readable `"alice"`/`"bob"` identities.
-    /// Production callers always pass `None`.
+    /// There is one identity path and every caller takes it — a fixture that
+    /// wants a particular identity seeds the key into `secure_storage` first
+    /// (see [`crate::test_identity`]) rather than naming an id here, because an
+    /// id nothing holds a key for is exactly what `MlsManager::new` refuses.
     fn initialize_mls_inner(
         &mut self,
         secure_storage: Arc<dyn MlsStorage>,
         protocol_state_storage: Arc<dyn ProtocolStateStorage>,
         adopt_legacy_state: bool,
-        forced_id: Option<String>,
     ) -> Result<()> {
         if self.mls_manager.is_some() {
             return Ok(());
@@ -794,13 +799,8 @@ impl OfflineProtocol {
         // protocol has no address — `local_id` is still the profile — which is
         // exactly why the key has to be resolved here, ahead of the manager
         // that embeds the id in its credential and in every session slot.
-        let local_id = match forced_id {
-            Some(id) => id,
-            None => {
-                let (_, address) = MlsManager::load_or_create_identity(&secure_storage)?;
-                address.to_string()
-            }
-        };
+        let (_, address) = MlsManager::load_or_create_identity(&secure_storage)?;
+        let local_id = address.to_string();
 
         let mut manager = MlsManager::new(&local_id, secure_storage.clone())?;
         // Installed before the manager becomes shared: the enforcement flag is
@@ -843,7 +843,7 @@ impl OfflineProtocol {
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
 
-        let previous_local_id = std::mem::replace(&mut self.local_id, local_id.clone()).to_string();
+        let previous_local_id = std::mem::replace(&mut self.local_id, local_id.clone());
         let previous_identity_established = self.identity_established;
         self.identity_established = true;
         // The governor took the profile at construction because no address
@@ -987,14 +987,11 @@ impl OfflineProtocol {
         self.mls_manager = Some(manager);
         self.emit_mls_initialized();
 
-        // Only now is the address both derived and committed — a restore
-        // failure above rolls it back, and announcing an identity the instance
-        // then abandoned would leave the app addressing a device that is not
-        // this one.
-        if self.identity_established {
-            let address = self.local_id.clone();
-            self.emit_event(Event::identity_ready(address));
-        }
+        // Announced only here, past the last `return Err` — a restore failure
+        // rolls the address back, and announcing an identity the instance then
+        // abandoned would leave the app addressing a device that is not this
+        // one.
+        self.emit_event(Event::identity_ready(self.local_id.clone()));
 
         info!(profile = %self.config.profile, "MLS encryption initialized with split secure and protocol-state storage");
         Ok(())
@@ -1013,7 +1010,7 @@ impl OfflineProtocol {
         // fixture says `"alice"` — which is what lets tests keep readable
         // labels while still exercising derived identity.
         crate::test_identity::seed_identity(&storage, &self.config.profile);
-        self.initialize_mls_inner(storage, protocol_state_storage, false, None)
+        self.initialize_mls_inner(storage, protocol_state_storage, false)
     }
 
     /// Test-only init that takes the **production** identity path: the address
@@ -1026,7 +1023,7 @@ impl OfflineProtocol {
         let protocol_state_storage = Arc::new(TestProtocolStateStorage {
             storage: storage.clone(),
         });
-        self.initialize_mls_inner(storage, protocol_state_storage, false, None)
+        self.initialize_mls_inner(storage, protocol_state_storage, false)
     }
 
     /// Test-only storage initialization for persistence-focused fixtures that

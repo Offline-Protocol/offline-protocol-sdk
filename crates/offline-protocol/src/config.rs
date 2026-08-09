@@ -528,10 +528,10 @@ pub struct ProtocolConfig {
 
     /// Local profile selector (required).
     ///
-    /// This string never leaves the device. It selects which stored identity
-    /// this instance runs as — one namespace per `(app_id, profile)` pair —
-    /// so an app hosting several accounts gives each its own value, and an app
-    /// hosting one can pass a constant like `"default"`.
+    /// Selects which stored identity this instance runs as — one namespace per
+    /// `(app_id, profile)` pair — so an app hosting several accounts gives each
+    /// its own value, and an app hosting one can pass a constant like
+    /// `"default"`.
     ///
     /// It is **not** the device's identity. The wire identity is the
     /// self-certifying address derived from the identity key held in this
@@ -540,6 +540,16 @@ pub struct ProtocolConfig {
     /// as `Message.sender`, what peers see as `NeighborDiscovered.peer_id`,
     /// and what others use as `recipient`. An app cannot choose it, because
     /// choosing it would mean claiming a key one does not hold.
+    ///
+    /// Under any configuration that reaches the wire the profile stays local.
+    /// The one exception is the explicit
+    /// [`EncryptionConfig::require_encryption`]` = false` opt-out, which lets a
+    /// plaintext send go out with MLS never initialized — no address has been
+    /// derived at that point, so the frame carries the profile as its sender
+    /// and the send emits
+    /// [`crate::events::SecurityWarningCode::PlaintextSend`]. The default
+    /// (`require_encryption = true`) fails such a send closed instead. Treat
+    /// the profile as private if that opt-out is in use.
     pub profile: String,
 
     /// Transport configuration.

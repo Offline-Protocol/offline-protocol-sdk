@@ -1531,7 +1531,6 @@ impl Event {
         Self::NeighborLost { peer_id }
     }
 
-    /// Creates a NetworkMetrics event.
     /// Creates an IdentityReady event.
     pub fn identity_ready(address: impl Into<String>) -> Self {
         Self::IdentityReady {

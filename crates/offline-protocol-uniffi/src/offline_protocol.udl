@@ -955,6 +955,8 @@ interface OfflineProtocol {
     // secret failed this session (the id would not be stable across launches,
     // so none is exposed). Unaffected by installing a telemetry sink or by an
     // app-supplied scrub secret.
+    string? telemetry_install_id();
+
     // This device's self-certifying address (`off1…`): its `sender` on every
     // outbound frame, and what peers must use as `recipient` to reach it.
     //
@@ -963,8 +965,6 @@ interface OfflineProtocol {
     // Returns null before `initialize_mls`, which is where that storage — and
     // therefore the key — first becomes available.
     string? local_address();
-
-    string? telemetry_install_id();
 
     // Messaging
     [Throws=ProtocolError]
