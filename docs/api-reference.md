@@ -729,7 +729,7 @@ NeighborDiscovered {
 ```
 
 Emitted when a peer becomes reachable. `peer_id` is the peer's canonical
-user id — the same value the peer supplied as `ProtocolConfig.user_id`,
+address (`off1…`) — the value that peer derived from its own identity key,
 on every transport — and is valid directly as the `recipient` of
 `send_message` / `send_connection_request`.
 

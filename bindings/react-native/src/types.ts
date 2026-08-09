@@ -935,11 +935,11 @@ export interface RelayDemotedBatteryEvent extends BaseEvent {
 export interface NeighborDiscoveredEvent extends BaseEvent {
   type: 'neighbor_discovered';
   /**
-   * The peer's canonical user id — the same value the peer supplied as
-   * `ProtocolConfig.userId`. This is the one identifier the SDK uses on
-   * every surface: use it directly as `recipient` in `sendMessage` and
-   * `sendConnectionRequest`, regardless of which transport discovered
-   * the peer.
+   * The peer's canonical address (`off1…`) — the value that peer derived
+   * from its own identity key, which it reports as its `localAddress()`.
+   * This is the one identifier the SDK uses on every surface: use it
+   * directly as `recipient` in `sendMessage` and `sendConnectionRequest`,
+   * regardless of which transport discovered the peer.
    */
   peer_id: string;
   transport: string;

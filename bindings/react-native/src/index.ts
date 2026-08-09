@@ -1155,8 +1155,8 @@ export class OfflineProtocol {
   /**
    * Sends a connection request
    *
-   * `params.recipient` must be the target's canonical user id — the value
-   * they supplied as `ProtocolConfig.userId`, which is also what
+   * `params.recipient` must be the target's canonical address (`off1…`) —
+   * the value they derived from their own identity key, which is also what
    * `neighbor_discovered` reports as `peer_id`.
    *
    * The returned message id is the correlation key for the request's
