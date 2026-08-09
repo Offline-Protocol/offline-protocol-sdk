@@ -1337,7 +1337,7 @@ impl OfflineProtocol {
 
             self.emit_event(Event::group_member_added(
                 group_id.clone(),
-                self.config.user_id.clone(),
+                self.local_id.clone(),
                 sender.to_string(),
                 payload.group_name.clone(),
                 // Not evaluated: this Welcome is what creates our view of the
@@ -1501,7 +1501,7 @@ impl OfflineProtocol {
                 // unencrypted commit metadata. Without this check, a non-admin
                 // group member could forge a commit with garbage ciphertext and
                 // affected_member = victim to force group eviction.
-                let self_id = self.config.user_id.clone();
+                let self_id = self.local_id.clone();
                 if matches!(payload.commit_type, GroupCommitType::Remove)
                     && payload.affected_member.as_deref() == Some(&self_id)
                     && self
@@ -2556,7 +2556,7 @@ impl OfflineProtocol {
 
         // Verify sender is actually a member of the group using MLS state
         // (authoritative) rather than only the local cache.
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
         let members = self
             .refresh_group_members(&payload.group_id)
             .ok()
@@ -2711,7 +2711,7 @@ impl OfflineProtocol {
         Self::validate_outbound_recipient(invitee_user_id)?;
 
         // Admin check
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
             return Err(Error::PermissionDenied(
                 "Only admins can invite members".to_string(),
@@ -2922,7 +2922,7 @@ impl OfflineProtocol {
     pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
         // Deliberately unvalidated — see `invite_to_group`. Removal must work
         // on whatever is actually on the roster.
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
 
         // Admin check + last-admin guard (single metadata load)
         {
@@ -3093,7 +3093,7 @@ impl OfflineProtocol {
             .or_else(|| self.refresh_group_members(group_id).ok())
             .unwrap_or_default();
 
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
 
         // Block last admin from leaving if other members remain
         let other_members_exist = members.iter().any(|m| m != &self_id);
@@ -3531,7 +3531,7 @@ impl OfflineProtocol {
         let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
         let epoch = encrypted.epoch;
 
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
 
         // --- Attempt relay broadcast first ---
         // If the group is registered, the app opted in, and the relay
@@ -3731,7 +3731,7 @@ impl OfflineProtocol {
     ) -> Result<()> {
         // Deliberately unvalidated — see `invite_to_group`. Demoting a member
         // admitted under older id rules must stay possible.
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
             return Err(Error::PermissionDenied(
                 "Only admins can change roles".to_string(),
@@ -3917,7 +3917,7 @@ impl OfflineProtocol {
                 "Group name cannot be empty".to_string(),
             ));
         }
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
             return Err(Error::PermissionDenied(
                 "Only admins can rename groups".to_string(),
@@ -4158,12 +4158,12 @@ impl OfflineProtocol {
         let gid = offline_protocol_mls::GroupId::new(group_id).ok()?;
         let metadata = Self::group_metadata_or_not_found(&mls_guard, &gid, group_id).ok()??;
         if metadata.has_any_admin() {
-            return Some(metadata.get_role(&self.config.user_id) == GroupRole::Admin);
+            return Some(metadata.get_role(&self.local_id) == GroupRole::Admin);
         }
         metadata
             .created_by
             .as_ref()
-            .map(|creator| creator == &self.config.user_id)
+            .map(|creator| creator == &self.local_id)
     }
 
     /// Attempts to register (or update) a group with the relay server.
@@ -4428,7 +4428,7 @@ impl OfflineProtocol {
                 .map_err(|e| Error::Serialization(format!("Serialize group message: {}", e)))?
         );
 
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
         let mut message_ids = Vec::new();
         let mut succeeded_members = Vec::new();
         let mut failed_members = Vec::new();
@@ -4556,7 +4556,7 @@ impl OfflineProtocol {
             .chain(report.pushed.iter())
             .map(String::as_str)
             .collect();
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
         let unreached: Vec<String> = members
             .iter()
             .filter(|m| m.as_str() != self_id && !reached.contains(m.as_str()))
@@ -4650,7 +4650,7 @@ impl OfflineProtocol {
     /// the same group is repeatedly detected.
     pub(crate) fn check_epoch_forks(&mut self) {
         let delay = StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS);
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
 
         // Collect forks ready for resolution
         let ready: Vec<EpochForkState> = self
@@ -4834,7 +4834,7 @@ impl OfflineProtocol {
         let timeout = StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS);
         let max_lifetime = StdDuration::from_secs(LEAVE_ELECTION_MAX_LIFETIME_SECS);
         let attempt_cooldown = StdDuration::from_secs(LEAVE_ELECTION_ATTEMPT_COOLDOWN_SECS);
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
 
         // Collect timed-out elections (keys + values) for processing.
         let timed_out: Vec<((String, String), PendingLeaveElection)> = self

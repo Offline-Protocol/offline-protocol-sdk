@@ -246,6 +246,13 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
         Event::NeighborLost { peer_id } => {
             hash_string(peer_id, scrubber);
         }
+        // Hashed on the telemetry path only. The app's own copy of this event
+        // keeps the real address — it is how the app learns its identity — but
+        // a sink receiving it in the clear could join every record it holds to
+        // one device, which is precisely what `scrub_ids` exists to stop.
+        Event::IdentityReady { address } => {
+            hash_string(address, scrubber);
+        }
         Event::NetworkMetrics {
             neighbor_count: _,
             relay_count: _,
@@ -717,6 +724,7 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::RelayDemoted { .. }
         | Event::NeighborDiscovered { .. }
         | Event::NeighborLost { .. }
+        | Event::IdentityReady { .. }
         | Event::NetworkMetrics { .. }
         | Event::FileProgress { .. }
         | Event::FileReceived { .. }

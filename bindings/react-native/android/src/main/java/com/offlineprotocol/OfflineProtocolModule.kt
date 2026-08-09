@@ -432,7 +432,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             currentConfig = config
             emitDiagnostic("info", "Protocol core created", mapOf(
                 "appId" to config.appId,
-                "userId" to config.userId,
+                "userId" to config.profile,
                 "bleEnabled" to config.bleEnabled,
                 "wifiDirectEnabled" to config.wifiDirectEnabled,
                 "internetEnabled" to config.internetEnabled,
@@ -459,7 +459,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 bleTransport = BleTransportFacade(
                     reactApplicationContext,
                     proto,
-                    config.userId,
+                    config.profile,
                 ) { level, message, context ->
                     emitDiagnostic(level, message, context)
                 }.also { manager ->
@@ -487,19 +487,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         }
                     }
                 }
-                android.util.Log.i(NAME, "BLE Manager initialized for user: ${config.userId}")
+                android.util.Log.i(NAME, "BLE Manager initialized for user: ${config.profile}")
                 emitDiagnostic("info", "BLE manager initialized", mapOf(
-                    "userId" to config.userId
+                    "userId" to config.profile
                 ))
             } else {
                 emitDiagnostic("warning", "BLE disabled in configuration", mapOf(
-                    "userId" to config.userId
+                    "userId" to config.profile
                 ))
             }
             
             // Initialize Internet manager if internet is enabled
             if (config.internetEnabled) {
-                internetManager = InternetManager(reactApplicationContext, proto, config.userId) { level, message, context ->
+                internetManager = InternetManager(reactApplicationContext, proto, config.profile) { level, message, context ->
                     emitDiagnostic(level, message, context)
                 }.also { manager ->
                     manager.serverMessageEmitter = { rawJson -> emitServerMessageEvent(rawJson) }
@@ -535,39 +535,39 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         }
                     }
                 }
-                android.util.Log.i(NAME, "Internet Manager initialized for user: ${config.userId}")
+                android.util.Log.i(NAME, "Internet Manager initialized for user: ${config.profile}")
                 emitDiagnostic("info", "Internet manager initialized", mapOf(
-                    "userId" to config.userId
+                    "userId" to config.profile
                 ))
             } else {
                 emitDiagnostic("info", "Internet disabled in configuration", mapOf(
-                    "userId" to config.userId
+                    "userId" to config.profile
                 ))
             }
 
             // Initialize Reticulum manager if reticulum is enabled
             if (config.reticulumEnabled) {
-                reticulumManager = createReticulumManager(proto, config.userId)
-                android.util.Log.i(NAME, "Reticulum Manager initialized for user: ${config.userId}")
+                reticulumManager = createReticulumManager(proto, config.profile)
+                android.util.Log.i(NAME, "Reticulum Manager initialized for user: ${config.profile}")
                 emitDiagnostic("info", "Reticulum manager initialized", mapOf(
-                    "userId" to config.userId
+                    "userId" to config.profile
                 ))
             } else {
                 emitDiagnostic("info", "Reticulum disabled in configuration", mapOf(
-                    "userId" to config.userId
+                    "userId" to config.profile
                 ))
             }
 
             // Initialize Nostr manager if nostr is enabled
             if (config.nostrEnabled) {
-                nostrManager = createNostrManager(proto, config.userId)
-                android.util.Log.i(NAME, "Nostr Manager initialized for user: ${config.userId}")
+                nostrManager = createNostrManager(proto, config.profile)
+                android.util.Log.i(NAME, "Nostr Manager initialized for user: ${config.profile}")
                 emitDiagnostic("info", "Nostr manager initialized", mapOf(
-                    "userId" to config.userId
+                    "userId" to config.profile
                 ))
             } else {
                 emitDiagnostic("info", "Nostr disabled in configuration", mapOf(
-                    "userId" to config.userId
+                    "userId" to config.profile
                 ))
             }
 
@@ -1876,11 +1876,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * `destroy()` first.
      */
     @ReactMethod
-    fun wipePersistedState(appId: String, userId: String, promise: Promise) {
+    fun wipePersistedState(appId: String, profile: String, promise: Promise) {
         try {
-            val namespace = StorageNamespace.account(appId, userId)
+            val namespace = StorageNamespace.account(appId, profile)
             val live = currentConfig
-            if (live != null && StorageNamespace.account(live.appId, live.userId) == namespace) {
+            if (live != null && StorageNamespace.account(live.appId, live.profile) == namespace) {
                 promise.reject(
                     "ERROR_WIPE_STATE",
                     "Refusing to wipe storage for the account this instance is " +
@@ -1936,7 +1936,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         // control-op translator filters self out of member
                         // deltas and gates LeaveGroup on it, so a placeholder
                         // would silently corrupt relay group state.
-                        val userId = currentConfig?.userId
+                        val userId = currentConfig?.profile
                             ?: throw IllegalStateException("Cannot enable Internet transport before initialize(config)")
                         internetManager = InternetManager(reactApplicationContext, proto, userId) { level, message, context ->
                             emitDiagnostic(level, message, context)
@@ -1981,7 +1981,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     // Configure and start WiFi Direct transport via WifiDirectManager
                     if (wifiDirectManager == null) {
                         // Create manager if not already created
-                        wifiDirectManager = WifiDirectManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                        wifiDirectManager = WifiDirectManager(reactApplicationContext, proto, currentConfig?.profile ?: "unknown") { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }
                         emitDiagnostic("info", "WiFi Direct manager created on demand")
@@ -2004,7 +2004,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         bleTransport = BleTransportFacade(
                             reactApplicationContext,
                             proto,
-                            currentConfig?.userId ?: "unknown",
+                            currentConfig?.profile ?: "unknown",
                         ) { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }
@@ -2021,7 +2021,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 }
                 "reticulum" -> {
                     if (reticulumManager == null) {
-                        reticulumManager = createReticulumManager(proto, currentConfig?.userId ?: "unknown")
+                        reticulumManager = createReticulumManager(proto, currentConfig?.profile ?: "unknown")
                         emitDiagnostic("info", "Reticulum manager created on demand")
                     }
 
@@ -2037,7 +2037,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 }
                 "nostr" -> {
                     if (nostrManager == null) {
-                        nostrManager = createNostrManager(proto, currentConfig?.userId ?: "unknown")
+                        nostrManager = createNostrManager(proto, currentConfig?.profile ?: "unknown")
                         emitDiagnostic("info", "Nostr manager created on demand")
                     }
 
@@ -3251,7 +3251,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             val config = currentConfig
                 ?: throw IllegalStateException("Protocol config not initialized")
-            val accountNamespace = StorageNamespace.account(config.appId, config.userId)
+            val accountNamespace = StorageNamespace.account(config.appId, config.profile)
             val secureStorage =
                 MlsSecureStorage(reactApplicationContext, accountNamespace)
             val protocolStateStorage =
@@ -3327,6 +3327,23 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             promise.reject("ERROR_CRYPTO", "Failed to get identity public key: ${e.message}", e)
         }
+    }
+
+    /**
+     * This device's own address ("off1..."), or null before MLS is initialized.
+     *
+     * Derived from the identity key in this profile's storage, so the app does
+     * not choose it; it is stable across restarts of the same profile. This is
+     * the string peers must be given to reach this device.
+     */
+    @ReactMethod
+    fun localAddress(promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.resolve(null)
+            return
+        }
+        promise.resolve(proto.localAddress())
     }
 
     /**
@@ -4468,7 +4485,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
         val root = JSONObject().apply {
             put("timestamp", System.currentTimeMillis() / Constants.MILLISECONDS_PER_SECOND)
-            put("local_user_id", currentConfig?.userId ?: "")
+            put("local_user_id", currentConfig?.profile ?: "")
             put("nodes", nodesArray)
             put("links", linksArray)
             put("stats", statsObj)

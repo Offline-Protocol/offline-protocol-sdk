@@ -40,8 +40,8 @@ enum StorageNamespace {
 
     private static let lowercaseHexAlphabet = Set("0123456789abcdef")
 
-    static func account(appId: String, userId: String) -> String {
-        let input = "\(domain)\0\(appId)\0\(userId)"
+    static func account(appId: String, profile: String) -> String {
+        let input = "\(domain)\0\(appId)\0\(profile)"
         let digest = SHA256.hash(data: Data(input.utf8))
         var output = Array("account-".utf8)
         output.reserveCapacity(output.count + SHA256.byteCount * 2)

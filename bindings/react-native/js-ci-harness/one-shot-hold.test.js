@@ -160,7 +160,7 @@ const test = (name, fn) => tests.push({ name, fn });
 
 function newSdk({ sticky = [], config = {} } = {}) {
   stickyOnSubscribe = sticky;
-  const sdk = new OfflineProtocol({ appId: 'harness', userId: 'harness-user', ...config });
+  const sdk = new OfflineProtocol({ appId: 'harness', profile: 'harness-profile', ...config });
   return { sdk, bus: buses[buses.length - 1] };
 }
 

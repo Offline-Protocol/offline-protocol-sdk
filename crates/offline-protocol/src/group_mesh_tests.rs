@@ -1,6 +1,7 @@
 use super::group_mesh::*;
 use crate::protocol::tests::{create_test_config, create_test_config_for_user};
 use crate::protocol::{base64_decode, base64_encode, internal_prefixes, InternalMessageResult};
+use crate::test_identity::{id, session_slot};
 use crate::{Event, OfflineProtocol};
 use offline_protocol_core::{AppId, UserId};
 use offline_protocol_mls::GroupRole;
@@ -44,7 +45,7 @@ fn setup_with_events() -> (OfflineProtocol, Arc<Mutex<Vec<Event>>>) {
 /// Returns (alice, bob, group_id).
 fn setup_alice_bob_group(group_name: &str) -> (OfflineProtocol, OfflineProtocol, String) {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
@@ -65,7 +66,7 @@ fn setup_alice_bob_group(group_name: &str) -> (OfflineProtocol, OfflineProtocol,
         alice_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -77,10 +78,9 @@ fn setup_alice_bob_group(group_name: &str) -> (OfflineProtocol, OfflineProtocol,
     }
 
     alice.refresh_group_members(&group_id).unwrap();
-    bob.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["alice".to_string(), "bob".to_string()],
-    );
+    bob.group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("alice"), id("bob")]);
 
     (alice, bob, group_id)
 }
@@ -109,7 +109,7 @@ fn test_group_welcome_cannot_squat_session_slot() {
     // group path. Regression against `main`: before the `join_group`
     // reserved-namespace guard, this installed a group at the squatted slot.
     let storage_m = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut mallory = OfflineProtocol::new(create_test_config_for_user("mallory")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     mallory.initialize_mls_for_test(storage_m).unwrap();
@@ -130,7 +130,7 @@ fn test_group_welcome_cannot_squat_session_slot() {
         mallory_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -142,10 +142,10 @@ fn test_group_welcome_cannot_squat_session_slot() {
     let squat = GroupMlsWelcomePayload {
         member_rich: HashMap::new(),
         created_by: None,
-        group_id: "session:alice:bob".to_string(),
+        group_id: session_slot("alice", "bob"),
         group_name: None,
         welcome_data: base64_encode(&welcome.welcome_data),
-        member_list: vec!["mallory".to_string(), "bob".to_string()],
+        member_list: vec![id("mallory"), id("bob")],
         member_roles: HashMap::new(),
     };
     let content = format!(
@@ -153,13 +153,13 @@ fn test_group_welcome_cannot_squat_session_slot() {
         internal_prefixes::GROUP_MLS_WELCOME,
         serde_json::to_string(&squat).unwrap()
     );
-    bob.process_internal_message(&make_message("mallory", "bob", &content));
+    bob.process_internal_message(&make_message(&id("mallory"), &id("bob"), &content));
 
     // The squat was dropped: bob has no 1:1 session at the alice+bob slot, so
-    // his `encrypt_for_user("alice")` can never encrypt to mallory's group.
+    // his `encrypt_for_user(&id("alice"))` can never encrypt to mallory's group.
     let bob_mls = bob.mls_manager_for_testing().read().unwrap();
     assert!(
-        !bob_mls.has_session("alice").unwrap(),
+        !bob_mls.has_session(&id("alice")).unwrap(),
         "a group Welcome must not install into the reserved `session:` slot"
     );
 }
@@ -188,7 +188,7 @@ fn test_group_mls_create_mesh_group_with_mls() {
     let group_info = protocol.create_group("Test Group").unwrap();
     assert_eq!(group_info.name, Some("Test Group".to_string()));
     assert!(group_info.group_id.as_str().starts_with("group:"));
-    assert!(group_info.members.contains(&"user123".to_string()));
+    assert!(group_info.members.contains(&id("user123")));
 
     // Verify group is cached
     let cached = protocol
@@ -196,7 +196,7 @@ fn test_group_mls_create_mesh_group_with_mls() {
         .members
         .get(group_info.group_id.as_str());
     assert!(cached.is_some());
-    assert!(cached.unwrap().contains(&"user123".to_string()));
+    assert!(cached.unwrap().contains(&id("user123")));
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn test_group_mls_invite_requires_key_package() {
     let group_id = info.group_id.as_str().to_string();
 
     // Inviting without key package should fail
-    let result = protocol.invite_to_group(&group_id, "bob");
+    let result = protocol.invite_to_group(&group_id, &id("bob"));
     assert!(result.is_err());
     assert!(
         result.unwrap_err().to_string().contains("No key package"),
@@ -337,29 +337,25 @@ fn test_group_mls_process_leave_message() {
     let (mut protocol, events) = setup_started_with_events();
 
     // Pre-populate group member cache.
-    // "alice" < "bob" < "user123" lexicographically.
-    // When "alice" leaves, "bob" is elected (lex-first remaining).
-    // We are "user123", so we are NOT elected.
+    // &id("alice") < &id("bob") < &id("user123") lexicographically.
+    // When &id("alice") leaves, &id("bob") is elected (lex-first remaining).
+    // We are &id("user123"), so we are NOT elected.
     protocol.group_mesh.members.insert(
         "group:test-123".to_string(),
-        vec![
-            "user123".to_string(),
-            "alice".to_string(),
-            "bob".to_string(),
-        ],
+        vec![id("user123"), id("alice"), id("bob")],
     );
 
     // Simulate receiving a leave message from alice
     let leave_payload = GroupMlsLeavePayload {
         group_id: "group:test-123".to_string(),
-        leaving_member: "alice".to_string(),
+        leaving_member: id("alice"),
     };
     let content = format!(
         "{}{}",
         internal_prefixes::GROUP_MLS_LEAVE,
         serde_json::to_string(&leave_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -393,7 +389,7 @@ fn test_group_mls_process_commit_empty_ciphertext_no_event() {
         commit_type: GroupCommitType::Add,
         ciphertext: String::new(),
         epoch: 1,
-        affected_member: Some("carol".to_string()),
+        affected_member: Some(id("carol")),
         role: None,
     };
     let content = format!(
@@ -401,7 +397,7 @@ fn test_group_mls_process_commit_empty_ciphertext_no_event() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -410,7 +406,7 @@ fn test_group_mls_process_commit_empty_ciphertext_no_event() {
     let events = events.lock().unwrap();
     let add_event = events.iter().find(|e| {
         matches!(e, Event::GroupMemberAdded { group_id: gid, user_id, .. }
-            if gid == &group_id && user_id == "carol")
+            if gid == &group_id && user_id == &id("carol"))
     });
     assert!(
         add_event.is_none(),
@@ -431,7 +427,7 @@ fn test_group_mls_refresh_group_members() {
     // refresh_group_members should populate cache
     protocol.group_mesh.members.clear();
     let members = protocol.refresh_group_members(&group_id).unwrap();
-    assert!(members.contains(&"user123".to_string()));
+    assert!(members.contains(&id("user123")));
     assert!(protocol.group_mesh.members.contains_key(&group_id));
 }
 
@@ -562,24 +558,24 @@ fn test_group_mls_payload_serialization_roundtrip() {
     };
     let json = serde_json::to_string(&leave_payload).unwrap();
     let parsed: GroupMlsLeavePayload = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.leaving_member, "dave");
+    assert_eq!(parsed.leaving_member, "dave".to_string());
 }
 
 #[test]
 fn test_group_mls_leave_sender_mismatch_rejected() {
     let (mut protocol, events) = setup_started_with_events();
 
-    // Simulate a spoofed leave: sender is "bob" but claims "alice" left
+    // Simulate a spoofed leave: sender is &id("bob") but claims &id("alice") left
     let leave_payload = GroupMlsLeavePayload {
         group_id: "group:test-123".to_string(),
-        leaving_member: "alice".to_string(),
+        leaving_member: id("alice"),
     };
     let content = format!(
         "{}{}",
         internal_prefixes::GROUP_MLS_LEAVE,
         serde_json::to_string(&leave_payload).unwrap()
     );
-    let message = make_message("bob", "user123", &content); // sender != leaving_member
+    let message = make_message(&id("bob"), &id("user123"), &content); // sender != leaving_member
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -625,7 +621,7 @@ fn test_group_mls_full_lifecycle_create_invite_send_decrypt() {
     );
 
     // Simulate Bob receiving this message from Alice
-    let bob_message = make_message("alice", "bob", &content);
+    let bob_message = make_message(&id("alice"), &id("bob"), &content);
     let result = bob.process_internal_message(&bob_message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -652,7 +648,7 @@ fn test_group_mls_message_with_spoofed_sender_not_surfaced() {
     });
 
     // Alice encrypts a legitimate group message, but the wire envelope
-    // claims it came from "carol" (SEC-M1: the envelope sender is
+    // claims it came from &id("carol") (SEC-M1: the envelope sender is
     // attacker-settable; only the MLS credential is authenticated).
     let encrypted = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
@@ -676,7 +672,7 @@ fn test_group_mls_message_with_spoofed_sender_not_surfaced() {
         serde_json::to_string(&msg_payload).unwrap()
     );
 
-    let bob_message = make_message("carol", "bob", &content);
+    let bob_message = make_message(&id("carol"), &id("bob"), &content);
     let result = bob.process_internal_message(&bob_message);
     assert!(
         matches!(result, Some(InternalMessageResult::SecurityRejected)),
@@ -702,7 +698,7 @@ fn test_group_mls_commit_with_spoofed_sender_rejected_not_buffered() {
     let (alice, mut bob, group_id) = setup_alice_bob_group("Spoof Commit Group");
 
     // Alice issues a legitimate key-update commit; the wire envelope claims
-    // it came from "carol" (SEC-M1). The mismatch is a permanent failure:
+    // it came from &id("carol") (SEC-M1). The mismatch is a permanent failure:
     // the forged commit must be rejected without advancing bob's epoch AND
     // without entering the out-of-order retry buffer.
     let commit = {
@@ -731,7 +727,7 @@ fn test_group_mls_commit_with_spoofed_sender_rejected_not_buffered() {
         serde_json::to_string(&commit_payload).unwrap()
     );
 
-    let bob_message = make_message("carol", "bob", &content);
+    let bob_message = make_message(&id("carol"), &id("bob"), &content);
     bob.process_internal_message(&bob_message);
 
     let epoch_after = {
@@ -761,9 +757,9 @@ fn test_group_mls_send_message_multiple_members() {
     protocol.group_mesh.members.insert(
         group_id.clone(),
         vec![
-            "user123".to_string(), // self
-            "bob".to_string(),
-            "carol".to_string(),
+            id("user123"), // self
+            id("bob"),
+            id("carol"),
         ],
     );
 
@@ -821,7 +817,7 @@ fn test_group_mls_commit_unknown_group() {
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"fake-commit-data"),
         epoch: 1,
-        affected_member: Some("carol".to_string()),
+        affected_member: Some(id("carol")),
         role: None,
     };
     let content = format!(
@@ -829,7 +825,7 @@ fn test_group_mls_commit_unknown_group() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -873,7 +869,7 @@ fn test_group_mls_message_after_leaving() {
         internal_prefixes::GROUP_MLS_MSG,
         serde_json::to_string(&msg_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     // Should not panic, just fail decryption gracefully
     let result = protocol.process_internal_message(&message);
@@ -908,7 +904,7 @@ fn test_group_mls_oversized_payload_rejected() {
         internal_prefixes::GROUP_MLS_MSG,
         serde_json::to_string(&msg_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -955,7 +951,7 @@ fn test_group_mls_duplicate_message_rejected() {
     );
 
     // Build a message with a fixed ID so we can send the same one twice
-    let bob_message = make_message("alice", "bob", &content);
+    let bob_message = make_message(&id("alice"), &id("bob"), &content);
 
     // First delivery — should succeed and emit GroupMessageReceived
     let result1 = bob.process_internal_message(&bob_message);
@@ -985,7 +981,7 @@ fn test_group_mls_leave_non_member_rejected() {
     // Pre-populate group member cache — "eve" is NOT in the group
     protocol.group_mesh.members.insert(
         "group:nonmember-test".to_string(),
-        vec!["user123".to_string(), "alice".to_string()],
+        vec![id("user123"), id("alice")],
     );
 
     // "eve" sends a leave notification for herself (sender matches, but not a member)
@@ -998,7 +994,7 @@ fn test_group_mls_leave_non_member_rejected() {
         internal_prefixes::GROUP_MLS_LEAVE,
         serde_json::to_string(&leave_payload).unwrap()
     );
-    let message = make_message("eve", "user123", &content);
+    let message = make_message("eve", &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -1021,34 +1017,30 @@ fn test_group_mls_leave_deterministic_election() {
     // fails and falls back to the local cache.
     let group_id = "group:election-test".to_string();
 
-    // "alice" < "bob" < "user123" lexicographically.
-    // When "bob" leaves, "alice" should be elected (lex-first remaining).
-    // Since we are "user123", we should NOT be elected.
+    // &id("alice") < &id("bob") < &id("user123") lexicographically.
+    // When &id("bob") leaves, &id("alice") should be elected (lex-first remaining).
+    // Since we are &id("user123"), we should NOT be elected.
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "alice".to_string(),
-            "bob".to_string(),
-            "user123".to_string(),
-        ],
+        vec![id("alice"), id("bob"), id("user123")],
     );
 
-    // "bob" sends a leave notification
+    // &id("bob") sends a leave notification
     let leave_payload = GroupMlsLeavePayload {
         group_id: group_id.clone(),
-        leaving_member: "bob".to_string(),
+        leaving_member: id("bob"),
     };
     let content = format!(
         "{}{}",
         internal_prefixes::GROUP_MLS_LEAVE,
         serde_json::to_string(&leave_payload).unwrap()
     );
-    let message = make_message("bob", "user123", &content);
+    let message = make_message(&id("bob"), &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
-    // Since "alice" < "user123", alice should be elected, not us.
+    // Since &id("alice") < &id("user123"), alice should be elected, not us.
     let events = events.lock().unwrap();
     let remove_event = events
         .iter()
@@ -1066,12 +1058,12 @@ fn test_group_mls_leave_we_are_elected() {
     // Use a fake group_id so refresh_group_members falls back to cache
     let group_id = "group:elected-test".to_string();
 
-    // Members: "user123" < "zzz" lexicographically.
-    // When "zzz" leaves, "user123" is the lex-first remaining → we should be elected.
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["user123".to_string(), "zzz".to_string()],
-    );
+    // Members: &id("user123") < "zzz" lexicographically.
+    // When "zzz" leaves, &id("user123") is the lex-first remaining → we should be elected.
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("user123"), "zzz".to_string()]);
 
     // "zzz" sends a leave notification
     let leave_payload = GroupMlsLeavePayload {
@@ -1083,7 +1075,7 @@ fn test_group_mls_leave_we_are_elected() {
         internal_prefixes::GROUP_MLS_LEAVE,
         serde_json::to_string(&leave_payload).unwrap()
     );
-    let message = make_message("zzz", "user123", &content);
+    let message = make_message("zzz", &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -1143,7 +1135,7 @@ fn test_group_mls_welcome_bad_data_no_panic() {
         group_id: "group:bad-welcome".to_string(),
         group_name: Some("Bad Group".to_string()),
         welcome_data: "not-valid-base64!!!".to_string(),
-        member_list: vec!["alice".to_string()],
+        member_list: vec![id("alice")],
         member_roles: HashMap::new(),
     };
     let content = format!(
@@ -1151,7 +1143,7 @@ fn test_group_mls_welcome_bad_data_no_panic() {
         internal_prefixes::GROUP_MLS_WELCOME,
         serde_json::to_string(&welcome_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     // Should not panic
     let result = protocol.process_internal_message(&message);
@@ -1178,7 +1170,7 @@ fn test_group_mls_welcome_valid_base64_bad_mls_no_panic() {
         group_id: "group:garbage-mls".to_string(),
         group_name: Some("Garbage MLS".to_string()),
         welcome_data: base64_encode(b"this is not valid MLS data"),
-        member_list: vec!["alice".to_string()],
+        member_list: vec![id("alice")],
         member_roles: HashMap::new(),
     };
     let content = format!(
@@ -1186,7 +1178,7 @@ fn test_group_mls_welcome_valid_base64_bad_mls_no_panic() {
         internal_prefixes::GROUP_MLS_WELCOME,
         serde_json::to_string(&welcome_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     // Should not panic — MLS join will fail gracefully
     let result = protocol.process_internal_message(&message);
@@ -1217,11 +1209,7 @@ fn test_group_mls_send_message_partial_failure() {
     // Populate cache with multiple members
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "bob".to_string(),
-            "carol".to_string(),
-        ],
+        vec![id("user123"), id("bob"), id("carol")],
     );
 
     // Sending should fail since protocol is not started
@@ -1248,7 +1236,7 @@ fn test_group_mls_commit_oversized_ciphertext_rejected() {
         commit_type: GroupCommitType::Add,
         ciphertext: oversized,
         epoch: 1,
-        affected_member: Some("carol".to_string()),
+        affected_member: Some(id("carol")),
         role: None,
     };
     let content = format!(
@@ -1256,7 +1244,7 @@ fn test_group_mls_commit_oversized_ciphertext_rejected() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -1286,7 +1274,7 @@ fn test_group_mls_malformed_json_payloads() {
 
     for prefix in &prefixes {
         let content = format!("{}{{not valid json!", prefix);
-        let message = make_message("alice", "user123", &content);
+        let message = make_message(&id("alice"), &id("user123"), &content);
         let result = protocol.process_internal_message(&message);
         assert!(
             matches!(result, Some(InternalMessageResult::Consumed)),
@@ -1322,7 +1310,7 @@ fn test_group_mls_dedup_inserted_before_decrypt_attempt() {
         internal_prefixes::GROUP_MLS_MSG,
         serde_json::to_string(&msg_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     let msg_id = message.id.as_str().to_string();
 
@@ -1370,13 +1358,14 @@ fn test_group_mls_leave_preserves_state_on_total_send_failure() {
         .members
         .get_mut(&group_id)
         .unwrap()
-        .push("bob".to_string());
+        .push(id("bob"));
 
     // Promote bob to admin so the last-admin guard doesn't block the leave
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        mls.set_member_role(&gid, "bob", GroupRole::Admin).unwrap();
+        mls.set_member_role(&gid, &id("bob"), GroupRole::Admin)
+            .unwrap();
     }
 
     // Attempt to leave — all sends should fail because protocol isn't started
@@ -1551,7 +1540,7 @@ fn test_group_mls_pending_commit_expired_entries_cleaned_up() {
     // Expired entry should be removed, recent one retained
     let buf = protocol.group_mesh.pending_commits.get(&group_id).unwrap();
     assert_eq!(buf.len(), 1, "Only recent pending commit should survive");
-    assert_eq!(buf[0].sender, "bob");
+    assert_eq!(buf[0].sender, "bob".to_string());
 }
 
 #[test]
@@ -1576,7 +1565,7 @@ fn test_group_mls_commit_empty_ciphertext_not_buffered() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
     let _ = protocol.process_internal_message(&message);
 
     // Empty ciphertext should NOT be buffered (it's not an ordering issue)
@@ -1658,15 +1647,11 @@ fn test_group_mls_invite_custom_max_members() {
     // Simulate 3 members (at the custom cap)
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "alice".to_string(),
-            "bob".to_string(),
-        ],
+        vec![id("user123"), id("alice"), id("bob")],
     );
 
     // Should be rejected — at the cap
-    let result = protocol.invite_to_group(&group_id, "carol");
+    let result = protocol.invite_to_group(&group_id, &id("carol"));
     assert!(result.is_err(), "Should reject invite when at custom cap");
     assert!(result.unwrap_err().to_string().contains("cannot exceed 3"));
 }
@@ -1684,12 +1669,12 @@ fn test_group_mls_invite_below_custom_cap_allowed() {
     let group_id = info.group_id.as_str().to_string();
 
     // 2 members — below the cap of 3
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["user123".to_string(), "alice".to_string()],
-    );
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("user123"), id("alice")]);
 
-    let result = protocol.invite_to_group(&group_id, "bob");
+    let result = protocol.invite_to_group(&group_id, &id("bob"));
     // Should fail for missing key package, NOT for cap
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -1712,7 +1697,7 @@ fn test_group_mls_invite_max_members_1_blocks_any_invite() {
     let info = protocol.create_group("Solo Only").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    let result = protocol.invite_to_group(&group_id, "alice");
+    let result = protocol.invite_to_group(&group_id, &id("alice"));
     assert!(result.is_err());
     assert!(
         result.unwrap_err().to_string().contains("cannot exceed 1"),
@@ -1732,7 +1717,7 @@ fn test_group_mls_invite_large_max_members_not_rejected() {
     let info = protocol.create_group("Large Cap Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    let result = protocol.invite_to_group(&group_id, "alice");
+    let result = protocol.invite_to_group(&group_id, &id("alice"));
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -1789,7 +1774,7 @@ fn test_group_mls_drain_pending_commits_no_double_buffering() {
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"not-a-real-mls-commit"),
         epoch: 99,
-        affected_member: Some("carol".to_string()),
+        affected_member: Some(id("carol")),
         role: None,
     };
     let bad_data = serde_json::to_string(&bad_commit).unwrap();
@@ -1798,14 +1783,14 @@ fn test_group_mls_drain_pending_commits_no_double_buffering() {
         real_group_id.clone(),
         VecDeque::from(vec![
             PendingCommit {
-                sender: "alice".to_string(),
+                sender: id("alice"),
                 message_id: "test-mid-4".to_string(),
                 data: bad_data.clone(),
                 buffered_at: Instant::now(),
                 retry_count: 0,
             },
             PendingCommit {
-                sender: "bob".to_string(),
+                sender: id("bob"),
                 message_id: "test-mid-5".to_string(),
                 data: bad_data,
                 buffered_at: Instant::now(),
@@ -1844,7 +1829,7 @@ fn test_group_mls_drain_pending_commits_expired_entries_dropped() {
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"stale-commit"),
         epoch: 1,
-        affected_member: Some("carol".to_string()),
+        affected_member: Some(id("carol")),
         role: None,
     };
     let data = serde_json::to_string(&bad_commit).unwrap();
@@ -1852,7 +1837,7 @@ fn test_group_mls_drain_pending_commits_expired_entries_dropped() {
     protocol.group_mesh.pending_commits.insert(
         group_id.clone(),
         VecDeque::from(vec![PendingCommit {
-            sender: "alice".to_string(),
+            sender: id("alice"),
             message_id: "test-mid-6".to_string(),
             data,
             buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 1),
@@ -1886,7 +1871,7 @@ fn test_group_mls_handle_commit_permanent_failure_not_buffered() {
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"fake-but-decodable-commit"),
         epoch: 42,
-        affected_member: Some("carol".to_string()),
+        affected_member: Some(id("carol")),
         role: None,
     };
     let content = format!(
@@ -1894,7 +1879,7 @@ fn test_group_mls_handle_commit_permanent_failure_not_buffered() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
@@ -1923,7 +1908,7 @@ fn test_group_mls_commit_rejected_not_buffered() {
         commit_type: GroupCommitType::Add,
         ciphertext: String::new(),
         epoch: 1,
-        affected_member: Some("carol".to_string()),
+        affected_member: Some(id("carol")),
         role: None,
     };
     let content = format!(
@@ -1931,7 +1916,7 @@ fn test_group_mls_commit_rejected_not_buffered() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     protocol.process_internal_message(&message);
     assert!(
@@ -1941,7 +1926,7 @@ fn test_group_mls_commit_rejected_not_buffered() {
 
     // Malformed JSON — should also not be buffered
     let bad_content = format!("{}{{invalid json", internal_prefixes::GROUP_MLS_COMMIT);
-    let bad_message = make_message("alice", "user123", &bad_content);
+    let bad_message = make_message(&id("alice"), &id("user123"), &bad_content);
 
     protocol.process_internal_message(&bad_message);
     assert!(
@@ -1993,13 +1978,13 @@ fn test_group_mls_invite_respects_max_group_members() {
     let group_id = info.group_id.as_str().to_string();
 
     // Manually set member cache to 2 members (at cap)
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["user123".to_string(), "alice".to_string()],
-    );
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("user123"), id("alice")]);
 
     // Invite should fail due to cap
-    let result = protocol.invite_to_group(&group_id, "bob");
+    let result = protocol.invite_to_group(&group_id, &id("bob"));
     assert!(result.is_err());
     assert!(
         result.unwrap_err().to_string().contains("cannot exceed"),
@@ -2014,7 +1999,7 @@ fn test_group_mls_invite_respects_max_group_members() {
 #[test]
 fn test_group_mls_invite_to_group_end_to_end() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
@@ -2043,7 +2028,7 @@ fn test_group_mls_invite_to_group_end_to_end() {
     use crate::protocol::ReceivedKeyPackage;
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000, // 10 min
@@ -2051,7 +2036,7 @@ fn test_group_mls_invite_to_group_end_to_end() {
     );
 
     // Alice invites Bob via the full invite_to_group() path
-    let invite_result = alice.invite_to_group(&group_id, "bob");
+    let invite_result = alice.invite_to_group(&group_id, &id("bob"));
     assert!(
         invite_result.is_ok(),
         "invite_to_group should succeed: {:?}",
@@ -2062,7 +2047,7 @@ fn test_group_mls_invite_to_group_end_to_end() {
     let events = alice_events.lock().unwrap();
     let added_event = events.iter().find(|e| {
         matches!(e, Event::GroupMemberAdded { group_id: gid, user_id, added_by, .. }
-            if gid == &group_id && user_id == "bob" && added_by == "alice")
+            if gid == &group_id && user_id == &id("bob") && added_by == &id("alice"))
     });
     assert!(
         added_event.is_some(),
@@ -2072,7 +2057,7 @@ fn test_group_mls_invite_to_group_end_to_end() {
     // Verify Alice's member cache was updated
     let cached = alice.group_mesh.members.get(&group_id).unwrap();
     assert!(
-        cached.contains(&"bob".to_string()),
+        cached.contains(&id("bob")),
         "Bob should be in Alice's member cache after invite"
     );
 }
@@ -2080,7 +2065,7 @@ fn test_group_mls_invite_to_group_end_to_end() {
 #[test]
 fn test_group_mls_invite_and_bob_joins_via_welcome() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
@@ -2100,7 +2085,7 @@ fn test_group_mls_invite_and_bob_joins_via_welcome() {
     use crate::protocol::ReceivedKeyPackage;
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
@@ -2108,11 +2093,11 @@ fn test_group_mls_invite_and_bob_joins_via_welcome() {
     );
 
     // Alice invites Bob
-    alice.invite_to_group(&group_id, "bob").unwrap();
+    alice.invite_to_group(&group_id, &id("bob")).unwrap();
 
     // Verify Alice's outbox contains the Welcome message for Bob
     let welcome_sent = alice.outbox_messages().any(|msg| {
-        msg.recipient.as_str() == "bob"
+        msg.recipient.as_str() == &id("bob")
             && msg
                 .content
                 .starts_with(internal_prefixes::GROUP_MLS_WELCOME)
@@ -2126,8 +2111,8 @@ fn test_group_mls_invite_and_bob_joins_via_welcome() {
 #[test]
 fn test_group_mls_invite_sends_commit_to_existing_members() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let carol_proto = OfflineProtocol::new(create_test_config_for_user("carol")).unwrap();
@@ -2151,7 +2136,7 @@ fn test_group_mls_invite_sends_commit_to_existing_members() {
         alice_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -2160,14 +2145,14 @@ fn test_group_mls_invite_sends_commit_to_existing_members() {
     alice.refresh_group_members(&group_id).unwrap();
 
     // Now generate a key package for carol
-    let carol_mls_manager = offline_protocol_mls::MlsManager::new("carol", storage_c).unwrap();
+    let carol_mls_manager = crate::test_identity::manager_for("carol", storage_c);
     let carol_kp = carol_mls_manager.generate_key_package().unwrap();
 
     // Alice stores Carol's key package
     use crate::protocol::ReceivedKeyPackage;
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     alice.pending_key_packages.insert(
-        "carol".to_string(),
+        id("carol"),
         ReceivedKeyPackage {
             key_package_data: carol_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
@@ -2178,11 +2163,11 @@ fn test_group_mls_invite_sends_commit_to_existing_members() {
     alice.clear_outbox();
 
     // Alice invites Carol
-    alice.invite_to_group(&group_id, "carol").unwrap();
+    alice.invite_to_group(&group_id, &id("carol")).unwrap();
 
     // Verify a Commit was sent to Bob (existing member)
     let commit_to_bob = alice.outbox_messages().any(|msg| {
-        msg.recipient.as_str() == "bob"
+        msg.recipient.as_str() == &id("bob")
             && msg.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
     });
     assert!(
@@ -2192,7 +2177,7 @@ fn test_group_mls_invite_sends_commit_to_existing_members() {
 
     // Verify a Welcome was sent to Carol
     let welcome_to_carol = alice.outbox_messages().any(|msg| {
-        msg.recipient.as_str() == "carol"
+        msg.recipient.as_str() == &id("carol")
             && msg
                 .content
                 .starts_with(internal_prefixes::GROUP_MLS_WELCOME)
@@ -2204,7 +2189,7 @@ fn test_group_mls_invite_sends_commit_to_existing_members() {
 
     // Verify NO commit was sent to Carol
     let commit_to_carol = alice.outbox_messages().any(|msg| {
-        msg.recipient.as_str() == "carol"
+        msg.recipient.as_str() == &id("carol")
             && msg.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
     });
     assert!(
@@ -2223,14 +2208,14 @@ fn test_group_mls_invite_expired_key_package_rejected() {
     // Insert an expired key package for bob
     use crate::protocol::ReceivedKeyPackage;
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: vec![1, 2, 3],
             local_expires_at_ms: 0, // already expired
         },
     );
 
-    let result = protocol.invite_to_group(&group_id, "bob");
+    let result = protocol.invite_to_group(&group_id, &id("bob"));
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -2241,7 +2226,7 @@ fn test_group_mls_invite_expired_key_package_rejected() {
 
     // The expired key package should have been removed
     assert!(
-        !protocol.pending_key_packages.contains_key("bob"),
+        !protocol.pending_key_packages.contains_key(&id("bob")),
         "Expired key package should be cleaned up"
     );
 }
@@ -2249,7 +2234,7 @@ fn test_group_mls_invite_expired_key_package_rejected() {
 #[test]
 fn test_group_mls_max_group_members_enforced_with_valid_key_package() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut config = create_test_config_for_user("alice");
     config.group.max_group_members = 1; // only creator allowed
     let mut alice = OfflineProtocol::new(config).unwrap();
@@ -2260,13 +2245,13 @@ fn test_group_mls_max_group_members_enforced_with_valid_key_package() {
     let group_id = info.group_id.as_str().to_string();
 
     // Generate a real key package for bob
-    let bob_mls = offline_protocol_mls::MlsManager::new("bob", storage_b).unwrap();
+    let bob_mls = crate::test_identity::manager_for("bob", storage_b);
     let bob_kp = bob_mls.generate_key_package().unwrap();
 
     use crate::protocol::ReceivedKeyPackage;
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
@@ -2274,7 +2259,7 @@ fn test_group_mls_max_group_members_enforced_with_valid_key_package() {
     );
 
     // Group has 1 member (alice), cap is 1 → invite should be rejected
-    let result = alice.invite_to_group(&group_id, "bob");
+    let result = alice.invite_to_group(&group_id, &id("bob"));
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -2291,7 +2276,7 @@ fn test_group_mls_remove_from_group_with_real_members() {
     // Verify bob is in the group
     let members_before = alice.group_mesh.members.get(&group_id).unwrap();
     assert!(
-        members_before.contains(&"bob".to_string()),
+        members_before.contains(&id("bob")),
         "Bob should be in group before removal"
     );
 
@@ -2306,7 +2291,7 @@ fn test_group_mls_remove_from_group_with_real_members() {
     alice.clear_outbox();
 
     // Alice removes Bob
-    let result = alice.remove_from_group(&group_id, "bob");
+    let result = alice.remove_from_group(&group_id, &id("bob"));
     assert!(
         result.is_ok(),
         "remove_from_group should succeed: {:?}",
@@ -2316,7 +2301,7 @@ fn test_group_mls_remove_from_group_with_real_members() {
     // Verify bob is no longer in the cached member list
     let members_after = alice.group_mesh.members.get(&group_id).unwrap();
     assert!(
-        !members_after.contains(&"bob".to_string()),
+        !members_after.contains(&id("bob")),
         "Bob should be removed from member cache"
     );
 
@@ -2324,7 +2309,7 @@ fn test_group_mls_remove_from_group_with_real_members() {
     let events = events.lock().unwrap();
     let removed_event = events.iter().find(|e| {
         matches!(e, Event::GroupMemberRemoved { group_id: gid, user_id, removed_by, .. }
-            if gid == &group_id && user_id == "bob" && removed_by == "alice")
+            if gid == &group_id && user_id == &id("bob") && removed_by == &id("alice"))
     });
     assert!(
         removed_event.is_some(),
@@ -2335,8 +2320,8 @@ fn test_group_mls_remove_from_group_with_real_members() {
 #[test]
 fn test_group_mls_invite_multiple_members_successively() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
     alice.start().unwrap();
@@ -2345,10 +2330,10 @@ fn test_group_mls_invite_multiple_members_successively() {
     let group_id = group_info.group_id.as_str().to_string();
 
     // Generate key packages for bob and carol
-    let bob_mls = offline_protocol_mls::MlsManager::new("bob", storage_b).unwrap();
+    let bob_mls = crate::test_identity::manager_for("bob", storage_b);
     let bob_kp = bob_mls.generate_key_package().unwrap();
 
-    let carol_mls = offline_protocol_mls::MlsManager::new("carol", storage_c).unwrap();
+    let carol_mls = crate::test_identity::manager_for("carol", storage_c);
     let carol_kp = carol_mls.generate_key_package().unwrap();
 
     use crate::protocol::ReceivedKeyPackage;
@@ -2356,33 +2341,33 @@ fn test_group_mls_invite_multiple_members_successively() {
 
     // Store Bob's key package and invite
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
         },
     );
-    alice.invite_to_group(&group_id, "bob").unwrap();
+    alice.invite_to_group(&group_id, &id("bob")).unwrap();
 
     // Verify Bob was added
     let members = alice.group_mesh.members.get(&group_id).unwrap();
-    assert!(members.contains(&"bob".to_string()));
+    assert!(members.contains(&id("bob")));
 
     // Store Carol's key package and invite
     alice.pending_key_packages.insert(
-        "carol".to_string(),
+        id("carol"),
         ReceivedKeyPackage {
             key_package_data: carol_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
         },
     );
-    alice.invite_to_group(&group_id, "carol").unwrap();
+    alice.invite_to_group(&group_id, &id("carol")).unwrap();
 
     // Verify both are in the group
     let members = alice.group_mesh.members.get(&group_id).unwrap();
-    assert!(members.contains(&"bob".to_string()));
-    assert!(members.contains(&"carol".to_string()));
-    assert!(members.contains(&"alice".to_string()));
+    assert!(members.contains(&id("bob")));
+    assert!(members.contains(&id("carol")));
+    assert!(members.contains(&id("alice")));
     assert_eq!(members.len(), 3);
 }
 
@@ -2400,7 +2385,7 @@ fn test_group_mls_commit_group_not_found_is_buffered_for_welcome_race() {
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"some-commit-data"),
         epoch: 1,
-        affected_member: Some("carol".to_string()),
+        affected_member: Some(id("carol")),
         role: None,
     };
     let content = format!(
@@ -2408,7 +2393,7 @@ fn test_group_mls_commit_group_not_found_is_buffered_for_welcome_race() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     let _ = protocol.process_internal_message(&message);
 
@@ -2438,7 +2423,7 @@ fn test_group_mls_commit_bad_deserialization_is_rejected_not_retriable() {
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(b"this-is-not-mls"),
         epoch: 1,
-        affected_member: Some("carol".to_string()),
+        affected_member: Some(id("carol")),
         role: None,
     };
     let content = format!(
@@ -2446,7 +2431,7 @@ fn test_group_mls_commit_bad_deserialization_is_rejected_not_retriable() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("alice", "user123", &content);
+    let message = make_message(&id("alice"), &id("user123"), &content);
 
     let _ = protocol.process_internal_message(&message);
 
@@ -2515,34 +2500,34 @@ fn test_group_mls_max_group_members_boundary() {
     let group_id = info.group_id.as_str().to_string();
 
     // Alice is already member 1. Add Bob as member 2 (at capacity).
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
-    let bob_mls = offline_protocol_mls::MlsManager::new("bob", storage_b).unwrap();
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_mls = crate::test_identity::manager_for("bob", storage_b);
     let bob_kp = bob_mls.generate_key_package().unwrap();
 
     use crate::protocol::ReceivedKeyPackage;
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
         },
     );
     // This should succeed — 2 members == max
-    alice.invite_to_group(&group_id, "bob").unwrap();
+    alice.invite_to_group(&group_id, &id("bob")).unwrap();
 
     // Now try to add carol as member 3 — should fail
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
-    let carol_mls = offline_protocol_mls::MlsManager::new("carol", storage_c).unwrap();
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
+    let carol_mls = crate::test_identity::manager_for("carol", storage_c);
     let carol_kp = carol_mls.generate_key_package().unwrap();
     alice.pending_key_packages.insert(
-        "carol".to_string(),
+        id("carol"),
         ReceivedKeyPackage {
             key_package_data: carol_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
         },
     );
-    let result = alice.invite_to_group(&group_id, "carol");
+    let result = alice.invite_to_group(&group_id, &id("carol"));
     assert!(result.is_err());
     assert!(
         result.unwrap_err().to_string().contains("cannot exceed"),
@@ -2558,10 +2543,10 @@ fn test_group_mls_send_message_with_reply_to() {
     let group_id = info.group_id.as_str().to_string();
 
     // Populate cache with another member
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["user123".to_string(), "bob".to_string()],
-    );
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("user123"), id("bob")]);
 
     // Send with reply_to
     let result =
@@ -2626,7 +2611,7 @@ fn test_group_mls_dedup_independent_per_message_id() {
             serde_json::to_string(&msg_payload).unwrap()
         );
         // Each Message::new generates a unique ID
-        let bob_message = make_message("alice", "bob", &content);
+        let bob_message = make_message(&id("alice"), &id("bob"), &content);
         bob.process_internal_message(&bob_message);
     }
 
@@ -2650,20 +2635,20 @@ fn test_group_mls_expired_key_package_rejected() {
 
     use crate::protocol::ReceivedKeyPackage;
     protocol.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: vec![1, 2, 3],
             local_expires_at_ms: 0, // expired
         },
     );
 
-    let result = protocol.invite_to_group(&group_id, "bob");
+    let result = protocol.invite_to_group(&group_id, &id("bob"));
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("expired"));
 
     // Expired package should be removed from cache
     assert!(
-        !protocol.pending_key_packages.contains_key("bob"),
+        !protocol.pending_key_packages.contains_key(&id("bob")),
         "Expired key package should be cleaned up"
     );
 }
@@ -2869,7 +2854,7 @@ fn test_group_relay_sync_changed_event_lifecycle() {
     // The relay's ack over the Internet path → synced:true/registered.
     let ack = make_message(
         "relay",
-        "user123",
+        &id("user123"),
         &format!(
             "__GROUP_CREATED__{{\"group_id\":\"{}\",\"name\":\"Sync Event Test\"}}",
             group_id
@@ -2911,7 +2896,7 @@ fn test_group_relay_sync_changed_event_lifecycle() {
     // A group-scoped relay error revokes the sync → synced:false/error.
     let error = make_message(
         "relay",
-        "user123",
+        &id("user123"),
         &format!(
             "__GROUP_ERROR__{{\"reason\":\"Only admins can sync this group\",\"group_id\":\"{}\"}}",
             group_id
@@ -3203,12 +3188,7 @@ fn test_relay_broadcast_used_when_synced() {
     let group_id = info.group_id.as_str().to_string();
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "bob".to_string(),
-            "carol".to_string(),
-            "dave".to_string(),
-        ],
+        vec![id("user123"), id("bob"), id("carol"), id("dave")],
     );
 
     // Mark group as relay-synced and the relay as v2-capable
@@ -3285,12 +3265,7 @@ fn test_relay_broadcast_without_capability_uses_per_member_fanout() {
     let group_id = info.group_id.as_str().to_string();
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "bob".to_string(),
-            "carol".to_string(),
-            "dave".to_string(),
-        ],
+        vec![id("user123"), id("bob"), id("carol"), id("dave")],
     );
     // Relay-synced, but no capability granted — under the flag-and-sync-only
     // gate this alone would have taken the broadcast path.
@@ -3343,11 +3318,7 @@ fn test_relay_broadcast_frame_is_unacked_and_not_retried() {
     let group_id = info.group_id.as_str().to_string();
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "bob".to_string(),
-            "carol".to_string(),
-        ],
+        vec![id("user123"), id("bob"), id("carol")],
     );
     protocol.group_mesh.relay_synced.insert(group_id.clone());
     grant_group_delivery_v2(&mut protocol);
@@ -3479,11 +3450,7 @@ fn test_relay_hint_frames_pin_to_internet_not_mesh() {
     let group_id = info.group_id.as_str().to_string();
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "bob".to_string(),
-            "carol".to_string(),
-        ],
+        vec![id("user123"), id("bob"), id("carol")],
     );
     protocol.group_mesh.relay_synced.insert(group_id.clone());
     grant_group_delivery_v2(&mut protocol);
@@ -3543,11 +3510,7 @@ fn test_relay_broadcast_falls_back_when_internet_unavailable() {
     let group_id = info.group_id.as_str().to_string();
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "bob".to_string(),
-            "carol".to_string(),
-        ],
+        vec![id("user123"), id("bob"), id("carol")],
     );
     // Stale sync state and capabilities from a previous connection.
     protocol.group_mesh.relay_synced.insert(group_id.clone());
@@ -3656,10 +3619,10 @@ fn test_relay_broadcast_tracker_is_bounded_by_downgrading_oldest() {
 
     let info = protocol.create_group("Bounded Tracker").unwrap();
     let group_id = info.group_id.as_str().to_string();
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["user123".to_string(), "bob".to_string()],
-    );
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("user123"), id("bob")]);
     protocol.group_mesh.relay_synced.insert(group_id.clone());
     grant_group_delivery_v2(&mut protocol);
 
@@ -3670,7 +3633,7 @@ fn test_relay_broadcast_tracker_is_bounded_by_downgrading_oldest() {
             &mut protocol,
             "other-group",
             &format!("logical-{i}"),
-            &["carol"],
+            &[&id("carol")],
         );
     }
     let oldest = "logical-0";
@@ -3708,7 +3671,7 @@ fn test_relay_broadcast_tracker_is_bounded_by_downgrading_oldest() {
         1,
         "the evicted broadcast is downgraded to per-member fan-out, not dropped"
     );
-    assert_eq!(reissued[0].0, "carol");
+    assert_eq!(reissued[0].0, id("carol"));
 }
 
 /// A report accounting for every roster member settles the tracker without
@@ -3734,7 +3697,7 @@ fn test_broadcast_report_all_reached_settles_without_reissue() {
         &mut protocol,
         "grp-report",
         logical,
-        &["user123", "bob", "carol", "dave"],
+        &[&id("user123"), &id("bob"), &id("carol"), &id("dave")],
     );
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3748,8 +3711,8 @@ fn test_broadcast_report_all_reached_settles_without_reissue() {
         "group_id": "grp-report",
         "message_id": logical,
         "timestamp": "2026-07-31T00:00:00Z",
-        "delivered": ["bob"],
-        "pushed": ["carol", "dave"],
+        "delivered": [&id("bob")],
+        "pushed": [&id("carol"), &id("dave")],
         "missed": [],
     })
     .to_string();
@@ -3790,11 +3753,8 @@ fn test_broadcast_report_all_reached_settles_without_reissue() {
         .expect("Expected GroupMessageDeliveryReport event");
     assert_eq!(report_event.0, "grp-report");
     assert_eq!(report_event.1, logical);
-    assert_eq!(report_event.2, vec!["bob".to_string()]);
-    assert_eq!(
-        report_event.3,
-        vec!["carol".to_string(), "dave".to_string()]
-    );
+    assert_eq!(report_event.2, vec![id("bob")]);
+    assert_eq!(report_event.3, vec![id("carol"), id("dave")]);
     assert!(report_event.4.is_empty());
 }
 
@@ -3824,7 +3784,7 @@ fn test_broadcast_report_reissues_missed_and_unnamed_members() {
         &mut protocol,
         "grp-missed",
         logical,
-        &["user123", "bob", "carol", "dave"],
+        &[&id("user123"), &id("bob"), &id("carol"), &id("dave")],
     );
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3838,9 +3798,9 @@ fn test_broadcast_report_reissues_missed_and_unnamed_members() {
         "group_id": "grp-missed",
         "message_id": logical,
         "timestamp": "2026-07-31T00:00:00Z",
-        "delivered": ["bob"],
+        "delivered": [&id("bob")],
         "pushed": [],
-        "missed": [{"username": "carol", "reason": "offline_no_push"}],
+        "missed": [{"username": &id("carol"), "reason": "offline_no_push"}],
     })
     .to_string();
     protocol
@@ -3852,7 +3812,7 @@ fn test_broadcast_report_reissues_missed_and_unnamed_members() {
     recipients.sort_unstable();
     assert_eq!(
         recipients,
-        vec!["carol", "dave"],
+        vec![&id("carol"), &id("dave")],
         "Missed and unnamed members must both get a per-member copy"
     );
     for (_, payload) in &frames {
@@ -3886,10 +3846,7 @@ fn test_broadcast_report_reissues_missed_and_unnamed_members() {
         .expect("Expected GroupMessageDeliveryReport event");
     let mut reissued_sorted = reissued;
     reissued_sorted.sort_unstable();
-    assert_eq!(
-        reissued_sorted,
-        vec!["carol".to_string(), "dave".to_string()]
-    );
+    assert_eq!(reissued_sorted, vec![id("carol"), id("dave")]);
 }
 
 /// Reports that correlate with nothing (settled already, or forged) are
@@ -3912,7 +3869,12 @@ fn test_broadcast_report_unknown_or_mismatched_is_ignored() {
     grant_group_delivery_v2(&mut protocol);
 
     let logical = "0d0d0d0d-1111-2222-3333-444444444444";
-    arm_fake_broadcast(&mut protocol, "grp-guard", logical, &["user123", "bob"]);
+    arm_fake_broadcast(
+        &mut protocol,
+        "grp-guard",
+        logical,
+        &[&id("user123"), &id("bob")],
+    );
 
     // Unknown id: no-op.
     let unknown = serde_json::json!({
@@ -3933,7 +3895,7 @@ fn test_broadcast_report_unknown_or_mismatched_is_ignored() {
     let mismatched = serde_json::json!({
         "group_id": "some-other-group",
         "message_id": logical,
-        "delivered": ["bob"], "pushed": [], "missed": [],
+        "delivered": [&id("bob")], "pushed": [], "missed": [],
     })
     .to_string();
     protocol
@@ -3973,7 +3935,7 @@ fn test_lost_report_rebroadcasts_bounded_then_downgrades_per_member() {
         &mut protocol,
         "grp-timeout",
         logical,
-        &["user123", "bob", "carol"],
+        &[&id("user123"), &id("bob"), &id("carol")],
     );
 
     let rewind = |protocol: &mut OfflineProtocol| {
@@ -4063,9 +4025,13 @@ fn test_lost_report_rebroadcasts_bounded_then_downgrades_per_member() {
     let frames = grp_mls_frames(&internet_handle);
     let mut recipients: Vec<&str> = frames.iter().map(|(r, _)| r.as_str()).collect();
     recipients.sort_unstable();
+    // Sorted on both sides: the fan-out order is not part of the contract, and
+    // addresses do not sort in label order.
+    let mut expected = vec![id("bob"), id("carol")];
+    expected.sort_unstable();
     assert_eq!(
         recipients,
-        vec!["bob", "carol"],
+        expected.iter().map(String::as_str).collect::<Vec<_>>(),
         "Downgrade must fan out to the whole roster (minus self)"
     );
     for (_, payload) in &frames {
@@ -4099,7 +4065,12 @@ fn test_internet_drop_downgrades_pending_broadcasts_and_clears_capabilities() {
     grant_group_delivery_v2(&mut protocol);
 
     let logical = "0f0f0f0f-1111-2222-3333-444444444444";
-    arm_fake_broadcast(&mut protocol, "grp-drop", logical, &["user123", "bob"]);
+    arm_fake_broadcast(
+        &mut protocol,
+        "grp-drop",
+        logical,
+        &[&id("user123"), &id("bob")],
+    );
     protocol.group_mesh.internet_was_available = true;
 
     protocol
@@ -4117,7 +4088,7 @@ fn test_internet_drop_downgrades_pending_broadcasts_and_clears_capabilities() {
     );
     let frames = grp_mls_frames(&wifi_handle);
     assert_eq!(frames.len(), 1, "Per-member copy should go out over mesh");
-    assert_eq!(frames[0].0, "bob");
+    assert_eq!(frames[0].0, id("bob"));
     assert_eq!(frames[0].1["message_id"].as_str(), Some(logical));
 }
 
@@ -4145,11 +4116,7 @@ fn test_relay_broadcast_opt_out_forces_per_member_fanout() {
     let group_id = info.group_id.as_str().to_string();
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "bob".to_string(),
-            "carol".to_string(),
-        ],
+        vec![id("user123"), id("bob"), id("carol")],
     );
     protocol.group_mesh.relay_synced.insert(group_id.clone());
     grant_group_delivery_v2(&mut protocol);
@@ -4218,11 +4185,11 @@ fn test_grp_mls_msg_logical_id_emit_and_cross_path_dedup() {
     .to_string();
 
     let msg1 = make_message(
-        "alice",
-        "bob",
+        &id("alice"),
+        &id("bob"),
         &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload),
     );
-    let res = bob.handle_group_mls_msg(&msg1, "alice", &payload);
+    let res = bob.handle_group_mls_msg(&msg1, &id("alice"), &payload);
     assert!(matches!(res, InternalMessageResult::Consumed));
     {
         let events = events.lock().unwrap();
@@ -4249,11 +4216,11 @@ fn test_grp_mls_msg_logical_id_emit_and_cross_path_dedup() {
     // an MLS decrypt (the ciphertext's ratchet generation is already spent,
     // so decrypting would misclassify as Retriable and buffer noise).
     let msg2 = make_message(
-        "alice",
-        "bob",
+        &id("alice"),
+        &id("bob"),
         &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload),
     );
-    let res2 = bob.handle_group_mls_msg(&msg2, "alice", &payload);
+    let res2 = bob.handle_group_mls_msg(&msg2, &id("alice"), &payload);
     assert!(
         matches!(res2, InternalMessageResult::Consumed),
         "Cross-path duplicate must be consumed (and re-ACKed by the receive loop)"
@@ -4262,7 +4229,7 @@ fn test_grp_mls_msg_logical_id_emit_and_cross_path_dedup() {
     // Relay path copy of the same logical message: also a duplicate.
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         &ciphertext_b64,
         "2026-07-31T00:00:00Z",
         logical,
@@ -4303,11 +4270,11 @@ fn test_grp_mls_msg_failed_decrypt_does_not_poison_logical_id() {
     })
     .to_string();
     let poison_msg = make_message(
-        "mallory",
-        "bob",
+        &id("mallory"),
+        &id("bob"),
         &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, poison_payload),
     );
-    bob.handle_group_mls_msg(&poison_msg, "mallory", &poison_payload);
+    bob.handle_group_mls_msg(&poison_msg, &id("mallory"), &poison_payload);
     assert!(
         !bob.group_mesh.message_dedup.contains_key(logical),
         "A failed decrypt must not mark the logical id as seen"
@@ -4327,11 +4294,11 @@ fn test_grp_mls_msg_failed_decrypt_does_not_poison_logical_id() {
     })
     .to_string();
     let genuine_msg = make_message(
-        "alice",
-        "bob",
+        &id("alice"),
+        &id("bob"),
         &format!("{}{}", internal_prefixes::GROUP_MLS_MSG, genuine_payload),
     );
-    let res = bob.handle_group_mls_msg(&genuine_msg, "alice", &genuine_payload);
+    let res = bob.handle_group_mls_msg(&genuine_msg, &id("alice"), &genuine_payload);
     assert!(matches!(res, InternalMessageResult::Consumed));
     let events = events.lock().unwrap();
     assert!(
@@ -4363,11 +4330,7 @@ fn test_relay_broadcast_fallback_to_fanout() {
     let group_id = info.group_id.as_str().to_string();
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "bob".to_string(),
-            "carol".to_string(),
-        ],
+        vec![id("user123"), id("bob"), id("carol")],
     );
 
     // Do NOT mark as relay-synced — force per-member fan-out
@@ -4391,13 +4354,13 @@ fn test_handle_relay_group_message_plaintext_passthrough() {
     // Pre-populate member cache so the group is known
     protocol.group_mesh.members.insert(
         "group:relay-plain".to_string(),
-        vec!["user123".to_string(), "alice".to_string()],
+        vec![id("user123"), id("alice")],
     );
 
     // Plaintext content (not valid base64) should pass through
     protocol.handle_relay_group_message_with_mls(
         "group:relay-plain",
-        "alice",
+        &id("alice"),
         "Hello world! This is not base64",
         "2026-03-13T00:00:00Z",
         "msg-relay-001",
@@ -4410,7 +4373,7 @@ fn test_handle_relay_group_message_plaintext_passthrough() {
         matches!(e, Event::GroupMessageReceived { group_id, content, sender, .. }
             if group_id == "group:relay-plain"
                 && content == "Hello world! This is not base64"
-                && sender == "alice")
+                && sender == &id("alice"))
     });
     assert!(
         received.is_some(),
@@ -4442,7 +4405,7 @@ fn test_handle_relay_group_message_mls_decrypt() {
     // Route through relay path
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         &ciphertext_b64,
         "2026-03-13T00:00:00Z",
         "msg-relay-mls-001",
@@ -4479,10 +4442,10 @@ fn test_relay_group_plaintext_naming_mls_group_is_dropped_not_spoofed() {
         events_clone.lock().unwrap().push(event);
     });
 
-    // Non-base64 plaintext naming Bob's real MLS group, forged as "alice".
+    // Non-base64 plaintext naming Bob's real MLS group, forged as &id("alice").
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         "Spoofed message! definitely not base64",
         "2026-03-13T00:00:00Z",
         "msg-spoof-001",
@@ -4637,11 +4600,7 @@ fn test_group_mls_send_total_failure_emits_partial_failure_event() {
     // Populate cache with multiple members
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "bob".to_string(),
-            "carol".to_string(),
-        ],
+        vec![id("user123"), id("bob"), id("carol")],
     );
 
     let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4673,11 +4632,11 @@ fn test_group_mls_send_total_failure_emits_partial_failure_event() {
     }) = failure_event
     {
         assert!(
-            failed_members.contains(&"bob".to_string()),
+            failed_members.contains(&id("bob")),
             "bob should be in failed_members"
         );
         assert!(
-            failed_members.contains(&"carol".to_string()),
+            failed_members.contains(&id("carol")),
             "carol should be in failed_members"
         );
         assert_eq!(
@@ -4712,7 +4671,7 @@ fn test_epoch_fork_not_flagged_for_never_retried_expired_commits() {
         .entry(group_id.clone())
         .or_default()
         .push_back(PendingCommit {
-            sender: "bob".to_string(),
+            sender: id("bob"),
             message_id: "test-mid-9".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
@@ -4748,7 +4707,7 @@ fn test_epoch_fork_flagged_for_retried_expired_commits() {
         .entry(group_id.clone())
         .or_default()
         .push_back(PendingCommit {
-            sender: "bob".to_string(),
+            sender: id("bob"),
             message_id: "test-mid-10".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
@@ -4799,7 +4758,7 @@ fn test_epoch_fork_not_duplicated_if_already_tracked() {
         .entry(group_id.clone())
         .or_default()
         .push_back(PendingCommit {
-            sender: "bob".to_string(),
+            sender: id("bob"),
             message_id: "test-mid-11".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
@@ -4846,7 +4805,7 @@ fn test_epoch_fork_max_entries_eviction() {
         .entry(new_gid.clone())
         .or_default()
         .push_back(PendingCommit {
-            sender: "bob".to_string(),
+            sender: id("bob"),
             message_id: "test-mid-12".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
@@ -4895,10 +4854,10 @@ fn test_epoch_fork_cleared_on_successful_commit() {
             message_type: offline_protocol_mls::MlsMessageType::Commit,
             epoch: alice_update.epoch,
             ciphertext: alice_update.ciphertext.clone(),
-            sender_id: "alice".to_string(),
+            sender_id: id("alice"),
             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
         };
-        mls.decrypt_from_group(&encrypted, "alice").unwrap();
+        mls.decrypt_from_group(&encrypted, &id("alice")).unwrap();
     }
 
     // Bob creates a commit that alice will process through the protocol layer
@@ -4921,7 +4880,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
     let data = serde_json::to_string(&commit_payload).unwrap();
 
     // Process through the protocol layer — this calls process_commit_core
-    alice.handle_group_mls_commit("commit-fork-clear-1", "bob", &data);
+    alice.handle_group_mls_commit("commit-fork-clear-1", &id("bob"), &data);
 
     // Fork should be cleared after successful commit processing
     assert!(
@@ -4940,7 +4899,7 @@ fn test_epoch_fork_resolution_by_leader() {
     let info = protocol.create_group("Resolution Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    // Protocol user "user123" is the only member → lex-first → leader.
+    // Protocol user &id("user123") is the only member → lex-first → leader.
     // Insert a fork that's past the resolution delay.
     let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
     protocol.group_mesh.epoch_forks.insert(
@@ -4978,12 +4937,12 @@ fn test_epoch_fork_resolution_skipped_for_non_leader() {
     let _info = protocol.create_group("Non-Leader Test").unwrap();
 
     // Use a fake group_id for the fork so refresh_group_members fails and
-    // falls back to cached membership where "alice" is lex-first leader.
+    // falls back to cached membership where &id("alice") is lex-first leader.
     let fake_group_id = "fake_fork_group".to_string();
-    protocol.group_mesh.members.insert(
-        fake_group_id.clone(),
-        vec!["alice".to_string(), "zoe".to_string()],
-    );
+    protocol
+        .group_mesh
+        .members
+        .insert(fake_group_id.clone(), vec![id("alice"), id("zoe")]);
 
     let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
     protocol.group_mesh.epoch_forks.insert(
@@ -5075,15 +5034,15 @@ fn test_leave_election_cleared_when_member_already_removed() {
     let info = protocol.create_group("Leave Election Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    // "bob" was never added to this MLS group, so refresh_group_members
+    // &id("bob") was never added to this MLS group, so refresh_group_members
     // won't find him — simulates a member that was already removed.
     let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
-    let key = (group_id.clone(), "bob".to_string());
+    let key = (group_id.clone(), id("bob"));
     protocol.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
-            leaving_member: "bob".to_string(),
+            leaving_member: id("bob"),
             received_at: past,
             last_attempt_at: None,
         },
@@ -5104,16 +5063,16 @@ fn test_leave_election_cleared_when_member_already_removed() {
 fn test_leave_election_timeout_re_elects_self() {
     let (mut alice, _bob, group_id) = setup_alice_bob_group("Re-election Test");
 
-    // Bob is in the MLS group. Alice is "alice", bob is "bob".
-    // After filtering out the leaver ("bob"), remaining = ["alice"].
+    // Bob is in the MLS group. Alice is &id("alice"), bob is &id("bob").
+    // After filtering out the leaver (&id("bob")), remaining = [&id("alice")].
     // alice is lex-first → candidate at interval 0 → should attempt remove.
     let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
-    let key = (group_id.clone(), "bob".to_string());
+    let key = (group_id.clone(), id("bob"));
     alice.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
-            leaving_member: "bob".to_string(),
+            leaving_member: id("bob"),
             received_at: past,
             last_attempt_at: None,
         },
@@ -5130,7 +5089,7 @@ fn test_leave_election_timeout_re_elects_self() {
     // Bob should no longer be in the MLS group
     let members = alice.refresh_group_members(&group_id).unwrap();
     assert!(
-        !members.contains(&"bob".to_string()),
+        !members.contains(&id("bob")),
         "Bob should be removed from group after re-election"
     );
 }
@@ -5142,12 +5101,12 @@ fn test_leave_election_not_triggered_before_timeout() {
     let group_id = info.group_id.as_str().to_string();
 
     // Insert a pending election that hasn't timed out yet
-    let key = (group_id.clone(), "bob".to_string());
+    let key = (group_id.clone(), id("bob"));
     protocol.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
-            leaving_member: "bob".to_string(),
+            leaving_member: id("bob"),
             received_at: Instant::now(), // just now — well within timeout
             last_attempt_at: None,
         },
@@ -5174,7 +5133,7 @@ fn test_pending_commit_retry_count_incremented() {
     // Insert a non-expired pending commit with invalid data.
     // process_commit_core will return Rejected (bad data), so it won't
     // be re-buffered. Instead, test the buffering path directly.
-    protocol.buffer_pending_commit(&group_id, "mid-fake", "bob", "fake-data");
+    protocol.buffer_pending_commit(&group_id, "mid-fake", &id("bob"), "fake-data");
 
     let pending = protocol.group_mesh.pending_commits.get(&group_id).unwrap();
     assert_eq!(pending.len(), 1);
@@ -5226,7 +5185,7 @@ fn test_epoch_fork_detected_via_periodic_cleanup_without_drain() {
         .entry(group_id.clone())
         .or_default()
         .push_back(PendingCommit {
-            sender: "bob".to_string(),
+            sender: id("bob"),
             message_id: "test-mid-13".to_string(),
             data: "fake-commit".to_string(),
             buffered_at: past,
@@ -5266,7 +5225,7 @@ fn test_epoch_fork_not_flagged_via_cleanup_for_never_retried() {
         .entry(group_id.clone())
         .or_default()
         .push_back(PendingCommit {
-            sender: "bob".to_string(),
+            sender: id("bob"),
             message_id: "test-mid-14".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
@@ -5316,7 +5275,7 @@ fn test_epoch_fork_cleanup_does_not_duplicate_existing_fork() {
         .entry(group_id.clone())
         .or_default()
         .push_back(PendingCommit {
-            sender: "bob".to_string(),
+            sender: id("bob"),
             message_id: "test-mid-15".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
@@ -5346,10 +5305,17 @@ fn test_epoch_fork_resolution_includes_failed_members() {
     // Verifies that GroupEpochForkResolved includes members we couldn't reach.
     // Strategy: create a real alice+bob MLS group, then stop alice's protocol
     // so send_internal_message fails for bob, populating failed_members.
+    // The fork leader is the lex-first member, and addresses sort by key hash,
+    // so the peer label is chosen to sort *after* us rather than assumed to.
+    let peer_label = (0..64)
+        .map(|n| format!("peer-{n}"))
+        .find(|label| id(label) > id("alice"))
+        .expect("a peer sorting after us");
+
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
-    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user(&peer_label)).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
     bob.initialize_mls_for_test(storage_b).unwrap();
     alice.start().unwrap();
@@ -5368,7 +5334,7 @@ fn test_epoch_fork_resolution_includes_failed_members() {
         alice_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id(&peer_label),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -5413,12 +5379,12 @@ fn test_epoch_fork_resolution_includes_failed_members() {
     if let Some(Event::GroupEpochForkResolved { failed_members, .. }) = resolved {
         // Bob should be in failed_members because protocol is stopped
         assert!(
-            failed_members.contains(&"bob".to_string()),
+            failed_members.contains(&id(&peer_label)),
             "bob should be in failed_members when protocol is stopped"
         );
         // Alice (self) should NOT be in failed_members
         assert!(
-            !failed_members.contains(&"alice".to_string()),
+            !failed_members.contains(&id("alice")),
             "self should not be in failed_members"
         );
     } else {
@@ -5471,7 +5437,7 @@ fn test_epoch_fork_update_keys_failure_leaves_resolution_attempted() {
     let fake_group_id = "group:nonexistent-for-update".to_string();
     protocol.group_mesh.members.insert(
         fake_group_id.clone(),
-        vec!["user123".to_string()], // self is leader
+        vec![id("user123")], // self is leader
     );
 
     let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
@@ -5569,7 +5535,7 @@ fn test_epoch_fork_multiple_concurrent_groups() {
             .entry(gid.clone())
             .or_default()
             .push_back(PendingCommit {
-                sender: "bob".to_string(),
+                sender: id("bob"),
                 message_id: "test-mid-16".to_string(),
                 data: "fake".to_string(),
                 buffered_at: past,
@@ -5792,7 +5758,7 @@ fn test_pending_leave_elections_size_cap_eviction() {
     protocol.group_mesh.members.insert(
         new_group.clone(),
         vec![
-            "alice".to_string(), // alice < test_user, so test_user is not the remover
+            id("alice"), // alice < test_user, so test_user is not the remover
             "test_user".to_string(),
             new_leaver.to_string(),
         ],
@@ -5897,13 +5863,13 @@ fn test_non_key_update_commit_does_not_clear_fork_state() {
         commit_type: GroupCommitType::Add,
         ciphertext: base64_encode(&bob_update.ciphertext),
         epoch: bob_update.epoch,
-        affected_member: Some("charlie".to_string()),
+        affected_member: Some(id("charlie")),
         role: None,
     };
     let data = serde_json::to_string(&add_commit_payload).unwrap();
 
     // Process through alice — the MLS commit succeeds but commit_type is Add
-    alice.handle_group_mls_commit("commit-add-no-clear-1", "bob", &data);
+    alice.handle_group_mls_commit("commit-add-no-clear-1", &id("bob"), &data);
 
     // Fork state should still exist because this was an Add commit, not KeyUpdate
     assert!(
@@ -5944,7 +5910,7 @@ fn test_key_update_commit_clears_fork_state() {
     };
     let data = serde_json::to_string(&ku_commit_payload).unwrap();
 
-    alice.handle_group_mls_commit("commit-ku-clear-1", "bob", &data);
+    alice.handle_group_mls_commit("commit-ku-clear-1", &id("bob"), &data);
 
     assert!(
         !alice.group_mesh.epoch_forks.contains_key(&group_id),
@@ -6010,7 +5976,7 @@ fn test_epoch_fork_periodic_cleanup_multiple_groups_mixed() {
         .entry(group_fork.clone())
         .or_default()
         .push_back(PendingCommit {
-            sender: "bob".to_string(),
+            sender: id("bob"),
             message_id: "test-mid-19".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
@@ -6024,7 +5990,7 @@ fn test_epoch_fork_periodic_cleanup_multiple_groups_mixed() {
         .entry(group_nofork.clone())
         .or_default()
         .push_back(PendingCommit {
-            sender: "carol".to_string(),
+            sender: id("carol"),
             message_id: "test-mid-20".to_string(),
             data: "fake".to_string(),
             buffered_at: past,
@@ -6062,14 +6028,14 @@ fn test_leave_election_cooldown_prevents_per_tick_spam() {
 
     // Set up an election for bob that has timed out
     let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
-    let key = (group_id.clone(), "bob".to_string());
+    let key = (group_id.clone(), id("bob"));
 
     // Simulate a recent failed attempt by setting last_attempt_at to just now
     alice.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
-            leaving_member: "bob".to_string(),
+            leaving_member: id("bob"),
             received_at: past,
             last_attempt_at: Some(Instant::now()), // just attempted
         },
@@ -6086,7 +6052,7 @@ fn test_leave_election_cooldown_prevents_per_tick_spam() {
     // Bob should still be in the group (no remove attempted)
     let members = alice.refresh_group_members(&group_id).unwrap();
     assert!(
-        members.contains(&"bob".to_string()),
+        members.contains(&id("bob")),
         "Bob should still be in group — cooldown should prevent remove attempt"
     );
 }
@@ -6097,7 +6063,7 @@ fn test_leave_election_proceeds_after_cooldown_expires() {
     let (mut alice, _bob, group_id) = setup_alice_bob_group("Cooldown Expiry Test");
 
     let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
-    let key = (group_id.clone(), "bob".to_string());
+    let key = (group_id.clone(), id("bob"));
 
     // Set last_attempt_at to well beyond the cooldown window
     let old_attempt =
@@ -6106,7 +6072,7 @@ fn test_leave_election_proceeds_after_cooldown_expires() {
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
-            leaving_member: "bob".to_string(),
+            leaving_member: id("bob"),
             received_at: past,
             last_attempt_at: Some(old_attempt),
         },
@@ -6122,7 +6088,7 @@ fn test_leave_election_proceeds_after_cooldown_expires() {
     // Bob should be removed
     let members = alice.refresh_group_members(&group_id).unwrap();
     assert!(
-        !members.contains(&"bob".to_string()),
+        !members.contains(&id("bob")),
         "Bob should be removed after cooldown-expired re-election"
     );
 }
@@ -6143,24 +6109,38 @@ fn test_leave_election_staggered_candidate_selection() {
     let group_id = "group:staggered".to_string();
     let leaving = "leaver";
 
-    // Set up a group with 4 remaining members after leaver departs.
-    // Sorted remaining (excluding leaver): ["alice", "bob", "charlie", "user123"]
-    // user123 (self) is at index 3 — selected at interval 3 (90-120s elapsed).
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec![
-            "alice".to_string(),
-            "bob".to_string(),
-            "charlie".to_string(),
-            "user123".to_string(), // self (from create_test_config)
-            leaving.to_string(),
-        ],
+    // Members are walked in sorted order and addresses sort by key hash, which
+    // no label predicts. Elections also only fire *past* the first timeout, so
+    // the member sorting first is never selected by this path — pick peers that
+    // sort before us so our own interval is reachable.
+    let self_id = id("user123");
+    let pool: Vec<String> = (0..64).map(|n| format!("peer-{n}")).collect();
+    let ahead: Vec<String> = pool
+        .iter()
+        .map(|label| id(label))
+        .filter(|m| m < &self_id)
+        .take(3)
+        .collect();
+    assert!(
+        !ahead.is_empty(),
+        "need at least one member sorting before us for a reachable interval"
     );
+    let self_interval = ahead.len() as u64;
+    let other_interval = self_interval - 1;
+
+    let mut members: Vec<String> = ahead.clone();
+    members.push(self_id.clone());
+    members.push(leaving.to_string());
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), members);
 
     let key = (group_id.clone(), leaving.to_string());
 
-    // Interval 1 (30-60s): candidate_idx=1 → "bob". We are "user123" → skip.
-    let past_1 = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
+    // An interval whose candidate is somebody else: we must not act.
+    let past_1 =
+        Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS * other_interval + 5);
     protocol.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
@@ -6176,29 +6156,13 @@ fn test_leave_election_staggered_candidate_selection() {
             .group_mesh
             .pending_leave_elections
             .contains_key(&key),
-        "Election should remain pending — user123 is not candidate at interval 1"
+        "Election must remain pending — we are not the candidate at this interval"
     );
 
-    // Interval 2 (60-90s): candidate_idx=2 → "charlie". We are "user123" → skip.
-    let past_2 = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS * 2 + 5);
-    protocol
-        .group_mesh
-        .pending_leave_elections
-        .get_mut(&key)
-        .unwrap()
-        .received_at = past_2;
-    protocol.check_leave_election_timeouts();
-    assert!(
-        protocol
-            .group_mesh
-            .pending_leave_elections
-            .contains_key(&key),
-        "Election should remain pending — user123 is not candidate at interval 2"
-    );
-
-    // Interval 3 (90-120s): candidate_idx=3 → "user123". We ARE the candidate.
-    // remove_from_group will fail (no MLS group), so election stays with cooldown set.
-    let past_3 = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS * 3 + 5);
+    // Our own interval: we ARE the candidate. remove_from_group will fail (no
+    // MLS group), so the election stays pending with the cooldown set.
+    let past_3 =
+        Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS * self_interval + 5);
     protocol
         .group_mesh
         .pending_leave_elections
@@ -6232,7 +6196,7 @@ fn test_leave_election_staggered_candidate_selection() {
 #[test]
 fn test_leave_election_staggered_with_real_mls_group() {
     // Full integration test: alice + bob MLS group, charlie (fake) is the
-    // leaver. "alice" is lex-first (idx 0), so interval 1 → idx 1 → "bob".
+    // leaver. &id("alice") is lex-first (idx 0), so interval 1 → idx 1 → &id("bob").
     // alice is at idx 0 which was already tried in handle_group_mls_leave.
     let (mut alice, _bob, group_id) = setup_alice_bob_group("Staggered Real Test");
 
@@ -6244,18 +6208,18 @@ fn test_leave_election_staggered_with_real_mls_group() {
         .members
         .get_mut(&group_id)
         .unwrap()
-        .push("charlie".to_string());
+        .push(id("charlie"));
 
-    let key = (group_id.clone(), "charlie".to_string());
+    let key = (group_id.clone(), id("charlie"));
 
-    // Interval 1 (30-60s): sorted remaining = ["alice", "bob"], candidate_idx=1 → "bob".
-    // We are "alice" → not selected → election stays.
+    // Interval 1 (30-60s): sorted remaining = [&id("alice"), &id("bob")], candidate_idx=1 → &id("bob").
+    // We are &id("alice") → not selected → election stays.
     let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
     alice.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
-            leaving_member: "charlie".to_string(),
+            leaving_member: id("charlie"),
             received_at: past,
             last_attempt_at: None,
         },
@@ -6285,22 +6249,28 @@ fn test_handle_group_mls_leave_records_pending_election_for_non_elected() {
     protocol.initialize_mls_for_test(storage).unwrap();
 
     let group_id = "group:leave-else-branch".to_string();
-    // Sorted remaining after "bob" leaves: ["alice", "zoe"]
-    // alice is lex-first → elected. zoe (us) is NOT elected → records election.
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["alice".to_string(), "bob".to_string(), "zoe".to_string()],
-    );
+    // We must not be the lex-first remaining member, and addresses sort by key
+    // hash — so pick a peer that sorts ahead of us rather than trusting a
+    // label to.
+    let self_id = id("zoe");
+    let elected = (0..64)
+        .map(|n| id(&format!("peer-{n}")))
+        .find(|m| m < &self_id)
+        .expect("a peer sorting before us");
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec![elected, id("bob"), self_id]);
 
     let leave_payload = GroupMlsLeavePayload {
         group_id: group_id.clone(),
-        leaving_member: "bob".to_string(),
+        leaving_member: id("bob"),
     };
     let data = serde_json::to_string(&leave_payload).unwrap();
 
-    protocol.handle_group_mls_leave("leave-else-1", "bob", &data);
+    protocol.handle_group_mls_leave("leave-else-1", &id("bob"), &data);
 
-    let key = (group_id.clone(), "bob".to_string());
+    let key = (group_id.clone(), id("bob"));
     assert!(
         protocol
             .group_mesh
@@ -6310,7 +6280,7 @@ fn test_handle_group_mls_leave_records_pending_election_for_non_elected() {
     );
     let election = &protocol.group_mesh.pending_leave_elections[&key];
     assert_eq!(election.group_id, group_id);
-    assert_eq!(election.leaving_member, "bob");
+    assert_eq!(election.leaving_member, id("bob"));
     assert!(election.last_attempt_at.is_none());
 }
 
@@ -6322,14 +6292,14 @@ fn test_handle_group_mls_leave_elected_does_not_record_election() {
 
     let leave_payload = GroupMlsLeavePayload {
         group_id: group_id.clone(),
-        leaving_member: "bob".to_string(),
+        leaving_member: id("bob"),
     };
     let data = serde_json::to_string(&leave_payload).unwrap();
 
     // alice < bob, so alice is elected → should handle immediately
-    alice.handle_group_mls_leave("leave-elected-1", "bob", &data);
+    alice.handle_group_mls_leave("leave-elected-1", &id("bob"), &data);
 
-    let key = (group_id.clone(), "bob".to_string());
+    let key = (group_id.clone(), id("bob"));
     assert!(
         !alice.group_mesh.pending_leave_elections.contains_key(&key),
         "Elected member should NOT have a pending election"
@@ -6350,7 +6320,7 @@ fn test_sync_groups_to_relay_refreshes_from_mls() {
     alice
         .group_mesh
         .members
-        .insert(group_id.clone(), vec!["alice".to_string()]);
+        .insert(group_id.clone(), vec![id("alice")]);
 
     // Mark as unsynced so sync_groups_to_relay will process it
     alice.group_mesh.relay_synced.remove(&group_id);
@@ -6366,7 +6336,7 @@ fn test_sync_groups_to_relay_refreshes_from_mls() {
     // refresh_group_members and verifying it updates the stale cache.
     let refreshed = alice.refresh_group_members(&group_id).unwrap();
     assert!(
-        refreshed.contains(&"alice".to_string()) && refreshed.contains(&"bob".to_string()),
+        refreshed.contains(&id("alice")) && refreshed.contains(&id("bob")),
         "refresh_group_members should return MLS-authoritative membership — got {:?}",
         refreshed
     );
@@ -6374,7 +6344,7 @@ fn test_sync_groups_to_relay_refreshes_from_mls() {
     // Verify the cache was updated from MLS
     let cached = alice.group_mesh.members.get(&group_id).unwrap();
     assert!(
-        cached.contains(&"alice".to_string()) && cached.contains(&"bob".to_string()),
+        cached.contains(&id("alice")) && cached.contains(&id("bob")),
         "Cached membership should be updated from MLS — got {:?}",
         cached
     );
@@ -6401,7 +6371,7 @@ fn test_drain_pending_commits_mixed_retried_and_non_retried_expired() {
 
     // Never-retried expired commit (slow delivery)
     buf.push_back(PendingCommit {
-        sender: "alice".to_string(),
+        sender: id("alice"),
         message_id: "test-mid-21".to_string(),
         data: "fake-1".to_string(),
         buffered_at: past,
@@ -6409,7 +6379,7 @@ fn test_drain_pending_commits_mixed_retried_and_non_retried_expired() {
     });
     // Retried expired commit (epoch mismatch signal)
     buf.push_back(PendingCommit {
-        sender: "bob".to_string(),
+        sender: id("bob"),
         message_id: "test-mid-22".to_string(),
         data: "fake-2".to_string(),
         buffered_at: past,
@@ -6417,7 +6387,7 @@ fn test_drain_pending_commits_mixed_retried_and_non_retried_expired() {
     });
     // Non-expired commit (should survive)
     buf.push_back(PendingCommit {
-        sender: "carol".to_string(),
+        sender: id("carol"),
         message_id: "test-mid-23".to_string(),
         data: "fake-3".to_string(),
         buffered_at: Instant::now(),
@@ -6462,7 +6432,7 @@ fn test_leave_election_remove_failure_keeps_election_pending() {
         group_id.clone(),
         vec![
             leaver.to_string(),
-            "user123".to_string(), // self — will be lex-first after filtering leaver
+            id("user123"), // self — will be lex-first after filtering leaver
         ],
     );
 
@@ -6504,7 +6474,7 @@ fn test_leave_election_remove_failure_keeps_election_pending() {
 #[test]
 fn test_invite_to_group_consumes_key_package() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
     alice.start().unwrap();
@@ -6513,13 +6483,13 @@ fn test_invite_to_group_consumes_key_package() {
     let group_id = group_info.group_id.as_str().to_string();
 
     // Generate Bob's key package and store it
-    let bob_mls = offline_protocol_mls::MlsManager::new("bob", storage_b).unwrap();
+    let bob_mls = crate::test_identity::manager_for("bob", storage_b);
     let bob_kp = bob_mls.generate_key_package().unwrap();
 
     use crate::protocol::ReceivedKeyPackage;
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
@@ -6527,11 +6497,11 @@ fn test_invite_to_group_consumes_key_package() {
     );
 
     // Invite succeeds
-    alice.invite_to_group(&group_id, "bob").unwrap();
+    alice.invite_to_group(&group_id, &id("bob")).unwrap();
 
     // Key package must be consumed after invite
     assert!(
-        !alice.pending_key_packages.contains_key("bob"),
+        !alice.pending_key_packages.contains_key(&id("bob")),
         "Key package should be removed after invite_to_group consumes it"
     );
 }
@@ -6539,7 +6509,7 @@ fn test_invite_to_group_consumes_key_package() {
 #[test]
 fn test_invite_same_peer_to_two_groups_needs_fresh_key_package() {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
     alice.start().unwrap();
@@ -6551,13 +6521,13 @@ fn test_invite_same_peer_to_two_groups_needs_fresh_key_package() {
     let group2_id = group2.group_id.as_str().to_string();
 
     // Generate a single key package for Bob
-    let bob_mls = offline_protocol_mls::MlsManager::new("bob", storage_b).unwrap();
+    let bob_mls = crate::test_identity::manager_for("bob", storage_b);
     let bob_kp = bob_mls.generate_key_package().unwrap();
 
     use crate::protocol::ReceivedKeyPackage;
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
@@ -6565,10 +6535,10 @@ fn test_invite_same_peer_to_two_groups_needs_fresh_key_package() {
     );
 
     // First invite succeeds and consumes the key package
-    alice.invite_to_group(&group1_id, "bob").unwrap();
+    alice.invite_to_group(&group1_id, &id("bob")).unwrap();
 
     // Second invite fails cleanly with "No key package" (not a stale MLS error)
-    let result = alice.invite_to_group(&group2_id, "bob");
+    let result = alice.invite_to_group(&group2_id, &id("bob"));
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -6580,21 +6550,21 @@ fn test_invite_same_peer_to_two_groups_needs_fresh_key_package() {
     // After supplying a fresh key package, the second invite succeeds
     let bob_kp2 = bob_mls.generate_key_package().unwrap();
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_kp2.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
         },
     );
     alice
-        .invite_to_group(&group2_id, "bob")
+        .invite_to_group(&group2_id, &id("bob"))
         .expect("Second invite should succeed with fresh key package");
 
     // Verify Bob is in both groups
     let g1_members = alice.group_mesh.members.get(&group1_id).unwrap();
     let g2_members = alice.group_mesh.members.get(&group2_id).unwrap();
-    assert!(g1_members.contains(&"bob".to_string()));
-    assert!(g2_members.contains(&"bob".to_string()));
+    assert!(g1_members.contains(&id("bob")));
+    assert!(g2_members.contains(&id("bob")));
 }
 
 #[test]
@@ -6677,7 +6647,7 @@ fn test_relay_group_message_dedup() {
     // First call — should produce an event
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         &ciphertext,
         &ts,
         msg_id,
@@ -6687,7 +6657,7 @@ fn test_relay_group_message_dedup() {
     // Second call — same message_id, should be deduped
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         &ciphertext,
         &ts,
         msg_id,
@@ -6735,7 +6705,7 @@ fn test_duplicate_welcome_ignored() {
     );
     // Strip the prefix to get just the JSON, since handle_group_mls_welcome expects raw JSON
     let json_data = &data[internal_prefixes::GROUP_MLS_WELCOME.len()..];
-    bob.handle_group_mls_welcome("welcome-dup-1", "alice", json_data);
+    bob.handle_group_mls_welcome("welcome-dup-1", &id("alice"), json_data);
 
     let evts = events.lock().unwrap();
     let add_events: Vec<_> = evts
@@ -6769,7 +6739,7 @@ fn test_relay_group_message_no_raw_on_decrypt_failure() {
 
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         &corrupted,
         &ts,
         "corrupt-msg-1",
@@ -6795,7 +6765,7 @@ fn test_relay_group_message_no_raw_on_decrypt_failure() {
 
 #[test]
 fn test_invite_commit_retry_no_panic() {
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
     charlie.initialize_mls_for_test(storage_c).unwrap();
     charlie.start().unwrap();
@@ -6808,7 +6778,7 @@ fn test_invite_commit_retry_no_panic() {
         mls.generate_key_package().unwrap()
     };
     alice.pending_key_packages.insert(
-        "charlie".to_string(),
+        id("charlie"),
         crate::protocol::ReceivedKeyPackage {
             key_package_data: charlie_kp.key_package_data,
             local_expires_at_ms: u64::MAX,
@@ -6817,7 +6787,7 @@ fn test_invite_commit_retry_no_panic() {
 
     // invite_to_group will fan-out commit to bob (+ retry pass for any failures).
     // Should not panic regardless of send outcomes.
-    let result = alice.invite_to_group(&group_id, "charlie");
+    let result = alice.invite_to_group(&group_id, &id("charlie"));
     assert!(
         result.is_ok(),
         "invite_to_group should succeed even when sends fail"
@@ -6828,19 +6798,19 @@ fn test_invite_commit_retry_no_panic() {
 fn test_remove_commit_retry_no_panic() {
     let (mut alice, _bob, group_id) = setup_alice_bob_group("Remove Retry");
 
-    // Add a third member "charlie" to member cache so commit fan-out has targets
+    // Add a third member &id("charlie") to member cache so commit fan-out has targets
     alice
         .group_mesh
         .members
         .entry(group_id.clone())
         .and_modify(|m| {
-            m.push("charlie".to_string());
+            m.push(id("charlie"));
         });
 
     // Stop transports so sends fail — remove_from_group should still succeed
     let _ = alice.stop();
 
-    let result = alice.remove_from_group(&group_id, "bob");
+    let result = alice.remove_from_group(&group_id, &id("bob"));
     assert!(
         result.is_ok(),
         "remove_from_group should succeed even when sends fail"
@@ -6857,8 +6827,8 @@ fn test_group_creator_is_admin() {
     let group_info = alice.create_group("Test Group").unwrap();
     let group_id = group_info.group_id.as_str();
 
-    // create_test_config uses "user123" as the user ID
-    let role = alice.get_member_role(group_id, "user123").unwrap();
+    // create_test_config uses &id("user123") as the user ID
+    let role = alice.get_member_role(group_id, &id("user123")).unwrap();
     assert_eq!(role, GroupRole::Admin, "Group creator should be admin");
 }
 
@@ -6868,10 +6838,10 @@ fn test_set_member_role_happy_path() {
 
     // Alice (creator/admin) promotes Bob to admin
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Admin)
         .unwrap();
 
-    let role = alice.get_member_role(&group_id, "bob").unwrap();
+    let role = alice.get_member_role(&group_id, &id("bob")).unwrap();
     assert_eq!(role, GroupRole::Admin);
 }
 
@@ -6880,7 +6850,7 @@ fn test_set_member_role_non_admin_rejected() {
     let (mut _alice, mut bob, group_id) = setup_alice_bob_group("Role Test");
 
     // Bob is not admin — should be rejected
-    let result = bob.set_member_role(&group_id, "alice", GroupRole::Member);
+    let result = bob.set_member_role(&group_id, &id("alice"), GroupRole::Member);
     assert!(result.is_err());
     assert!(
         result.unwrap_err().to_string().contains("Only admins"),
@@ -6893,7 +6863,7 @@ fn test_last_admin_cannot_demote_self() {
     let (mut alice, _bob, group_id) = setup_alice_bob_group("Role Test");
 
     // Alice is the only admin — cannot demote herself
-    let result = alice.set_member_role(&group_id, "alice", GroupRole::Member);
+    let result = alice.set_member_role(&group_id, &id("alice"), GroupRole::Member);
     assert!(result.is_err());
     assert!(
         result
@@ -6910,15 +6880,15 @@ fn test_admin_can_demote_self_when_other_admin_exists() {
 
     // Promote Bob to admin first
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Admin)
         .unwrap();
 
     // Now Alice can demote herself
     alice
-        .set_member_role(&group_id, "alice", GroupRole::Member)
+        .set_member_role(&group_id, &id("alice"), GroupRole::Member)
         .unwrap();
 
-    let role = alice.get_member_role(&group_id, "alice").unwrap();
+    let role = alice.get_member_role(&group_id, &id("alice")).unwrap();
     assert_eq!(role, GroupRole::Member);
 }
 
@@ -6928,19 +6898,19 @@ fn test_get_group_roles_returns_all() {
 
     // Promote Bob
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Admin)
         .unwrap();
 
     let roles = alice.get_group_roles(&group_id).unwrap();
-    assert_eq!(roles.get("alice"), Some(&GroupRole::Admin));
-    assert_eq!(roles.get("bob"), Some(&GroupRole::Admin));
+    assert_eq!(roles.get(&id("alice")), Some(&GroupRole::Admin));
+    assert_eq!(roles.get(&id("bob")), Some(&GroupRole::Admin));
 }
 
 #[test]
 fn test_set_member_role_non_member_rejected() {
     let (mut alice, _bob, group_id) = setup_alice_bob_group("Role Test");
 
-    let result = alice.set_member_role(&group_id, "carol", GroupRole::Admin);
+    let result = alice.set_member_role(&group_id, &id("carol"), GroupRole::Admin);
     assert!(result.is_err());
     assert!(
         result.unwrap_err().to_string().contains("not a member"),
@@ -6953,7 +6923,7 @@ fn test_invite_requires_admin() {
     let (mut _alice, mut bob, group_id) = setup_alice_bob_group("Invite Test");
 
     // Bob (member) tries to invite — should fail
-    let result = bob.invite_to_group(&group_id, "carol");
+    let result = bob.invite_to_group(&group_id, &id("carol"));
     assert!(result.is_err());
     assert!(
         result
@@ -6969,7 +6939,7 @@ fn test_remove_requires_admin() {
     let (mut _alice, mut bob, group_id) = setup_alice_bob_group("Remove Test");
 
     // Bob (member) tries to remove Alice — should fail
-    let result = bob.remove_from_group(&group_id, "alice");
+    let result = bob.remove_from_group(&group_id, &id("alice"));
     assert!(result.is_err());
     assert!(
         result
@@ -6991,7 +6961,7 @@ fn test_set_member_role_emits_event() {
     });
 
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Admin)
         .unwrap();
 
     let captured = events.lock().unwrap();
@@ -7007,9 +6977,9 @@ fn test_set_member_role_emits_event() {
     }) = role_event
     {
         assert_eq!(gid, &group_id);
-        assert_eq!(user_id, "bob");
+        assert_eq!(user_id, &id("bob"));
         assert_eq!(new_role, "admin");
-        assert_eq!(changed_by, "alice");
+        assert_eq!(changed_by, &id("alice"));
     }
 }
 
@@ -7022,7 +6992,7 @@ fn test_handle_group_role_change_non_admin_rejected() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
 
@@ -7035,13 +7005,17 @@ fn test_handle_group_role_change_non_admin_rejected() {
     // Simulate an incoming role change from a non-admin sender (bob)
     let payload = GroupRoleChangePayload {
         group_id: group_id.clone(),
-        target_user_id: "bob".to_string(),
+        target_user_id: id("bob"),
         new_role: GroupRole::Admin,
-        changed_by: "bob".to_string(),
+        changed_by: id("bob"),
     };
-    bob.handle_group_role_change("msg-456", "bob", &serde_json::to_string(&payload).unwrap());
+    bob.handle_group_role_change(
+        "msg-456",
+        &id("bob"),
+        &serde_json::to_string(&payload).unwrap(),
+    );
 
-    // Should NOT emit event — sender "bob" is not admin
+    // Should NOT emit event — sender &id("bob") is not admin
     let captured = events.lock().unwrap();
     let role_event = captured
         .iter()
@@ -7061,7 +7035,7 @@ fn test_handle_group_role_change_uses_transport_sender_not_payload() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
 
@@ -7074,17 +7048,17 @@ fn test_handle_group_role_change_uses_transport_sender_not_payload() {
     // Simulate role change from alice (admin) but with a spoofed changed_by field
     let payload = GroupRoleChangePayload {
         group_id: group_id.clone(),
-        target_user_id: "bob".to_string(),
+        target_user_id: id("bob"),
         new_role: GroupRole::Admin,
         changed_by: "evil_spoofed_user".to_string(),
     };
     bob.handle_group_role_change(
         "msg-123",
-        "alice",
+        &id("alice"),
         &serde_json::to_string(&payload).unwrap(),
     );
 
-    // Event should use transport sender ("alice"), not the spoofed changed_by
+    // Event should use transport sender (&id("alice")), not the spoofed changed_by
     let captured = events.lock().unwrap();
     let role_event = captured
         .iter()
@@ -7092,7 +7066,8 @@ fn test_handle_group_role_change_uses_transport_sender_not_payload() {
     assert!(role_event.is_some(), "Valid admin should be accepted");
     if let Some(Event::GroupRoleChanged { changed_by, .. }) = role_event {
         assert_eq!(
-            changed_by, "alice",
+            changed_by,
+            &id("alice"),
             "changed_by must be transport-authenticated sender, not payload"
         );
     }
@@ -7217,7 +7192,7 @@ fn test_admin_can_leave_when_another_admin_exists() {
 
     // Promote Bob to admin
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Admin)
         .unwrap();
 
     // Now Alice can leave — another admin exists
@@ -7255,7 +7230,7 @@ fn test_cannot_remove_last_admin_with_other_members() {
     // The guard triggers when member_count > 2.
 
     // Instead, test that a non-admin member can still be removed
-    let result = alice.remove_from_group(&group_id, "bob");
+    let result = alice.remove_from_group(&group_id, &id("bob"));
     assert!(
         result.is_ok(),
         "Admin should be able to remove a non-admin member"
@@ -7278,20 +7253,16 @@ fn test_fallback_admin_uses_created_by() {
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(group_id).unwrap();
-        mls.remove_member_role(&gid, "charlie").unwrap();
+        mls.remove_member_role(&gid, &id("charlie")).unwrap();
     }
 
     protocol.group_mesh.members.insert(
         group_id.to_string(),
-        vec![
-            "charlie".to_string(),
-            "alice".to_string(),
-            "bob".to_string(),
-        ],
+        vec![id("charlie"), id("alice"), id("bob")],
     );
 
     // charlie is the creator (created_by), so the fallback grants admin
-    let result = protocol.set_member_role(group_id, "bob", GroupRole::Admin);
+    let result = protocol.set_member_role(group_id, &id("bob"), GroupRole::Admin);
     assert!(
         result.is_ok(),
         "Creator should be fallback admin via created_by"
@@ -7302,7 +7273,7 @@ fn test_fallback_admin_uses_created_by() {
 fn test_fallback_admin_denies_non_creator() {
     // A non-creator should NOT be treated as admin when roles are empty.
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
@@ -7324,7 +7295,7 @@ fn test_fallback_admin_denies_non_creator() {
         alice_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -7334,22 +7305,21 @@ fn test_fallback_admin_denies_non_creator() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         bob_mls.join_group(&welcome).unwrap();
     }
-    bob.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["alice".to_string(), "bob".to_string()],
-    );
+    bob.group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("alice"), id("bob")]);
 
     // Clear Bob's roles but leave created_by as None (Bob didn't create the group)
     // Bob's metadata was set by join_group, which doesn't set created_by
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        bob_mls.remove_member_role(&gid, "bob").unwrap();
-        bob_mls.remove_member_role(&gid, "alice").unwrap();
+        bob_mls.remove_member_role(&gid, &id("bob")).unwrap();
+        bob_mls.remove_member_role(&gid, &id("alice")).unwrap();
     }
 
     // Bob is not the creator — should be denied admin
-    let result = bob.set_member_role(&group_id, "alice", GroupRole::Member);
+    let result = bob.set_member_role(&group_id, &id("alice"), GroupRole::Member);
     assert!(result.is_err(), "Non-creator should not be fallback admin");
     assert!(
         result.unwrap_err().to_string().contains("Only admins"),
@@ -7367,12 +7337,12 @@ fn test_no_metadata_denies_admin() {
     protocol.start().unwrap();
 
     // Simulate having a group in the member list but no MLS state
-    protocol.group_mesh.members.insert(
-        "group:phantom".to_string(),
-        vec!["alice".to_string(), "bob".to_string()],
-    );
+    protocol
+        .group_mesh
+        .members
+        .insert("group:phantom".to_string(), vec![id("alice"), id("bob")]);
 
-    let result = protocol.set_member_role("group:phantom", "bob", GroupRole::Admin);
+    let result = protocol.set_member_role("group:phantom", &id("bob"), GroupRole::Admin);
     assert!(
         matches!(result, Err(crate::Error::GroupNotFound(_))),
         "Phantom group should be GroupNotFound, got {:?}",
@@ -7387,21 +7357,21 @@ fn test_admin_gated_ops_on_missing_group_return_group_not_found() {
     // the error class.
     let (mut alice, _events) = setup_started_with_events();
 
-    let result = alice.invite_to_group("group:missing", "bob");
+    let result = alice.invite_to_group("group:missing", &id("bob"));
     assert!(
         matches!(result, Err(crate::Error::GroupNotFound(_))),
         "invite_to_group: expected GroupNotFound, got {:?}",
         result
     );
 
-    let result = alice.remove_from_group("group:missing", "bob");
+    let result = alice.remove_from_group("group:missing", &id("bob"));
     assert!(
         matches!(result, Err(crate::Error::GroupNotFound(_))),
         "remove_from_group: expected GroupNotFound, got {:?}",
         result
     );
 
-    let result = alice.set_member_role("group:missing", "bob", GroupRole::Admin);
+    let result = alice.set_member_role("group:missing", &id("bob"), GroupRole::Admin);
     assert!(
         matches!(result, Err(crate::Error::GroupNotFound(_))),
         "set_member_role: expected GroupNotFound, got {:?}",
@@ -7432,7 +7402,7 @@ fn test_role_getters_on_metadata_less_group_return_defaults() {
     let group_id = info.group_id.as_str().to_string();
     storage.delete("group_metadata", &group_id).unwrap();
 
-    let role = protocol.get_member_role(&group_id, "user123").unwrap();
+    let role = protocol.get_member_role(&group_id, &id("user123")).unwrap();
     assert_eq!(role, GroupRole::Member);
     let roles = protocol.get_group_roles(&group_id).unwrap();
     assert!(
@@ -7442,7 +7412,7 @@ fn test_role_getters_on_metadata_less_group_return_defaults() {
     );
 
     // A group with no MLS state at all is still GroupNotFound.
-    let missing = protocol.get_member_role("group:missing", "user123");
+    let missing = protocol.get_member_role("group:missing", &id("user123"));
     assert!(
         matches!(missing, Err(crate::Error::GroupNotFound(_))),
         "get_member_role: expected GroupNotFound, got {:?}",
@@ -7473,28 +7443,28 @@ fn test_legacy_roles_in_custom_map_are_migrated() {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(group_id).unwrap();
         // Set custom metadata with legacy role keys
-        mls.set_group_custom_metadata(&gid, "role:alice", "admin")
+        mls.set_group_custom_metadata(&gid, &format!("role:{}", id("alice")), "admin")
             .unwrap();
-        mls.set_group_custom_metadata(&gid, "role:bob", "member")
+        mls.set_group_custom_metadata(&gid, &format!("role:{}", id("bob")), "member")
             .unwrap();
         // Clear the proper roles
-        mls.remove_member_role(&gid, "alice").unwrap();
+        mls.remove_member_role(&gid, &id("alice")).unwrap();
     }
 
-    protocol.group_mesh.members.insert(
-        group_id.to_string(),
-        vec!["alice".to_string(), "bob".to_string()],
-    );
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.to_string(), vec![id("alice"), id("bob")]);
 
     // Reading metadata should trigger migration: legacy keys -> roles map
-    let role = protocol.get_member_role(group_id, "alice").unwrap();
+    let role = protocol.get_member_role(group_id, &id("alice")).unwrap();
     assert_eq!(
         role,
         GroupRole::Admin,
         "Legacy role should be migrated to admin"
     );
 
-    let role = protocol.get_member_role(group_id, "bob").unwrap();
+    let role = protocol.get_member_role(group_id, &id("bob")).unwrap();
     assert_eq!(
         role,
         GroupRole::Member,
@@ -7510,7 +7480,7 @@ fn test_fallback_admin_not_used_when_roles_exist() {
 
     // Alice is admin (stored). Even if members list sorts differently,
     // the stored role takes precedence.
-    let role = alice.get_member_role(&group_id, "alice").unwrap();
+    let role = alice.get_member_role(&group_id, &id("alice")).unwrap();
     assert_eq!(
         role,
         GroupRole::Admin,
@@ -7518,7 +7488,7 @@ fn test_fallback_admin_not_used_when_roles_exist() {
     );
 
     // Bob is member (stored), not fallback admin
-    let role = alice.get_member_role(&group_id, "bob").unwrap();
+    let role = alice.get_member_role(&group_id, &id("bob")).unwrap();
     assert_eq!(
         role,
         GroupRole::Member,
@@ -7535,7 +7505,7 @@ fn test_handle_role_change_dedup() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
 
@@ -7547,16 +7517,16 @@ fn test_handle_role_change_dedup() {
 
     let payload = super::group_mesh::GroupRoleChangePayload {
         group_id: group_id.clone(),
-        target_user_id: "bob".to_string(),
+        target_user_id: id("bob"),
         new_role: GroupRole::Admin,
-        changed_by: "alice".to_string(),
+        changed_by: id("alice"),
     };
     let data = serde_json::to_string(&payload).unwrap();
 
     // First call — should emit event
-    bob.handle_group_role_change("dedup-msg-1", "alice", &data);
+    bob.handle_group_role_change("dedup-msg-1", &id("alice"), &data);
     // Second call with same message_id — should be deduped
-    bob.handle_group_role_change("dedup-msg-1", "alice", &data);
+    bob.handle_group_role_change("dedup-msg-1", &id("alice"), &data);
 
     let captured = events.lock().unwrap();
     let role_events: Vec<_> = captured
@@ -7577,19 +7547,19 @@ fn test_demote_other_admin_succeeds_when_caller_remains_admin() {
 
     // Both admins
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Admin)
         .unwrap();
 
     // Alice demotes Bob — alice remains admin, so this should succeed
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Member)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Member)
         .unwrap();
     assert_eq!(
-        alice.get_member_role(&group_id, "bob").unwrap(),
+        alice.get_member_role(&group_id, &id("bob")).unwrap(),
         GroupRole::Member
     );
     assert_eq!(
-        alice.get_member_role(&group_id, "alice").unwrap(),
+        alice.get_member_role(&group_id, &id("alice")).unwrap(),
         GroupRole::Admin,
         "Alice should remain admin"
     );
@@ -7604,12 +7574,12 @@ fn test_last_admin_demotion_blocked_when_targeting_other() {
 
     // Both admins
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Admin)
         .unwrap();
 
     // Demote alice (leaves bob as sole admin) — should succeed since bob remains
     alice
-        .set_member_role(&group_id, "alice", GroupRole::Member)
+        .set_member_role(&group_id, &id("alice"), GroupRole::Member)
         .unwrap();
 
     // Re-promote alice so she can call set_member_role (needs admin for auth)
@@ -7617,18 +7587,18 @@ fn test_last_admin_demotion_blocked_when_targeting_other() {
     {
         let mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        mls.set_member_role(&gid, "alice", GroupRole::Admin)
+        mls.set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
 
     // Now alice=admin, bob=admin. Demote bob — leaves alice as sole admin. Should succeed.
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Member)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Member)
         .unwrap();
 
     // Now alice is the sole admin. Try to demote alice (targeting self) — already tested.
-    // The new scenario: alice is sole admin, try to demote her by targeting "alice".
-    let result = alice.set_member_role(&group_id, "alice", GroupRole::Member);
+    // The new scenario: alice is sole admin, try to demote her by targeting &id("alice").
+    let result = alice.set_member_role(&group_id, &id("alice"), GroupRole::Member);
     assert!(
         result.is_err(),
         "Should not be able to demote the last admin"
@@ -7640,22 +7610,22 @@ fn test_last_admin_demotion_blocked_when_targeting_other() {
 
     // Re-promote bob, then test demoting bob when he's the sole admin
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Admin)
         .unwrap();
     // Demote alice so bob is sole admin
     alice
-        .set_member_role(&group_id, "alice", GroupRole::Member)
+        .set_member_role(&group_id, &id("alice"), GroupRole::Member)
         .unwrap();
     // Re-grant alice admin so she passes auth, but keep bob as sole "other" admin
     {
         let mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        mls.set_member_role(&gid, "alice", GroupRole::Admin)
+        mls.set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
     // Now 2 admins: alice, bob. Demote alice via API to make bob sole admin.
     alice
-        .set_member_role(&group_id, "alice", GroupRole::Member)
+        .set_member_role(&group_id, &id("alice"), GroupRole::Member)
         .unwrap();
     // bob is now the sole admin. Alice is member but we need her to be admin
     // to call set_member_role. The only way to do this without bob's protocol
@@ -7666,7 +7636,7 @@ fn test_last_admin_demotion_blocked_when_targeting_other() {
     // demote themselves.
 
     // Verify: alice (member) cannot demote bob (sole admin)
-    let result = alice.set_member_role(&group_id, "bob", GroupRole::Member);
+    let result = alice.set_member_role(&group_id, &id("bob"), GroupRole::Member);
     assert!(result.is_err());
     assert!(
         result.unwrap_err().to_string().contains("Only admins"),
@@ -7685,28 +7655,28 @@ fn test_auto_promote_after_last_admin_removed() {
 
     // Promote bob so both are admin, then have alice remove bob.
     alice
-        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .set_member_role(&group_id, &id("bob"), GroupRole::Admin)
         .unwrap();
     // Demote alice so bob is sole admin
     alice
-        .set_member_role(&group_id, "alice", GroupRole::Member)
+        .set_member_role(&group_id, &id("alice"), GroupRole::Member)
         .unwrap();
     // Re-promote alice for auth
     {
         let mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        mls.set_member_role(&gid, "alice", GroupRole::Admin)
+        mls.set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
 
     // Now alice=admin, bob=admin. Remove bob via MLS.
-    let result = alice.remove_from_group(&group_id, "bob");
+    let result = alice.remove_from_group(&group_id, &id("bob"));
     // This may fail at the MLS level since our test setup doesn't always
     // have a fully working MLS state for removals. Check what we can.
     if result.is_ok() {
         // After removing bob (who was admin), alice should still be admin
         // or auto-promoted if she wasn't.
-        let role = alice.get_member_role(&group_id, "alice").unwrap();
+        let role = alice.get_member_role(&group_id, &id("alice")).unwrap();
         assert_eq!(
             role,
             GroupRole::Admin,
@@ -7770,7 +7740,7 @@ fn test_welcome_payload_roles_stored_on_join() {
     // Verify that when a welcome payload contains member_roles,
     // the joining node stores them in its local metadata.
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
@@ -7792,7 +7762,7 @@ fn test_welcome_payload_roles_stored_on_join() {
         alice_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -7810,8 +7780,8 @@ fn test_welcome_payload_roles_stored_on_join() {
     // Since handle_group_mls_welcome is private, we test indirectly via
     // handle_internal_message. Build a GroupMlsWelcomePayload with roles.
     let mut roles = HashMap::new();
-    roles.insert("alice".to_string(), GroupRole::Admin);
-    roles.insert("bob".to_string(), GroupRole::Member);
+    roles.insert(id("alice"), GroupRole::Admin);
+    roles.insert(id("bob"), GroupRole::Member);
 
     // Bob handles the welcome message. The MLS join will fail because
     // Bob already joined above, but the role storage happens before the
@@ -7832,12 +7802,12 @@ fn test_welcome_payload_roles_stored_on_join() {
     let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
     let metadata = bob_mls.get_group_metadata(&gid).unwrap().unwrap();
     assert_eq!(
-        metadata.get_role("alice"),
+        metadata.get_role(&id("alice")),
         GroupRole::Admin,
         "Alice should be admin in Bob's local metadata after welcome"
     );
     assert_eq!(
-        metadata.get_role("bob"),
+        metadata.get_role(&id("bob")),
         GroupRole::Member,
         "Bob should be member in Bob's local metadata after welcome"
     );
@@ -7858,7 +7828,7 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
     // Add "admin_alice" as a member and set her as admin
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec!["user123".to_string(), "admin_alice".to_string()],
+        vec![id("user123"), "admin_alice".to_string()],
     );
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
@@ -7868,7 +7838,7 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
     }
 
     // Simulate receiving a remove-commit from admin_alice that targets us
-    // ("user123"). Use garbage ciphertext so MLS decrypt fails, forcing
+    // (&id("user123")). Use garbage ciphertext so MLS decrypt fails, forcing
     // the self-removal fallback path.
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
@@ -7876,7 +7846,7 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
         commit_type: GroupCommitType::Remove,
         ciphertext: base64_encode(b"undecryptable-commit-ciphertext"),
         epoch: 99,
-        affected_member: Some("user123".to_string()),
+        affected_member: Some(id("user123")),
         role: None,
     };
     let content = format!(
@@ -7884,15 +7854,15 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("admin_alice", "user123", &content);
+    let message = make_message("admin_alice", &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
     // Should have emitted GroupMemberRemoved for ourselves
     let events = events.lock().unwrap();
-    let removal = events
-        .iter()
-        .find(|e| matches!(e, Event::GroupMemberRemoved { user_id, .. } if user_id == "user123"));
+    let removal = events.iter().find(
+        |e| matches!(e, Event::GroupMemberRemoved { user_id, .. } if user_id == &id("user123")),
+    );
     assert!(
         removal.is_some(),
         "Should emit GroupMemberRemoved when admin sends remove-commit targeting us"
@@ -7909,24 +7879,24 @@ fn test_self_removal_commit_from_admin_emits_event_and_cleans_up() {
 fn test_self_removal_commit_from_non_admin_is_rejected() {
     let (mut protocol, events) = setup_started_with_events();
 
-    // Create a group where "user123" (test default) is the only member/admin
+    // Create a group where &id("user123") (test default) is the only member/admin
     let info = protocol.create_group("Security Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
     // Add a non-admin member "eve" to the member cache
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["user123".to_string(), "eve".to_string()],
-    );
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("user123"), "eve".to_string()]);
 
-    // Eve (non-admin) sends a forged commit claiming to remove "user123"
+    // Eve (non-admin) sends a forged commit claiming to remove &id("user123")
     let commit_payload = GroupMlsCommitPayload {
         affected_member_rich: None,
         group_id: group_id.clone(),
         commit_type: GroupCommitType::Remove,
         ciphertext: base64_encode(b"garbage-ciphertext"),
         epoch: 99,
-        affected_member: Some("user123".to_string()),
+        affected_member: Some(id("user123")),
         role: None,
     };
     let content = format!(
@@ -7934,7 +7904,7 @@ fn test_self_removal_commit_from_non_admin_is_rejected() {
         internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload).unwrap()
     );
-    let message = make_message("eve", "user123", &content);
+    let message = make_message("eve", &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -7968,7 +7938,7 @@ fn test_plaintext_removal_notification_from_admin_cleans_up() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
 
@@ -7994,15 +7964,15 @@ fn test_plaintext_removal_notification_from_admin_cleans_up() {
     // Simulate Alice (admin) sending a plaintext removal notification to Bob
     let payload = crate::protocol::GroupMemberRemovedPayload {
         group_id: group_id.clone(),
-        user_id: "bob".to_string(),
-        removed_by: "alice".to_string(),
+        user_id: id("bob"),
+        removed_by: id("alice"),
     };
     let content = format!(
         "{}{}",
         internal_prefixes::GROUP_MEMBER_REMOVED,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = make_message("alice", "bob", &content);
+    let message = make_message(&id("alice"), &id("bob"), &content);
     let result = bob.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -8010,7 +7980,7 @@ fn test_plaintext_removal_notification_from_admin_cleans_up() {
     let events = bob_events.lock().unwrap();
     let removal = events
         .iter()
-        .find(|e| matches!(e, Event::GroupMemberRemoved { user_id, .. } if user_id == "bob"));
+        .find(|e| matches!(e, Event::GroupMemberRemoved { user_id, .. } if user_id == &id("bob")));
     assert!(
         removal.is_some(),
         "Bob should emit GroupMemberRemoved from plaintext notification"
@@ -8048,24 +8018,24 @@ fn test_plaintext_removal_notification_from_non_admin_member_rejected() {
     let info = protocol.create_group("Security Test 2").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    // Add "mallory" as a non-admin member
-    protocol.group_mesh.members.insert(
-        group_id.clone(),
-        vec!["user123".to_string(), "mallory".to_string()],
-    );
+    // Add &id("mallory") as a non-admin member
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec![id("user123"), id("mallory")]);
 
     // Mallory (non-admin member) sends a fake removal notification
     let payload = crate::protocol::GroupMemberRemovedPayload {
         group_id: group_id.clone(),
-        user_id: "user123".to_string(),
-        removed_by: "mallory".to_string(),
+        user_id: id("user123"),
+        removed_by: id("mallory"),
     };
     let content = format!(
         "{}{}",
         internal_prefixes::GROUP_MEMBER_REMOVED,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = make_message("mallory", "user123", &content);
+    let message = make_message(&id("mallory"), &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -8099,23 +8069,23 @@ fn test_plaintext_removal_notification_from_nonmember_naming_admin_rejected() {
     // behalf of the admin and must be dropped.
     let (mut protocol, events) = setup_started_with_events();
 
-    // Create a group — "user123" (test default) is creator/admin.
+    // Create a group — &id("user123") (test default) is creator/admin.
     let info = protocol.create_group("Relay Evict Forgery Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    // A non-member sender names the real admin ("user123") in removed_by,
+    // A non-member sender names the real admin (&id("user123")) in removed_by,
     // trying to evict the local node from its own group.
     let payload = crate::protocol::GroupMemberRemovedPayload {
         group_id: group_id.clone(),
-        user_id: "user123".to_string(),
-        removed_by: "user123".to_string(),
+        user_id: id("user123"),
+        removed_by: id("user123"),
     };
     let content = format!(
         "{}{}",
         internal_prefixes::GROUP_MEMBER_REMOVED,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = make_message("relay-server", "user123", &content);
+    let message = make_message("relay-server", &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -8139,14 +8109,14 @@ fn test_plaintext_removal_notification_from_nonmember_naming_admin_rejected() {
 fn test_plaintext_removal_notification_from_relay_unverifiable_rejected() {
     let (mut protocol, events) = setup_started_with_events();
 
-    // Create a group — "user123" is creator/admin
+    // Create a group — &id("user123") is creator/admin
     let info = protocol.create_group("Relay Security Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
     // Non-member sender with a removed_by that is NOT a known admin
     let payload = crate::protocol::GroupMemberRemovedPayload {
         group_id: group_id.clone(),
-        user_id: "user123".to_string(),
+        user_id: id("user123"),
         removed_by: "fake-admin".to_string(),
     };
     let content = format!(
@@ -8154,7 +8124,7 @@ fn test_plaintext_removal_notification_from_relay_unverifiable_rejected() {
         internal_prefixes::GROUP_MEMBER_REMOVED,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = make_message("attacker", "user123", &content);
+    let message = make_message("attacker", &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -8183,7 +8153,7 @@ fn test_other_member_removal_from_non_admin_does_not_poison_send_cache() {
     let group_id = info.group_id.as_str().to_string();
 
     // Promote "admin_alice" to admin and seed the send cache with a real
-    // member "bob" whom the attacker will try to drop.
+    // member &id("bob") whom the attacker will try to drop.
     {
         let mls = protocol.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
@@ -8192,18 +8162,14 @@ fn test_other_member_removal_from_non_admin_does_not_poison_send_cache() {
     }
     protocol.group_mesh.members.insert(
         group_id.clone(),
-        vec![
-            "user123".to_string(),
-            "admin_alice".to_string(),
-            "bob".to_string(),
-        ],
+        vec![id("user123"), "admin_alice".to_string(), id("bob")],
     );
 
-    // Non-admin "eve" forges a removal of "bob", naming the real admin in
+    // Non-admin "eve" forges a removal of &id("bob"), naming the real admin in
     // `removed_by`. Authorization is off `sender` (eve), not `removed_by`.
     let payload = crate::protocol::GroupMemberRemovedPayload {
         group_id: group_id.clone(),
-        user_id: "bob".to_string(),
+        user_id: id("bob"),
         removed_by: "admin_alice".to_string(),
     };
     let content = format!(
@@ -8211,7 +8177,7 @@ fn test_other_member_removal_from_non_admin_does_not_poison_send_cache() {
         internal_prefixes::GROUP_MEMBER_REMOVED,
         serde_json::to_string(&payload).unwrap()
     );
-    let message = make_message("eve", "user123", &content);
+    let message = make_message("eve", &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -8226,18 +8192,18 @@ fn test_other_member_removal_from_non_admin_does_not_poison_send_cache() {
         );
         let members = protocol.group_mesh.members.get(&group_id).unwrap();
         assert!(
-            members.contains(&"bob".to_string()),
+            members.contains(&id("bob")),
             "Non-admin removal must not drop a real member from the fan-out cache"
         );
     }
 
     // The same removal from the authenticated admin IS honored.
-    let message = make_message("admin_alice", "user123", &content);
+    let message = make_message("admin_alice", &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
     let members = protocol.group_mesh.members.get(&group_id).unwrap();
     assert!(
-        !members.contains(&"bob".to_string()),
+        !members.contains(&id("bob")),
         "An admin-authorized removal should drop the member from the cache"
     );
 }
@@ -8264,12 +8230,12 @@ fn test_group_member_added_from_mesh_is_dropped_not_cache_poisoned() {
     protocol
         .group_mesh
         .members
-        .insert(group_id.clone(), vec!["user123".to_string()]);
+        .insert(group_id.clone(), vec![id("user123")]);
 
     let payload = crate::protocol::GroupMemberAddedPayload {
         group_id: group_id.clone(),
         user_id: "eve".to_string(),
-        added_by: "user123".to_string(),
+        added_by: id("user123"),
         group_name: None,
     };
     let content = format!(
@@ -8280,7 +8246,7 @@ fn test_group_member_added_from_mesh_is_dropped_not_cache_poisoned() {
 
     // (1) Mesh arrival (non-Internet) must be dropped: no cache mutation, no
     // roster event.
-    let message = make_message("eve", "user123", &content);
+    let message = make_message("eve", &id("user123"), &content);
     let result = protocol.process_internal_message_via(&message, Some(TransportType::BLE));
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
     {
@@ -8299,7 +8265,7 @@ fn test_group_member_added_from_mesh_is_dropped_not_cache_poisoned() {
     }
 
     // (2) The same frame delivered over the Internet relay path is honored.
-    let message = make_message("user123", "user123", &content);
+    let message = make_message(&id("user123"), &id("user123"), &content);
     let result = protocol.process_internal_message_via(&message, Some(TransportType::Internet));
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
     let members = protocol.group_mesh.members.get(&group_id).unwrap();
@@ -8329,12 +8295,12 @@ fn test_group_member_added_over_internet_accepted_regardless_of_sender_documents
     protocol
         .group_mesh
         .members
-        .insert(group_id.clone(), vec!["user123".to_string()]);
+        .insert(group_id.clone(), vec![id("user123")]);
 
     let payload = crate::protocol::GroupMemberAddedPayload {
         group_id: group_id.clone(),
         user_id: "eve".to_string(),
-        added_by: "user123".to_string(),
+        added_by: id("user123"),
         group_name: None,
     };
     let content = format!(
@@ -8344,7 +8310,7 @@ fn test_group_member_added_over_internet_accepted_regardless_of_sender_documents
     );
 
     // An arbitrary, non-admin, non-member `sender` over the Internet relay path.
-    let message = make_message("mallory", "user123", &content);
+    let message = make_message(&id("mallory"), &id("user123"), &content);
     let result = protocol.process_internal_message_via(&message, Some(TransportType::Internet));
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
     let members = protocol.group_mesh.members.get(&group_id).unwrap();
@@ -8363,7 +8329,7 @@ fn test_key_package_sent_to_cleared_after_invite_consumption() {
     let (mut alice, _bob, _group_id) = setup_alice_bob_group("KP Test");
 
     // Simulate that Alice has already sent a key package to Bob
-    alice.key_package_sent_to.insert("bob".to_string());
+    alice.key_package_sent_to.insert(id("bob"));
 
     // Simulate Alice consuming Bob's key package for an invite.
     // After invite_to_group, the key_package_sent_to for the invitee
@@ -8371,9 +8337,9 @@ fn test_key_package_sent_to_cleared_after_invite_consumption() {
     //
     // We can't easily call invite_to_group (needs a key package), so
     // test the field directly after the clear logic.
-    alice.key_package_sent_to.remove("bob");
+    alice.key_package_sent_to.remove(&id("bob"));
     assert!(
-        !alice.key_package_sent_to.contains("bob"),
+        !alice.key_package_sent_to.contains(&id("bob")),
         "key_package_sent_to should be cleared for invitee after invite"
     );
 }
@@ -8386,12 +8352,12 @@ fn test_welcome_handler_clears_key_package_sent_to() {
     // processing the Welcome (so he can send a fresh key package).
     // In setup_alice_bob_group, bob manually joins, so let's verify
     // the behavior by checking that the field can be cleared.
-    bob.key_package_sent_to.insert("alice".to_string());
+    bob.key_package_sent_to.insert(id("alice"));
 
     // Simulate the clear that happens in handle_group_mls_welcome
-    bob.key_package_sent_to.remove("alice");
+    bob.key_package_sent_to.remove(&id("alice"));
     assert!(
-        !bob.key_package_sent_to.contains("alice"),
+        !bob.key_package_sent_to.contains(&id("alice")),
         "key_package_sent_to should be cleared for inviter after Welcome"
     );
 }
@@ -8432,7 +8398,7 @@ fn test_rename_group_success() {
         assert_eq!(gid, &group_id);
         assert_eq!(new_name, "New Name");
         assert_eq!(old_name.as_deref(), Some("Original Name"));
-        assert_eq!(renamed_by, "alice");
+        assert_eq!(renamed_by, &id("alice"));
     }
 }
 
@@ -8460,7 +8426,7 @@ fn test_handle_group_rename_from_admin() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
         bob_mls.set_group_name(&gid, "Original Name").unwrap();
     }
@@ -8474,11 +8440,11 @@ fn test_handle_group_rename_from_admin() {
     let payload = GroupRenamePayload {
         group_id: group_id.clone(),
         new_name: "Renamed By Alice".to_string(),
-        renamed_by: "alice".to_string(),
+        renamed_by: id("alice"),
     };
     bob.handle_group_rename(
         "msg-rename-1",
-        "alice",
+        &id("alice"),
         &serde_json::to_string(&payload).unwrap(),
     );
 
@@ -8493,7 +8459,7 @@ fn test_handle_group_rename_from_admin() {
         .find(|e| matches!(e, Event::GroupRenamed { .. }));
     assert!(rename_event.is_some(), "Should emit GroupRenamed event");
     if let Some(Event::GroupRenamed { renamed_by, .. }) = rename_event {
-        assert_eq!(renamed_by, "alice", "Should use transport sender");
+        assert_eq!(renamed_by, &id("alice"), "Should use transport sender");
     }
 }
 
@@ -8506,7 +8472,7 @@ fn test_handle_group_rename_from_non_admin_rejected() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
 
@@ -8516,15 +8482,15 @@ fn test_handle_group_rename_from_non_admin_rejected() {
         events_clone.lock().unwrap().push(event);
     });
 
-    // Incoming rename from "bob" (non-admin sender)
+    // Incoming rename from &id("bob") (non-admin sender)
     let payload = GroupRenamePayload {
         group_id: group_id.clone(),
         new_name: "Hacked Name".to_string(),
-        renamed_by: "bob".to_string(),
+        renamed_by: id("bob"),
     };
     bob.handle_group_rename(
         "msg-rename-2",
-        "bob",
+        &id("bob"),
         &serde_json::to_string(&payload).unwrap(),
     );
 
@@ -8548,7 +8514,7 @@ fn test_handle_group_rename_dedup() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
 
@@ -8561,14 +8527,14 @@ fn test_handle_group_rename_dedup() {
     let payload = GroupRenamePayload {
         group_id: group_id.clone(),
         new_name: "New Name".to_string(),
-        renamed_by: "alice".to_string(),
+        renamed_by: id("alice"),
     };
     let json = serde_json::to_string(&payload).unwrap();
 
     // First delivery — accepted
-    bob.handle_group_rename("msg-rename-dup", "alice", &json);
+    bob.handle_group_rename("msg-rename-dup", &id("alice"), &json);
     // Second delivery — deduplicated
-    bob.handle_group_rename("msg-rename-dup", "alice", &json);
+    bob.handle_group_rename("msg-rename-dup", &id("alice"), &json);
 
     let captured = events.lock().unwrap();
     let rename_count = captured
@@ -8587,7 +8553,7 @@ fn test_handle_group_rename_uses_transport_sender() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
     }
 
@@ -8597,15 +8563,15 @@ fn test_handle_group_rename_uses_transport_sender() {
         events_clone.lock().unwrap().push(event);
     });
 
-    // Payload claims "mallory" renamed, but transport sender is "alice"
+    // Payload claims &id("mallory") renamed, but transport sender is &id("alice")
     let payload = GroupRenamePayload {
         group_id: group_id.clone(),
         new_name: "Spoofed Name".to_string(),
-        renamed_by: "mallory".to_string(),
+        renamed_by: id("mallory"),
     };
     bob.handle_group_rename(
         "msg-rename-spoof",
-        "alice",
+        &id("alice"),
         &serde_json::to_string(&payload).unwrap(),
     );
 
@@ -8615,7 +8581,8 @@ fn test_handle_group_rename_uses_transport_sender() {
         .find(|e| matches!(e, Event::GroupRenamed { .. }))
     {
         assert_eq!(
-            renamed_by, "alice",
+            renamed_by,
+            &id("alice"),
             "renamed_by should be transport sender, not payload field"
         );
     } else {
@@ -8634,7 +8601,7 @@ fn test_rename_group_payload_serialization() {
     let parsed: GroupRenamePayload = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.group_id, "grp-123");
     assert_eq!(parsed.new_name, "Test Name");
-    assert_eq!(parsed.renamed_by, "alice");
+    assert_eq!(parsed.renamed_by, "alice".to_string());
 }
 
 #[test]
@@ -8695,7 +8662,7 @@ fn setup_race_alice_bob() -> (
     String,
 ) {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
@@ -8720,7 +8687,7 @@ fn setup_race_alice_bob() -> (
         let (welcome, _commit) = alice_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -8733,7 +8700,7 @@ fn setup_race_alice_bob() -> (
         "group_id": group_id,
         "group_name": "Race Group",
         "welcome_data": base64_encode(&welcome.welcome_data),
-        "member_list": ["alice", "bob"],
+        "member_list": [&id("alice"), &id("bob")],
     })
     .to_string();
 
@@ -8763,8 +8730,8 @@ fn test_group_message_before_welcome_buffered_then_delivered_on_join() {
 
     // The first group message reaches Bob BEFORE the Welcome.
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
-    let wire = make_message("alice", "bob", "unused-envelope");
-    let result = bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
+    let result = bob.handle_group_mls_msg(&wire, &id("alice"), &msg_json);
     // Buffered, not delivered: the deferred-ACK atom returns Deferred so the
     // receive loop skips the ACK and the sender keeps retransmitting until the
     // drain surfaces it.
@@ -8782,7 +8749,7 @@ fn test_group_message_before_welcome_buffered_then_delivered_on_join() {
     );
 
     // Now the Welcome arrives — the buffered message must be delivered.
-    bob.handle_group_mls_welcome("welcome-race-1", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("welcome-race-1", &id("alice"), &welcome_json);
 
     let received = group_messages_received(&events);
     assert_eq!(
@@ -8805,11 +8772,11 @@ fn test_group_message_before_welcome_redelivery_not_duplicated() {
     let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
 
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
-    let wire = make_message("alice", "bob", "unused-envelope");
-    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
+    bob.handle_group_mls_msg(&wire, &id("alice"), &msg_json);
     // Redelivery via a second transport: same message ID, rejected by dedup,
     // but the buffered copy must survive.
-    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    bob.handle_group_mls_msg(&wire, &id("alice"), &msg_json);
     assert_eq!(
         bob.group_mesh
             .pending_group_messages
@@ -8819,7 +8786,7 @@ fn test_group_message_before_welcome_redelivery_not_duplicated() {
         "Redelivery must not create a second buffered copy"
     );
 
-    bob.handle_group_mls_welcome("welcome-race-2", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("welcome-race-2", &id("alice"), &welcome_json);
 
     let received = group_messages_received(&events);
     assert_eq!(received.len(), 1, "Exactly one delivery after the Welcome");
@@ -8862,12 +8829,13 @@ fn test_deferred_group_msg_defers_ack_then_recovers_without_loss_or_dup() {
     let ble = attach_ble_mock(&mut bob);
 
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
-    let wire = make_message("alice", "bob", "unused-envelope");
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
     let msg_id = wire.id.as_str().to_string();
 
     // Arrives before the Welcome: buffered and deferred — no delivery ACK yet,
     // so the sender's ack_manager keeps the message live for retransmission.
-    let result = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    let result =
+        bob.handle_group_mls_msg_via(&wire, &id("alice"), &msg_json, Some(TransportType::BLE));
     assert!(matches!(result, InternalMessageResult::Deferred));
     assert!(group_messages_received(&events).is_empty());
     assert_eq!(
@@ -8878,7 +8846,7 @@ fn test_deferred_group_msg_defers_ack_then_recovers_without_loss_or_dup() {
 
     // The Welcome arrives: the drain surfaces the message AND sends the
     // deferred ACK on its arrival transport.
-    bob.handle_group_mls_welcome("welcome-defer-1", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("welcome-defer-1", &id("alice"), &welcome_json);
 
     let received = group_messages_received(&events);
     assert_eq!(received.len(), 1, "exactly one delivery — no loss, no dup");
@@ -8900,12 +8868,12 @@ fn test_deferred_group_msg_is_acked_on_drain_without_a_resend() {
     let ble = attach_ble_mock(&mut bob);
 
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "one and only");
-    let wire = make_message("alice", "bob", "unused-envelope");
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
     let msg_id = wire.id.as_str().to_string();
 
     // Exactly one inbound receipt, then the Welcome — no sender resend at all.
-    bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
-    bob.handle_group_mls_welcome("welcome-defer-2", "alice", &welcome_json);
+    bob.handle_group_mls_msg_via(&wire, &id("alice"), &msg_json, Some(TransportType::BLE));
+    bob.handle_group_mls_welcome("welcome-defer-2", &id("alice"), &welcome_json);
 
     // The ACK is sent by the drain itself, back to the wire sender, closing the
     // latency window without waiting for a duplicate to arrive.
@@ -8920,7 +8888,7 @@ fn test_deferred_group_msg_is_acked_on_drain_without_a_resend() {
         })
         .collect();
     assert_eq!(acks.len(), 1, "delivered on drain, ACKed without a resend");
-    assert_eq!(acks[0].recipient.as_str(), "alice");
+    assert_eq!(acks[0].recipient.as_str(), id("alice"));
 }
 
 #[test]
@@ -8929,15 +8897,15 @@ fn test_group_dup_while_pending_defers_not_reacks() {
     let ble = attach_ble_mock(&mut bob);
 
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
-    let wire = make_message("alice", "bob", "unused-envelope");
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
     let msg_id = wire.id.as_str().to_string();
 
-    let r1 = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    let r1 = bob.handle_group_mls_msg_via(&wire, &id("alice"), &msg_json, Some(TransportType::BLE));
     assert!(matches!(r1, InternalMessageResult::Deferred));
     // A retransmit of the still-pending message must also defer (no ACK), must
     // not stack a second buffered copy, and must not re-run MLS decrypt (the
     // dup branch returns before decrypt — replay-amplification defense intact).
-    let r2 = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    let r2 = bob.handle_group_mls_msg_via(&wire, &id("alice"), &msg_json, Some(TransportType::BLE));
     assert!(matches!(r2, InternalMessageResult::Deferred));
     assert_eq!(
         bob.group_mesh
@@ -8954,7 +8922,7 @@ fn test_group_dup_while_pending_defers_not_reacks() {
     );
 
     // Drain delivers exactly once and ACKs exactly once.
-    bob.handle_group_mls_welcome("welcome-defer-3", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("welcome-defer-3", &id("alice"), &welcome_json);
     assert_eq!(group_messages_received(&events).len(), 1);
     assert_eq!(ack_count(&ble, &msg_id), 1);
 }
@@ -8965,11 +8933,11 @@ fn test_group_dup_after_delivery_reacks_and_not_redelivered() {
     let ble = attach_ble_mock(&mut bob);
 
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
-    let wire = make_message("alice", "bob", "unused-envelope");
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
     let msg_id = wire.id.as_str().to_string();
 
-    bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
-    bob.handle_group_mls_welcome("welcome-defer-4", "alice", &welcome_json);
+    bob.handle_group_mls_msg_via(&wire, &id("alice"), &msg_json, Some(TransportType::BLE));
+    bob.handle_group_mls_welcome("welcome-defer-4", &id("alice"), &welcome_json);
     assert_eq!(group_messages_received(&events).len(), 1);
     assert_eq!(ack_count(&ble, &msg_id), 1);
 
@@ -8978,7 +8946,7 @@ fn test_group_dup_after_delivery_reacks_and_not_redelivered() {
     // stop) and it must NOT be surfaced a second time. The handler itself does
     // not ACK on Consumed (that is the loop's job), so the drain ACK count is
     // unchanged here.
-    let r = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    let r = bob.handle_group_mls_msg_via(&wire, &id("alice"), &msg_json, Some(TransportType::BLE));
     assert!(matches!(r, InternalMessageResult::Consumed));
     assert_eq!(
         group_messages_received(&events).len(),
@@ -9023,15 +8991,15 @@ fn test_both_buffered_copies_of_one_logical_message_deliver_exactly_once() {
 
     // The mesh re-issued copy: buffered under its envelope id, carrying the
     // logical id in its payload.
-    let wire = make_message("alice", "bob", "unused-envelope");
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
     let envelope_id = wire.id.as_str().to_string();
-    let r = bob.handle_group_mls_msg_via(&wire, "alice", &msg_json, Some(TransportType::BLE));
+    let r = bob.handle_group_mls_msg_via(&wire, &id("alice"), &msg_json, Some(TransportType::BLE));
     assert!(matches!(r, InternalMessageResult::Deferred));
 
     // Then the relay's own copy of the same logical message.
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         &ciphertext_b64,
         "2026-07-31T00:00:00Z",
         logical,
@@ -9048,7 +9016,7 @@ fn test_both_buffered_copies_of_one_logical_message_deliver_exactly_once() {
     );
 
     // Group state catches up.
-    bob.handle_group_mls_welcome("welcome-both-copies", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("welcome-both-copies", &id("alice"), &welcome_json);
 
     let received = group_messages_received(&events);
     assert_eq!(
@@ -9087,15 +9055,19 @@ fn test_evicted_pending_group_msg_recovers_on_resend_after_state_ready() {
     // each buffers.
     let cap = MAX_PENDING_GROUP_MESSAGES_PER_GROUP;
     let first_json = make_group_mls_msg_json(&alice, &group_id, "m0");
-    let first_wire = make_message("alice", "bob", "unused-envelope");
+    let first_wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
     let first_id = first_wire.id.as_str().to_string();
-    let r0 =
-        bob.handle_group_mls_msg_via(&first_wire, "alice", &first_json, Some(TransportType::BLE));
+    let r0 = bob.handle_group_mls_msg_via(
+        &first_wire,
+        &id("alice"),
+        &first_json,
+        Some(TransportType::BLE),
+    );
     assert!(matches!(r0, InternalMessageResult::Deferred));
     for i in 1..=cap {
         let json = make_group_mls_msg_json(&alice, &group_id, &format!("m{i}"));
-        let wire = make_message("alice", "bob", "unused-envelope");
-        let r = bob.handle_group_mls_msg_via(&wire, "alice", &json, Some(TransportType::BLE));
+        let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
+        let r = bob.handle_group_mls_msg_via(&wire, &id("alice"), &json, Some(TransportType::BLE));
         assert!(matches!(r, InternalMessageResult::Deferred));
     }
 
@@ -9115,8 +9087,12 @@ fn test_evicted_pending_group_msg_recovers_on_resend_after_state_ready() {
 
     // m0 was never ACKed (deferred), so the sender resends it — and it
     // re-enters the buffer instead of being rejected as a duplicate.
-    let r =
-        bob.handle_group_mls_msg_via(&first_wire, "alice", &first_json, Some(TransportType::BLE));
+    let r = bob.handle_group_mls_msg_via(
+        &first_wire,
+        &id("alice"),
+        &first_json,
+        Some(TransportType::BLE),
+    );
     assert!(
         matches!(r, InternalMessageResult::Deferred),
         "a released message must re-buffer on resend, not be swallowed"
@@ -9135,7 +9111,7 @@ fn test_group_message_at_future_epoch_buffered_then_delivered_after_commit() {
     });
 
     // Alice adds Charlie, advancing the epoch. Bob has not seen the commit.
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
     charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
@@ -9148,7 +9124,7 @@ fn test_group_message_at_future_epoch_buffered_then_delivered_after_commit() {
         let (_welcome, commit) = alice_mls
             .add_group_member(
                 &gid,
-                "charlie",
+                &id("charlie"),
                 &charlie_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -9159,8 +9135,8 @@ fn test_group_message_at_future_epoch_buffered_then_delivered_after_commit() {
 
     // Alice's next message is encrypted at the new epoch and outruns the commit.
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "after epoch bump");
-    let wire = make_message("alice", "bob", "unused-envelope");
-    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
+    bob.handle_group_mls_msg(&wire, &id("alice"), &msg_json);
 
     assert!(group_messages_received(&events).is_empty());
     assert_eq!(
@@ -9178,10 +9154,10 @@ fn test_group_message_at_future_epoch_buffered_then_delivered_after_commit() {
         "commit_type": "add",
         "ciphertext": base64_encode(&commit.ciphertext),
         "epoch": commit.epoch,
-        "affected_member": "charlie",
+        "affected_member": &id("charlie"),
     })
     .to_string();
-    bob.handle_group_mls_commit("commit-epoch-race", "alice", &commit_json);
+    bob.handle_group_mls_commit("commit-epoch-race", &id("alice"), &commit_json);
 
     let received = group_messages_received(&events);
     assert_eq!(
@@ -9208,7 +9184,7 @@ fn test_relay_group_message_before_welcome_buffered_then_delivered() {
     };
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         &ciphertext_b64,
         "2026-07-10T00:00:00Z",
         "relay-race-1",
@@ -9226,7 +9202,7 @@ fn test_relay_group_message_before_welcome_buffered_then_delivered() {
         "Relay message arriving before the Welcome should be buffered"
     );
 
-    bob.handle_group_mls_welcome("welcome-race-3", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("welcome-race-3", &id("alice"), &welcome_json);
 
     let received = group_messages_received(&events);
     assert_eq!(received.len(), 1);
@@ -9249,7 +9225,7 @@ fn test_commit_riding_message_channel_drains_buffered_messages() {
     });
 
     // Alice adds Charlie, advancing the epoch. Bob has not seen the commit.
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
     charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
@@ -9262,7 +9238,7 @@ fn test_commit_riding_message_channel_drains_buffered_messages() {
         let (_welcome, commit) = alice_mls
             .add_group_member(
                 &gid,
-                "charlie",
+                &id("charlie"),
                 &charlie_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -9273,8 +9249,8 @@ fn test_commit_riding_message_channel_drains_buffered_messages() {
 
     // The future-epoch message arrives first and is buffered.
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "unblocked by riding commit");
-    let wire = make_message("alice", "bob", "unused-envelope");
-    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
+    bob.handle_group_mls_msg(&wire, &id("alice"), &msg_json);
     assert!(group_messages_received(&events).is_empty());
 
     // The commit catches up on the *message* channel (not the commit
@@ -9286,8 +9262,8 @@ fn test_commit_riding_message_channel_drains_buffered_messages() {
         "epoch": commit.epoch,
     })
     .to_string();
-    let wire2 = make_message("alice", "bob", "unused-envelope");
-    let result = bob.handle_group_mls_msg(&wire2, "alice", &commit_as_msg_json);
+    let wire2 = make_message(&id("alice"), &id("bob"), "unused-envelope");
+    let result = bob.handle_group_mls_msg(&wire2, &id("alice"), &commit_as_msg_json);
     assert!(matches!(result, InternalMessageResult::Consumed));
 
     let received = group_messages_received(&events);
@@ -9313,7 +9289,7 @@ fn test_buffered_commit_riding_message_channel_unblocks_earlier_entries() {
     // at the post-Charlie epoch. Bob sees, in order: the future-epoch
     // message, the commit riding the message channel, and only then the
     // Welcome (which joins at the pre-Charlie epoch).
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
     charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
@@ -9326,7 +9302,7 @@ fn test_buffered_commit_riding_message_channel_unblocks_earlier_entries() {
         let (_welcome, commit) = alice_mls
             .add_group_member(
                 &gid,
-                "charlie",
+                &id("charlie"),
                 &charlie_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -9335,8 +9311,8 @@ fn test_buffered_commit_riding_message_channel_unblocks_earlier_entries() {
     };
 
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "needs two passes");
-    let wire = make_message("alice", "bob", "unused-envelope");
-    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
+    bob.handle_group_mls_msg(&wire, &id("alice"), &msg_json);
 
     let commit_as_msg_json = serde_json::json!({
         "group_id": group_id,
@@ -9344,8 +9320,8 @@ fn test_buffered_commit_riding_message_channel_unblocks_earlier_entries() {
         "epoch": commit.epoch,
     })
     .to_string();
-    let wire2 = make_message("alice", "bob", "unused-envelope");
-    bob.handle_group_mls_msg(&wire2, "alice", &commit_as_msg_json);
+    let wire2 = make_message(&id("alice"), &id("bob"), "unused-envelope");
+    bob.handle_group_mls_msg(&wire2, &id("alice"), &commit_as_msg_json);
 
     // Both are buffered — Bob has no group state at all yet.
     assert_eq!(
@@ -9360,7 +9336,7 @@ fn test_buffered_commit_riding_message_channel_unblocks_earlier_entries() {
     // buffer) still fails — it is one epoch ahead — and is re-buffered; the
     // riding commit behind it is consumed and advances the epoch. The
     // NonApplication-triggered second pass must deliver the message.
-    bob.handle_group_mls_welcome("welcome-nonapp-race", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("welcome-nonapp-race", &id("alice"), &welcome_json);
 
     let received = group_messages_received(&events);
     assert_eq!(
@@ -9461,7 +9437,7 @@ fn test_drain_pending_group_messages_drops_expired() {
 
     let expired = PendingGroupMessage {
         logical_id: None,
-        sender: "alice".to_string(),
+        sender: id("alice"),
         message_id: "expired-drain-1".to_string(),
         ciphertext_b64: base64_encode(b"x"),
         timestamp: None,
@@ -9496,7 +9472,7 @@ fn test_commit_and_message_both_outrun_welcome() {
     // Alice adds Charlie (advancing the epoch) while Bob's Welcome is still
     // in flight — Bob is a member from Alice's view, so he receives the
     // add-Charlie commit too.
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
     charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
@@ -9509,7 +9485,7 @@ fn test_commit_and_message_both_outrun_welcome() {
         let (_welcome, commit) = alice_mls
             .add_group_member(
                 &gid,
-                "charlie",
+                &id("charlie"),
                 &charlie_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -9526,10 +9502,10 @@ fn test_commit_and_message_both_outrun_welcome() {
         "commit_type": "add",
         "ciphertext": base64_encode(&commit.ciphertext),
         "epoch": commit.epoch,
-        "affected_member": "charlie",
+        "affected_member": &id("charlie"),
     })
     .to_string();
-    bob.handle_group_mls_commit("commit-before-welcome", "alice", &commit_json);
+    bob.handle_group_mls_commit("commit-before-welcome", &id("alice"), &commit_json);
     assert_eq!(
         bob.group_mesh
             .pending_commits
@@ -9541,13 +9517,13 @@ fn test_commit_and_message_both_outrun_welcome() {
 
     // Alice's message at the post-add epoch also outruns the Welcome.
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "outran everything");
-    let wire = make_message("alice", "bob", "unused-envelope");
-    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
+    bob.handle_group_mls_msg(&wire, &id("alice"), &msg_json);
     assert!(group_messages_received(&events).is_empty());
 
     // The Welcome finally lands: join, then the buffered commit advances the
     // epoch, then the buffered message decrypts — all in one pass.
-    bob.handle_group_mls_welcome("welcome-after-commit", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("welcome-after-commit", &id("alice"), &welcome_json);
 
     let received = group_messages_received(&events);
     assert_eq!(
@@ -10148,8 +10124,8 @@ fn test_group_message_buffer_survives_failed_welcome_join() {
     let (alice, mut bob, events, group_id, welcome_json) = setup_race_alice_bob();
 
     let msg_json = make_group_mls_msg_json(&alice, &group_id, "hello race");
-    let wire = make_message("alice", "bob", "unused-envelope");
-    bob.handle_group_mls_msg(&wire, "alice", &msg_json);
+    let wire = make_message(&id("alice"), &id("bob"), "unused-envelope");
+    bob.handle_group_mls_msg(&wire, &id("alice"), &msg_json);
 
     // A Welcome whose join fails (garbage welcome_data) must not drain or
     // drop the buffered message.
@@ -10157,10 +10133,10 @@ fn test_group_message_buffer_survives_failed_welcome_join() {
         "group_id": group_id,
         "group_name": "Race Group",
         "welcome_data": base64_encode(b"not-a-real-welcome"),
-        "member_list": ["alice", "bob"],
+        "member_list": [&id("alice"), &id("bob")],
     })
     .to_string();
-    bob.handle_group_mls_welcome("bad-welcome", "alice", &bad_welcome_json);
+    bob.handle_group_mls_welcome("bad-welcome", &id("alice"), &bad_welcome_json);
 
     assert!(group_messages_received(&events).is_empty());
     assert_eq!(
@@ -10173,7 +10149,7 @@ fn test_group_message_buffer_survives_failed_welcome_join() {
     );
 
     // The real Welcome still delivers it.
-    bob.handle_group_mls_welcome("good-welcome", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("good-welcome", &id("alice"), &welcome_json);
     let received = group_messages_received(&events);
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].0, "hello race");
@@ -10186,12 +10162,12 @@ fn test_leave_group_clears_pending_buffers() {
     let info = protocol.create_group("Leave Cleanup").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
-    protocol.buffer_pending_commit(&group_id, "mid-stale", "alice", "stale-commit");
+    protocol.buffer_pending_commit(&group_id, "mid-stale", &id("alice"), "stale-commit");
     protocol.buffer_pending_group_message(
         &group_id,
         PendingGroupMessage {
             logical_id: None,
-            sender: "alice".to_string(),
+            sender: id("alice"),
             message_id: "stale-msg".to_string(),
             ciphertext_b64: base64_encode(b"x"),
             timestamp: None,
@@ -10237,13 +10213,13 @@ fn test_relay_group_message_before_welcome_buffered_via_dispatch() {
     // legacy raw-emit branch.
     let payload = serde_json::json!({
         "group_id": group_id,
-        "sender": "alice",
+        "sender": &id("alice"),
         "content": ciphertext_b64,
         "timestamp": "2026-07-10T00:00:00Z",
         "message_id": "relay-dispatch-race-1",
     });
     let content = format!("{}{}", internal_prefixes::GROUP_MSG, payload);
-    let message = make_message("relay", "bob", &content);
+    let message = make_message("relay", &id("bob"), &content);
     let result = bob.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -10260,7 +10236,7 @@ fn test_relay_group_message_before_welcome_buffered_via_dispatch() {
         "Relay message arriving before the Welcome must be buffered by the dispatch path"
     );
 
-    bob.handle_group_mls_welcome("welcome-dispatch-1", "alice", &welcome_json);
+    bob.handle_group_mls_welcome("welcome-dispatch-1", &id("alice"), &welcome_json);
 
     let received = group_messages_received(&events);
     assert_eq!(received.len(), 1);
@@ -10280,13 +10256,13 @@ fn test_relay_group_message_legacy_base64_plaintext_emitted_raw_via_dispatch() {
     // (which would silently lose it after the TTL).
     let payload = serde_json::json!({
         "group_id": "group:legacy-relay-1",
-        "sender": "alice",
+        "sender": &id("alice"),
         "content": "aGVsbG8=",
         "timestamp": "2026-07-10T00:00:00Z",
         "message_id": "legacy-b64-1",
     });
     let content = format!("{}{}", internal_prefixes::GROUP_MSG, payload);
-    let message = make_message("relay", "user123", &content);
+    let message = make_message("relay", &id("user123"), &content);
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -10347,8 +10323,8 @@ fn test_mesh_group_message_non_mls_payload_not_buffered() {
         "epoch": 0,
     })
     .to_string();
-    let wire = make_message("mallory", "user123", "unused-envelope");
-    let result = protocol.handle_group_mls_msg(&wire, "mallory", &msg_json);
+    let wire = make_message(&id("mallory"), &id("user123"), "unused-envelope");
+    let result = protocol.handle_group_mls_msg(&wire, &id("mallory"), &msg_json);
     assert!(matches!(result, InternalMessageResult::Consumed));
 
     assert!(group_messages_received(&events).is_empty());
@@ -10564,7 +10540,7 @@ fn group_forward_seals_media_secrets_when_all_members_capable() {
     let alice_handle = wire_mock_transport(&mut alice);
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "bob",
+        &id("bob"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
 
@@ -10574,7 +10550,7 @@ fn group_forward_seals_media_secrets_when_all_members_capable() {
         bob_events_clone.lock().unwrap().push(event);
     });
 
-    let original = group_cloud_media_original("dave", "alice");
+    let original = group_cloud_media_original(&id("dave"), &id("alice"));
     alice
         .forward_message_to_group(&original, &group_id, None)
         .unwrap();
@@ -10591,11 +10567,11 @@ fn group_forward_seals_media_secrets_when_all_members_capable() {
     // member reads the sealed attribution, so a hop-visible copy would
     // expose the original sender to relays for nobody's benefit.
     assert!(
-        !wire.content.contains("dave"),
+        !wire.content.contains(&id("dave")),
         "sealed forward must not carry hop-visible attribution"
     );
 
-    let bob_message = make_message("alice", "bob", &wire.content);
+    let bob_message = make_message(&id("alice"), &id("bob"), &wire.content);
     let result = bob.process_internal_message(&bob_message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
@@ -10628,7 +10604,7 @@ fn group_forward_seals_media_secrets_when_all_members_capable() {
     let fwd = forward_info
         .as_ref()
         .expect("forward attribution restored from the sealed body");
-    assert_eq!(fwd.original_sender, "dave");
+    assert_eq!(fwd.original_sender, id("dave"));
 }
 
 #[test]
@@ -10653,7 +10629,7 @@ fn group_forward_drops_media_when_member_capability_unknown() {
         alice_events_clone.lock().unwrap().push(event);
     });
 
-    let original = group_cloud_media_original("dave", "alice");
+    let original = group_cloud_media_original(&id("dave"), &id("alice"));
     alice
         .forward_message_to_group(&original, &group_id, None)
         .unwrap();
@@ -10675,7 +10651,7 @@ fn group_forward_drops_media_when_member_capability_unknown() {
     assert!(!wire.content.contains("a2V5LWJ5dGVz"));
     assert!(!wire.content.contains(internal_prefixes::RICH_V1));
 
-    let bob_message = make_message("alice", "bob", &wire.content);
+    let bob_message = make_message(&id("alice"), &id("bob"), &wire.content);
     bob.process_internal_message(&bob_message);
 
     let events = bob_events.lock().unwrap();
@@ -10700,7 +10676,7 @@ fn group_forward_drops_media_when_member_capability_unknown() {
     let fwd = forward_info
         .as_ref()
         .expect("payload attribution survives for legacy groups");
-    assert_eq!(fwd.original_sender, "dave");
+    assert_eq!(fwd.original_sender, id("dave"));
 }
 
 #[test]
@@ -10711,7 +10687,7 @@ fn group_send_with_seals_media_toward_capable_group() {
     let alice_handle = wire_mock_transport(&mut alice);
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "bob",
+        &id("bob"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
 
@@ -10721,7 +10697,7 @@ fn group_send_with_seals_media_toward_capable_group() {
         bob_events_clone.lock().unwrap().push(event);
     });
 
-    let media = group_cloud_media_original("alice", "bob")
+    let media = group_cloud_media_original(&id("alice"), &id("bob"))
         .media_metadata
         .unwrap();
     alice
@@ -10743,7 +10719,7 @@ fn group_send_with_seals_media_toward_capable_group() {
         .expect("group send must reach the wire");
     assert!(!wire.content.contains("a2V5LWJ5dGVz"));
 
-    let bob_message = make_message("alice", "bob", &wire.content);
+    let bob_message = make_message(&id("alice"), &id("bob"), &wire.content);
     bob.process_internal_message(&bob_message);
 
     let events = bob_events.lock().unwrap();
@@ -10781,7 +10757,7 @@ fn group_relay_path_restores_sealed_media() {
         bob_events_clone.lock().unwrap().push(event);
     });
 
-    let original = group_cloud_media_original("dave", "alice");
+    let original = group_cloud_media_original(&id("dave"), &id("alice"));
     let sealed = OfflineProtocol::seal_rich_payload(
         &original.content,
         &crate::protocol::RichSendExtras {
@@ -10802,7 +10778,7 @@ fn group_relay_path_restores_sealed_media() {
 
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         &base64_encode(&encrypted.ciphertext),
         "2026-07-21T00:00:00Z",
         "relay-msg-1",
@@ -10831,7 +10807,7 @@ fn group_relay_path_restores_sealed_media() {
     );
     assert_eq!(
         forward_info.as_ref().map(|f| f.original_sender.as_str()),
-        Some("dave")
+        Some(id("dave").as_str())
     );
 }
 
@@ -10867,7 +10843,7 @@ fn group_sealed_parse_failure_surfaces_raw_text() {
         internal_prefixes::GROUP_MLS_MSG,
         serde_json::to_string(&msg_payload).unwrap()
     );
-    bob.process_internal_message(&make_message("alice", "bob", &content));
+    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &content));
 
     let events = bob_events.lock().unwrap();
     let Some(Event::GroupMessageReceived {
@@ -10900,14 +10876,14 @@ fn group_send_with_rejects_file_chunk_and_oversized_extras() {
         .unwrap_err();
     assert!(matches!(err, crate::Error::InvalidArgument(_)));
 
-    let mut original = group_cloud_media_original("dave", "alice");
+    let mut original = group_cloud_media_original(&id("dave"), &id("alice"));
     original.content_type = offline_protocol_core::ContentType::FileChunk;
     let err = alice
         .forward_message_to_group(&original, &group_id, None)
         .unwrap_err();
     assert!(matches!(err, crate::Error::InvalidArgument(_)));
 
-    let mut original = group_cloud_media_original("dave", "alice");
+    let mut original = group_cloud_media_original(&id("dave"), &id("alice"));
     if let Some(media) = original.media_metadata.as_mut() {
         media.thumbnail_base64 = Some("x".repeat(crate::protocol::MAX_RICH_EXTRAS_BYTES + 1));
     }
@@ -10932,7 +10908,7 @@ fn group_sealed_body_ignores_injected_payload_attribution() {
         bob_events_clone.lock().unwrap().push(event);
     });
 
-    let original = group_cloud_media_original("dave", "alice");
+    let original = group_cloud_media_original(&id("dave"), &id("alice"));
     let sealed = OfflineProtocol::seal_rich_payload(
         &original.content,
         &crate::protocol::RichSendExtras {
@@ -10953,13 +10929,13 @@ fn group_sealed_body_ignores_injected_payload_attribution() {
 
     // The relay rewrites the hop-visible payload to add fake attribution.
     let injected = offline_protocol_core::ForwardInfo::from_message(&make_message(
-        "mallory",
-        "bob",
+        &id("mallory"),
+        &id("bob"),
         "never sent",
     ));
     bob.handle_relay_group_message_with_mls(
         &group_id,
-        "alice",
+        &id("alice"),
         &base64_encode(&encrypted.ciphertext),
         "2026-07-22T00:00:00Z",
         "relay-injected-1",
@@ -11003,7 +10979,7 @@ fn group_buffered_drain_restores_sealed_media() {
         bob_events_clone.lock().unwrap().push(event);
     });
 
-    let original = group_cloud_media_original("dave", "alice");
+    let original = group_cloud_media_original(&id("dave"), &id("alice"));
     let sealed = OfflineProtocol::seal_rich_payload(
         &original.content,
         &crate::protocol::RichSendExtras {
@@ -11026,7 +11002,7 @@ fn group_buffered_drain_restores_sealed_media() {
         &group_id,
         PendingGroupMessage {
             logical_id: None,
-            sender: "alice".to_string(),
+            sender: id("alice"),
             message_id: "buffered-rich-1".to_string(),
             ciphertext_b64: base64_encode(&encrypted.ciphertext),
             timestamp: None,
@@ -11061,7 +11037,7 @@ fn group_buffered_drain_restores_sealed_media() {
     assert_eq!(content_type.as_deref(), Some("image"));
     assert_eq!(
         forward_info.as_ref().map(|f| f.original_sender.as_str()),
-        Some("dave")
+        Some(id("dave").as_str())
     );
 }
 
@@ -11095,7 +11071,7 @@ fn group_hint_only_send_seals_content_type_toward_capable_group() {
 
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "bob",
+        &id("bob"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
     alice
@@ -11111,7 +11087,7 @@ fn group_hint_only_send_seals_content_type_toward_capable_group() {
 
     for wire in alice_handle.sent_messages() {
         if wire.content.starts_with(internal_prefixes::GROUP_MLS_MSG) {
-            bob.process_internal_message(&make_message("alice", "bob", &wire.content));
+            bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &wire.content));
         }
     }
 
@@ -11148,11 +11124,11 @@ fn group_rich_seal_gate_requires_every_member_capable() {
         .unwrap();
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "bob",
+        &id("bob"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
 
-    let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+    let members = vec![id("alice"), id("bob"), id("carol")];
     assert!(
         !alice.group_rich_seal_active(&members),
         "a member with unknown capability must fail the gate for the whole group"
@@ -11160,7 +11136,7 @@ fn group_rich_seal_gate_requires_every_member_capable() {
 
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "carol",
+        &id("carol"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
     assert!(
@@ -11179,7 +11155,7 @@ fn group_rich_kill_switch_drops_extras_even_when_all_members_capable() {
     let alice_handle = wire_mock_transport(&mut alice);
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "bob",
+        &id("bob"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
     alice.config.encryption.rich_payload_enabled = false;
@@ -11195,7 +11171,7 @@ fn group_rich_kill_switch_drops_extras_even_when_all_members_capable() {
         alice_events_clone.lock().unwrap().push(event);
     });
 
-    let media = group_cloud_media_original("alice", "bob")
+    let media = group_cloud_media_original(&id("alice"), &id("bob"))
         .media_metadata
         .unwrap();
     alice
@@ -11218,7 +11194,7 @@ fn group_rich_kill_switch_drops_extras_even_when_all_members_capable() {
     assert!(!wire.content.contains(internal_prefixes::RICH_V1));
     assert!(!wire.content.contains("a2V5LWJ5dGVz"));
 
-    bob.process_internal_message(&make_message("alice", "bob", &wire.content));
+    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &wire.content));
 
     let events = bob_events.lock().unwrap();
     let Some(Event::GroupMessageReceived {
@@ -11287,8 +11263,8 @@ fn setup_three_party_invite(
     carol_rich_known: bool,
 ) -> (OfflineProtocol, OfflineProtocol, OfflineProtocol, String) {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     let mut carol = OfflineProtocol::new(create_test_config_for_user("carol")).unwrap();
@@ -11311,7 +11287,7 @@ fn setup_three_party_invite(
     use crate::protocol::ReceivedKeyPackage;
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     alice.pending_key_packages.insert(
-        "bob".to_string(),
+        id("bob"),
         ReceivedKeyPackage {
             key_package_data: bob_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
@@ -11320,13 +11296,13 @@ fn setup_three_party_invite(
     if bob_rich_known {
         crate::protocol::tests::feed_key_package_with_rich(
             &mut alice,
-            "bob",
+            &id("bob"),
             vec![crate::protocol::RICH_PAYLOAD_V1],
         );
         // The synthetic capability advertisement clobbered the pending key
         // package with junk bytes; restore the real one for the invite.
         alice.pending_key_packages.insert(
-            "bob".to_string(),
+            id("bob"),
             ReceivedKeyPackage {
                 key_package_data: {
                     let bob_mls = bob.mls_manager_for_testing().read().unwrap();
@@ -11337,16 +11313,20 @@ fn setup_three_party_invite(
             },
         );
     }
-    alice.invite_to_group(&group_id, "bob").unwrap();
+    alice.invite_to_group(&group_id, &id("bob")).unwrap();
     let bob_welcome = alice
         .outbox_messages()
         .find(|m| {
-            m.recipient.as_str() == "bob"
+            m.recipient.as_str() == &id("bob")
                 && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
         })
         .expect("alice must have queued bob's Welcome")
         .clone();
-    bob.process_internal_message(&make_message("alice", "bob", &bob_welcome.content));
+    bob.process_internal_message(&make_message(
+        &id("alice"),
+        &id("bob"),
+        &bob_welcome.content,
+    ));
     assert!(
         bob.group_mesh.members.contains_key(&group_id),
         "bob must have joined via the Welcome"
@@ -11360,12 +11340,12 @@ fn setup_three_party_invite(
     if carol_rich_known {
         crate::protocol::tests::feed_key_package_with_rich(
             &mut alice,
-            "carol",
+            &id("carol"),
             vec![crate::protocol::RICH_PAYLOAD_V1],
         );
     }
     alice.pending_key_packages.insert(
-        "carol".to_string(),
+        id("carol"),
         ReceivedKeyPackage {
             key_package_data: carol_kp.key_package_data,
             local_expires_at_ms: now_ms + 600_000,
@@ -11373,7 +11353,7 @@ fn setup_three_party_invite(
     );
 
     alice.clear_outbox();
-    alice.invite_to_group(&group_id, "carol").unwrap();
+    alice.invite_to_group(&group_id, &id("carol")).unwrap();
 
     (alice, bob, carol, group_id)
 }
@@ -11385,7 +11365,7 @@ fn invite_attests_rich_capability_on_commit_and_welcome() {
     let commit = alice
         .outbox_messages()
         .find(|m| {
-            m.recipient.as_str() == "bob"
+            m.recipient.as_str() == &id("bob")
                 && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
         })
         .expect("commit to bob must be queued");
@@ -11405,7 +11385,7 @@ fn invite_attests_rich_capability_on_commit_and_welcome() {
     let welcome = alice
         .outbox_messages()
         .find(|m| {
-            m.recipient.as_str() == "carol"
+            m.recipient.as_str() == &id("carol")
                 && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
         })
         .expect("welcome to carol must be queued");
@@ -11417,17 +11397,17 @@ fn invite_attests_rich_capability_on_commit_and_welcome() {
     )
     .unwrap();
     assert_eq!(
-        welcome_payload.member_rich.get("alice"),
+        welcome_payload.member_rich.get(&id("alice")),
         Some(&vec![crate::protocol::RICH_PAYLOAD_V1]),
         "the welcome must self-attest the inviter"
     );
     assert_eq!(
-        welcome_payload.member_rich.get("bob"),
+        welcome_payload.member_rich.get(&id("bob")),
         Some(&vec![crate::protocol::RICH_PAYLOAD_V1]),
         "the welcome must attest known existing members"
     );
     assert!(
-        !welcome_payload.member_rich.contains_key("carol"),
+        !welcome_payload.member_rich.contains_key(&id("carol")),
         "the joiner needs no entry about itself"
     );
 }
@@ -11442,7 +11422,7 @@ fn invite_omits_attestation_for_unknown_members() {
     let commit = alice
         .outbox_messages()
         .find(|m| {
-            m.recipient.as_str() == "bob"
+            m.recipient.as_str() == &id("bob")
                 && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
         })
         .expect("commit to bob must be queued");
@@ -11458,7 +11438,7 @@ fn invite_omits_attestation_for_unknown_members() {
     let welcome = alice
         .outbox_messages()
         .find(|m| {
-            m.recipient.as_str() == "carol"
+            m.recipient.as_str() == &id("carol")
                 && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
         })
         .expect("welcome to carol must be queued");
@@ -11470,11 +11450,11 @@ fn invite_omits_attestation_for_unknown_members() {
     )
     .unwrap();
     assert_eq!(
-        welcome_payload.member_rich.get("alice"),
+        welcome_payload.member_rich.get(&id("alice")),
         Some(&vec![crate::protocol::RICH_PAYLOAD_V1]),
         "the inviter still self-attests"
     );
-    assert!(!welcome_payload.member_rich.contains_key("bob"));
+    assert!(!welcome_payload.member_rich.contains_key(&id("bob")));
 }
 
 #[test]
@@ -11482,7 +11462,7 @@ fn commit_attestation_teaches_existing_member() {
     // Bob (an existing member) never exchanges key packages with carol; the
     // attested capability on alice's Add commit must open bob's group gate.
     let (alice, mut bob, _carol, _group_id) = setup_three_party_invite(true, true);
-    let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+    let members = vec![id("alice"), id("bob"), id("carol")];
     // Bob already knows alice via the Welcome self-attestation, but carol
     // is unknown until the commit lands.
     assert!(!bob.group_rich_seal_active(&members));
@@ -11490,12 +11470,12 @@ fn commit_attestation_teaches_existing_member() {
     let commit = alice
         .outbox_messages()
         .find(|m| {
-            m.recipient.as_str() == "bob"
+            m.recipient.as_str() == &id("bob")
                 && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
         })
         .expect("commit to bob must be queued")
         .clone();
-    bob.process_internal_message(&make_message("alice", "bob", &commit.content));
+    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &commit.content));
 
     assert!(
         bob.group_rich_seal_active(&members),
@@ -11510,7 +11490,7 @@ fn welcome_attestation_lets_joiner_seal_and_ignores_non_roster_entries() {
     let welcome = alice
         .outbox_messages()
         .find(|m| {
-            m.recipient.as_str() == "carol"
+            m.recipient.as_str() == &id("carol")
                 && m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
         })
         .expect("welcome to carol must be queued")
@@ -11526,29 +11506,28 @@ fn welcome_attestation_lets_joiner_seal_and_ignores_non_roster_entries() {
             .unwrap(),
     )
     .unwrap();
-    payload.member_rich.insert(
-        "mallory".to_string(),
-        vec![crate::protocol::RICH_PAYLOAD_V1],
-    );
+    payload
+        .member_rich
+        .insert(id("mallory"), vec![crate::protocol::RICH_PAYLOAD_V1]);
     let tampered = format!(
         "{}{}",
         internal_prefixes::GROUP_MLS_WELCOME,
         serde_json::to_string(&payload).unwrap()
     );
-    carol.process_internal_message(&make_message("alice", "carol", &tampered));
+    carol.process_internal_message(&make_message(&id("alice"), &id("carol"), &tampered));
     assert!(
         carol.group_mesh.members.contains_key(&group_id),
         "carol must have joined via the Welcome"
     );
 
-    let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+    let members = vec![id("alice"), id("bob"), id("carol")];
     assert!(
         carol.group_rich_seal_active(&members),
         "the welcome attestation must let the joiner seal toward members it \
          never directly exchanged with"
     );
     assert!(
-        !carol.group_rich_seal_active(&vec!["carol".to_string(), "mallory".to_string()]),
+        !carol.group_rich_seal_active(&vec![id("carol"), id("mallory")]),
         "a non-roster map entry must not be recorded"
     );
 }
@@ -11562,7 +11541,7 @@ fn non_admin_commit_attestation_is_ignored() {
     // demoting alice after the fact on bob's view: process the same commit
     // with the sender's admin role removed.
     let (alice, mut bob, _carol, group_id) = setup_three_party_invite(true, true);
-    let members = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+    let members = vec![id("alice"), id("bob"), id("carol")];
 
     // Strip alice's admin role in bob's local metadata before the commit
     // arrives, so the sender fails bob's admin check. Promote bob in the same
@@ -11576,22 +11555,22 @@ fn non_admin_commit_attestation_is_ignored() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Member)
+            .set_member_role(&gid, &id("alice"), GroupRole::Member)
             .unwrap();
         bob_mls
-            .set_member_role(&gid, "bob", GroupRole::Admin)
+            .set_member_role(&gid, &id("bob"), GroupRole::Admin)
             .unwrap();
     }
 
     let commit = alice
         .outbox_messages()
         .find(|m| {
-            m.recipient.as_str() == "bob"
+            m.recipient.as_str() == &id("bob")
                 && m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
         })
         .expect("commit to bob must be queued")
         .clone();
-    bob.process_internal_message(&make_message("alice", "bob", &commit.content));
+    bob.process_internal_message(&make_message(&id("alice"), &id("bob"), &commit.content));
 
     assert!(
         !bob.group_rich_seal_active(&members),
@@ -11610,7 +11589,7 @@ fn group_kill_switch_drop_blames_nobody_and_skips_backfill() {
     let alice_handle = wire_mock_transport(&mut alice);
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "bob",
+        &id("bob"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
     // Carol was added by someone else: capability unknown — the member the
@@ -11621,7 +11600,7 @@ fn group_kill_switch_drop_blames_nobody_and_skips_backfill() {
         .members
         .get_mut(&group_id)
         .unwrap()
-        .push("carol".to_string());
+        .push(id("carol"));
     alice.config.encryption.rich_payload_enabled = false;
 
     let alice_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -11630,7 +11609,7 @@ fn group_kill_switch_drop_blames_nobody_and_skips_backfill() {
         alice_events_clone.lock().unwrap().push(event);
     });
 
-    let media = group_cloud_media_original("alice", "bob")
+    let media = group_cloud_media_original(&id("alice"), &id("bob"))
         .media_metadata
         .unwrap();
     alice
@@ -11665,7 +11644,8 @@ fn group_kill_switch_drop_blames_nobody_and_skips_backfill() {
         .sent_messages()
         .iter()
         .filter(|m| {
-            m.recipient.as_str() == "carol" && m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+            m.recipient.as_str() == &id("carol")
+                && m.content.starts_with(internal_prefixes::KEY_PACKAGE)
         })
         .count();
     assert_eq!(
@@ -11684,7 +11664,7 @@ fn group_drop_reports_unknown_members_and_backfills_capability() {
     let alice_handle = wire_mock_transport(&mut alice);
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "bob",
+        &id("bob"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
     // Carol was added by someone else: present in the fan-out cache, no
@@ -11695,7 +11675,7 @@ fn group_drop_reports_unknown_members_and_backfills_capability() {
         .members
         .get_mut(&group_id)
         .unwrap()
-        .push("carol".to_string());
+        .push(id("carol"));
 
     let alice_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
     let alice_events_clone = alice_events.clone();
@@ -11703,7 +11683,7 @@ fn group_drop_reports_unknown_members_and_backfills_capability() {
         alice_events_clone.lock().unwrap().push(event);
     });
 
-    let media = group_cloud_media_original("alice", "bob")
+    let media = group_cloud_media_original(&id("alice"), &id("bob"))
         .media_metadata
         .unwrap();
     for _ in 0..2 {
@@ -11735,7 +11715,7 @@ fn group_drop_reports_unknown_members_and_backfills_capability() {
     assert_eq!(g, &group_id);
     assert_eq!(
         unknown_members,
-        &vec!["carol".to_string()],
+        &vec![id("carol")],
         "only the capability-unknown member is reported — bob is known capable"
     );
 
@@ -11743,7 +11723,8 @@ fn group_drop_reports_unknown_members_and_backfills_capability() {
         .sent_messages()
         .iter()
         .filter(|m| {
-            m.recipient.as_str() == "carol" && m.content.starts_with(internal_prefixes::KEY_PACKAGE)
+            m.recipient.as_str() == &id("carol")
+                && m.content.starts_with(internal_prefixes::KEY_PACKAGE)
         })
         .count();
     assert_eq!(
@@ -11757,7 +11738,7 @@ fn group_rich_readiness_reports_gate_state() {
     let (mut alice, _bob, group_id) = setup_alice_bob_group("Readiness Group");
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "bob",
+        &id("bob"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
     alice
@@ -11765,15 +11746,15 @@ fn group_rich_readiness_reports_gate_state() {
         .members
         .get_mut(&group_id)
         .unwrap()
-        .push("carol".to_string());
+        .push(id("carol"));
 
     let readiness = alice.group_rich_readiness(&group_id).unwrap();
     assert!(!readiness.ready);
-    assert_eq!(readiness.unknown_members, vec!["carol".to_string()]);
+    assert_eq!(readiness.unknown_members, vec![id("carol")]);
 
     crate::protocol::tests::feed_key_package_with_rich(
         &mut alice,
-        "carol",
+        &id("carol"),
         vec![crate::protocol::RICH_PAYLOAD_V1],
     );
     let readiness = alice.group_rich_readiness(&group_id).unwrap();
@@ -11809,7 +11790,7 @@ fn setup_alice_bob_charlie_group(group_name: &str) -> (OfflineProtocol, OfflineP
     let (mut alice, bob, group_id) = setup_alice_bob_group(group_name);
     let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
 
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
     charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
@@ -11825,7 +11806,7 @@ fn setup_alice_bob_charlie_group(group_name: &str) -> (OfflineProtocol, OfflineP
         let (_welcome, commit) = alice_mls
             .add_group_member(
                 &gid,
-                "charlie",
+                &id("charlie"),
                 &charlie_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -11834,7 +11815,7 @@ fn setup_alice_bob_charlie_group(group_name: &str) -> (OfflineProtocol, OfflineP
     };
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        bob_mls.decrypt_from_group(&commit, "alice").unwrap();
+        bob_mls.decrypt_from_group(&commit, &id("alice")).unwrap();
     }
     alice.refresh_group_members(&group_id).unwrap();
 
@@ -11905,16 +11886,16 @@ fn test_unauthorized_remove_commit_emits_security_event_and_marks_unauthorized()
     let commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
-    alice.handle_group_mls_commit("insider-remove-1", "bob", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some(&id("charlie")));
+    alice.handle_group_mls_commit("insider-remove-1", &id("bob"), &frame);
 
     let (committer, added, removed, reason) = unauthorized_change(&events)
         .expect("a non-admin Remove commit must surface GroupUnauthorizedMembershipChange");
-    assert_eq!(committer, "bob");
+    assert_eq!(committer, id("bob"));
     assert!(added.is_empty(), "a Remove commit adds nobody");
-    assert_eq!(removed, vec!["charlie".to_string()]);
+    assert_eq!(removed, vec![id("charlie")]);
     assert_eq!(reason, "sender_not_admin");
 
     // The roster event still fires — the change is real and the app's roster
@@ -11929,7 +11910,7 @@ fn test_unauthorized_remove_commit_emits_security_event_and_marks_unauthorized()
     });
     assert_eq!(
         removed_event,
-        Some(("charlie".to_string(), Some(false))),
+        Some((id("charlie"), Some(false))),
         "GroupMemberRemoved must still fire, flagged authorized = false"
     );
 }
@@ -11955,20 +11936,20 @@ fn test_unauthorized_add_commit_emits_security_event_and_marks_unauthorized() {
         let (_welcome, commit) = bob_mls
             .add_group_member(
                 &gid,
-                "dave",
+                &id("dave"),
                 &dave_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
         commit
     };
-    let frame = group_commit_frame(&commit, &group_id, "add", Some("dave"));
-    alice.handle_group_mls_commit("insider-add-1", "bob", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "add", Some(&id("dave")));
+    alice.handle_group_mls_commit("insider-add-1", &id("bob"), &frame);
 
     let (committer, added, removed, reason) = unauthorized_change(&events)
         .expect("a non-admin Add commit must surface GroupUnauthorizedMembershipChange");
-    assert_eq!(committer, "bob");
-    assert_eq!(added, vec!["dave".to_string()]);
+    assert_eq!(committer, id("bob"));
+    assert_eq!(added, vec![id("dave")]);
     assert!(removed.is_empty(), "an Add commit removes nobody");
     assert_eq!(reason, "sender_not_admin");
 
@@ -11982,7 +11963,7 @@ fn test_unauthorized_add_commit_emits_security_event_and_marks_unauthorized() {
     });
     assert_eq!(
         added_event,
-        Some(("dave".to_string(), Some(false))),
+        Some((id("dave"), Some(false))),
         "GroupMemberAdded must still fire, flagged authorized = false"
     );
 }
@@ -11998,7 +11979,7 @@ fn test_admin_commit_does_not_emit_security_event() {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .set_member_role(&gid, "bob", GroupRole::Admin)
+            .set_member_role(&gid, &id("bob"), GroupRole::Admin)
             .unwrap();
     }
     let events = collect_events(&mut alice);
@@ -12006,10 +11987,10 @@ fn test_admin_commit_does_not_emit_security_event() {
     let commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
-    alice.handle_group_mls_commit("admin-remove-1", "bob", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some(&id("charlie")));
+    alice.handle_group_mls_commit("admin-remove-1", &id("bob"), &frame);
 
     assert!(
         unauthorized_change(&events).is_none(),
@@ -12023,7 +12004,7 @@ fn test_admin_commit_does_not_emit_security_event() {
         } => Some((user_id.clone(), *authorized)),
         _ => None,
     });
-    assert_eq!(removed_event, Some(("charlie".to_string(), Some(true))));
+    assert_eq!(removed_event, Some((id("charlie"), Some(true))));
 }
 
 #[test]
@@ -12031,13 +12012,13 @@ fn test_admin_commit_with_mismatched_claim_reports_affected_member_mismatch() {
     let (mut alice, bob, group_id) = setup_alice_bob_charlie_group("Mismatched Claim");
 
     // Bob is a genuine admin and the commit is real — only the unencrypted
-    // framing lies: it names "dave" while the MLS delta removes charlie.
+    // framing lies: it names &id("dave") while the MLS delta removes charlie.
     // This pins the second `reason` branch of the security event.
     {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
         alice_mls
-            .set_member_role(&gid, "bob", GroupRole::Admin)
+            .set_member_role(&gid, &id("bob"), GroupRole::Admin)
             .unwrap();
     }
     let events = collect_events(&mut alice);
@@ -12045,18 +12026,18 @@ fn test_admin_commit_with_mismatched_claim_reports_affected_member_mismatch() {
     let commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", Some("dave"));
-    alice.handle_group_mls_commit("mismatched-claim-1", "bob", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some(&id("dave")));
+    alice.handle_group_mls_commit("mismatched-claim-1", &id("bob"), &frame);
 
     let (committer, added, removed, reason) = unauthorized_change(&events)
         .expect("an admin commit whose framing names the wrong member must surface the event");
-    assert_eq!(committer, "bob");
+    assert_eq!(committer, id("bob"));
     assert!(added.is_empty(), "a Remove commit adds nobody");
     assert_eq!(
         removed,
-        vec!["charlie".to_string()],
+        vec![id("charlie")],
         "the event must carry the actual MLS delta, not the claimed member"
     );
     assert_eq!(reason, "affected_member_mismatch");
@@ -12070,7 +12051,7 @@ fn test_admin_commit_with_mismatched_claim_reports_affected_member_mismatch() {
         } => Some((user_id.clone(), *authorized)),
         _ => None,
     });
-    assert_eq!(removed_event, Some(("charlie".to_string(), Some(false))));
+    assert_eq!(removed_event, Some((id("charlie"), Some(false))));
 }
 
 #[test]
@@ -12095,10 +12076,10 @@ fn test_unauthorized_commit_still_applies_membership_and_does_not_fork() {
     let commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
-    alice.handle_group_mls_commit("no-fork-1", "bob", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some(&id("charlie")));
+    alice.handle_group_mls_commit("no-fork-1", &id("bob"), &frame);
 
     assert_eq!(
         group_epoch_of(&alice, &group_id),
@@ -12107,11 +12088,11 @@ fn test_unauthorized_commit_still_applies_membership_and_does_not_fork() {
     );
     let members = alice.group_mesh.members.get(&group_id).unwrap();
     assert!(
-        !members.contains(&"charlie".to_string()),
+        !members.contains(&id("charlie")),
         "the membership change is real and must be reflected in the local roster"
     );
     assert!(
-        members.contains(&"alice".to_string()) && members.contains(&"bob".to_string()),
+        members.contains(&id("alice")) && members.contains(&id("bob")),
         "no other member should be affected"
     );
 }
@@ -12131,7 +12112,7 @@ fn test_keyupdate_commit_emits_no_membership_or_security_events() {
         bob_mls.update_keys(&gid).unwrap()
     };
     let frame = group_commit_frame(&commit, &group_id, "keyupdate", None);
-    alice.handle_group_mls_commit("keyupdate-1", "bob", &frame);
+    alice.handle_group_mls_commit("keyupdate-1", &id("bob"), &frame);
 
     assert_eq!(
         group_epoch_of(&alice, &group_id),
@@ -12169,10 +12150,10 @@ fn test_unauthorized_report_is_rate_limited_per_group_and_committer() {
     let remove_commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&remove_commit, &group_id, "remove", Some("charlie"));
-    alice.handle_group_mls_commit("rate-limit-remove-1", "bob", &frame);
+    let frame = group_commit_frame(&remove_commit, &group_id, "remove", Some(&id("charlie")));
+    alice.handle_group_mls_commit("rate-limit-remove-1", &id("bob"), &frame);
 
     let add_commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
@@ -12180,15 +12161,15 @@ fn test_unauthorized_report_is_rate_limited_per_group_and_committer() {
         let (_welcome, commit) = bob_mls
             .add_group_member(
                 &gid,
-                "dave",
+                &id("dave"),
                 &dave_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
         commit
     };
-    let frame = group_commit_frame(&add_commit, &group_id, "add", Some("dave"));
-    alice.handle_group_mls_commit("rate-limit-add-1", "bob", &frame);
+    let frame = group_commit_frame(&add_commit, &group_id, "add", Some(&id("dave")));
+    alice.handle_group_mls_commit("rate-limit-add-1", &id("bob"), &frame);
 
     let events = events.lock().unwrap();
     let reports = events
@@ -12206,7 +12187,7 @@ fn test_unauthorized_report_is_rate_limited_per_group_and_committer() {
             user_id,
             authorized,
             ..
-        } if user_id == "charlie" => Some(*authorized),
+        } if user_id == &id("charlie") => Some(*authorized),
         _ => None,
     });
     assert_eq!(removed_flag, Some(Some(false)));
@@ -12215,7 +12196,7 @@ fn test_unauthorized_report_is_rate_limited_per_group_and_committer() {
             user_id,
             authorized,
             ..
-        } if user_id == "dave" => Some(*authorized),
+        } if user_id == &id("dave") => Some(*authorized),
         _ => None,
     });
     assert_eq!(added_flag, Some(Some(false)));
@@ -12229,21 +12210,16 @@ fn test_judgment_covers_combined_add_and_remove_delta() {
     let (mut alice, _bob, group_id) = setup_alice_bob_charlie_group("Combined Delta");
     let events = collect_events(&mut alice);
 
-    let judgment = alice.judge_membership_change(
-        &group_id,
-        "bob",
-        &["dave".to_string()],
-        &["charlie".to_string()],
-        true,
-    );
+    let judgment =
+        alice.judge_membership_change(&group_id, &id("bob"), &[id("dave")], &[id("charlie")], true);
     assert!(!judgment.sender_is_admin);
     assert!(!judgment.authorized);
 
     let (committer, added, removed, reason) = unauthorized_change(&events)
         .expect("a combined add+remove delta must surface a single report");
-    assert_eq!(committer, "bob");
-    assert_eq!(added, vec!["dave".to_string()]);
-    assert_eq!(removed, vec!["charlie".to_string()]);
+    assert_eq!(committer, id("bob"));
+    assert_eq!(added, vec![id("dave")]);
+    assert_eq!(removed, vec![id("charlie")]);
     assert_eq!(reason, "sender_not_admin");
 }
 
@@ -12325,7 +12301,7 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     // reporting is skipped, and the roster self-heals on the next
     // successful refresh.
     let storage_a = Arc::new(FailingMetadataStorage::new());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls_for_test(storage_a.clone()).unwrap();
@@ -12347,7 +12323,7 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
         alice_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -12359,7 +12335,7 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     }
 
     // Charlie joins too, so bob has someone to remove.
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
     charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
@@ -12371,7 +12347,7 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
         let (_welcome, commit) = alice_mls
             .add_group_member(
                 &gid,
-                "charlie",
+                &id("charlie"),
                 &charlie_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -12380,7 +12356,9 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     };
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        bob_mls.decrypt_from_group(&add_commit, "alice").unwrap();
+        bob_mls
+            .decrypt_from_group(&add_commit, &id("alice"))
+            .unwrap();
     }
     alice.refresh_group_members(&group_id).unwrap();
 
@@ -12390,11 +12368,11 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     // Bob removes charlie while alice's metadata reads are failing.
     let commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some(&id("charlie")));
     storage_a.set_failing(true);
-    alice.handle_group_mls_commit("storage-fail-1", "bob", &frame);
+    alice.handle_group_mls_commit("storage-fail-1", &id("bob"), &frame);
     storage_a.set_failing(false);
 
     assert_eq!(
@@ -12418,7 +12396,7 @@ fn test_failed_roster_read_skips_delta_and_judgment_but_merges_commit() {
     // Self-heal: the next successful refresh restores the true roster.
     let members = alice.refresh_group_members(&group_id).unwrap();
     assert!(
-        !members.iter().any(|m| m == "charlie"),
+        !members.iter().any(|m| m == &id("charlie")),
         "the roster must converge to MLS state once reads succeed again"
     );
 }
@@ -12460,7 +12438,7 @@ fn stage_welcome_for_bob(
     offline_protocol_mls::WelcomeMessage,
 ) {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
@@ -12481,7 +12459,7 @@ fn stage_welcome_for_bob(
         let (welcome, _commit) = alice_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -12571,19 +12549,19 @@ fn test_welcome_created_by_does_not_overwrite_existing() {
 
     assert_eq!(
         creator_of(&alice, &group_id),
-        Some("alice".to_string()),
+        Some(id("alice")),
         "precondition: the creator has itself on record"
     );
 
     {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        alice_mls.set_group_creator(&gid, "mallory").unwrap();
+        alice_mls.set_group_creator(&gid, &id("mallory")).unwrap();
     }
 
     assert_eq!(
         creator_of(&alice, &group_id),
-        Some("alice".to_string()),
+        Some(id("alice")),
         "an established creator must never be rewritten"
     );
 }
@@ -12598,11 +12576,11 @@ fn test_welcome_without_created_by_leaves_metadata_unchanged() {
     let frame = group_welcome_frame(
         &welcome,
         &group_id,
-        &["alice", "bob"],
-        serde_json::json!({"alice": "admin"}),
+        &[&id("alice"), &id("bob")],
+        serde_json::json!({&id("alice"): "admin"}),
         None,
     );
-    bob.handle_group_mls_welcome("welcome-creator-3", "alice", &frame);
+    bob.handle_group_mls_welcome("welcome-creator-3", &id("alice"), &frame);
 
     assert!(
         bob.group_mesh.members.contains_key(&group_id),
@@ -12614,7 +12592,7 @@ fn test_welcome_without_created_by_leaves_metadata_unchanged() {
         "absence means no information — never a fabricated creator"
     );
     assert!(
-        bob.check_is_admin(&group_id, "alice").unwrap(),
+        bob.check_is_admin(&group_id, &id("alice")).unwrap(),
         "the role snapshot still resolves admin without the fallback"
     );
 }
@@ -12634,7 +12612,7 @@ fn setup_enforcing_group(
     bob_enforces: bool,
 ) -> (OfflineProtocol, OfflineProtocol, String) {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice_config = create_test_config_for_user("alice");
     alice_config.group.enforce_admin_commits = alice_enforces;
     let mut bob_config = create_test_config_for_user("bob");
@@ -12660,7 +12638,7 @@ fn setup_enforcing_group(
         let (welcome, _commit) = alice_mls
             .add_group_member(
                 &gid,
-                "bob",
+                &id("bob"),
                 &bob_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -12672,7 +12650,7 @@ fn setup_enforcing_group(
         bob_mls.join_group(&welcome).unwrap();
     }
 
-    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::new());
     let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
     charlie.initialize_mls_for_test(storage_c).unwrap();
     let charlie_kp = {
@@ -12684,7 +12662,7 @@ fn setup_enforcing_group(
         let (_welcome, commit) = alice_mls
             .add_group_member(
                 &gid,
-                "charlie",
+                &id("charlie"),
                 &charlie_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
@@ -12693,7 +12671,7 @@ fn setup_enforcing_group(
     };
     {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        bob_mls.decrypt_from_group(&commit, "alice").unwrap();
+        bob_mls.decrypt_from_group(&commit, &id("alice")).unwrap();
     }
     alice.refresh_group_members(&group_id).unwrap();
 
@@ -12703,10 +12681,10 @@ fn setup_enforcing_group(
     {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         alice_mls
-            .set_member_role(&gid, "bob", GroupRole::Member)
+            .set_member_role(&gid, &id("bob"), GroupRole::Member)
             .unwrap();
         alice_mls
-            .set_member_role(&gid, "charlie", GroupRole::Member)
+            .set_member_role(&gid, &id("charlie"), GroupRole::Member)
             .unwrap();
     }
 
@@ -12752,10 +12730,10 @@ fn test_enforcement_disabled_by_default_applies_commit() {
     let commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
-    alice.handle_group_mls_commit("default-off-1", "bob", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some(&id("charlie")));
+    alice.handle_group_mls_commit("default-off-1", &id("bob"), &frame);
 
     assert_eq!(
         group_epoch_of(&alice, &group_id),
@@ -12777,10 +12755,10 @@ fn test_enforced_non_admin_remove_commit_is_rejected_without_merge() {
     let commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
-    alice.handle_group_mls_commit("enforced-remove-1", "bob", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some(&id("charlie")));
+    alice.handle_group_mls_commit("enforced-remove-1", &id("bob"), &frame);
 
     assert_eq!(
         group_epoch_of(&alice, &group_id),
@@ -12789,15 +12767,15 @@ fn test_enforced_non_admin_remove_commit_is_rejected_without_merge() {
     );
     let members = alice.refresh_group_members(&group_id).unwrap();
     assert!(
-        members.iter().any(|m| m == "charlie"),
+        members.iter().any(|m| m == &id("charlie")),
         "the refused removal must not have changed the roster"
     );
 
     let (committer, added, removed, reason, enforced) =
         unauthorized_change_enforced(&events).expect("a refused commit must be reported");
-    assert_eq!(committer, "bob");
+    assert_eq!(committer, id("bob"));
     assert!(added.is_empty());
-    assert_eq!(removed, vec!["charlie".to_string()]);
+    assert_eq!(removed, vec![id("charlie")]);
     assert_eq!(reason, "sender_not_admin");
     assert!(enforced, "a refused change must report enforced = true");
 
@@ -12837,15 +12815,15 @@ fn test_enforced_non_admin_add_commit_is_rejected_without_merge() {
         let (_welcome, commit) = bob_mls
             .add_group_member(
                 &gid,
-                "dave",
+                &id("dave"),
                 &dave_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
         commit
     };
-    let frame = group_commit_frame(&commit, &group_id, "add", Some("dave"));
-    alice.handle_group_mls_commit("enforced-add-1", "bob", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "add", Some(&id("dave")));
+    alice.handle_group_mls_commit("enforced-add-1", &id("bob"), &frame);
 
     assert_eq!(
         group_epoch_of(&alice, &group_id),
@@ -12854,13 +12832,13 @@ fn test_enforced_non_admin_add_commit_is_rejected_without_merge() {
     );
     let members = alice.refresh_group_members(&group_id).unwrap();
     assert!(
-        !members.iter().any(|m| m == "dave"),
+        !members.iter().any(|m| m == &id("dave")),
         "the refused Add must not have spliced dave into the roster"
     );
     let (committer, added, _, _, enforced) =
         unauthorized_change_enforced(&events).expect("a refused Add must be reported");
-    assert_eq!(committer, "bob");
-    assert_eq!(added, vec!["dave".to_string()]);
+    assert_eq!(committer, id("bob"));
+    assert_eq!(added, vec![id("dave")]);
     assert!(enforced);
 }
 
@@ -12881,10 +12859,10 @@ fn test_enforced_admin_remove_commit_is_applied() {
         // Bob knows alice is the admin.
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         bob_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
             .unwrap();
         bob_mls
-            .set_member_role(&gid, "charlie", GroupRole::Member)
+            .set_member_role(&gid, &id("charlie"), GroupRole::Member)
             .unwrap();
     }
     let events = collect_events(&mut bob);
@@ -12892,10 +12870,10 @@ fn test_enforced_admin_remove_commit_is_applied() {
 
     let commit = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        alice_mls.remove_group_member(&gid, "charlie").unwrap()
+        alice_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
-    bob.handle_group_mls_commit("enforced-admin-1", "alice", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some(&id("charlie")));
+    bob.handle_group_mls_commit("enforced-admin-1", &id("alice"), &frame);
 
     assert_eq!(
         group_epoch_of(&bob, &group_id),
@@ -12922,7 +12900,7 @@ fn test_enforcement_fails_open_when_admin_set_unknown() {
     {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         alice_mls
-            .set_member_role(&gid, "alice", GroupRole::Member)
+            .set_member_role(&gid, &id("alice"), GroupRole::Member)
             .unwrap();
         let metadata = alice_mls.get_group_metadata(&gid).unwrap().unwrap();
         assert!(
@@ -12939,10 +12917,10 @@ fn test_enforcement_fails_open_when_admin_set_unknown() {
 
     let commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&commit, &group_id, "remove", Some("charlie"));
-    alice.handle_group_mls_commit("fail-open-1", "bob", &frame);
+    let frame = group_commit_frame(&commit, &group_id, "remove", Some(&id("charlie")));
+    alice.handle_group_mls_commit("fail-open-1", &id("bob"), &frame);
 
     assert_eq!(
         group_epoch_of(&alice, &group_id),
@@ -12966,7 +12944,7 @@ fn test_enforced_keyupdate_commit_applies() {
         bob_mls.update_keys(&gid).unwrap()
     };
     let frame = group_commit_frame(&commit, &group_id, "keyupdate", None);
-    alice.handle_group_mls_commit("enforced-keyupdate-1", "bob", &frame);
+    alice.handle_group_mls_commit("enforced-keyupdate-1", &id("bob"), &frame);
 
     assert_eq!(
         group_epoch_of(&alice, &group_id),
@@ -12994,7 +12972,7 @@ fn test_app_channel_commit_is_also_policy_gated() {
     let commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         let gid = offline_protocol_mls::GroupId::new(&group_id).unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
     // Same ciphertext, reframed as an application message.
     let reframed = serde_json::json!({
@@ -13003,8 +12981,8 @@ fn test_app_channel_commit_is_also_policy_gated() {
         "epoch": commit.epoch,
     })
     .to_string();
-    let wire = make_message("bob", "alice", "unused-envelope");
-    let result = alice.handle_group_mls_msg(&wire, "bob", &reframed);
+    let wire = make_message(&id("bob"), &id("alice"), "unused-envelope");
+    let result = alice.handle_group_mls_msg(&wire, &id("bob"), &reframed);
 
     assert_eq!(
         group_epoch_of(&alice, &group_id),
@@ -13017,8 +12995,8 @@ fn test_app_channel_commit_is_also_policy_gated() {
     );
     let (committer, _, removed, _, enforced) = unauthorized_change_enforced(&events)
         .expect("a reframed commit must be reported like the commit-channel one");
-    assert_eq!(committer, "bob");
-    assert_eq!(removed, vec!["charlie".to_string()]);
+    assert_eq!(committer, id("bob"));
+    assert_eq!(removed, vec![id("charlie")]);
     assert!(enforced);
 }
 
@@ -13030,7 +13008,7 @@ fn test_session_paths_unaffected_by_enforcement() {
     let mut config_a = create_test_config_for_user("alice");
     config_a.group.enforce_admin_commits = true;
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
-    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
     let mut alice = OfflineProtocol::new(config_a).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls_for_test(storage_a).unwrap();
@@ -13044,12 +13022,12 @@ fn test_session_paths_unaffected_by_enforcement() {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
         bob_mls
             .import_key_package(
-                "alice",
+                &id("alice"),
                 &alice_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
-        bob_mls.create_session("alice").unwrap()
+        bob_mls.create_session(&id("alice")).unwrap()
     };
     {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
@@ -13058,11 +13036,13 @@ fn test_session_paths_unaffected_by_enforcement() {
 
     let encrypted = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        bob_mls.encrypt_for_user("alice", b"hello session").unwrap()
+        bob_mls
+            .encrypt_for_user(&id("alice"), b"hello session")
+            .unwrap()
     };
     let plaintext = {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
-        alice_mls.decrypt(&encrypted, "bob").unwrap()
+        alice_mls.decrypt(&encrypted, &id("bob")).unwrap()
     };
     assert_eq!(
         plaintext,
@@ -13089,17 +13069,17 @@ fn test_enforced_alarm_is_not_suppressed_by_an_earlier_applied_report() {
     {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         alice_mls
-            .set_member_role(&gid, "alice", GroupRole::Member)
+            .set_member_role(&gid, &id("alice"), GroupRole::Member)
             .unwrap();
     }
     let events = collect_events(&mut alice);
 
     let remove_commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&remove_commit, &group_id, "remove", Some("charlie"));
-    alice.handle_group_mls_commit("alarm-applied-1", "bob", &frame);
+    let frame = group_commit_frame(&remove_commit, &group_id, "remove", Some(&id("charlie")));
+    alice.handle_group_mls_commit("alarm-applied-1", &id("bob"), &frame);
 
     // Alice's role snapshot lands: now the admin set is known and non-empty,
     // so the next commit from the same non-admin is refused rather than
@@ -13107,7 +13087,14 @@ fn test_enforced_alarm_is_not_suppressed_by_an_earlier_applied_report() {
     {
         let alice_mls = alice.mls_manager_for_testing().read().unwrap();
         alice_mls
-            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .set_member_role(&gid, &id("alice"), GroupRole::Admin)
+            .unwrap();
+        // Emptying the admin set above auto-promotes whoever sorts first, and
+        // addresses sort by key hash — so bob may hold admin now. The premise
+        // under test is that bob is *not* an admin, so say it rather than
+        // relying on where his address happens to sort.
+        alice_mls
+            .set_member_role(&gid, &id("bob"), GroupRole::Member)
             .unwrap();
     }
 
@@ -13123,15 +13110,15 @@ fn test_enforced_alarm_is_not_suppressed_by_an_earlier_applied_report() {
         let (_welcome, commit) = bob_mls
             .add_group_member(
                 &gid,
-                "dave",
+                &id("dave"),
                 &dave_kp.key_package_data,
                 offline_protocol_mls::KeyPackageTrust::FirstUse,
             )
             .unwrap();
         commit
     };
-    let frame = group_commit_frame(&add_commit, &group_id, "add", Some("dave"));
-    alice.handle_group_mls_commit("alarm-enforced-1", "bob", &frame);
+    let frame = group_commit_frame(&add_commit, &group_id, "add", Some(&id("dave")));
+    alice.handle_group_mls_commit("alarm-enforced-1", &id("bob"), &frame);
 
     let flags: Vec<bool> = events
         .lock()
@@ -13148,11 +13135,9 @@ fn test_enforced_alarm_is_not_suppressed_by_an_earlier_applied_report() {
         "the refusal alarm must survive the applied report's rate-limit window"
     );
     assert!(
-        !events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, Event::GroupMemberAdded { user_id, .. } if user_id == "dave")),
+        !events.lock().unwrap().iter().any(
+            |e| matches!(e, Event::GroupMemberAdded { user_id, .. } if user_id == &id("dave"))
+        ),
         "the refused Add must not have spliced dave into the roster"
     );
 }
@@ -13168,13 +13153,13 @@ fn test_repeated_refusals_by_one_committer_are_still_rate_limited() {
 
     let remove_commit = {
         let bob_mls = bob.mls_manager_for_testing().read().unwrap();
-        bob_mls.remove_group_member(&gid, "charlie").unwrap()
+        bob_mls.remove_group_member(&gid, &id("charlie")).unwrap()
     };
-    let frame = group_commit_frame(&remove_commit, &group_id, "remove", Some("charlie"));
-    alice.handle_group_mls_commit("refusal-1", "bob", &frame);
+    let frame = group_commit_frame(&remove_commit, &group_id, "remove", Some(&id("charlie")));
+    alice.handle_group_mls_commit("refusal-1", &id("bob"), &frame);
     // Bob's own state advanced, so this is a second, distinct commit — but it
     // is refused for the same reason by the same committer.
-    alice.handle_group_mls_commit("refusal-2", "bob", &frame);
+    alice.handle_group_mls_commit("refusal-2", &id("bob"), &frame);
 
     let reports = events
         .lock()

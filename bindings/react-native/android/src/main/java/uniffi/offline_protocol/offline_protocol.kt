@@ -1040,6 +1040,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leav
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session(
@@ -1455,6 +1457,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_rout
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_leave_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_list_groups(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_local_address(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_clear_pending_welcome(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -2006,6 +2010,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 60142.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address() != 44586.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 30627.toShort()) {
@@ -3357,6 +3364,8 @@ public interface OfflineProtocolInterface {
     
     fun `listGroups`(): List<kotlin.String>
     
+    fun `localAddress`(): kotlin.String?
+    
     fun `mlsClearPendingWelcome`(`otherUserId`: kotlin.String)
     
     fun `mlsCreateSession`(`otherUserId`: kotlin.String): MlsWelcomeMessage
@@ -4594,6 +4603,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_list_groups(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `localAddress`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_local_address(
         it,
         _status)
 }
@@ -7317,7 +7339,7 @@ public object FfiConverterTypePendingQueueConfig: FfiConverterRustBuffer<Pending
 data class ProtocolConfig (
     var `appId`: kotlin.String
     , 
-    var `userId`: kotlin.String
+    var `profile`: kotlin.String
     , 
     var `bleEnabled`: kotlin.Boolean
     , 
@@ -7417,7 +7439,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
 
     override fun allocationSize(value: ProtocolConfig) = (
             FfiConverterString.allocationSize(value.`appId`) +
-            FfiConverterString.allocationSize(value.`userId`) +
+            FfiConverterString.allocationSize(value.`profile`) +
             FfiConverterBoolean.allocationSize(value.`bleEnabled`) +
             FfiConverterBoolean.allocationSize(value.`wifiDirectEnabled`) +
             FfiConverterBoolean.allocationSize(value.`internetEnabled`) +
@@ -7448,7 +7470,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
             FfiConverterString.write(value.`appId`, buf)
-            FfiConverterString.write(value.`userId`, buf)
+            FfiConverterString.write(value.`profile`, buf)
             FfiConverterBoolean.write(value.`bleEnabled`, buf)
             FfiConverterBoolean.write(value.`wifiDirectEnabled`, buf)
             FfiConverterBoolean.write(value.`internetEnabled`, buf)
@@ -7483,7 +7505,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
 data class ProtocolConfigExtended (
     var `appId`: kotlin.String
     , 
-    var `userId`: kotlin.String
+    var `profile`: kotlin.String
     , 
     var `transport`: TransportConfig
     , 
@@ -7523,7 +7545,7 @@ public object FfiConverterTypeProtocolConfigExtended: FfiConverterRustBuffer<Pro
 
     override fun allocationSize(value: ProtocolConfigExtended) = (
             FfiConverterString.allocationSize(value.`appId`) +
-            FfiConverterString.allocationSize(value.`userId`) +
+            FfiConverterString.allocationSize(value.`profile`) +
             FfiConverterTypeTransportConfig.allocationSize(value.`transport`) +
             FfiConverterTypeDorsConfig.allocationSize(value.`dors`) +
             FfiConverterTypeRelayConfig.allocationSize(value.`relay`) +
@@ -7534,7 +7556,7 @@ public object FfiConverterTypeProtocolConfigExtended: FfiConverterRustBuffer<Pro
 
     override fun write(value: ProtocolConfigExtended, buf: ByteBuffer) {
             FfiConverterString.write(value.`appId`, buf)
-            FfiConverterString.write(value.`userId`, buf)
+            FfiConverterString.write(value.`profile`, buf)
             FfiConverterTypeTransportConfig.write(value.`transport`, buf)
             FfiConverterTypeDorsConfig.write(value.`dors`, buf)
             FfiConverterTypeRelayConfig.write(value.`relay`, buf)

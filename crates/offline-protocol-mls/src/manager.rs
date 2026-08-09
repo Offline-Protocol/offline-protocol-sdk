@@ -152,6 +152,45 @@ impl MlsManager {
         &self.user_id
     }
 
+    /// Loads this device's identity key from `storage`, minting and persisting
+    /// one on first call, and returns the address it derives to.
+    ///
+    /// This is the bootstrap entry point: it exists so the address can be known
+    /// *before* an [`MlsManager`] is constructed. The manager needs its own id
+    /// at construction time (it goes into the credential and every session
+    /// slot), but under self-certifying addressing that id is a function of the
+    /// identity key — which used to be minted inside the constructor. Callers
+    /// break the circle by calling this first and passing the resulting address
+    /// to [`Self::new`].
+    ///
+    /// Idempotent: a second call returns the stored key and the same address.
+    /// The keypair is written before the address is derived, so a caller that
+    /// crashes between the two finds the same identity on the next start rather
+    /// than minting a second one.
+    pub fn load_or_create_identity(
+        storage: &Arc<dyn MlsStorage>,
+    ) -> Result<(SignatureKeyPair, Address)> {
+        let key_type = StorageKeyType::Identity.as_str();
+
+        let signature_keys = match storage.load(key_type, "key_pair")? {
+            Some(json) => serde_json::from_slice(&json).map_err(|e| {
+                MlsError::Deserialization(format!("Failed to deserialize signature keys: {}", e))
+            })?,
+            None => {
+                let keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm())
+                    .map_err(|e| MlsError::CryptoGeneration(format!("{:?}", e)))?;
+                let keys_json = serde_json::to_vec(&keys)
+                    .map_err(|e| MlsError::Serialization(e.to_string()))?;
+                storage.store(key_type, "key_pair", &keys_json)?;
+                info!("Minted a new identity key");
+                keys
+            }
+        };
+
+        let address = Self::derive_address(signature_keys.public())?;
+        Ok((signature_keys, address))
+    }
+
     /// Ensures the user has an identity.
     fn ensure_identity(&self) -> Result<()> {
         if self.load_identity()? {
@@ -159,6 +198,27 @@ impl MlsManager {
         }
         self.create_identity()?;
         info!(user_id = %self.user_id, "Created new MLS identity");
+        Ok(())
+    }
+
+    /// Requires the stored identity key to derive to `self.user_id` when that
+    /// id is an address.
+    ///
+    /// A nickname id (tests, legacy) has no derivation to check, so it passes
+    /// unchecked — the check is about catching a *broken* self-certifying
+    /// identity, not about enforcing that ids are addresses.
+    fn verify_identity_binding(&self, public_key: &[u8]) -> Result<()> {
+        let Ok(expected) = self.user_id.parse::<Address>() else {
+            return Ok(());
+        };
+
+        let derived = Self::derive_address(public_key)?;
+        if derived != expected {
+            return Err(MlsError::IdentityAddressMismatch {
+                expected: expected.to_string(),
+                derived: derived.to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -178,6 +238,12 @@ impl MlsManager {
                     })?;
 
                 let public_key = signature_keys.public();
+
+                // Under self-certifying addressing the id is this key's hash,
+                // so a disagreement means the wrong namespace was opened or the
+                // stored key was replaced. Caught here rather than shipping a
+                // credential every peer would reject.
+                self.verify_identity_binding(public_key)?;
 
                 let credential =
                     Credential::new(CredentialType::Basic, self.user_id.as_bytes().to_vec());
@@ -213,6 +279,15 @@ impl MlsManager {
     fn create_identity(&self) -> Result<()> {
         let signature_keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm())
             .map_err(|e| MlsError::CryptoGeneration(format!("{:?}", e)))?;
+
+        // A freshly minted key derives to a fresh address, so an
+        // address-shaped `user_id` reaching here means the caller asked this
+        // manager to *claim* an address whose key it does not hold — the
+        // storage was empty when it should have held that identity. Checked
+        // before the key is persisted so the refusal leaves nothing behind.
+        // The supported bootstrap is `load_or_create_identity` first, then
+        // `new` with the address it returned.
+        self.verify_identity_binding(signature_keys.public())?;
 
         let keys_json = serde_json::to_vec(&signature_keys)
             .map_err(|e| MlsError::Serialization(e.to_string()))?;
@@ -1763,6 +1838,50 @@ mod tests {
         MlsManager::new(user_id, storage).unwrap()
     }
 
+    /// A deterministic identity keypair for `label`, plus the address it
+    /// derives to.
+    ///
+    /// Seeded from the label rather than generated so a test can name the same
+    /// identity twice, and so the address in a failure message is stable across
+    /// runs. Only the *derivation* is being pinned here — the seed is a test
+    /// convenience, not a key-generation scheme anything ships.
+    pub(crate) fn test_identity(label: &str) -> (SignatureKeyPair, Address) {
+        use sha2::{Digest, Sha256};
+
+        let seed: [u8; 32] = Sha256::digest(label.as_bytes()).into();
+        let signing = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let public = signing.verifying_key().to_bytes().to_vec();
+        let address = MlsManager::derive_address(&public).unwrap();
+        let keys = SignatureKeyPair::from_raw(
+            DEFAULT_CIPHERSUITE.signature_algorithm(),
+            signing.to_bytes().to_vec(),
+            public,
+        );
+        (keys, address)
+    }
+
+    /// Writes `keys` where [`MlsManager::load_or_create_identity`] will find
+    /// them, standing in for a previous run of this profile.
+    pub(crate) fn seed_identity(storage: &Arc<dyn MlsStorage>, keys: &SignatureKeyPair) {
+        storage
+            .store(
+                StorageKeyType::Identity.as_str(),
+                "key_pair",
+                &serde_json::to_vec(keys).unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// A manager bootstrapped the way production does it: mint/load the
+    /// identity first, then construct at the address it derives to.
+    fn create_addressed_manager(label: &str) -> (MlsManager, Address) {
+        let storage: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+        let (keys, address) = test_identity(label);
+        seed_identity(&storage, &keys);
+        let manager = MlsManager::new(address.to_string(), storage).unwrap();
+        (manager, address)
+    }
+
     /// Same, but keeps a handle on the storage so a test can age a package in
     /// place — the only way to reach the expiry and purge paths without either
     /// waiting 30 days or making the clock injectable.
@@ -3205,5 +3324,101 @@ mod tests {
                 .expect("derives")
                 .to_string()
         );
+    }
+
+    #[test]
+    fn load_or_create_identity_mints_once_and_is_idempotent() {
+        let storage: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+
+        let (first_keys, first_address) = MlsManager::load_or_create_identity(&storage).unwrap();
+        let (second_keys, second_address) = MlsManager::load_or_create_identity(&storage).unwrap();
+
+        // Second call loads, never mints: same key, therefore same address.
+        assert_eq!(first_keys.public(), second_keys.public());
+        assert_eq!(first_address, second_address);
+        assert_eq!(
+            MlsManager::derive_address(first_keys.public()).unwrap(),
+            first_address,
+            "the returned address must be the stored key's derivation"
+        );
+    }
+
+    #[test]
+    fn load_or_create_identity_adopts_an_existing_key() {
+        let storage: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+        let (keys, address) = test_identity("alice");
+        seed_identity(&storage, &keys);
+
+        let (loaded, loaded_address) = MlsManager::load_or_create_identity(&storage).unwrap();
+
+        assert_eq!(loaded.public(), keys.public());
+        assert_eq!(loaded_address, address);
+    }
+
+    #[test]
+    fn manager_bootstrapped_at_its_derived_address_loads_that_identity() {
+        let (manager, address) = create_addressed_manager("alice");
+
+        assert_eq!(manager.user_id(), address.to_string());
+        assert_eq!(
+            MlsManager::derive_address(&manager.get_identity_public_key().unwrap()).unwrap(),
+            address,
+            "the manager's identity key must derive to the address it claims"
+        );
+    }
+
+    /// The address is the identity key's hash, so a manager pointed at storage
+    /// holding a *different* identity is a broken bootstrap — the wrong
+    /// namespace for this profile, or a replaced key. It must fail loudly
+    /// rather than build a credential claiming an address it cannot prove.
+    #[test]
+    fn manager_refuses_an_address_whose_key_is_not_the_stored_one() {
+        let storage: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+        let (alice_keys, alice_address) = test_identity("alice");
+        let (_, bob_address) = test_identity("bob");
+        seed_identity(&storage, &alice_keys);
+
+        let Err(err) = MlsManager::new(bob_address.to_string(), storage) else {
+            panic!("a manager must not claim an address it holds no key for");
+        };
+
+        match err {
+            MlsError::IdentityAddressMismatch { expected, derived } => {
+                assert_eq!(expected, bob_address.to_string());
+                assert_eq!(derived, alice_address.to_string());
+            }
+            other => panic!("expected IdentityAddressMismatch, got {other:?}"),
+        }
+    }
+
+    /// Empty storage plus an address id means the caller skipped the bootstrap:
+    /// a freshly minted key derives to a different address, so claiming this
+    /// one would be unprovable. Refused before anything is persisted.
+    #[test]
+    fn manager_refuses_to_claim_an_address_with_no_stored_identity() {
+        let storage: Arc<dyn MlsStorage> = Arc::new(InMemoryStorage::new());
+        let (_, address) = test_identity("alice");
+
+        let Err(err) = MlsManager::new(address.to_string(), storage.clone()) else {
+            panic!("a manager must not mint a key and claim a different address");
+        };
+        assert!(matches!(err, MlsError::IdentityAddressMismatch { .. }));
+
+        assert!(
+            storage
+                .load(StorageKeyType::Identity.as_str(), "key_pair")
+                .unwrap()
+                .is_none(),
+            "a refused bootstrap must not leave a key behind"
+        );
+    }
+
+    /// Nickname ids have no derivation to check, so they keep working — the
+    /// binding check is about catching a broken self-certifying identity, not
+    /// about forcing every id to be an address.
+    #[test]
+    fn manager_with_a_non_address_id_skips_the_binding_check() {
+        let manager = create_test_manager("alice");
+        assert_eq!(manager.user_id(), "alice");
     }
 }

@@ -861,7 +861,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     cancelFileTransfer: protocolCancelFile,
   } = useOfflineProtocol({
     appId: 'offline-messenger',
-    userId: currentUserId,
+    profile: currentUserId,
     transports: {
       ble: {
         enabled: true,

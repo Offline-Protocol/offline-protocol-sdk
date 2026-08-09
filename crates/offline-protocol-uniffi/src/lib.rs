@@ -2019,7 +2019,9 @@ impl Default for PendingQueueConfig {
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
     pub app_id: String,
-    pub user_id: String,
+    /// Local profile selector: which stored identity this instance runs as.
+    /// Never on the wire — see `OfflineProtocol::local_address`.
+    pub profile: String,
     pub ble_enabled: bool,
     pub wifi_direct_enabled: bool,
     pub internet_enabled: bool,
@@ -2078,7 +2080,8 @@ pub struct ProtocolConfig {
 #[derive(Debug, Clone)]
 pub struct ProtocolConfigExtended {
     pub app_id: String,
-    pub user_id: String,
+    /// See [`ProtocolConfig::profile`].
+    pub profile: String,
     pub transport: TransportConfig,
     pub dors: DorsConfig,
     pub relay: RelayConfig,
@@ -2089,7 +2092,7 @@ pub struct ProtocolConfigExtended {
 
 impl From<ProtocolConfig> for CoreConfig {
     fn from(config: ProtocolConfig) -> Self {
-        let mut core_config = CoreConfig::new(config.app_id, config.user_id);
+        let mut core_config = CoreConfig::new(config.app_id, config.profile);
         core_config.transport.ble_enabled = config.ble_enabled;
         core_config.transport.wifi_direct_enabled = config.wifi_direct_enabled;
         core_config.transport.internet_enabled = config.internet_enabled;
@@ -2316,12 +2319,27 @@ pub struct OfflineProtocol {
     relay_priority: RwLock<RelayPriority>,
     forced_transport: RwLock<Option<TransportType>>,
     dors_config: RwLock<Option<DorsConfig>>,
+    /// Which transports this instance was configured with, so they can be
+    /// rebuilt against the derived address once `initialize_mls` knows it.
+    enabled_transports: EnabledTransports,
+}
+
+/// The transport set from the original config.
+#[derive(Debug, Clone, Copy)]
+struct EnabledTransports {
+    ble: bool,
+    internet: bool,
+    reticulum: bool,
+    nostr: bool,
 }
 
 impl OfflineProtocol {
     /// Creates a new protocol instance
     pub fn new(config: ProtocolConfig) -> Result<Self, ProtocolError> {
-        let user_id = config.user_id.clone();
+        // Pre-identity placeholder. The transports built here are rebuilt
+        // against the real address in `initialize_mls`, which is the first
+        // point this device knows who it is.
+        let user_id = config.profile.clone();
         let ble_enabled = config.ble_enabled;
         let internet_enabled = config.internet_enabled;
         let reticulum_enabled = config.reticulum_enabled;
@@ -2435,7 +2453,73 @@ impl OfflineProtocol {
             relay_priority: RwLock::new(RelayPriority::Medium),
             forced_transport: RwLock::new(None),
             dors_config: RwLock::new(None),
+            enabled_transports: EnabledTransports {
+                ble: ble_enabled,
+                internet: internet_enabled,
+                reticulum: reticulum_enabled,
+                nostr: nostr_enabled,
+            },
         })
+    }
+
+    /// Rebuilds the configured transports against this device's derived
+    /// address.
+    ///
+    /// The transports are constructed in `new`, before `initialize_mls` has
+    /// opened the storage that holds the identity key, so they start out
+    /// carrying the profile string as a placeholder. For most of them that id
+    /// is inert, but `NostrTransport` derives its routing tag and bootstrap
+    /// keypair from it at construction — listening on a tag computed from the
+    /// profile while peers address us by a tag computed from our address would
+    /// mean nothing ever arrives. Rebuilding is therefore the correction, not
+    /// a refresh.
+    ///
+    /// Only correct while the protocol is stopped, which the caller enforces.
+    /// `add_transport` *replaces* the entry, and a running instance's
+    /// transports are not interchangeable with fresh ones: the platform
+    /// bridges have already reported connection status onto them and filled
+    /// their queues, and a replacement starts Disconnected and empty. (Their
+    /// `start()` is a no-op — the platform owns the connection — so there is no
+    /// re-start that would recover that state.)
+    ///
+    /// Every replacement is constructed before any is installed, so the one
+    /// fallible construction cannot leave half the set rebuilt and half still
+    /// on the profile.
+    fn rebuild_transports_for_identity(
+        protocol: &mut CoreProtocol,
+        enabled: EnabledTransports,
+        address: &str,
+    ) -> Result<(), ProtocolError> {
+        let mut rebuilt: Vec<(CoreTransportType, Box<dyn Transport>)> = Vec::new();
+
+        if enabled.ble {
+            rebuilt.push((CoreTransportType::BLE, Box::new(BleTransport::new(address))));
+        }
+        if enabled.internet {
+            rebuilt.push((
+                CoreTransportType::Internet,
+                Box::new(InternetTransport::new(address)),
+            ));
+        }
+        if enabled.reticulum {
+            rebuilt.push((
+                CoreTransportType::Reticulum,
+                Box::new(ReticulumTransport::new(address)),
+            ));
+        }
+        if enabled.nostr {
+            let nostr = NostrTransport::new(address).map_err(|e| {
+                ProtocolError::InvalidConfiguration(format!("Failed to create Nostr keypair: {e}"))
+            })?;
+            rebuilt.push((CoreTransportType::Nostr, Box::new(nostr)));
+        }
+
+        for (transport_type, transport) in rebuilt {
+            protocol
+                .transport_manager_mut()
+                .add_transport(transport_type, transport);
+        }
+        Ok(())
     }
 
     // ========================================================================
@@ -5095,10 +5179,47 @@ impl OfflineProtocol {
         if protocol.is_mls_initialized() {
             return Ok(());
         }
+
+        // First initialization derives this device's address, and the
+        // transports have to be rebuilt to carry it — which replaces the
+        // objects the platform bridges have been reporting status onto. That
+        // is only safe before `start()`, so refuse the wrong order here,
+        // *before* MLS is touched: an app that reorders its two calls gets a
+        // working instance, where a rebuild against a running protocol would
+        // silently strip every transport back to Disconnected with an empty
+        // queue and no error. (Initializing MLS first is the required order
+        // anyway — key-package exchange has to be armed before discovery can
+        // fire.)
+        let state = *recover_rwlock_read(&self.state, "state");
+        if state != ProtocolState::Stopped {
+            return Err(ProtocolError::InvalidState(format!(
+                "initialize_mls must be called before start(): the protocol is {:?}, \
+                 and deriving this device's address here would replace transports \
+                 the platform has already connected",
+                state
+            )));
+        }
+
         protocol
             .initialize_mls(secure_wrapper, state_wrapper)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
+
+        // The address exists only now, so this is the first point the
+        // transports can carry it. See `rebuild_transports_for_identity`.
+        if let Some(address) = protocol.local_address().map(str::to_owned) {
+            Self::rebuild_transports_for_identity(
+                &mut protocol,
+                self.enabled_transports,
+                &address,
+            )?;
+        }
         Ok(())
+    }
+
+    /// This device's self-certifying address, or null before `initialize_mls`.
+    pub fn local_address(&self) -> Option<String> {
+        let protocol = recover_mutex(&self.inner, "inner");
+        protocol.local_address().map(str::to_owned)
     }
 
     /// Check if MLS is initialized
@@ -6121,7 +6242,7 @@ mod tests {
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
             app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
+            profile: "user123".to_string(),
             ble_enabled: true,
             wifi_direct_enabled: true,
             internet_enabled: true,
@@ -6154,7 +6275,7 @@ mod tests {
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
             app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
+            profile: "user123".to_string(),
             ble_enabled: true,
             wifi_direct_enabled: false,
             internet_enabled: false,
@@ -6507,7 +6628,7 @@ mod tests {
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
             app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
+            profile: "user123".to_string(),
             ble_enabled: false,
             wifi_direct_enabled: false,
             internet_enabled: false,
@@ -6832,7 +6953,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "sender-user".to_string(),
+            profile: "sender-user".to_string(),
             ..create_reticulum_config()
         };
         let sender = OfflineProtocol::new(sender_config).unwrap();
@@ -6862,7 +6983,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_reticulum_config()
         };
         let receiver = OfflineProtocol::new(receiver_config).unwrap();
@@ -6893,7 +7014,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "sender-user".to_string(),
+            profile: "sender-user".to_string(),
             ..create_reticulum_config()
         };
         let sender = OfflineProtocol::new(sender_config).unwrap();
@@ -6923,7 +7044,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_reticulum_config()
         };
         let receiver = OfflineProtocol::new(receiver_config).unwrap();
@@ -7015,7 +7136,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: sender_id.to_string(),
+            profile: sender_id.to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7104,7 +7225,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7135,7 +7256,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7165,7 +7286,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7199,7 +7320,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7248,7 +7369,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7289,7 +7410,7 @@ mod tests {
     #[test]
     fn test_synthesized_relay_frame_creates_no_phantom_peer() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7358,7 +7479,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7440,7 +7561,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_reticulum_config()
         })
         .unwrap();
@@ -7468,7 +7589,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             nostr_enabled: true,
             ..create_test_config()
         })
@@ -7493,7 +7614,7 @@ mod tests {
     #[test]
     fn test_nostr_undecodable_frame_surfaces_no_discovery() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             nostr_enabled: true,
             ..create_test_config()
         })
@@ -7537,7 +7658,7 @@ mod tests {
         let data = serialized_message_from("sender-user", "receiver-user");
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             nostr_enabled: true,
             ..create_test_config()
         })
@@ -7569,7 +7690,7 @@ mod tests {
         // publish to it. Junk must not drag the receive window past history
         // the relay still owes us.
         let receiver = OfflineProtocol::new(ProtocolConfig {
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             nostr_enabled: true,
             ..create_test_config()
         })
@@ -7599,7 +7720,7 @@ mod tests {
         let data = serialized_message_from("sender-user", "receiver-user");
 
         let receiver = OfflineProtocol::new(ProtocolConfig {
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             nostr_enabled: true,
             ..create_test_config()
         })
@@ -7629,7 +7750,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7664,7 +7785,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "receiver-user".to_string(),
+            profile: "receiver-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7717,7 +7838,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "owner-user".to_string(),
+            profile: "owner-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7738,7 +7859,7 @@ mod tests {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
-            user_id: "peer-user".to_string(),
+            profile: "peer-user".to_string(),
             ..create_test_config()
         })
         .unwrap();
@@ -7751,11 +7872,16 @@ mod tests {
         peer.internet_status_changed(true).unwrap();
         peer.force_transport(TransportType::Internet).unwrap();
 
+        // Identities are derived from each instance's own storage, so the wire
+        // ids have to be read back rather than assumed from the profile.
+        let owner_id = owner.local_address().expect("owner address");
+        let peer_id = peer.local_address().expect("peer address");
+
         // Discovery seed: an inbound message from the owner makes the peer
         // auto-send its key package.
         peer.internet_message_received(
-            "owner-user".to_string(),
-            serialized_message_from("owner-user", "peer-user"),
+            owner_id.clone(),
+            serialized_message_from(&owner_id, &peer_id),
         )
         .unwrap();
 
@@ -7764,14 +7890,12 @@ mod tests {
         // during this drain already.)
         for msg in drain_internet_outbox(&peer) {
             owner
-                .internet_message_received("peer-user".to_string(), msg.data)
+                .internet_message_received(peer_id.clone(), msg.data)
                 .unwrap();
         }
 
         // Ensure the session exists; `Ok(None)` if auto-establish beat us.
-        owner
-            .establish_secure_session("peer-user".to_string())
-            .unwrap();
+        owner.establish_secure_session(peer_id.clone()).unwrap();
 
         // Exactly one Welcome must be queued. The owner's other outbound
         // items (its own key package) are deliberately NOT forwarded to the
@@ -7799,7 +7923,7 @@ mod tests {
         // The peer got the Welcome anyway (an earlier attempt landed, or it
         // arrived over another carrier): it adopts the session and queues its
         // proactive encrypted session-confirm.
-        peer.internet_message_received("owner-user".to_string(), welcome.data.clone())
+        peer.internet_message_received(owner_id.clone(), welcome.data.clone())
             .unwrap();
 
         // After adopting, the peer queues its proactive encrypted
@@ -7816,7 +7940,7 @@ mod tests {
         // The moment under test: the encrypted confirm arrives in the same
         // inbound batch that marks the peer reachable again.
         owner
-            .internet_message_received("peer-user".to_string(), confirm.data)
+            .internet_message_received(peer_id.clone(), confirm.data)
             .unwrap();
 
         assert!(
@@ -7832,7 +7956,7 @@ mod tests {
             "no Welcome may be re-sent to a peer whose confirmation arrived in the same batch"
         );
         assert!(
-            owner.lock_inner().unwrap().is_known_peer("peer-user"),
+            owner.lock_inner().unwrap().is_known_peer(&peer_id),
             "the reachability notification must still run after the drain"
         );
     }
@@ -9759,6 +9883,98 @@ mod tests {
             kotlin.contains("private fun sendEvent(eventName: String, params: Any?): Boolean"),
             "OfflineProtocolModule.kt sendEvent must keep returning Boolean — the two platforms \
              report hand-over the same way or neither claim means anything"
+        );
+    }
+
+    /// The one transport for which the post-identity rebuild is load-bearing.
+    ///
+    /// `NostrTransport` computes its routing tag from the id it is constructed
+    /// with, and that tag is the address peers publish to. Built in `new()` the
+    /// id is still the profile, so without the rebuild this device subscribes
+    /// to a tag nobody writes to and every Nostr-carried frame is simply never
+    /// seen — no error anywhere. The assertion that matters is the second one:
+    /// the tag actually *moved* off the profile.
+    #[test]
+    fn test_nostr_routing_tag_follows_the_derived_address_after_mls_init() {
+        let config = ProtocolConfig {
+            profile: "nostr-profile".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        };
+        let profile = config.profile.clone();
+        let protocol = OfflineProtocol::new(config).unwrap();
+
+        let profile_tag = offline_protocol_transport::routing_tag_for_device_id(&profile).unwrap();
+        assert_eq!(
+            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
+            Some(profile_tag.clone()),
+            "before init the transport can only know the profile"
+        );
+
+        protocol
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .unwrap();
+
+        let address = protocol.local_address().expect("address after init");
+        let address_tag = offline_protocol_transport::routing_tag_for_device_id(&address).unwrap();
+
+        assert_eq!(
+            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
+            Some(address_tag),
+            "the Nostr transport must listen on the tag derived from this device's address"
+        );
+        assert_ne!(
+            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
+            Some(profile_tag),
+            "a tag still derived from the profile is the silent-delivery failure this rebuild exists to prevent"
+        );
+    }
+
+    /// The rebuild replaces live transport objects, so it cannot run against a
+    /// started protocol: the replacements come up `Disconnected` with empty
+    /// queues, and their `start()` is a no-op because the platform owns the
+    /// connection — nothing would ever restore the status the bridge had
+    /// already reported. Refused before MLS is touched, so the instance is
+    /// left in a state the app can still fix by reordering its two calls.
+    #[test]
+    fn test_initialize_mls_after_start_is_refused_and_changes_nothing() {
+        let protocol = OfflineProtocol::new(ProtocolConfig {
+            profile: "late-init".to_string(),
+            nostr_enabled: true,
+            ..create_test_config()
+        })
+        .unwrap();
+
+        let tag_before = protocol.with_nostr_transport(|nt| nt.routing_tag().to_string());
+        protocol.start().unwrap();
+
+        let err = protocol
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .expect_err("initializing MLS after start() must not silently swap the transports");
+        assert!(
+            matches!(err, ProtocolError::InvalidState(_)),
+            "expected InvalidState, got {err:?}"
+        );
+
+        assert!(
+            !protocol.is_mls_initialized(),
+            "the refusal must come before MLS is initialized, so no half-state is left behind"
+        );
+        assert_eq!(
+            protocol.local_address(),
+            None,
+            "no address may be published for an initialization that was refused"
+        );
+        assert_eq!(
+            protocol.with_nostr_transport(|nt| nt.routing_tag().to_string()),
+            tag_before,
+            "the running transports must be left exactly as they were"
         );
     }
 }

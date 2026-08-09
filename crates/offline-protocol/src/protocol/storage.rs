@@ -2713,7 +2713,7 @@ impl OfflineProtocol {
     /// A later direct key-package exchange overwrites the whole record and
     /// evicts the in-memory entry — direct knowledge is always authoritative.
     pub(crate) fn record_attested_rich(&mut self, peer_id: &str, versions: &[u8]) {
-        if peer_id == self.config.user_id || !versions.contains(&RICH_PAYLOAD_V1) {
+        if peer_id == self.local_id || !versions.contains(&RICH_PAYLOAD_V1) {
             return;
         }
         // Direct self-advertisement already covers this peer; an attested
@@ -4049,7 +4049,7 @@ impl OfflineProtocol {
             // The live path refuses to block your own id; restore has to refuse
             // it too, or a planted record blocks the local user — which
             // `block_user` would never have produced.
-            if user_id.as_str() == self.config.user_id {
+            if user_id.as_str() == self.local_id {
                 warn!("Skipping blocked user entry naming the local user");
                 continue;
             }

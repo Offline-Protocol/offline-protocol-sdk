@@ -446,13 +446,29 @@ impl OfflineProtocol {
 
                     if has_existing {
                         // Both sides created a session and exchanged Welcomes.
-                        // Deterministic tiebreaker: the device whose user_id is
-                        // lexicographically *greater* adopts the remote Welcome;
-                        // the other keeps its own session.  This guarantees both
-                        // devices converge on the same MLS group.
-                        let local_id: &str = &self.config.user_id;
+                        // Deterministic tiebreaker: the device with the
+                        // *greater* id adopts the remote Welcome; the other
+                        // keeps its own session. This guarantees both devices
+                        // converge on the same MLS group.
+                        //
+                        // Addresses compare as addresses — hash bytes, the same
+                        // order `GroupId::for_session` canonicalizes slots with
+                        // — because the bech32 charset is not ASCII-monotonic,
+                        // so comparing the rendered strings would give a
+                        // different answer than every other address comparison.
+                        // Any total order converges as long as both peers use
+                        // the same one; ids that are not both addresses keep
+                        // string order.
+                        let local_id: &str = &self.local_id;
                         let remote_id: &str = sender;
-                        if local_id > remote_id {
+                        let local_adopts = match (
+                            local_id.parse::<offline_protocol_core::Address>(),
+                            remote_id.parse::<offline_protocol_core::Address>(),
+                        ) {
+                            (Ok(local), Ok(remote)) => local > remote,
+                            _ => local_id > remote_id,
+                        };
+                        if local_adopts {
                             info!(
                                 sender = %sender,
                                 local_id = %local_id,
@@ -1498,7 +1514,7 @@ impl OfflineProtocol {
 
                 // If WE are the removed member, clean up local MLS group state
                 // so we don't retain a stale group that can't encrypt/decrypt.
-                let self_removed = payload.user_id == self.config.user_id;
+                let self_removed = payload.user_id == self.local_id;
                 if self_removed {
                     // SECURITY (HIGH-2): authorize this destructive local
                     // teardown off the authenticated wire `sender`, never the
@@ -1744,7 +1760,7 @@ impl OfflineProtocol {
             content,
             sender,
             message.hop_count.value(),
-            &self.config.user_id,
+            &self.local_id,
             &peers,
         ) {
             ServiceAction::NotHandled => {

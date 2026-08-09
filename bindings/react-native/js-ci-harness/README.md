@@ -32,8 +32,9 @@ npm ci          # first time only
 npm run test:js
 ```
 
-Or directly: `node js-ci-harness/one-shot-hold.test.js`. The same command runs
-in the `React Native Typecheck` job in `.github/workflows/ci.yml`.
+`test:js` runs every file below in turn; each is also runnable directly, e.g.
+`node js-ci-harness/one-shot-hold.test.js`. The same `npm run test:js` runs in
+the `React Native Typecheck` job in `.github/workflows/ci.yml`.
 
 Each file compiles `../src` into a scratch directory of its own rather than
 using the package's `lib/` — that directory is gitignored and routinely stale,
@@ -67,3 +68,4 @@ Two traps, both of which produce a test that passes while proving nothing:
 | File | Covers |
 | --- | --- |
 | `one-shot-hold.test.js` | The JS-layer one-shot event hold: hold, replay, and the `start()` / `enableTransport('internet')` / `destroy()` staleness transitions (`src/index.ts`, `ONE_SHOT_EVENT_TYPES`). See `docs/react-native-integration.md` §6.1. |
+| `local-address.test.js` | The cache of this device's derived address (`src/index.ts`, `cachedLocalAddress`): populated eagerly by `start()` and by `identity_ready`, cleared by `destroy()` so it cannot outlive the identity it names, and the session attribution that depends on knowing which half of a pair is us. |

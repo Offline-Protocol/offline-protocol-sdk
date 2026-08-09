@@ -258,23 +258,26 @@ impl SessionManager {
         Ok(result)
     }
 
-    /// Lists all active sessions.
+    /// Lists the peers this device has a 1:1 session with.
+    ///
+    /// A session id is `session:<a>:<b>` where exactly one of the two halves
+    /// is us — ids cannot contain `:` (`GroupId::validate` runs the storage-key
+    /// charset check per segment), so the split is unambiguous. Anything that
+    /// does not have that exact shape is skipped rather than guessed at: a slot
+    /// naming two other parties has no "other peer" to report, and returning
+    /// one half of it anyway would surface a peer this device has no session
+    /// with.
     pub fn list_sessions(&self) -> Result<Vec<String>> {
-        let groups = self.group_manager.list_groups()?;
-        let sessions: Vec<String> = groups
+        let sessions: Vec<String> = self
+            .group_manager
+            .list_groups()?
             .into_iter()
-            .filter(|g| g.as_str().starts_with("session:"))
             .filter_map(|g| {
                 let parts: Vec<&str> = g.as_str().split(':').collect();
-                if parts.len() == 3 {
-                    let other = if parts[1] == self.user_id {
-                        parts[2]
-                    } else {
-                        parts[1]
-                    };
-                    Some(other.to_string())
-                } else {
-                    None
+                match parts.as_slice() {
+                    ["session", a, b] if *a == self.user_id => Some(b.to_string()),
+                    ["session", a, b] if *b == self.user_id => Some(a.to_string()),
+                    _ => None,
                 }
             })
             .collect();

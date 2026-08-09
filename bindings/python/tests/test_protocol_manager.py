@@ -21,7 +21,7 @@ def _make_config(**overrides) -> ProtocolConfig:
     # transport in the same call (see `test_internet_none_when_disabled`).
     defaults = dict(
         app_id="test-app",
-        user_id="test-user",
+        profile="test-user",
         ble_enabled=False,
         wifi_direct_enabled=False,
         internet_enabled=True,
@@ -44,7 +44,7 @@ def _make_config(**overrides) -> ProtocolConfig:
 
 class TestProtocolManagerLifecycle:
     def test_default_stores_use_the_account_namespace(self):
-        config = _make_config(app_id="test-app", user_id="test-user-1")
+        config = _make_config(app_id="test-app", profile="test-user-1")
         from offline_protocol_sdk.protocol_manager import ProtocolManager
 
         with (

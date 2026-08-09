@@ -552,7 +552,7 @@ impl OfflineProtocol {
             }
         }
 
-        let self_id = self.config.user_id.clone();
+        let self_id = self.local_id.clone();
         let mut message = self.create_message(&self_id, content, Some(priority), None)?;
         // Set before signing for clarity; the canonical payload covers only
         // sender/id/recipient/content, so ordering is not security-relevant.
@@ -680,7 +680,7 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<MessageId>,
     ) -> Result<Message> {
-        let sender = UserId::new(&self.config.user_id)?;
+        let sender = UserId::new(&self.local_id)?;
         let recipient = UserId::new(recipient)?;
         let app_id = AppId::new(&self.config.app_id)?;
 
@@ -933,7 +933,7 @@ impl OfflineProtocol {
         self.config.encryption.rich_payload_enabled
             && members
                 .iter()
-                .filter(|m| m.as_str() != self.config.user_id)
+                .filter(|m| m.as_str() != self.local_id)
                 .all(|m| {
                     self.peer_rich_payload.contains(m.as_str())
                         || self.peer_rich_attested.contains(m.as_str())
@@ -948,7 +948,7 @@ impl OfflineProtocol {
         members
             .iter()
             .filter(|m| {
-                m.as_str() != self.config.user_id
+                m.as_str() != self.local_id
                     && !self.peer_rich_payload.contains(m.as_str())
                     && !self.peer_rich_attested.contains(m.as_str())
             })
@@ -2468,7 +2468,7 @@ impl OfflineProtocol {
     ) -> Result<Message> {
         use crate::constants::{TRANSPORT_PREFERENCE_INTERNET, TRANSPORT_PREFERENCE_KEY};
 
-        let sender = UserId::new(&self.config.user_id)?;
+        let sender = UserId::new(&self.local_id)?;
         let recipient = UserId::new(recipient)?;
         let app_id = AppId::new(&self.config.app_id)?;
 
@@ -3070,7 +3070,7 @@ impl OfflineProtocol {
         // a frame addressed to somebody else and carry it further, spending
         // airtime to deliver a control op nobody can act on. They are pinned to
         // Internet for the same reason.
-        if message.recipient.as_str() == self.config.user_id {
+        if message.recipient.as_str() == self.local_id {
             return 0;
         }
 
@@ -3648,14 +3648,12 @@ impl OfflineProtocol {
             return None;
         }
         let content = message.content.as_str();
-        if message.sender.as_str() == self.config.user_id {
+        if message.sender.as_str() == self.local_id {
             if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_MLS_LEAVE) {
                 return Some(("group_mls_leave", payload.to_string()));
             }
         }
-        if message.sender.as_str() == self.config.user_id
-            && message.recipient.as_str() == self.config.user_id
-        {
+        if message.sender.as_str() == self.local_id && message.recipient.as_str() == self.local_id {
             if let Some(payload) = content.strip_prefix(internal_prefixes::GROUP_RELAY_REGISTER) {
                 return Some(("group_relay_register", payload.to_string()));
             }
@@ -3787,7 +3785,7 @@ impl OfflineProtocol {
         message: &Message,
         inbound_transport: TransportType,
     ) -> Result<()> {
-        let sender = UserId::new(&self.config.user_id)?;
+        let sender = UserId::new(&self.local_id)?;
         let recipient = message.sender.clone();
         let app_id = AppId::new(&self.config.app_id)?;
         let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
@@ -3880,7 +3878,7 @@ impl OfflineProtocol {
         acked_message_id: &str,
         inbound_transport: TransportType,
     ) -> Result<()> {
-        let sender = UserId::new(&self.config.user_id)?;
+        let sender = UserId::new(&self.local_id)?;
         let recipient = UserId::new(ack_to)?;
         let app_id = AppId::new(&self.config.app_id)?;
         let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
@@ -4369,7 +4367,7 @@ impl OfflineProtocol {
         session_reset: bool,
     ) -> KeyPackagePayload {
         KeyPackagePayload {
-            user_id: self.config.user_id.clone(),
+            user_id: self.local_id.clone(),
             key_package_data: key_pkg.key_package_data.clone(),
             remaining_lifetime_ms: key_pkg.remaining_lifetime_ms(),
             timestamp_ms: Utc::now().timestamp_millis() as u64,

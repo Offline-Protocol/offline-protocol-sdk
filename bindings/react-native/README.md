@@ -690,8 +690,8 @@ enum MessagePriority {
 | `rejectConnectionRequest(params)` | `Promise<string>` | Reject a received request |
 | `cancelConnectionRequest(params)` | `Promise<string>` | Cancel a request you sent |
 
-`recipient` is always the target's canonical user id — the value they
-supplied as `ProtocolConfig.userId`, which is exactly what
+`recipient` is always the target's canonical address (`off1…`) — the value
+they derived from their own identity key, which is exactly what
 `neighbor_discovered` reports as `peer_id` (see the identity contract under
 [neighbor_discovered](#neighbor_discovered)).
 
@@ -887,11 +887,13 @@ interface NeighborDiscoveredEvent {
 ```
 
 <a name="identity"></a>
-**Identity contract**: `peer_id` is the peer's canonical user id — the
-same value the peer supplied as `ProtocolConfig.userId`, regardless of
-which transport discovered them. Use it directly as `recipient` in
-`sendMessage` and `sendConnectionRequest`; there is no separate
-transport-level address to resolve.
+**Identity contract**: `peer_id` is the peer's canonical address (`off1…`) —
+the value that peer derived from its own identity key, regardless of which
+transport discovered them. Use it directly as `recipient` in `sendMessage`
+and `sendConnectionRequest`; there is no separate transport-level address to
+resolve. No app chooses its own address, so a peer claiming one can be
+checked by re-deriving it from the key it presents. Your own is
+`localAddress()`.
 
 #### neighbor_lost
 

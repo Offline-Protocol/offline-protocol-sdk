@@ -1192,7 +1192,7 @@ impl OfflineProtocol {
     /// peer ids are dropped entirely: an app waiting on `presence_updated`
     /// for a blocked peer will never see it.
     pub fn on_peer_presence(&mut self, peer_id: &str, online: bool, last_seen_ms: Option<i64>) {
-        if peer_id.is_empty() || peer_id == self.config.user_id || self.is_user_blocked(peer_id) {
+        if peer_id.is_empty() || peer_id == self.local_id || self.is_user_blocked(peer_id) {
             return;
         }
         if online {

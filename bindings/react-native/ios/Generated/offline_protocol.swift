@@ -940,6 +940,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func listGroups() throws  -> [String]
     
+    func localAddress()  -> String?
+    
     func mlsClearPendingWelcome(otherUserId: String) throws 
     
     func mlsCreateSession(otherUserId: String) throws  -> MlsWelcomeMessage
@@ -1794,6 +1796,14 @@ open func leaveGroup(groupId: String)throws   {try rustCallWithError(FfiConverte
 open func listGroups()throws  -> [String]  {
     return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_list_groups(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func localAddress() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_local_address(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -4531,7 +4541,7 @@ public func FfiConverterTypePendingQueueConfig_lower(_ value: PendingQueueConfig
 
 public struct ProtocolConfig: Equatable, Hashable {
     public var appId: String
-    public var userId: String
+    public var profile: String
     public var bleEnabled: Bool
     public var wifiDirectEnabled: Bool
     public var internetEnabled: Bool
@@ -4561,9 +4571,9 @@ public struct ProtocolConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
+    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true) {
         self.appId = appId
-        self.userId = userId
+        self.profile = profile
         self.bleEnabled = bleEnabled
         self.wifiDirectEnabled = wifiDirectEnabled
         self.internetEnabled = internetEnabled
@@ -4607,7 +4617,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         return
             try ProtocolConfig(
                 appId: FfiConverterString.read(from: &buf), 
-                userId: FfiConverterString.read(from: &buf), 
+                profile: FfiConverterString.read(from: &buf), 
                 bleEnabled: FfiConverterBool.read(from: &buf), 
                 wifiDirectEnabled: FfiConverterBool.read(from: &buf), 
                 internetEnabled: FfiConverterBool.read(from: &buf), 
@@ -4639,7 +4649,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
 
     public static func write(_ value: ProtocolConfig, into buf: inout [UInt8]) {
         FfiConverterString.write(value.appId, into: &buf)
-        FfiConverterString.write(value.userId, into: &buf)
+        FfiConverterString.write(value.profile, into: &buf)
         FfiConverterBool.write(value.bleEnabled, into: &buf)
         FfiConverterBool.write(value.wifiDirectEnabled, into: &buf)
         FfiConverterBool.write(value.internetEnabled, into: &buf)
@@ -4687,7 +4697,7 @@ public func FfiConverterTypeProtocolConfig_lower(_ value: ProtocolConfig) -> Rus
 
 public struct ProtocolConfigExtended: Equatable, Hashable {
     public var appId: String
-    public var userId: String
+    public var profile: String
     public var transport: TransportConfig
     public var dors: DorsConfig
     public var relay: RelayConfig
@@ -4697,9 +4707,9 @@ public struct ProtocolConfigExtended: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, transport: TransportConfig, dors: DorsConfig, relay: RelayConfig, path: PathConfig, reliability: ReliabilityConfig, initialTtl: UInt8) {
+    public init(appId: String, profile: String, transport: TransportConfig, dors: DorsConfig, relay: RelayConfig, path: PathConfig, reliability: ReliabilityConfig, initialTtl: UInt8) {
         self.appId = appId
-        self.userId = userId
+        self.profile = profile
         self.transport = transport
         self.dors = dors
         self.relay = relay
@@ -4723,7 +4733,7 @@ public struct FfiConverterTypeProtocolConfigExtended: FfiConverterRustBuffer {
         return
             try ProtocolConfigExtended(
                 appId: FfiConverterString.read(from: &buf), 
-                userId: FfiConverterString.read(from: &buf), 
+                profile: FfiConverterString.read(from: &buf), 
                 transport: FfiConverterTypeTransportConfig.read(from: &buf), 
                 dors: FfiConverterTypeDorsConfig.read(from: &buf), 
                 relay: FfiConverterTypeRelayConfig.read(from: &buf), 
@@ -4735,7 +4745,7 @@ public struct FfiConverterTypeProtocolConfigExtended: FfiConverterRustBuffer {
 
     public static func write(_ value: ProtocolConfigExtended, into buf: inout [UInt8]) {
         FfiConverterString.write(value.appId, into: &buf)
-        FfiConverterString.write(value.userId, into: &buf)
+        FfiConverterString.write(value.profile, into: &buf)
         FfiConverterTypeTransportConfig.write(value.transport, into: &buf)
         FfiConverterTypeDorsConfig.write(value.dors, into: &buf)
         FfiConverterTypeRelayConfig.write(value.relay, into: &buf)
@@ -9921,6 +9931,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 60142) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address() != 44586) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 30627) {

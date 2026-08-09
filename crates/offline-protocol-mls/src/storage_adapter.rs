@@ -15,15 +15,37 @@ impl MlsStorageAdapter {
         Self { storage }
     }
 
+    /// Maps an OpenMLS storage key to the `key_id` string this adapter stores
+    /// it under.
+    ///
+    /// The key is hashed rather than hex-encoded verbatim. The serialized form
+    /// of a `GroupId` is a JSON array of its bytes (`[115,101,...]`, ~5
+    /// characters per byte) which hex then doubles again, so a session id
+    /// inflates roughly 8× — and under address-shaped ids a session id is
+    /// already ~97 characters. A fixed 64-character digest keeps the platform
+    /// key-value stores (iOS Keychain accounts, Android SharedPreferences keys)
+    /// off their length limits regardless of what an id grows into.
+    ///
+    /// Safe precisely because nothing ever inverts or enumerates these keys:
+    /// every one of the `StorageProvider` methods is a point get/put/delete for
+    /// a key the caller already holds. The one place a stored key is turned
+    /// back into a `GroupId` — `GroupManager::list_groups` — reads the
+    /// `group_state` category, which this adapter does not own.
+    fn key_id<K: Serialize>(key: &K) -> Result<String, MlsError> {
+        use sha2::{Digest, Sha256};
+
+        let key_bytes =
+            serde_json::to_vec(key).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        Ok(hex::encode(Sha256::digest(&key_bytes)))
+    }
+
     fn write_generic<K: Serialize, V: Serialize + ?Sized>(
         &self,
         label: &str,
         key: &K,
         value: &V,
     ) -> Result<(), MlsError> {
-        let key_bytes =
-            serde_json::to_vec(key).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        let key_id = hex::encode(key_bytes);
+        let key_id = Self::key_id(key)?;
         let value_bytes =
             serde_json::to_vec(value).map_err(|e| MlsError::Serialization(e.to_string()))?;
         self.storage.store(label, &key_id, &value_bytes)?;
@@ -35,9 +57,7 @@ impl MlsStorageAdapter {
         label: &str,
         key: &K,
     ) -> Result<Option<V>, MlsError> {
-        let key_bytes =
-            serde_json::to_vec(key).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        let key_id = hex::encode(key_bytes);
+        let key_id = Self::key_id(key)?;
         let data = self.storage.load(label, &key_id)?;
         match data {
             Some(bytes) => {
@@ -50,9 +70,7 @@ impl MlsStorageAdapter {
     }
 
     fn delete_generic<K: Serialize>(&self, label: &str, key: &K) -> Result<(), MlsError> {
-        let key_bytes =
-            serde_json::to_vec(key).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        let key_id = hex::encode(key_bytes);
+        let key_id = Self::key_id(key)?;
         self.storage.delete(label, &key_id)?;
         Ok(())
     }

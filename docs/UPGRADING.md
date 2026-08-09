@@ -68,6 +68,7 @@ cannot be undone later.
 | 11 | [Events you must handle](#11-events-you-must-now-handle) | all | all | all | all |
 | 12 | [Build & packaging](#12-build-and-packaging) | — | regenerate bindings | rebuild native | — |
 | 12.1 | [iOS: delete your manual `pod 'MeshSdk'` line](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) | n/a | n/a | **breaking** (`pod install` fails) | n/a |
+| 14 | [Your identity is derived, not chosen](#14-your-identity-is-derived-not-chosen-unreleased) | **breaking** | **breaking** | **breaking** | **breaking** |
 
 ---
 
@@ -1091,6 +1092,101 @@ packages no longer resolve to an unversioned `react-android` dependency.
 
 Events cross the FFI as JSON strings, so **event field changes need no bindings
 regeneration** — only `bindings/react-native/src/types.ts`, which can drift.
+
+---
+
+## 14. Your identity is derived, not chosen (unreleased)
+
+**`ProtocolConfig.userId` is gone.** It is replaced by `profile`, and the two
+are not the same thing wearing a new name.
+
+`userId` used to be your identity on every surface at once: the app picked a
+string and that string *was* the device — its `sender`, its `recipient`, its
+`peer_id`, and the thing peers trusted. Nothing authenticated it, so
+impersonating someone cost typing their name.
+
+Now the device holds an Ed25519 identity key and its address is the hash of
+that key, rendered `off1…`. Peers verify an address by re-deriving it from the
+key its owner presents, so claiming one you do not hold a key for is not
+possible rather than merely discouraged.
+
+`profile` is what is left of the old field's *other* job: choosing which stored
+identity this instance runs as. It never leaves the device.
+
+```diff
+  const protocol = new OfflineProtocol({
+    appId: 'my-app',
+-   userId: currentUserId,
++   profile: currentUserId,
+  });
+```
+
+Keeping the same string in `profile` that you passed as `userId` keeps you in
+the same storage namespace — the namespace is still
+`SHA-256(domain ‖ 0x00 ‖ appId ‖ 0x00 ‖ <that string>)`, unchanged. An app with
+one account per install can pass a constant like `'default'`.
+
+### Read your address instead of assuming it
+
+```ts
+const address = await protocol.localAddress();   // "off1q..." or null
+```
+
+It is `null` until startup completes, because the key that defines it lives in
+storage that is not open before then. The `identity_ready` event carries the
+same value at the moment it becomes known:
+
+```ts
+protocol.on('identity_ready', ({ address }) => setMyAddress(address));
+```
+
+Equivalents: `local_address()` in Rust and Python, `localAddress()` over
+UniFFI.
+
+### What this breaks in your app
+
+The address is what peers must use to reach you, so anywhere your app *assumed*
+it knew an identity has to be re-pointed:
+
+- **Sending.** `recipient` must be a peer's address. A username reaches nobody.
+- **Comparing.** "Is this message mine?" compares against `localAddress()`, not
+  against the profile.
+- **Storing.** Conversation rows, contact records, and group membership keyed
+  by username must be keyed by address. There is no mapping from the old ids to
+  the new ones — the identities genuinely changed.
+- **Displaying.** An `off1…` string is not a name. Keep your own display names
+  (the `senderName` / `accepterName` fields already carry them) and treat the
+  address the way you would a phone number: the thing you route on, not the
+  thing you show.
+
+### Cold contact by username is gone for now
+
+Reaching someone by typing their username was only ever possible because
+usernames were addresses. Until a signed username-discovery layer lands, first
+contact is invite/QR only: exchange `{address, publicKey}` and verify it on the
+spot with `deriveAddress(publicKey) === address`.
+
+### There is no in-place migration, and that is deliberate
+
+Changing the identity changes the MLS credential, which invalidates every
+existing session regardless of anything else — and 1:1 session slots are named
+after the two ids, which OpenMLS cannot rename. So this release starts a fresh
+identity world: old sessions do not carry over, and peers on an older build
+fail cleanly at credential verification rather than half-working.
+
+Old containers are left untouched rather than deleted, so nothing is destroyed
+on upgrade. Clean them up when you are confident, by passing the *old* user id
+where `wipePersistedState` now expects a profile:
+
+```ts
+await protocol.wipePersistedState(appId, oldUserId);
+```
+
+### Relay-backed deployments
+
+Relay accounts, JWTs, and group rosters move into address space with the
+server-side change; a build that sends address-shaped ids to a relay that still
+expects usernames will fail its identity check. Sequence the relay first.
 
 ---
 

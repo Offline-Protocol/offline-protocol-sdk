@@ -129,8 +129,8 @@ impl OfflineProtocol {
                     // relay-native control ops on our authenticated relay
                     // connection. (A sender==self frame addressed *to* us is the
                     // legitimate relay echo and falls through unchanged.)
-                    if message.recipient.as_str() != self.config.user_id {
-                        if message.sender.as_str() == self.config.user_id {
+                    if message.recipient.as_str() != self.local_id {
+                        if message.sender.as_str() == self.local_id {
                             debug!(
                                 message_id = %message.id,
                                 recipient = %message.recipient,
@@ -1053,7 +1053,7 @@ impl OfflineProtocol {
         // claim, so without this check any peer holding a valid session with
         // us could deliver its own ciphertext under an arbitrary
         // `message.sender` and have the file attributed to that identity.
-        let Ok(expected_group) = GroupId::for_session(&self.config.user_id, sender) else {
+        let Ok(expected_group) = GroupId::for_session(&self.local_id, sender) else {
             warn!(
                 sender = %sender,
                 "Cannot derive 1:1 session id for media chunk sender, dropping"

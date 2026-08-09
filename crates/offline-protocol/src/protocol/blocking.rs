@@ -20,7 +20,7 @@ impl OfflineProtocol {
             .map_err(|_| Error::InvalidConfiguration(format!("Invalid user ID: {}", user_id)))?;
 
         // Cannot block self
-        if user_id == self.config.user_id {
+        if user_id == self.local_id {
             return Err(Error::InvalidConfiguration(
                 "Cannot block own user ID".to_string(),
             ));
@@ -190,6 +190,7 @@ impl OfflineProtocol {
 #[cfg(test)]
 mod tests {
     use crate::mls::InMemoryStorage;
+    use crate::test_identity::id;
     use crate::ProtocolConfig;
     use offline_protocol_transport::Transport;
     use std::sync::Arc;
@@ -382,33 +383,33 @@ mod tests {
 
         // Simulate receiving a key package from bob (pending state)
         proto.pending_key_packages.insert(
-            "bob".to_string(),
+            id("bob"),
             ReceivedKeyPackage {
                 key_package_data: vec![0x01, 0x02],
                 local_expires_at_ms: u64::MAX,
             },
         );
-        proto.key_package_sent_to.insert("bob".to_string());
+        proto.key_package_sent_to.insert(id("bob"));
 
         // Queue a pending encrypted message for bob
         let pending_msg = Message::new(
-            UserId::new("alice").unwrap(),
-            UserId::new("bob").unwrap(),
+            UserId::new(&id("alice")).unwrap(),
+            UserId::new(&id("bob")).unwrap(),
             AppId::new("test-app").unwrap(),
             "queued",
         );
-        proto.enqueue_pending_decryption("bob", &pending_msg);
+        proto.enqueue_pending_decryption(&id("bob"), &pending_msg);
 
         // Block then unblock — should clear all state
-        proto.block_user("bob").unwrap();
-        proto.unblock_user("bob").unwrap();
+        proto.block_user(&id("bob")).unwrap();
+        proto.unblock_user(&id("bob")).unwrap();
 
-        assert!(proto.pending_key_packages.get("bob").is_none());
-        assert!(!proto.key_package_sent_to.contains("bob"));
-        assert!(!proto.confirmed_sessions.contains("bob"));
+        assert!(proto.pending_key_packages.get(&id("bob")).is_none());
+        assert!(!proto.key_package_sent_to.contains(&id("bob")));
+        assert!(!proto.confirmed_sessions.contains(&id("bob")));
         assert!(proto
             .pending_queue
-            .drain_for_peer(&proto.config.encryption.pending_queue, "bob")
+            .drain_for_peer(&proto.config.encryption.pending_queue, &id("bob"))
             .is_empty());
     }
 
@@ -1338,12 +1339,12 @@ mod tests {
             let manager = mls.read().unwrap();
             manager
                 .import_key_package(
-                    "alice",
+                    &id("alice"),
                     &alice_key_pkg.key_package_data,
                     offline_protocol_mls::KeyPackageTrust::FirstUse,
                 )
                 .unwrap();
-            let welcome = manager.create_session("alice").unwrap();
+            let welcome = manager.create_session(&id("alice")).unwrap();
             // Alice joins via welcome
             let alice_mls = alice.mls_manager.as_ref().unwrap();
             let alice_manager = alice_mls.read().unwrap();
@@ -1353,23 +1354,23 @@ mod tests {
         // Verify both have sessions
         {
             let mls = alice.mls_manager.as_ref().unwrap();
-            assert!(mls.read().unwrap().has_session("bob").unwrap());
+            assert!(mls.read().unwrap().has_session(&id("bob")).unwrap());
         }
         {
             let mls = bob.mls_manager.as_ref().unwrap();
-            assert!(mls.read().unwrap().has_session("alice").unwrap());
+            assert!(mls.read().unwrap().has_session(&id("alice")).unwrap());
         }
 
         // Now simulate: Alice blocks then unblocks Bob.
         // Alice's side deletes her session (done by unblock_user internally).
-        alice.block_user("bob").unwrap();
-        alice.unblock_user("bob").unwrap();
+        alice.block_user(&id("bob")).unwrap();
+        alice.unblock_user(&id("bob")).unwrap();
 
         // Verify Alice no longer has a session with Bob
         {
             let mls = alice.mls_manager.as_ref().unwrap();
             assert!(
-                !mls.read().unwrap().has_session("bob").unwrap(),
+                !mls.read().unwrap().has_session(&id("bob")).unwrap(),
                 "Alice should have no session after unblock cleanup"
             );
         }
@@ -1378,7 +1379,7 @@ mod tests {
         {
             let mls = bob.mls_manager.as_ref().unwrap();
             assert!(
-                mls.read().unwrap().has_session("alice").unwrap(),
+                mls.read().unwrap().has_session(&id("alice")).unwrap(),
                 "Bob still has the old session before receiving reset"
             );
         }
@@ -1390,7 +1391,7 @@ mod tests {
             manager.get_or_create_key_package().unwrap()
         };
         let reset_payload = KeyPackagePayload {
-            user_id: "alice".to_string(),
+            user_id: id("alice"),
             key_package_data: alice_fresh_key_pkg.key_package_data.clone(),
             remaining_lifetime_ms: alice_fresh_key_pkg.remaining_lifetime_ms(),
             timestamp_ms: 0,
@@ -1405,7 +1406,7 @@ mod tests {
         // Bob handles the key package with session_reset=true.
         // This deletes the stale session and auto-establishes a fresh one
         // using Alice's new key package.
-        bob.handle_key_package_message("alice", &content, true);
+        bob.handle_key_package_message(&id("alice"), &content, true);
 
         // Bob should have a session (the NEW one, auto-established from
         // Alice's fresh key package — NOT the stale orphaned session).
@@ -1413,7 +1414,7 @@ mod tests {
             let mls = bob.mls_manager.as_ref().unwrap();
             let manager = mls.read().unwrap();
             assert!(
-                manager.has_session("alice").unwrap(),
+                manager.has_session(&id("alice")).unwrap(),
                 "Bob should have a fresh session after session_reset + auto-establish"
             );
         }
@@ -1421,13 +1422,13 @@ mod tests {
         // The old confirmed_sessions entry should be gone (cleared during
         // session delete), proving the stale session was replaced.
         assert!(
-            !bob.confirmed_sessions.contains("alice"),
+            !bob.confirmed_sessions.contains(&id("alice")),
             "Old confirmed session entry should be cleared"
         );
 
         // The pending key package should have been consumed by auto-establish
         assert!(
-            !bob.pending_key_packages.contains_key("alice"),
+            !bob.pending_key_packages.contains_key(&id("alice")),
             "Key package should be consumed after auto-establish"
         );
     }
@@ -1455,25 +1456,25 @@ mod tests {
             let manager = mls.read().unwrap();
             manager
                 .import_key_package(
-                    "bob",
+                    &id("bob"),
                     &bob_key_pkg.key_package_data,
                     offline_protocol_mls::KeyPackageTrust::FirstUse,
                 )
                 .unwrap();
-            manager.create_session("bob").unwrap();
-            assert!(manager.has_session("bob").unwrap());
+            manager.create_session(&id("bob")).unwrap();
+            assert!(manager.has_session(&id("bob")).unwrap());
         }
 
         // Pin bob's TOFU key (real API) so the reset engages and returns true.
-        alice.tofu_check_or_pin("bob", vec![7u8; 32]).unwrap();
+        alice.tofu_check_or_pin(&id("bob"), vec![7u8; 32]).unwrap();
 
         // Reset re-identifies bob: unpin the key AND drop the now-stale session.
-        assert!(alice.reset_tofu_for_peer("bob"));
-        assert!(!alice.known_peer_public_keys.contains_key("bob"));
+        assert!(alice.reset_tofu_for_peer(&id("bob")));
+        assert!(!alice.known_peer_public_keys.contains_key(&id("bob")));
         {
             let mls = alice.mls_manager.as_ref().unwrap();
             assert!(
-                !mls.read().unwrap().has_session("bob").unwrap(),
+                !mls.read().unwrap().has_session(&id("bob")).unwrap(),
                 "reset_tofu_for_peer must drop the stale MLS session"
             );
         }
@@ -1538,15 +1539,15 @@ mod tests {
             let manager = mls.read().unwrap();
             manager
                 .import_key_package(
-                    "bob",
+                    &id("bob"),
                     &bob_key_pkg.key_package_data,
                     offline_protocol_mls::KeyPackageTrust::FirstUse,
                 )
                 .unwrap();
-            manager.create_session("bob").unwrap();
-            assert!(manager.has_session("bob").unwrap());
+            manager.create_session(&id("bob")).unwrap();
+            assert!(manager.has_session(&id("bob")).unwrap());
         }
-        alice.tofu_check_or_pin("bob", vec![7u8; 32]).unwrap();
+        alice.tofu_check_or_pin(&id("bob"), vec![7u8; 32]).unwrap();
 
         // Flip storage to reject deletes, then reset — the session drop now
         // genuinely fails.
@@ -1557,11 +1558,11 @@ mod tests {
         // key even though the session drop failed (surfaced via `warn!`, not
         // rolled back).
         assert!(
-            alice.reset_tofu_for_peer("bob"),
+            alice.reset_tofu_for_peer(&id("bob")),
             "reset commits the TOFU un-pin before the session drop, so it still returns true"
         );
         assert!(
-            !alice.known_peer_public_keys.contains_key("bob"),
+            !alice.known_peer_public_keys.contains_key(&id("bob")),
             "the pinned key must be removed even when the session drop fails"
         );
         // And the hazard the `warn!` flags is real: the stale session outlived
@@ -1570,7 +1571,7 @@ mod tests {
         {
             let mls = alice.mls_manager.as_ref().unwrap();
             assert!(
-                mls.read().unwrap().has_session("bob").unwrap(),
+                mls.read().unwrap().has_session(&id("bob")).unwrap(),
                 "the stale MLS session survives a failed drop — exactly what the warn! surfaces"
             );
         }

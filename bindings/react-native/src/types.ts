@@ -446,8 +446,19 @@ export interface PendingQueueConfig {
 export interface ProtocolConfig {
   /** Application identifier */
   appId: string;
-  /** User identifier */
-  userId: string;
+  /**
+   * Local profile selector: which stored identity this instance runs as.
+   *
+   * Never leaves the device and is not this device's identity. It picks a
+   * storage namespace — one per `(appId, profile)` — so an app hosting several
+   * accounts gives each its own value, and an app hosting one can pass a
+   * constant such as `'default'`.
+   *
+   * The wire identity is the self-certifying address derived from the identity
+   * key in that namespace: read it with `localAddress()` or from the
+   * `identity_ready` event. An app cannot choose it.
+   */
+  profile: string;
   /** Transport configuration (optional) */
   transports?: TransportsConfig;
   /**
@@ -924,11 +935,11 @@ export interface RelayDemotedBatteryEvent extends BaseEvent {
 export interface NeighborDiscoveredEvent extends BaseEvent {
   type: 'neighbor_discovered';
   /**
-   * The peer's canonical user id — the same value the peer supplied as
-   * `ProtocolConfig.userId`. This is the one identifier the SDK uses on
-   * every surface: use it directly as `recipient` in `sendMessage` and
-   * `sendConnectionRequest`, regardless of which transport discovered
-   * the peer.
+   * The peer's canonical address (`off1…`) — the value that peer derived
+   * from its own identity key, which it reports as its `localAddress()`.
+   * This is the one identifier the SDK uses on every surface: use it
+   * directly as `recipient` in `sendMessage` and `sendConnectionRequest`,
+   * regardless of which transport discovered the peer.
    */
   peer_id: string;
   transport: string;
@@ -941,6 +952,23 @@ export interface NeighborDiscoveredEvent extends BaseEvent {
 export interface NeighborLostEvent extends BaseEvent {
   type: 'neighbor_lost';
   peer_id: string;
+}
+
+/**
+ * This device's own address is known.
+ *
+ * Fires once per successful startup, before any message can be sent. The
+ * address is derived from the identity key held in this profile's storage —
+ * the app does not choose it. It is this device's `sender` on every outbound
+ * frame and the string peers must use as `recipient` to reach it, and it is
+ * stable across restarts of the same `profile`.
+ *
+ * Also readable at any time after startup via `localAddress()`.
+ */
+export interface IdentityReadyEvent extends BaseEvent {
+  type: 'identity_ready';
+  /** This device's self-certifying address (`off1…`). */
+  address: string;
 }
 
 /**
@@ -2044,6 +2072,7 @@ export type ProtocolEvent =
   | RelayDemotedBatteryEvent
   | NeighborDiscoveredEvent
   | NeighborLostEvent
+  | IdentityReadyEvent
   | NetworkMetricsEvent
   | FileProgressEvent
   | FileReceivedEvent

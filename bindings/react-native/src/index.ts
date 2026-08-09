@@ -117,7 +117,7 @@ interface InitialRuntimeConfig {
  */
 interface NativeConfig {
   appId: string;
-  userId: string;
+  profile: string;
   bleEnabled: boolean;
   wifiDirectEnabled: boolean;
   internetEnabled: boolean;
@@ -284,6 +284,14 @@ export class OfflineProtocol {
    */
   private droppedEventTypesWarned: Set<string> = new Set();
   private config: ProtocolConfig;
+
+  /**
+   * This device's derived address, once known.
+   *
+   * Cached from the `identity_ready` event so callers that need to compare
+   * against "us" do not have to await a native round-trip.
+   */
+  private cachedLocalAddress: string | null = null;
   private isCreated: boolean = false;
   private initialRuntimeConfig: InitialRuntimeConfig | null = null;
   private initialRuntimeConfigApplied: boolean = false;
@@ -386,7 +394,7 @@ export class OfflineProtocol {
 
     const nativeConfig: NativeConfig = {
       appId: this.config.appId,
-      userId: this.config.userId,
+      profile: this.config.profile,
       bleEnabled: this.config.transports?.ble?.enabled ?? true,
       wifiDirectEnabled: this.config.transports?.wifiDirect?.enabled ?? false,
       internetEnabled: this.config.transports?.internet?.enabled ?? false,
@@ -651,6 +659,10 @@ export class OfflineProtocol {
    * with both listener maps empty. See {@link on} for the redelivery half.
    */
   private emitEvent(event: ProtocolEvent): void {
+    if (event.type === 'identity_ready') {
+      this.cachedLocalAddress = event.address;
+    }
+
     let delivered = false;
 
     // Call event-specific listeners
@@ -918,6 +930,13 @@ export class OfflineProtocol {
         console.log(
           "[OfflineProtocol] MLS auto-initialized with secure storage"
         );
+        // Pull the address across now rather than waiting for the
+        // `identity_ready` event to make its way back through the native
+        // emitter. Anything that compares a peer against "us" — session
+        // attribution especially — can run as soon as `start()` resolves, and
+        // an empty cache in that window reads as "no id matches us".
+        this.cachedLocalAddress =
+          (await OfflineProtocolNativeModule.localAddress()) ?? null;
       } catch (error) {
         console.warn(
           "[OfflineProtocol] MLS initialization failed — secure sessions and handshake will not work:",
@@ -1143,8 +1162,8 @@ export class OfflineProtocol {
   /**
    * Sends a connection request
    *
-   * `params.recipient` must be the target's canonical user id — the value
-   * they supplied as `ProtocolConfig.userId`, which is also what
+   * `params.recipient` must be the target's canonical address (`off1…`) —
+   * the value they derived from their own identity key, which is also what
    * `neighbor_discovered` reports as `peer_id`.
    *
    * The returned message id is the correlation key for the request's
@@ -2383,6 +2402,28 @@ export class OfflineProtocol {
   }
 
   /**
+   * This device's own address (`off1…`), or `null` before startup completes.
+   *
+   * Derived from the identity key held in this profile's storage — the app
+   * does not choose it, and it is stable across restarts of the same
+   * `profile`. This is the string to show the user, put in an invite or QR
+   * code, and what peers pass as the recipient to reach this device.
+   *
+   * `null` until MLS is initialized (which `start()` does), because the key
+   * that defines it lives in storage that is not open before then. The
+   * `identity_ready` event carries the same value at the moment it is known.
+   */
+  async localAddress(): Promise<string | null> {
+    if (this.cachedLocalAddress !== null) {
+      return this.cachedLocalAddress;
+    }
+    const address =
+      (await OfflineProtocolNativeModule.localAddress()) ?? null;
+    this.cachedLocalAddress = address;
+    return address;
+  }
+
+  /**
    * Derives a deterministic user ID from a public key.
    *
    * @deprecated Use {@link deriveAddress}. This returns the same `off1…`
@@ -2587,8 +2628,15 @@ export class OfflineProtocol {
 
   private toMlsSessionInfo(raw: any): MlsSessionInfo {
     const members: string[] = raw.memberIds ?? raw.members ?? [];
+    // Without our own address there is no way to tell which half of the pair
+    // is the peer, and guessing picks us half the time. `start()` caches the
+    // address as soon as MLS is up, so a null here means there is no session
+    // to describe yet.
+    const localAddress = this.cachedLocalAddress;
     const otherUserId =
-      members.find(memberId => memberId !== this.config.userId) ?? '';
+      localAddress === null
+        ? ''
+        : members.find(memberId => memberId !== localAddress) ?? '';
     return {
       otherUserId,
       groupId: raw.groupId,
@@ -3106,6 +3154,14 @@ export class OfflineProtocol {
 
     this.initialRuntimeConfigApplied = false;
 
+    // The address belonged to the destroyed instance. An app may re-create
+    // this object against a different profile, or wipe this profile's storage
+    // and come back with a freshly minted identity — the documented cleanup
+    // flow does exactly that — and a surviving cache would answer
+    // `localAddress()` with a dead identity for the rest of the process, never
+    // re-reading the native side because the cache hit short-circuits it.
+    this.cachedLocalAddress = null;
+
     // The session these held one-shot events belong to is over, so there is
     // nobody left to redeliver them to — and an instance can be started again
     // (`start()` re-creates), where a survivor would be handed to the next
@@ -3144,9 +3200,9 @@ export class OfflineProtocol {
    * Keychain outlives the app container — its identity and delivery state
    * survive an uninstall and are adopted again after a reinstall.
    *
-   * The identity is passed explicitly because `destroy()` clears the config the
+   * The account is named explicitly because `destroy()` clears the config the
    * namespace would otherwise be derived from. Pass the same `appId` and
-   * `userId` the protocol was created with; any other pair names a different
+   * `profile` the protocol was created with; any other pair names a different
    * account and wipes nothing.
    *
    * Irreversible, and it rotates the account's MLS and Nostr identities: peers
@@ -3158,10 +3214,12 @@ export class OfflineProtocol {
    * containers: this only knows about the built-in ones.
    *
    * @param appId - The `appId` the protocol was created with
-   * @param userId - The `userId` the protocol was created with
+   * @param profile - The `profile` the protocol was created with. The
+   *   namespace hash is unchanged from before the rename, so passing a
+   *   pre-migration `userId` here reaches that account's old container.
    */
-  async wipePersistedState(appId: string, userId: string): Promise<void> {
-    await OfflineProtocolNativeModule.wipePersistedState(appId, userId);
+  async wipePersistedState(appId: string, profile: string): Promise<void> {
+    await OfflineProtocolNativeModule.wipePersistedState(appId, profile);
   }
 
   // ─── Presence, Typing, Read Receipts ────────────────────────

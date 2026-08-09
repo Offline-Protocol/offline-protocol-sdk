@@ -143,6 +143,26 @@ pub enum MlsError {
     #[error("Invalid public key: {0}")]
     InvalidPublicKey(String),
 
+    /// The stored identity key does not derive to the address this manager
+    /// was constructed for.
+    ///
+    /// Under self-certifying addressing the address *is* the identity key's
+    /// hash, so these two can only disagree if the wrong storage namespace was
+    /// opened for this profile, or a stored keypair was replaced. Continuing
+    /// would build a credential claiming an address this device cannot prove
+    /// it owns — every peer would reject it at the derivation check, so the
+    /// failure is raised here where it is still legible.
+    ///
+    /// Only reachable for address-shaped ids: a manager constructed with a
+    /// legacy/nickname id has no derivation to check against.
+    #[error("Stored identity key derives to '{derived}', but this manager is '{expected}'")]
+    IdentityAddressMismatch {
+        /// The address this manager was constructed for.
+        expected: String,
+        /// The address the stored identity key actually derives to.
+        derived: String,
+    },
+
     /// Group id failed storage-key validation (empty, oversized, or
     /// containing path-traversal / storage-hostile characters).
     #[error("Invalid group id: {0}")]

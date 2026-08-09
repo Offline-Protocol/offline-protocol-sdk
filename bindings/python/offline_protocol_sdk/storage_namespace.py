@@ -10,11 +10,11 @@ _NAMESPACE_DOMAIN = b"offline-protocol-storage-v1"
 _ACCOUNT_PATTERN = re.compile(r"\Aaccount-[0-9a-f]{64}\Z")
 
 
-def account_storage_namespace(app_id: str, user_id: str) -> str:
+def account_storage_namespace(app_id: str, profile: str) -> str:
     """Return an opaque, filesystem-safe namespace for one protocol account."""
 
     digest = hashlib.sha256(
-        _NAMESPACE_DOMAIN + b"\0" + app_id.encode("utf-8") + b"\0" + user_id.encode("utf-8")
+        _NAMESPACE_DOMAIN + b"\0" + app_id.encode("utf-8") + b"\0" + profile.encode("utf-8")
     ).hexdigest()
     return f"account-{digest}"
 

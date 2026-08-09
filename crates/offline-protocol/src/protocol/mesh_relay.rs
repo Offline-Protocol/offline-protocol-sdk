@@ -364,6 +364,16 @@ impl MeshRelayGovernor {
         }
     }
 
+    /// Re-points the governor at this device's real identity once it is known.
+    ///
+    /// The governor is built before `initialize_mls` derives the address, so it
+    /// starts out seeded with the profile. Both uses are hashes — fan-out
+    /// spread and send jitter — so the change is only a reseed: it shifts which
+    /// frames this node prefers, never whether a frame is relayed.
+    pub fn set_local_id(&mut self, local_id: impl Into<String>) {
+        self.local_id = local_id.into();
+    }
+
     /// The tunables in force. Apps read these from
     /// `ProtocolConfig::mesh_relay`; this is for the tests that assert the
     /// defaults hold together.

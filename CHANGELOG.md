@@ -4,6 +4,77 @@ All notable changes to the Offline Protocol SDK are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). This changelog covers everything after the **v0.7.1** release.
 
+## [Unreleased]
+
+> **Your identity is no longer something your app picks.** `ProtocolConfig.userId`
+> is replaced by `profile`, and a device's identity on the wire becomes the
+> self-certifying `off1…` address derived from an Ed25519 identity key it mints
+> for itself. Peers verify an address by re-deriving it from the key its owner
+> presents, so an address cannot be claimed by anyone who does not hold its key
+> — where before, impersonation cost typing a name.
+>
+> `profile` keeps the old field's other job: choosing which stored identity this
+> instance runs as. It never leaves the device, and passing the string you used
+> as `userId` keeps you in the same storage namespace (the namespace hash is
+> unchanged). Read your address with `localAddress()` or from the new
+> `identity_ready` event.
+>
+> **There is no in-place migration and that is deliberate**: the identity is the
+> MLS credential, so changing it invalidates every existing session no matter
+> what, and 1:1 session slots are named after the two ids. Old containers are
+> left intact rather than deleted; clean them up by passing the *old* user id to
+> `wipePersistedState`. Full migration guide in
+> [UPGRADING §14](./docs/UPGRADING.md#14-your-identity-is-derived-not-chosen-unreleased).
+
+### Changed
+
+- **BREAKING**: `ProtocolConfig.user_id` → `ProtocolConfig.profile` across Rust,
+  UniFFI (both config dictionaries), React Native, and Python. `profile` selects
+  a storage namespace and is never sent; it is not an identity.
+- **BREAKING**: the wire identity is now the address derived from this profile's
+  identity key. `Message.sender`, `recipient`, and `NeighborDiscovered.peer_id`
+  all carry `off1…` addresses. Anything an app keyed by username — conversation
+  rows, contacts, group membership — must be re-keyed.
+- **BREAKING**: the MLS credential is the address, so peers on an older build
+  fail cleanly at credential verification instead of interoperating.
+- 1:1 session slots and the both-create tiebreaker order addresses by their hash
+  bytes rather than their rendered string. The bech32 charset is not
+  ASCII-monotonic, so string order contradicts every other address comparison.
+- The OpenMLS storage adapter hashes its keys, removing the ~8× inflation of
+  `hex(json(GroupId))` now that ids are 44 characters.
+- `wipePersistedState(appId, profile)` — same shape; pass a legacy user id to
+  reach a pre-migration container.
+
+### Added
+
+- `localAddress()` (Rust, UniFFI, React Native, Python) returns this device's
+  address, or null before startup opens the storage that holds the key.
+- `identity_ready` event, carrying the address at the moment it is known.
+- `MlsError::IdentityAddressMismatch`, raised when a stored identity key does
+  not derive to the address it is being used under — the wrong namespace for a
+  profile, or a replaced key — instead of building a credential the device
+  cannot prove it owns.
+
+- `initialize_mls` must now be called **before** `start()` and returns
+  `InvalidState` otherwise. Deriving the address is what lets the transports be
+  rebuilt to carry it, and rebuilding replaces transport objects the platform
+  has already reported connection status onto — against a running protocol that
+  would strip every transport back to disconnected-with-an-empty-queue and
+  report nothing. React Native already calls them in this order inside
+  `start()`; direct UniFFI and Python embedders that call `start()` first get a
+  clear error instead of dead transports.
+
+### Fixed
+
+- `listSessions` no longer reports a peer for a session slot that names two
+  other parties; it requires one half of the slot to be this device.
+- React Native: `localAddress()` no longer serves a destroyed instance's
+  address. The cache is cleared by `destroy()` and populated eagerly by
+  `start()`, so the documented `destroy` → `wipePersistedState` → `start`
+  cleanup reports the newly minted identity rather than the dead one, and
+  session attribution cannot run against an empty cache — which previously
+  named *this* device as the remote peer.
+
 ## [0.20.1] — 2026-08-07
 
 > **Nothing breaks a build, and one event changes meaning.** A receiver no

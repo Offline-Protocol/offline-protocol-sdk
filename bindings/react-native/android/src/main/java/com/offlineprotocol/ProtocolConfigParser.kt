@@ -135,7 +135,7 @@ internal object ProtocolConfigParser {
 
         val config = ProtocolConfig(
             appId = json.safeOptString("appId", json.safeOptString("app_id")),
-            userId = json.safeOptString("userId", json.safeOptString("user_id")),
+            profile = json.safeOptString("profile"),
             bleEnabled = json.optBoolean("bleEnabled", json.optBoolean("ble_enabled", true)),
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),
             internetEnabled = json.optBoolean("internetEnabled", json.optBoolean("internet_enabled", true)),
