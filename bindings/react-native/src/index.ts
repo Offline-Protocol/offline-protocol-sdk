@@ -930,6 +930,13 @@ export class OfflineProtocol {
         console.log(
           "[OfflineProtocol] MLS auto-initialized with secure storage"
         );
+        // Pull the address across now rather than waiting for the
+        // `identity_ready` event to make its way back through the native
+        // emitter. Anything that compares a peer against "us" — session
+        // attribution especially — can run as soon as `start()` resolves, and
+        // an empty cache in that window reads as "no id matches us".
+        this.cachedLocalAddress =
+          (await OfflineProtocolNativeModule.localAddress()) ?? null;
       } catch (error) {
         console.warn(
           "[OfflineProtocol] MLS initialization failed — secure sessions and handshake will not work:",
@@ -2621,8 +2628,15 @@ export class OfflineProtocol {
 
   private toMlsSessionInfo(raw: any): MlsSessionInfo {
     const members: string[] = raw.memberIds ?? raw.members ?? [];
+    // Without our own address there is no way to tell which half of the pair
+    // is the peer, and guessing picks us half the time. `start()` caches the
+    // address as soon as MLS is up, so a null here means there is no session
+    // to describe yet.
+    const localAddress = this.cachedLocalAddress;
     const otherUserId =
-      members.find(memberId => memberId !== this.cachedLocalAddress) ?? '';
+      localAddress === null
+        ? ''
+        : members.find(memberId => memberId !== localAddress) ?? '';
     return {
       otherUserId,
       groupId: raw.groupId,
@@ -3140,6 +3154,14 @@ export class OfflineProtocol {
 
     this.initialRuntimeConfigApplied = false;
 
+    // The address belonged to the destroyed instance. An app may re-create
+    // this object against a different profile, or wipe this profile's storage
+    // and come back with a freshly minted identity — the documented cleanup
+    // flow does exactly that — and a surviving cache would answer
+    // `localAddress()` with a dead identity for the rest of the process, never
+    // re-reading the native side because the cache hit short-circuits it.
+    this.cachedLocalAddress = null;
+
     // The session these held one-shot events belong to is over, so there is
     // nobody left to redeliver them to — and an instance can be started again
     // (`start()` re-creates), where a survivor would be handed to the next
@@ -3178,9 +3200,9 @@ export class OfflineProtocol {
    * Keychain outlives the app container — its identity and delivery state
    * survive an uninstall and are adopted again after a reinstall.
    *
-   * The identity is passed explicitly because `destroy()` clears the config the
+   * The account is named explicitly because `destroy()` clears the config the
    * namespace would otherwise be derived from. Pass the same `appId` and
-   * `userId` the protocol was created with; any other pair names a different
+   * `profile` the protocol was created with; any other pair names a different
    * account and wipes nothing.
    *
    * Irreversible, and it rotates the account's MLS and Nostr identities: peers
@@ -3192,7 +3214,9 @@ export class OfflineProtocol {
    * containers: this only knows about the built-in ones.
    *
    * @param appId - The `appId` the protocol was created with
-   * @param userId - The `userId` the protocol was created with
+   * @param profile - The `profile` the protocol was created with. The
+   *   namespace hash is unchanged from before the rename, so passing a
+   *   pre-migration `userId` here reaches that account's old container.
    */
   async wipePersistedState(appId: string, profile: string): Promise<void> {
     await OfflineProtocolNativeModule.wipePersistedState(appId, profile);

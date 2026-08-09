@@ -68,6 +68,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `listSessions` no longer reports a peer for a session slot that names two
   other parties; it requires one half of the slot to be this device.
+- React Native: `localAddress()` no longer serves a destroyed instance's
+  address. The cache is cleared by `destroy()` and populated eagerly by
+  `start()`, so the documented `destroy` → `wipePersistedState` → `start`
+  cleanup reports the newly minted identity rather than the dead one, and
+  session attribution cannot run against an empty cache — which previously
+  named *this* device as the remote peer.
 
 ## [0.20.1] — 2026-08-07
 
